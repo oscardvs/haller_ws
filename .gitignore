@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# ROS 2
+build/
+install/
+log/
+
+# C++
+*.o
+*.so
+*.a
+*.out
+
+# JetBrains
+.idea/
+
+# VSCode
+.vscode/
+.cursor/
+.claude/
