@@ -49,13 +49,26 @@ sudo apt install -y \
     ros-humble-nav2-bringup \
     ros-humble-slam-toolbox \
     ros-humble-robot-localization \
-    ros-humble-rplidar-ros \
     ros-humble-xacro \
     ros-humble-joint-state-publisher-gui
 
 # Install rosdep dependencies
 cd ~/haller_ws
 rosdep install --from-paths src --ignore-src -r -y
+```
+
+### LiDAR Setup (Real Robot Only)
+
+The Slamtec RPLIDAR A1M8 requires udev rules for USB permissions. Run this once:
+
+```bash
+# Copy udev rules
+sudo cp ~/haller_ws/src/sllidar_ros2/scripts/rplidar.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
+# Verify the lidar is detected (after connecting)
+ls -la /dev/ttyUSB*
 ```
 
 ## Building
@@ -70,8 +83,10 @@ source install/setup.bash
 
 ### Simulation
 
+In simulation, the LiDAR is provided by a Gazebo plugin - no physical hardware needed.
+
 ```bash
-# Launch Gazebo simulation with robot
+# Launch Gazebo simulation with robot (includes simulated LiDAR)
 ros2 launch haller_gazebo haller_sim.launch.py
 
 # In another terminal - launch navigation
@@ -80,19 +95,33 @@ ros2 launch haller_navigation navigation.launch.py use_sim_time:=true
 
 ### Real Robot
 
+On the Jetson Orin with hardware connected:
+
 ```bash
-# Launch hardware drivers
+# Launch hardware drivers (includes RPLIDAR A1M8)
 ros2 launch haller_hardware haller_bringup.launch.py
 
-# Launch navigation
+# In another terminal - launch navigation
 ros2 launch haller_navigation navigation.launch.py
+```
+
+To test only the LiDAR:
+
+```bash
+# Launch just the lidar node
+ros2 launch sllidar_ros2 sllidar_a1_launch.py
+
+# Verify scan data
+ros2 topic echo /scan --once
 ```
 
 ### Visualization
 
 ```bash
-# View robot model in RViz
+# View robot model in RViz (requires display)
 ros2 launch haller_description display.launch.py
+
+# For headless Jetson, run RViz on a remote machine on the same network
 ```
 
 ## Development

@@ -82,11 +82,11 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # RPLIDAR Node
+        # RPLIDAR Node (Slamtec A1M8)
         Node(
-            package='rplidar_ros',
-            executable='rplidar_composition',
-            name='rplidar_node',
+            package='sllidar_ros2',
+            executable='sllidar_node',
+            name='sllidar_node',
             parameters=[lidar_config],
             output='screen',
         ),
