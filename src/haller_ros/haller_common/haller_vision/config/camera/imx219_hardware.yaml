@@ -1,34 +1,33 @@
-# IMX219 Camera Configuration (J8IM228-V3.0)
-# Hardware configuration for Jetson Orin Nano CSI camera
+# IMX219 Camera Configuration for Jetson Orin Nano
+# Uses GStreamer pipeline for Bayer-to-RGB conversion
 
-camera:
+gscam_node:
   ros__parameters:
-    # V4L2 device path (CSI camera on Jetson)
-    video_device: "/dev/video0"
-    
-    # Frame configuration
+    # GStreamer pipeline for IMX219 CSI camera
+    # Captures raw Bayer from v4l2, converts to RGB using software debayer
+    # Using 1280x720 @ 30fps for good balance of quality and performance
+    gscam_config: >-
+      v4l2src device=/dev/video0 !
+      video/x-bayer,format=rggb,width=1280,height=720,framerate=30/1 !
+      bayer2rgb !
+      videoconvert !
+      video/x-raw,format=RGB !
+      appsink
+
+    # Camera frame (must match URDF)
     frame_id: "camera_optical_frame"
-    
-    # Image format and resolution
-    # Using 640x480 for optimal inference performance on 8GB Orin Nano
-    image_width: 640
-    image_height: 480
-    pixel_format: "YUYV"
-    
-    # Framerate
-    framerate: 30.0
-    
-    # Camera intrinsics (approximate for 120° FOV IMX219)
-    # These should be updated after camera calibration
+
+    # Camera info URL (for calibration file)
+    # Run: ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025 image:=/camera/image_raw
     camera_info_url: ""
-    
-    # Auto exposure and white balance
-    brightness: 0
-    contrast: 32
-    saturation: 64
-    hue: 0
-    gamma: 100
-    
-    # Image transport
-    image_transport: "raw"
+
+    # Image dimensions (must match gscam_config)
+    image_width: 1280
+    image_height: 720
+
+    # Sync camera timestamp with system time
+    sync_sink: true
+
+    # Preroll to get first frame faster
+    preroll: true
 

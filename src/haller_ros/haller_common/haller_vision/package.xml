@@ -25,7 +25,7 @@
   <depend>image_geometry</depend>
 
   <!-- Camera drivers -->
-  <exec_depend>v4l2_camera</exec_depend>
+  <exec_depend>gscam</exec_depend>
 
   <!-- TF2 for transforms -->
   <depend>tf2</depend>

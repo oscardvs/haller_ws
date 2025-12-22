@@ -86,11 +86,12 @@ def generate_launch_description():
         ),
         
         # ==================== Camera Layer ====================
-        # Hardware camera (only when use_sim=false)
+        # Hardware camera using gscam (only when use_sim=false)
+        # gscam handles GStreamer pipeline for IMX219 Bayer-to-RGB conversion
         Node(
             condition=UnlessCondition(use_sim),
-            package='v4l2_camera',
-            executable='v4l2_camera_node',
+            package='gscam',
+            executable='gscam_node',
             name='camera',
             namespace='',
             parameters=[camera_config],

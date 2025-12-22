@@ -1,7 +1,9 @@
 """
-Hardware Camera Launch (IMX219 on Jetson Orin)
+Hardware Camera Launch (IMX219 on Jetson Orin via GStreamer)
 
-This launch file starts the V4L2 camera driver for the IMX219 CSI camera.
+This launch file starts the gscam driver for the IMX219 CSI camera.
+Uses GStreamer pipeline for Bayer-to-RGB conversion.
+
 Used internally by camera.launch.py when use_sim:=false
 """
 
@@ -21,10 +23,10 @@ def generate_launch_description():
     )
     
     return LaunchDescription([
-        # V4L2 Camera Node for IMX219
+        # GStreamer Camera Node for IMX219
         Node(
-            package='v4l2_camera',
-            executable='v4l2_camera_node',
+            package='gscam',
+            executable='gscam_node',
             name='camera',
             namespace='',
             parameters=[camera_config],
