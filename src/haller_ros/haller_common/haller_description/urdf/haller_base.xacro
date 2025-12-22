@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Robot Dimensions -->
+  <xacro:property name="chassis_length" value="0.40"/>
+  <xacro:property name="chassis_width" value="0.30"/>
+  <xacro:property name="chassis_height" value="0.15"/>
+  <xacro:property name="chassis_mass" value="10.0"/>
+  <xacro:property name="chassis_z_offset" value="0.10"/>
+
+  <!-- Top plate for sensors -->
+  <xacro:property name="top_plate_height" value="0.02"/>
+  <xacro:property name="top_plate_mass" value="0.5"/>
+
+  <xacro:macro name="haller_base">
+
+    <!-- Chassis Link -->
+    <link name="chassis_link">
+      <visual>
+        <origin xyz="0 0 ${chassis_z_offset}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+        </geometry>
+        <material name="haller_chassis"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${chassis_z_offset}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+        </geometry>
+      </collision>
+      <xacro:box_inertial mass="${chassis_mass}"
+        x="${chassis_length}" y="${chassis_width}" z="${chassis_height}">
+        <origin xyz="0 0 ${chassis_z_offset}" rpy="0 0 0"/>
+      </xacro:box_inertial>
+    </link>
+
+    <joint name="chassis_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="chassis_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
+    <!-- Top Plate Link -->
+    <link name="top_plate_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${chassis_length - 0.05} ${chassis_width - 0.05} ${top_plate_height}"/>
+        </geometry>
+        <material name="dark_grey"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${chassis_length - 0.05} ${chassis_width - 0.05} ${top_plate_height}"/>
+        </geometry>
+      </collision>
+      <xacro:box_inertial mass="${top_plate_mass}"
+        x="${chassis_length - 0.05}" y="${chassis_width - 0.05}" z="${top_plate_height}">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+      </xacro:box_inertial>
+    </link>
+
+    <joint name="top_plate_joint" type="fixed">
+      <parent link="chassis_link"/>
+      <child link="top_plate_link"/>
+      <origin xyz="0 0 ${chassis_z_offset + chassis_height/2 + top_plate_height/2}" rpy="0 0 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>
+

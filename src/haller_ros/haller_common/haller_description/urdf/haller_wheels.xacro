@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Wheel Properties -->
+  <xacro:property name="wheel_radius" value="0.05"/>
+  <xacro:property name="wheel_width" value="0.04"/>
+  <xacro:property name="wheel_mass" value="0.5"/>
+
+  <!-- Wheel positions -->
+  <xacro:property name="wheel_x_offset" value="0.13"/>
+  <xacro:property name="wheel_y_offset" value="0.17"/>
+  <xacro:property name="wheel_z_offset" value="0.0"/>
+
+  <!-- Wheel macro -->
+  <xacro:macro name="wheel" params="prefix x_reflect y_reflect">
+    <link name="${prefix}_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+      </collision>
+      <xacro:cylinder_inertial mass="${wheel_mass}"
+        radius="${wheel_radius}" length="${wheel_width}">
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+      </xacro:cylinder_inertial>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <origin
+        xyz="${x_reflect * wheel_x_offset} ${y_reflect * wheel_y_offset} ${wheel_z_offset}"
+        rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <dynamics damping="0.1" friction="0.1"/>
+    </joint>
+
+    <!-- Gazebo wheel properties -->
+    <gazebo reference="${prefix}_wheel_link">
+      <material>Gazebo/DarkGrey</material>
+      <mu1>1.0</mu1>
+      <mu2>1.0</mu2>
+      <kp>1000000.0</kp>
+      <kd>100.0</kd>
+      <minDepth>0.001</minDepth>
+      <maxVel>1.0</maxVel>
+    </gazebo>
+  </xacro:macro>
+
+  <!-- All wheels macro -->
+  <xacro:macro name="haller_wheels">
+    <!-- Front wheels -->
+    <xacro:wheel prefix="front_left" x_reflect="1" y_reflect="1"/>
+    <xacro:wheel prefix="front_right" x_reflect="1" y_reflect="-1"/>
+
+    <!-- Rear wheels -->
+    <xacro:wheel prefix="rear_left" x_reflect="-1" y_reflect="1"/>
+    <xacro:wheel prefix="rear_right" x_reflect="-1" y_reflect="-1"/>
+  </xacro:macro>
+
+</robot>
+

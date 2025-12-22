@@ -1,0 +1,11 @@
+<library path="haller_hardware_interface">
+  <class name="haller_hardware_interface/HallerHardwareInterface"
+         type="haller_hardware_interface::HallerHardwareInterface"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Hardware interface for the Haller 4-wheel mobile robot platform.
+      Communicates with motor controllers via serial connection.
+    </description>
+  </class>
+</library>
+

@@ -1,0 +1,74 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 50  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+joint_state_broadcaster:
+  ros__parameters:
+    publish_rate: 50.0
+
+diff_drive_controller:
+  ros__parameters:
+    # Wheel configuration
+    left_wheel_names:
+      - front_left_wheel_joint
+      - rear_left_wheel_joint
+    right_wheel_names:
+      - front_right_wheel_joint
+      - rear_right_wheel_joint
+
+    # Wheel parameters
+    wheel_separation: 0.34  # distance between left and right wheels
+    wheel_radius: 0.05      # wheel radius in meters
+
+    # Multipliers (for fine-tuning)
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+
+    # Publishing
+    publish_rate: 50.0
+    odom_frame_id: odom
+    base_frame_id: base_link
+    pose_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+    twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+
+    # TF publishing
+    open_loop: false
+    enable_odom_tf: true
+
+    # Velocity commands
+    cmd_vel_timeout: 0.5
+
+    # Velocity and acceleration limits
+    linear:
+      x:
+        has_velocity_limits: true
+        has_acceleration_limits: true
+        has_jerk_limits: false
+        max_velocity: 1.0           # m/s
+        min_velocity: -1.0          # m/s
+        max_acceleration: 2.0       # m/s^2
+        min_acceleration: -2.0      # m/s^2
+
+    angular:
+      z:
+        has_velocity_limits: true
+        has_acceleration_limits: true
+        has_jerk_limits: false
+        max_velocity: 2.0           # rad/s
+        min_velocity: -2.0          # rad/s
+        max_acceleration: 3.0       # rad/s^2
+        min_acceleration: -3.0      # rad/s^2
+
+    # Preserve turning radius when limiting speed
+    preserve_turning_radius: true
+
+    # Use stamped velocity commands
+    use_stamped_vel: false
+

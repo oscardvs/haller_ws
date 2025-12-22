@@ -1,0 +1,109 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Sensor mounting properties -->
+  <xacro:property name="lidar_z_offset" value="0.22"/>
+  <xacro:property name="camera_x_offset" value="0.18"/>
+  <xacro:property name="camera_z_offset" value="0.15"/>
+
+  <!-- LiDAR properties (Slamtech RPLIDAR) -->
+  <xacro:property name="lidar_radius" value="0.035"/>
+  <xacro:property name="lidar_height" value="0.04"/>
+  <xacro:property name="lidar_mass" value="0.2"/>
+
+  <!-- Camera properties -->
+  <xacro:property name="camera_size" value="0.03"/>
+  <xacro:property name="camera_mass" value="0.1"/>
+
+  <xacro:macro name="haller_sensors">
+
+    <!-- ==================== LiDAR Sensor ==================== -->
+    <link name="lidar_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${lidar_radius}" length="${lidar_height}"/>
+        </geometry>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <cylinder radius="${lidar_radius}" length="${lidar_height}"/>
+        </geometry>
+      </collision>
+      <xacro:cylinder_inertial mass="${lidar_mass}"
+        radius="${lidar_radius}" length="${lidar_height}">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+      </xacro:cylinder_inertial>
+    </link>
+
+    <joint name="lidar_joint" type="fixed">
+      <parent link="top_plate_link"/>
+      <child link="lidar_link"/>
+      <origin xyz="0 0 ${lidar_height/2}" rpy="0 0 0"/>
+    </joint>
+
+    <!-- Laser frame for scan data -->
+    <link name="laser_frame"/>
+    <joint name="laser_frame_joint" type="fixed">
+      <parent link="lidar_link"/>
+      <child link="laser_frame"/>
+      <origin xyz="0 0 ${lidar_height/2}" rpy="0 0 0"/>
+    </joint>
+
+    <gazebo reference="lidar_link">
+      <material>Gazebo/Black</material>
+    </gazebo>
+
+    <!-- ==================== Front Camera ==================== -->
+    <link name="camera_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${camera_size} ${camera_size * 2} ${camera_size}"/>
+        </geometry>
+        <material name="dark_grey"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${camera_size} ${camera_size * 2} ${camera_size}"/>
+        </geometry>
+      </collision>
+      <xacro:box_inertial mass="${camera_mass}"
+        x="${camera_size}" y="${camera_size * 2}" z="${camera_size}">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+      </xacro:box_inertial>
+    </link>
+
+    <joint name="camera_joint" type="fixed">
+      <parent link="chassis_link"/>
+      <child link="camera_link"/>
+      <origin xyz="${camera_x_offset} 0 ${camera_z_offset}" rpy="0 0 0"/>
+    </joint>
+
+    <!-- Camera optical frame (Z forward, X right, Y down) -->
+    <link name="camera_optical_frame"/>
+    <joint name="camera_optical_joint" type="fixed">
+      <parent link="camera_link"/>
+      <child link="camera_optical_frame"/>
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+    </joint>
+
+    <gazebo reference="camera_link">
+      <material>Gazebo/Grey</material>
+    </gazebo>
+
+    <!-- ==================== IMU Sensor ==================== -->
+    <link name="imu_link"/>
+    <joint name="imu_joint" type="fixed">
+      <parent link="chassis_link"/>
+      <child link="imu_link"/>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>
+

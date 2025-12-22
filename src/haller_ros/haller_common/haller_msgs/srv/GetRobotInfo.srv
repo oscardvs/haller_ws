@@ -1,0 +1,7 @@
+# Get robot information
+---
+string robot_name
+string firmware_version
+string hardware_version
+string serial_number
+

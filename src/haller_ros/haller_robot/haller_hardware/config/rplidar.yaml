@@ -1,0 +1,17 @@
+# Slamtech RPLIDAR Configuration
+rplidar_node:
+  ros__parameters:
+    # Serial port configuration
+    serial_port: /dev/ttyUSB0
+    serial_baudrate: 115200
+
+    # Frame configuration
+    frame_id: laser_frame
+
+    # Scan settings
+    inverted: false
+    angle_compensate: true
+
+    # Scan mode (for A2/A3 lidar)
+    # scan_mode: Standard
+

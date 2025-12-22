@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="haller">
+
+  <!-- Arguments -->
+  <xacro:arg name="use_sim" default="false"/>
+  <xacro:arg name="use_fake_hardware" default="false"/>
+  <xacro:arg name="sim_gazebo" default="false"/>
+
+  <!-- Properties -->
+  <xacro:property name="use_sim" value="$(arg use_sim)"/>
+  <xacro:property name="use_fake_hardware" value="$(arg use_fake_hardware)"/>
+  <xacro:property name="sim_gazebo" value="$(arg sim_gazebo)"/>
+
+  <!-- Include modular xacro files -->
+  <xacro:include filename="$(find haller_description)/urdf/materials.xacro"/>
+  <xacro:include filename="$(find haller_description)/urdf/inertia_macros.xacro"/>
+  <xacro:include filename="$(find haller_description)/urdf/haller_base.xacro"/>
+  <xacro:include filename="$(find haller_description)/urdf/haller_wheels.xacro"/>
+  <xacro:include filename="$(find haller_description)/urdf/haller_sensors.xacro"/>
+  <xacro:include filename="$(find haller_description)/urdf/haller_ros2_control.xacro"/>
+
+  <!-- Base Link -->
+  <link name="base_link"/>
+
+  <!-- Base Footprint - for navigation -->
+  <link name="base_footprint"/>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_footprint"/>
+    <origin xyz="0 0 -0.05" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Chassis -->
+  <xacro:haller_base/>
+
+  <!-- Wheels -->
+  <xacro:haller_wheels/>
+
+  <!-- Sensors -->
+  <xacro:haller_sensors/>
+
+  <!-- ROS2 Control -->
+  <xacro:haller_ros2_control
+    use_sim="$(arg use_sim)"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    sim_gazebo="$(arg sim_gazebo)"/>
+
+  <!-- Gazebo plugins -->
+  <xacro:if value="${sim_gazebo}">
+    <xacro:include filename="$(find haller_description)/urdf/gazebo_plugins.xacro"/>
+    <xacro:gazebo_plugins/>
+  </xacro:if>
+
+</robot>
+
