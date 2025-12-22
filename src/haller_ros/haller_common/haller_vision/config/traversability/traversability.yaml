@@ -1,0 +1,47 @@
+# Traversability Analysis Configuration
+# Converts segmentation and detection outputs to navigation costmap
+
+traversability_node:
+  ros__parameters:
+    # Input topics
+    segmentation_topic: "/segmentation/mask"
+    detection_topic: "/detections"
+    camera_info_topic: "/camera/camera_info"
+    
+    # Output topics
+    costmap_topic: "/traversability/costmap"
+    annotated_topic: "/camera/traversability_annotated"
+    
+    # Costmap parameters
+    costmap_resolution: 0.05  # meters per cell
+    costmap_width: 10.0       # meters
+    costmap_height: 10.0      # meters
+    costmap_frame: "base_link"
+    
+    # Cost values (0-254, 255=unknown)
+    free_cost: 0
+    inscribed_cost: 253
+    lethal_cost: 254
+    unknown_cost: 255
+    
+    # Traversability class costs
+    traversable_cost: 0       # Safe to drive
+    caution_cost: 100         # Possible but risky
+    obstacle_cost: 254        # Cannot traverse
+    
+    # Detection-based obstacle inflation
+    detection_inflation_radius: 0.5  # meters around detected objects
+    person_safety_radius: 1.0        # Extra safety for people
+    
+    # Camera projection parameters
+    camera_height: 0.15       # meters above ground (from URDF)
+    camera_pitch: 0.0         # radians, downward tilt
+    ground_plane_height: 0.0  # Assume flat ground
+    
+    # Temporal filtering
+    costmap_decay_time: 2.0   # seconds before obstacles fade
+    use_temporal_filter: true
+    
+    # Publishing rate
+    publish_rate: 10.0  # Hz
+

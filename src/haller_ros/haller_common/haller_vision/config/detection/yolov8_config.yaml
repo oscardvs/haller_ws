@@ -1,0 +1,37 @@
+# YOLOv8 Object Detection Configuration
+# Optimized for Jetson Orin Nano 8GB
+
+detection_node:
+  ros__parameters:
+    # Model configuration
+    model_path: ""  # Path to TensorRT engine, empty uses default ONNX
+    model_type: "yolov8n"  # nano variant for speed
+    
+    # Input configuration (must match camera resolution)
+    input_width: 640
+    input_height: 480
+    
+    # Detection thresholds
+    confidence_threshold: 0.5
+    nms_threshold: 0.45
+    
+    # Classes of interest for obstacle detection
+    # COCO class IDs: 0=person, 2=car, 5=bus, 7=truck, etc.
+    target_classes: [0, 2, 5, 7, 14, 15, 16, 24, 25, 26, 27]
+    # 0: person, 2: car, 5: bus, 7: truck
+    # 14: bird, 15: cat, 16: dog (animals)
+    # 24: backpack, 25: umbrella, 26: handbag, 27: suitcase (obstacles)
+    
+    # Topic names
+    image_topic: "/camera/image_raw"
+    detection_topic: "/detections"
+    annotated_image_topic: "/camera/image_annotated"
+    
+    # Processing settings
+    publish_annotated_image: true
+    max_detections: 100
+    
+    # Performance settings
+    use_tensorrt: true
+    fp16_inference: true
+

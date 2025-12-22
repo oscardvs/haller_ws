@@ -1,0 +1,37 @@
+# Semantic Segmentation Configuration
+# SegFormer-B0 optimized for Jetson Orin Nano 8GB
+
+segmentation_node:
+  ros__parameters:
+    # Model configuration
+    model_path: ""  # Path to TensorRT engine
+    model_type: "segformer_b0"
+    
+    # Input configuration
+    input_width: 640
+    input_height: 480
+    
+    # Class definitions for traversability
+    # Map model output classes to traversability categories
+    num_classes: 19  # Cityscapes classes
+    
+    # Class mapping to traversability
+    # 0: road, 1: sidewalk -> traversable
+    # 2: building, 3: wall, 4: fence -> obstacle
+    # etc.
+    traversable_classes: [0, 1, 9]  # road, sidewalk, terrain
+    obstacle_classes: [2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17, 18]
+    unknown_classes: [8, 10]  # sky, vegetation (context dependent)
+    
+    # Topic names
+    image_topic: "/camera/image_raw"
+    segmentation_topic: "/segmentation/mask"
+    colored_mask_topic: "/segmentation/colored"
+    
+    # Processing settings
+    publish_colored_mask: true
+    
+    # Performance settings
+    use_tensorrt: true
+    fp16_inference: true
+

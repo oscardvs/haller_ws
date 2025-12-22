@@ -1,0 +1,16 @@
+# Camera Configuration for Simulation
+# Gazebo camera plugin already publishes to the correct topics
+# This file contains any additional parameters needed for sim mode
+
+camera_sim:
+  ros__parameters:
+    # In simulation, camera topics come from Gazebo plugin
+    # No additional configuration needed for basic operation
+    
+    # Topic names (must match gazebo_plugins.xacro)
+    image_topic: "/camera/image_raw"
+    camera_info_topic: "/camera/camera_info"
+    
+    # Simulation specific settings
+    use_sim_time: true
+

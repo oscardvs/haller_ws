@@ -173,7 +173,8 @@ local_costmap:
       height: 3
       resolution: 0.05
       robot_radius: 0.22
-      plugins: ["voxel_layer", "inflation_layer"]
+      # Vision layer added for camera-based obstacle detection
+      plugins: ["voxel_layer", "vision_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -198,6 +199,16 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
+      # Vision-based traversability layer
+      # Subscribes to /traversability/costmap from haller_vision
+      vision_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: True
+        subscribe_to_updates: True
+        map_subscribe_transient_local: False
+        map_topic: /traversability/costmap
+        # Use TRINARY mode: free(0), occupied(254), unknown(-1)
+        # Combines with other layers via max cost
       static_layer:
         map_subscribe_transient_local: True
       always_send_full_costmap: True
@@ -213,7 +224,8 @@ global_costmap:
       robot_radius: 0.22
       resolution: 0.05
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # Vision layer added for camera-based traversability
+      plugins: ["static_layer", "obstacle_layer", "vision_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
@@ -231,6 +243,13 @@ global_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
+      # Vision-based traversability layer (same as local costmap)
+      vision_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        enabled: True
+        subscribe_to_updates: True
+        map_subscribe_transient_local: False
+        map_topic: /traversability/costmap
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
