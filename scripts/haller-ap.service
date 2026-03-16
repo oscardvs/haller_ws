@@ -1,0 +1,12 @@
+[Unit]
+Description=Haller Robot WiFi Access Point
+Before=haller-robot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/orin/haller_ws/scripts/setup_ap.sh start
+ExecStop=/home/orin/haller_ws/scripts/setup_ap.sh stop
+
+[Install]
+WantedBy=multi-user.target

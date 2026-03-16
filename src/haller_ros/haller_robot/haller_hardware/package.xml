@@ -22,6 +22,7 @@
   <exec_depend>haller_vision</exec_depend>
   <exec_depend>haller_motor_controller</exec_depend>
   <exec_depend>gscam</exec_depend>
+  <exec_depend>haller_utils</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

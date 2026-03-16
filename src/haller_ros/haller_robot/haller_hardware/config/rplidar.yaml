@@ -5,7 +5,7 @@ sllidar_node:
     channel_type: serial
 
     # Serial port configuration
-    serial_port: /dev/ttyUSB0
+    serial_port: /dev/haller_lidar
     serial_baudrate: 115200
 
     # Frame configuration (must match URDF laser_frame)

@@ -1,0 +1,9 @@
+# Haller Robot udev rules
+# Install: sudo cp scripts/99-haller-devices.rules /etc/udev/rules.d/
+# Reload: sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# CANable2 SLCAN adapter -> /dev/haller_can
+SUBSYSTEM=="tty", ATTRS{idVendor}=="16d0", ATTRS{idProduct}=="117e", SYMLINK+="haller_can", MODE="0666"
+
+# Slamtec RPLidar A1 (CP2102) -> /dev/haller_lidar
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="haller_lidar", MODE="0666"

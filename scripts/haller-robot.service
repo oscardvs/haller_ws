@@ -1,0 +1,18 @@
+[Unit]
+Description=Haller Robot ROS2 Bringup
+After=network-online.target haller-ap.service
+Wants=network-online.target haller-ap.service
+
+[Service]
+Type=simple
+User=orin
+Group=orin
+Environment="HOME=/home/orin"
+ExecStart=/home/orin/haller_ws/scripts/haller_bringup.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -68,6 +68,8 @@ def generate_launch_description():
     # LiDAR config
     lidar_config = os.path.join(pkg_hardware, 'config', 'rplidar.yaml')
 
+    enable_web_teleop = LaunchConfiguration('enable_web_teleop')
+
     return LaunchDescription([
         # ==================== Launch Arguments ====================
         DeclareLaunchArgument(
@@ -89,6 +91,11 @@ def generate_launch_description():
             'enable_segmentation',
             default_value='true',
             description='Enable semantic segmentation (requires enable_vision:=true)'
+        ),
+        DeclareLaunchArgument(
+            'enable_web_teleop',
+            default_value='true',
+            description='Enable web-based teleop interface on port 8080'
         ),
 
         # ==================== Logging ====================
@@ -169,5 +176,19 @@ def generate_launch_description():
                 'enable_traversability': 'true',
             }.items(),
             condition=IfCondition(enable_vision),
+        ),
+
+        # ==================== Web Teleop ====================
+        Node(
+            package='haller_utils',
+            executable='web_teleop.py',
+            name='web_teleop',
+            output='screen',
+            parameters=[{
+                'port': 8080,
+                'max_linear': 1.0,
+                'max_angular': 2.0,
+            }],
+            condition=IfCondition(enable_web_teleop),
         ),
     ])

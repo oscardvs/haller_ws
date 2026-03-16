@@ -1,7 +1,7 @@
 motor_controller:
   ros__parameters:
     # SLCAN serial device (CANable2 USB adapter)
-    can_device: "/dev/ttyACM0"
+    can_device: "/dev/haller_can"
     can_bitrate: 1000000
 
     # Motor IDs (CAN ID = 0x140 + motor_id)

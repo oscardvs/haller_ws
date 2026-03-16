@@ -15,6 +15,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/teleop_keyboard.py
   scripts/battery_monitor.py
+  scripts/web_teleop.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
