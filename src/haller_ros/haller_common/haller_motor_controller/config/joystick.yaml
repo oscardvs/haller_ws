@@ -1,0 +1,26 @@
+teleop_twist_joy_node:
+  ros__parameters:
+    # Left stick vertical = linear speed
+    axis_linear:
+      x: 1
+    scale_linear:
+      x: 1.0                   # Max 1.0 m/s
+
+    # Left stick horizontal = angular speed
+    axis_angular:
+      yaw: 0
+    scale_angular:
+      yaw: 2.0                 # Max 2.0 rad/s
+
+    # Deadman switches
+    enable_button: 4            # L1 - must hold to drive
+    enable_turbo_button: 5      # R1 - turbo mode
+
+    # Turbo speeds
+    scale_linear_turbo:
+      x: 1.5
+    scale_angular_turbo:
+      yaw: 3.0
+
+    # Don't require button for initial enable (just deadman)
+    require_enable_button: true

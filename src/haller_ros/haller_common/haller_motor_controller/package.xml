@@ -1,27 +1,22 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>haller_hardware</name>
+  <name>haller_motor_controller</name>
   <version>0.1.0</version>
-  <description>Hardware bringup and driver nodes for the Haller robot</description>
+  <description>Direct CAN motor controller for Haller robot with LK-TECH MF5010 motors via SLCAN</description>
   <maintainer email="oscar.devos02@gmail.com">Oscar Devos</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
-  <depend>haller_msgs</depend>
-  <depend>haller_description</depend>
-  <depend>haller_controllers</depend>
-
-  <exec_depend>sllidar_ros2</exec_depend>
-  <exec_depend>robot_state_publisher</exec_depend>
-  <exec_depend>joint_state_publisher</exec_depend>
-  <exec_depend>haller_vision</exec_depend>
-  <exec_depend>haller_motor_controller</exec_depend>
-  <exec_depend>gscam</exec_depend>
+  <depend>std_srvs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
@@ -30,4 +25,3 @@
     <build_type>ament_cmake</build_type>
   </export>
 </package>
-

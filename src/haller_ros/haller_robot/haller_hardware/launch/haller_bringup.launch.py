@@ -3,19 +3,19 @@ Haller Robot Hardware Bringup
 
 Launches all hardware components:
 - Robot state publisher
-- ros2_control with diff drive controller
+- Motor controller (real hardware) OR ros2_control (simulation/fake hardware)
 - RPLIDAR LiDAR sensor
 - Vision pipeline (IMX219 camera, detection, segmentation, traversability)
 
 Usage:
-    # Full robot bringup
+    # Full robot bringup (real motors via CAN)
     ros2 launch haller_hardware haller_bringup.launch.py
 
     # Without vision (for debugging)
     ros2 launch haller_hardware haller_bringup.launch.py enable_vision:=false
 
-    # With fake hardware (simulation mode without Gazebo)
-    ros2 launch haller_hardware haller_bringup.launch.py use_fake_hardware:=true
+    # With ros2_control fake hardware (simulation mode without Gazebo)
+    ros2 launch haller_hardware haller_bringup.launch.py use_sim:=true
 """
 
 import os
@@ -26,7 +26,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     LogInfo,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, Command
 from launch_ros.actions import Node
@@ -39,9 +39,10 @@ def generate_launch_description():
     pkg_description = get_package_share_directory('haller_description')
     pkg_controllers = get_package_share_directory('haller_controllers')
     pkg_vision = get_package_share_directory('haller_vision')
+    pkg_motor = get_package_share_directory('haller_motor_controller')
 
     # Launch arguments
-    use_fake_hardware = LaunchConfiguration('use_fake_hardware')
+    use_sim = LaunchConfiguration('use_sim')
     enable_vision = LaunchConfiguration('enable_vision')
     enable_detection = LaunchConfiguration('enable_detection')
     enable_segmentation = LaunchConfiguration('enable_segmentation')
@@ -52,14 +53,17 @@ def generate_launch_description():
         Command([
             'xacro ', xacro_file,
             ' use_sim:=false',
-            ' use_fake_hardware:=', use_fake_hardware,
+            ' use_fake_hardware:=', use_sim,
             ' sim_gazebo:=false'
         ]),
         value_type=str
     )
 
-    # Controller config
+    # Controller config (for ros2_control / simulation mode)
     controller_config = os.path.join(pkg_controllers, 'config', 'haller_controllers.yaml')
+
+    # Motor controller config (for real hardware)
+    motor_params = os.path.join(pkg_motor, 'config', 'motor_params.yaml')
 
     # LiDAR config
     lidar_config = os.path.join(pkg_hardware, 'config', 'rplidar.yaml')
@@ -67,9 +71,9 @@ def generate_launch_description():
     return LaunchDescription([
         # ==================== Launch Arguments ====================
         DeclareLaunchArgument(
-            'use_fake_hardware',
+            'use_sim',
             default_value='false',
-            description='Use fake hardware for testing'
+            description='Use ros2_control with fake hardware (true) or direct CAN motor control (false)'
         ),
         DeclareLaunchArgument(
             'enable_vision',
@@ -102,7 +106,19 @@ def generate_launch_description():
             }]
         ),
 
-        # ==================== ros2_control ====================
+        # ==================== Motor Controller (Real Hardware) ====================
+        # Direct CAN motor control - used when use_sim:=false
+        Node(
+            package='haller_motor_controller',
+            executable='motor_controller_node',
+            name='motor_controller',
+            parameters=[motor_params],
+            output='screen',
+            condition=UnlessCondition(use_sim),
+        ),
+
+        # ==================== ros2_control (Simulation/Fake Hardware) ====================
+        # Used when use_sim:=true
         Node(
             package='controller_manager',
             executable='ros2_control_node',
@@ -111,22 +127,25 @@ def generate_launch_description():
                 controller_config
             ],
             output='screen',
+            condition=IfCondition(use_sim),
         ),
 
-        # Joint State Broadcaster
+        # Joint State Broadcaster (simulation only)
         Node(
             package='controller_manager',
             executable='spawner',
             arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
             output='screen',
+            condition=IfCondition(use_sim),
         ),
 
-        # Diff Drive Controller
+        # Diff Drive Controller (simulation only)
         Node(
             package='controller_manager',
             executable='spawner',
             arguments=['diff_drive_controller', '--controller-manager', '/controller_manager'],
             output='screen',
+            condition=IfCondition(use_sim),
         ),
 
         # ==================== LiDAR ====================

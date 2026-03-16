@@ -1,0 +1,27 @@
+motor_controller:
+  ros__parameters:
+    # SLCAN serial device (CANable2 USB adapter)
+    can_device: "/dev/ttyACM0"
+    can_bitrate: 1000000
+
+    # Motor IDs (CAN ID = 0x140 + motor_id)
+    left_motor_id: 1
+    right_motor_id: 2
+
+    # Robot geometry (must match URDF)
+    wheel_radius: 0.05        # meters
+    wheel_separation: 0.34    # meters (center-to-center)
+
+    # Velocity limits
+    max_linear_speed: 1.0     # m/s
+    max_angular_speed: 2.0    # rad/s
+
+    # Safety
+    cmd_vel_timeout: 0.5      # seconds - stop motors if no cmd_vel received
+
+    # Control loop rate
+    control_rate: 50.0        # Hz
+
+    # Frame IDs
+    odom_frame: "odom"
+    base_frame: "base_link"
