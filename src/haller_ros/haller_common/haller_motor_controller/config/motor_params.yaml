@@ -10,7 +10,7 @@ motor_controller:
 
     # Robot geometry (must match URDF)
     wheel_radius: 0.05        # meters
-    wheel_separation: 0.34    # meters (center-to-center)
+    wheel_separation: 0.35    # meters (center-to-center)
 
     # Velocity limits
     max_linear_speed: 1.0     # m/s

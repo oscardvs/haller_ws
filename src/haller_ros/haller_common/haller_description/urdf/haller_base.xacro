@@ -1,9 +1,10 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- Robot Dimensions -->
-  <xacro:property name="chassis_length" value="0.40"/>
-  <xacro:property name="chassis_width" value="0.30"/>
+  <!-- Robot Dimensions (triangular chassis approximated as a box) -->
+  <!-- Two driven wheels in front (35cm apart), castor 27cm behind -->
+  <xacro:property name="chassis_length" value="0.27"/>
+  <xacro:property name="chassis_width" value="0.35"/>
   <xacro:property name="chassis_height" value="0.15"/>
   <xacro:property name="chassis_mass" value="10.0"/>
   <xacro:property name="chassis_z_offset" value="0.10"/>
@@ -17,21 +18,21 @@
     <!-- Chassis Link -->
     <link name="chassis_link">
       <visual>
-        <origin xyz="0 0 ${chassis_z_offset}" rpy="0 0 0"/>
+        <origin xyz="${-chassis_length/2} 0 ${chassis_z_offset}" rpy="0 0 0"/>
         <geometry>
           <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
         </geometry>
         <material name="haller_chassis"/>
       </visual>
       <collision>
-        <origin xyz="0 0 ${chassis_z_offset}" rpy="0 0 0"/>
+        <origin xyz="${-chassis_length/2} 0 ${chassis_z_offset}" rpy="0 0 0"/>
         <geometry>
           <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
         </geometry>
       </collision>
       <xacro:box_inertial mass="${chassis_mass}"
         x="${chassis_length}" y="${chassis_width}" z="${chassis_height}">
-        <origin xyz="0 0 ${chassis_z_offset}" rpy="0 0 0"/>
+        <origin xyz="${-chassis_length/2} 0 ${chassis_z_offset}" rpy="0 0 0"/>
       </xacro:box_inertial>
     </link>
 
@@ -65,10 +66,9 @@
     <joint name="top_plate_joint" type="fixed">
       <parent link="chassis_link"/>
       <child link="top_plate_link"/>
-      <origin xyz="0 0 ${chassis_z_offset + chassis_height/2 + top_plate_height/2}" rpy="0 0 0"/>
+      <origin xyz="${-chassis_length/2} 0 ${chassis_z_offset + chassis_height/2 + top_plate_height/2}" rpy="0 0 0"/>
     </joint>
 
   </xacro:macro>
 
 </robot>
-

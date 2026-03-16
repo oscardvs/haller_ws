@@ -6,13 +6,16 @@
   <xacro:property name="wheel_width" value="0.04"/>
   <xacro:property name="wheel_mass" value="0.5"/>
 
-  <!-- Wheel positions -->
-  <xacro:property name="wheel_x_offset" value="0.13"/>
-  <xacro:property name="wheel_y_offset" value="0.17"/>
-  <xacro:property name="wheel_z_offset" value="0.0"/>
+  <!-- Wheel positions (drive wheels at base_link origin line) -->
+  <xacro:property name="wheel_y_offset" value="0.175"/>  <!-- half of 0.35m separation -->
 
-  <!-- Wheel macro -->
-  <xacro:macro name="wheel" params="prefix x_reflect y_reflect">
+  <!-- Castor wheel properties -->
+  <xacro:property name="castor_radius" value="0.025"/>
+  <xacro:property name="castor_mass" value="0.1"/>
+  <xacro:property name="castor_x_offset" value="-0.27"/>  <!-- behind drive axle -->
+
+  <!-- Drive wheel macro -->
+  <xacro:macro name="drive_wheel" params="prefix y_reflect">
     <link name="${prefix}_wheel_link">
       <visual>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
@@ -36,14 +39,11 @@
     <joint name="${prefix}_wheel_joint" type="continuous">
       <parent link="base_link"/>
       <child link="${prefix}_wheel_link"/>
-      <origin
-        xyz="${x_reflect * wheel_x_offset} ${y_reflect * wheel_y_offset} ${wheel_z_offset}"
-        rpy="0 0 0"/>
+      <origin xyz="0 ${y_reflect * wheel_y_offset} 0" rpy="0 0 0"/>
       <axis xyz="0 1 0"/>
       <dynamics damping="0.1" friction="0.1"/>
     </joint>
 
-    <!-- Gazebo wheel properties -->
     <gazebo reference="${prefix}_wheel_link">
       <material>Gazebo/DarkGrey</material>
       <mu1>1.0</mu1>
@@ -57,14 +57,45 @@
 
   <!-- All wheels macro -->
   <xacro:macro name="haller_wheels">
-    <!-- Front wheels -->
-    <xacro:wheel prefix="front_left" x_reflect="1" y_reflect="1"/>
-    <xacro:wheel prefix="front_right" x_reflect="1" y_reflect="-1"/>
+    <!-- Drive wheels (at the front, on the drive axle) -->
+    <xacro:drive_wheel prefix="left" y_reflect="1"/>
+    <xacro:drive_wheel prefix="right" y_reflect="-1"/>
 
-    <!-- Rear wheels -->
-    <xacro:wheel prefix="rear_left" x_reflect="-1" y_reflect="1"/>
-    <xacro:wheel prefix="rear_right" x_reflect="-1" y_reflect="-1"/>
+    <!-- Castor wheel (rear) -->
+    <link name="castor_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <sphere radius="${castor_radius}"/>
+        </geometry>
+        <material name="dark_grey"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <sphere radius="${castor_radius}"/>
+        </geometry>
+      </collision>
+      <xacro:sphere_inertial mass="${castor_mass}" radius="${castor_radius}">
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+      </xacro:sphere_inertial>
+    </link>
+
+    <joint name="castor_wheel_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="castor_wheel_link"/>
+      <origin xyz="${castor_x_offset} 0 ${-(wheel_radius - castor_radius)}" rpy="0 0 0"/>
+    </joint>
+
+    <gazebo reference="castor_wheel_link">
+      <material>Gazebo/Grey</material>
+      <mu1>0.0</mu1>
+      <mu2>0.0</mu2>
+      <kp>1000000.0</kp>
+      <kd>100.0</kd>
+      <minDepth>0.001</minDepth>
+      <maxVel>1.0</maxVel>
+    </gazebo>
   </xacro:macro>
 
 </robot>
-

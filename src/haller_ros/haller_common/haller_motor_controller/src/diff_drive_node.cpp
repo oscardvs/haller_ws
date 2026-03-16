@@ -12,10 +12,10 @@ DiffDriveNode::DiffDriveNode(const rclcpp::NodeOptions &options)
   // Declare parameters
   this->declare_parameter("can_device", "/dev/ttyACM0");
   this->declare_parameter("can_bitrate", 1000000);
-  this->declare_parameter("left_motor_id", 1);
-  this->declare_parameter("right_motor_id", 2);
+  this->declare_parameter("left_motor_id", 4);
+  this->declare_parameter("right_motor_id", 1);
   this->declare_parameter("wheel_radius", 0.05);
-  this->declare_parameter("wheel_separation", 0.34);
+  this->declare_parameter("wheel_separation", 0.35);
   this->declare_parameter("max_linear_speed", 1.0);
   this->declare_parameter("max_angular_speed", 2.0);
   this->declare_parameter("cmd_vel_timeout", 0.5);
@@ -170,8 +170,9 @@ void DiffDriveNode::controlLoop() {
       (linear_vel + angular_vel * wheel_separation_ / 2.0) / wheel_radius_;
 
   // Convert rad/s → degrees/s for motor commands
+  // Right motor is mounted mirrored, so negate its direction
   double v_left_dps = v_left_rad * 180.0 / M_PI;
-  double v_right_dps = v_right_rad * 180.0 / M_PI;
+  double v_right_dps = -(v_right_rad * 180.0 / M_PI);
 
   // Send speed commands to motors
   if (!left_motor_->setSpeed(v_left_dps)) {
@@ -188,6 +189,7 @@ void DiffDriveNode::controlLoop() {
   double right_angle_rad = 0.0;
   bool left_ok = left_motor_->readMultiAngle(left_angle_rad);
   bool right_ok = right_motor_->readMultiAngle(right_angle_rad);
+  right_angle_rad = -right_angle_rad;  // Right motor is mirrored
 
   if (left_ok && right_ok) {
     if (first_angle_read_) {
@@ -211,9 +213,10 @@ void DiffDriveNode::controlLoop() {
       double d_theta = (d_right - d_left) / wheel_separation_;
 
       // Update odometry pose (midpoint integration)
+      double mid_theta = odom_theta_ + d_theta / 2.0;
+      odom_x_ += d_center * cos(mid_theta);
+      odom_y_ += d_center * sin(mid_theta);
       odom_theta_ += d_theta;
-      odom_x_ += d_center * cos(odom_theta_);
-      odom_y_ += d_center * sin(odom_theta_);
 
       // Normalize theta to [-pi, pi]
       odom_theta_ = atan2(sin(odom_theta_), cos(odom_theta_));
@@ -273,7 +276,7 @@ void DiffDriveNode::controlLoop() {
     // Publish joint states for both front wheels
     auto js_msg = sensor_msgs::msg::JointState();
     js_msg.header.stamp = now;
-    js_msg.name = {"front_left_wheel_joint", "front_right_wheel_joint"};
+    js_msg.name = {"left_wheel_joint", "right_wheel_joint"};
     js_msg.position = {left_wheel_pos_, right_wheel_pos_};
     js_msg.velocity = {v_left_rad, v_right_rad};
     joint_state_pub_->publish(js_msg);

@@ -33,8 +33,8 @@
         </xacro:unless>
       </xacro:unless>
 
-      <!-- Front Left Wheel -->
-      <joint name="front_left_wheel_joint">
+      <!-- Left Wheel -->
+      <joint name="left_wheel_joint">
         <command_interface name="velocity">
           <param name="min">-10</param>
           <param name="max">10</param>
@@ -43,28 +43,8 @@
         <state_interface name="velocity"/>
       </joint>
 
-      <!-- Front Right Wheel -->
-      <joint name="front_right_wheel_joint">
-        <command_interface name="velocity">
-          <param name="min">-10</param>
-          <param name="max">10</param>
-        </command_interface>
-        <state_interface name="position"/>
-        <state_interface name="velocity"/>
-      </joint>
-
-      <!-- Rear Left Wheel -->
-      <joint name="rear_left_wheel_joint">
-        <command_interface name="velocity">
-          <param name="min">-10</param>
-          <param name="max">10</param>
-        </command_interface>
-        <state_interface name="position"/>
-        <state_interface name="velocity"/>
-      </joint>
-
-      <!-- Rear Right Wheel -->
-      <joint name="rear_right_wheel_joint">
+      <!-- Right Wheel -->
+      <joint name="right_wheel_joint">
         <command_interface name="velocity">
           <param name="min">-10</param>
           <param name="max">10</param>
@@ -78,4 +58,3 @@
   </xacro:macro>
 
 </robot>
-
