@@ -1,0 +1,58 @@
+
+// ID: 141      DATA: 80 00 00 00 00 00 00 00 // motor off
+
+// ID: 141      DATA: 81 00 00 00 00 00 00 00 // motor stop
+
+// ID: 141      DATA: 88 00 00 00 00 00 00 00 // motor on
+
+// ID: 141      DATA: A0 00 00 00 C8 00 00 00 // torque open loop(only for MS series)
+
+// ID: 141      DATA: A1 00 00 00 64 00 00 00 // torque closed-loop(only for MG/MF series)
+
+// ID: 141      DATA: A2 00 00 00 A0 8C 00 00 // speed closed-loop
+
+// ID: 141      DATA: A3 00 00 00 A0 8C 00 00 // Multi position closed-loop control command 1
+
+// ID: 141      DATA: A4 00 D0 02 A0 8C 00 00 // Multi position closed-loop control command 2
+
+// ID: 141      DATA: A4 00 78 00 50 46 00 00 // Multi position closed-loop control command 2   speed 120dps  angle +180°
+
+// ID: 154      DATA: A4 00 78 00 B0 B9 FF FF // Multi position closed-loop control command 2   speed 120dps  angle -180°  ID#20
+
+// ID: 141      DATA: A5 00 00 00 50 46 00 00 // Single position closed-loop control command 1
+
+// ID: 141      DATA: A6 00 D0 02 50 46 00 00 // Single position closed-loop control command 2
+
+// ID: 141      DATA: A7 00 D0 02 94 11 00 00 // Incremental closed-loop control command 1
+
+// ID: 141      DATA: 30 00 00 00 00 00 00 00 // Read PID parameter command
+
+// ID: 141      DATA: 31 00 64 64 32 28 32 32 // Write PID parameter to RAM command
+
+// ID: 141      DATA: 32 00 64 64 32 28 32 32 // Write PID parameter to ROM command
+
+// ID: 141      DATA: 33 00 00 00 00 00 00 00 // Read acceleration command
+
+// ID: 141      DATA: 34 00 00 00 B8 0B 00 00 // Write acceleration to RAM command
+
+// ID: 141      DATA: 37 00 00 00 00 00 00 00 // Read max torque
+
+// ID: 141      DATA: 38 00 00 00 64 00 00 00 // Write max torque to RAM
+
+// ID: 141      DATA: 90 00 00 00 00 00 00 00 // Read encoder command
+
+// ID: 141      DATA: 91 00 00 00 00 00 00 00 // Write encoder value as motor zero point command
+
+// ID: 141      DATA: 19 00 00 00 00 00 00 00 // Write the current position to ROM as the zero point command of the motor
+
+// ID: 141      DATA: 92 00 00 00 00 00 00 00 // read multi angle
+
+// ID: 141      DATA: 94 00 00 00 00 00 00 00 // read single angle
+
+// ID: 141      DATA: 9A 00 00 00 00 00 00 00 // read error/state 1
+
+// ID: 141      DATA: 9B 00 00 00 00 00 00 00 // clear error
+
+// ID: 141      DATA: 9C 00 00 00 00 00 00 00 // read state 2
+
+// ID: 141      DATA: 9D 00 00 00 00 00 00 00 // read state 3
