@@ -232,3 +232,25 @@ def test_post_calibration_abort_is_idempotent(app_with_mocks):
     assert r1.status_code == 200
     r2 = app_with_mocks.post("/calibration/right/abort")
     assert r2.status_code == 200
+
+
+def test_estop_aborts_calibration_session(app_with_mocks):
+    app_with_mocks.post("/calibration/right/start")
+    r = app_with_mocks.post("/estop")
+    assert r.status_code == 200
+    status = app_with_mocks.get("/calibration/status").json()
+    assert status["current_session"] is None
+
+
+def test_arm_mode_blocked_during_calibration(app_with_mocks):
+    app_with_mocks.post("/calibration/right/start")
+    r = app_with_mocks.post("/arm/right/mode", json={"mode": "auto"})
+    assert r.status_code == 409
+    assert "calibrat" in r.json()["detail"].lower()
+
+
+def test_arm_mode_other_arm_unaffected_by_calibration(app_with_mocks):
+    # The fixture only has 'right'; a different arm_id 404s, not 409.
+    app_with_mocks.post("/calibration/right/start")
+    r = app_with_mocks.post("/arm/left/mode", json={"mode": "manual"})
+    assert r.status_code == 404

@@ -167,6 +167,9 @@ async def post_arm_goal(arm_id: str, body: dict[str, float]):
 @app.post("/arm/{arm_id}/mode")
 async def post_arm_mode(arm_id: str, body: ArmModeBody):
     handle = _arm_or_404(arm_id)
+    if calibration.current is not None and calibration.current.arm_id == arm_id:
+        raise HTTPException(status_code=409,
+                            detail=f"arm {arm_id!r} is being calibrated")
     try:
         new_mode = Mode(body.mode)
     except ValueError:
@@ -276,6 +279,7 @@ async def get_camera_stream(camera_id: str):
 @app.post("/estop")
 async def post_estop():
     logger.warning("E-STOP triggered")
+    calibration.abort()
     teleop.stop()
     for handle in arms.values():
         handle.disable_torque()
