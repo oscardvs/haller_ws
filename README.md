@@ -2,7 +2,7 @@
 
 Haller is an open-source mobile-manipulation robot: a four-wheeled differential-drive base that carries **two SO-101 arms** for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, scripts for deployment, and documentation for reproducing the build.
 
-> **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms running through the unified HMI (FastAPI + Next.js + shadcn) on main. Per-arm controls (joint sliders, home, free-drive, pose presets) and a leader↔follower teleop launcher at 60 Hz are live. Next: HMI-driven calibration wizard.
+> **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms running through the unified HMI (FastAPI + Next.js + shadcn) on main. Per-arm controls (joint sliders, home, free-drive, pose presets) and a leader↔follower teleop launcher at 60 Hz are live. Live MJPEG camera streams in the HMI and a CLI-driven dataset collection pipeline are now wired — see [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md). Next: HMI-driven calibration wizard, HMI-integrated recorder.
 
 ## Hardware overview
 
@@ -26,7 +26,8 @@ haller_ws/
 ├── docs/                            ← vendor datasheets + setup guides
 │   ├── setup/
 │   │   ├── lerobot-environment.md   ← Python/conda env for the arms
-│   │   └── so101-arm.md             ← SO-101 motor configuration + calibration
+│   │   ├── so101-arm.md             ← SO-101 motor configuration + calibration
+│   │   └── dataset-collection.md    ← record SO-101 datasets + push to HF Hub
 │   └── *.pdf                        ← LK-TECH MF5010 manuals (drive motors)
 ├── scripts/                         ← provisioning, services, udev rules
 │   ├── install.sh
@@ -34,6 +35,7 @@ haller_ws/
 │   ├── 99-haller-devices.rules      ← udev rules (stable device names)
 │   ├── haller-robot.service         ← systemd unit, robot bringup on boot
 │   ├── haller-ap.service            ← systemd unit, Wi-Fi AP fallback
+│   ├── record_dataset.sh            ← wrapper around lerobot-record (Phase 1 data collection)
 │   └── setup_ap.sh
 ├── src/                             ← ROS 2 colcon workspace
 │   ├── haller_ros/                  ← core ROS 2 packages
@@ -75,6 +77,7 @@ Two guides, run them in order:
 1. **[`docs/setup/lerobot-environment.md`](./docs/setup/lerobot-environment.md)** — install Miniforge, create the `lerobot` conda env, install LeRobot with the Feetech extra, and patch the env so it isn't poisoned by ROS's `PYTHONPATH` or the user-site directory.
 2. **[`docs/setup/so101-arm.md`](./docs/setup/so101-arm.md)** — find the bus servo adapter's serial port, configure each motor's ID and baud rate one-by-one, wire the arm, calibrate, and run a smoke test.
 3. **[`hmi/README.md`](./hmi/README.md)** — bring up the unified HMI (FastAPI backend + Next.js + shadcn frontend) that replaces the legacy `web_teleop.py`.
+4. **[`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md)** — wire your cameras, record an SO-101 teleop dataset with `scripts/record_dataset.sh`, push to the Hugging Face Hub. Prerequisite for training or finetuning a policy on your own task.
 
 ## License
 

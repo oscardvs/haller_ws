@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { ArmPanel } from "@/components/ArmPanel";
 import { BasePanel } from "@/components/BasePanel";
+import { CamerasPanel } from "@/components/CamerasPanel";
+import { RecordingPanel } from "@/components/RecordingPanel";
 import { TeleopLauncher } from "@/components/TeleopLauncher";
 import { api } from "@/lib/api";
 
@@ -44,6 +46,21 @@ export default function Dashboard() {
           {cfg.arms.map((arm) => (
             <ArmPanel key={arm.id} armId={arm.id} />
           ))}
+        </div>
+      </div>
+
+      {/* Section: dataset collection. Cameras strip + CLI-command builder. */}
+      <div className="flex items-center gap-3 px-1 pt-2">
+        <span className="label-tracked text-muted-foreground">Dataset collection</span>
+        <span className="h-px flex-1 bg-border" />
+      </div>
+
+      <div className="grid grid-cols-12 gap-3">
+        <div className="col-span-12 lg:col-span-7">
+          <CamerasPanel />
+        </div>
+        <div className="col-span-12 lg:col-span-5">
+          <RecordingPanel />
         </div>
       </div>
     </main>

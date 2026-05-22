@@ -96,6 +96,35 @@ lerobot-calibrate \
 
 An HMI-driven calibration wizard is on the roadmap (see `docs/superpowers/specs/...` once the spec is written).
 
+## Cameras
+
+Cameras are declared in [`backend/config.yaml`](./backend/config.yaml). Each entry has:
+
+| Field            | Notes |
+|------------------|-------|
+| `id`             | Free-form id used in the URL path and as the dataset feature key. |
+| `role`           | `wrist` or `base`. `wrist` cameras tied to an `arm_id` render inside the matching arm card. |
+| `arm_id`         | Optional — binds a wrist camera to one of the arms. |
+| `source`         | `placeholder` (slot reserved, no capture) or `opencv` (real V4L2 device). |
+| `index_or_path`  | Required for `opencv`. Either an integer (`0`) or device path (`/dev/video0`). |
+| `width, height, fps` | OpenCV capture parameters. Default 640×480 @ 30. |
+
+When source is `opencv`, the HMI captures via `lerobot.cameras.opencv.OpenCVCamera` and exposes:
+
+- `GET /cameras` — runtime list of all configured cameras + the `active` flag.
+- `GET /cameras/{id}/snapshot` — a single JPEG (503 if placeholder or capture failed).
+- `GET /cameras/{id}/stream` — `multipart/x-mixed-replace` MJPEG, ~15 Hz to the browser.
+
+The same `(index_or_path, width, height, fps)` tuple is exactly the shape `lerobot-record --robot.cameras=...` wants, so editing `config.yaml` wires a camera for both live view *and* dataset collection.
+
+In the dashboard the **Cameras** strip shows every configured camera as a live thumbnail (or the placeholder "no feed" state); each arm card also embeds its bound wrist camera.
+
+## Dataset collection
+
+Recording uses `scripts/record_dataset.sh` (wraps `lerobot-record`), which needs exclusive access to the serial ports + cameras — so the HMI must be stopped while it runs. The dashboard's **Recording** panel builds the exact shell command from a task description + episode count for you to copy.
+
+Full end-to-end guide: [`docs/setup/dataset-collection.md`](../docs/setup/dataset-collection.md).
+
 ## Operating the base
 
 The Base panel ports the existing teleop UX onto shadcn:
@@ -148,6 +177,9 @@ The legacy `web_teleop.py` is disabled at the launch-arg level (`enable_web_tele
 | GET  | `/teleop` | — | current teleop status |
 | POST | `/teleop/start` | `{leader, follower, hz}` | start the leader→follower loop |
 | POST | `/teleop/stop` | `{}` | stop the teleop loop and restore both arms |
+| GET  | `/cameras` | — | configured cameras + runtime `active` flag |
+| GET  | `/cameras/{id}/snapshot` | — | single JPEG (503 if placeholder or disconnected) |
+| GET  | `/cameras/{id}/stream` | — | `multipart/x-mixed-replace` MJPEG live feed (~15 Hz to the browser) |
 | POST | `/estop` | `{}` | stop teleop, torque off all arms, zero `/cmd_vel` |
 | WS | `/ws/telemetry` | — | ~20 Hz frames: base + arms state + teleop + alerts |
 
