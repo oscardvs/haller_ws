@@ -37,3 +37,10 @@ class PresetStore:
 
     def list(self, arm_id: str) -> list[str]:
         return list(self._data.get(arm_id, {}).keys())
+
+    def delete(self, name: str, arm_id: str) -> None:
+        try:
+            del self._data[arm_id][name]
+        except KeyError as e:
+            raise PresetNotFound(f"no preset {name!r} for arm {arm_id!r}") from e
+        self._write()

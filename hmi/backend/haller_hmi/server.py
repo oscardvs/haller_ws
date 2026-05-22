@@ -173,6 +173,22 @@ async def post_arm_torque(arm_id: str, body: TorqueBody):
     return {"ok": True, "torque": handle.torque_enabled}
 
 
+@app.get("/arm/{arm_id}/presets")
+async def get_arm_presets(arm_id: str):
+    _arm_or_404(arm_id)  # 404 if arm unknown
+    return {"names": presets.list(arm_id)}
+
+
+@app.delete("/arm/{arm_id}/preset/{name}")
+async def delete_arm_preset(arm_id: str, name: str):
+    _arm_or_404(arm_id)
+    try:
+        presets.delete(name, arm_id)
+    except PresetNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True}
+
+
 @app.post("/arm/{arm_id}/preset")
 async def post_arm_preset(arm_id: str, body: PresetBody):
     handle = _arm_or_404(arm_id)

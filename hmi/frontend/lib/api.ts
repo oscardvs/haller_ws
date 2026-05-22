@@ -49,6 +49,25 @@ export const api = {
     postJson<{ ok: true; sent: ArmGoal }>(`/arm/${armId}/preset`, { name }),
   armPresetRecord: (armId: string, name: string) =>
     postJson<{ ok: true; saved: ArmGoal }>(`/arm/${armId}/preset/record`, { name }),
+  armPresetsList: (armId: string) =>
+    getJson<{ names: string[] }>(`/arm/${armId}/presets`),
+  armPresetDelete: async (armId: string, name: string) => {
+    const res = await fetch(
+      `${BACKEND_URL}/arm/${armId}/preset/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) {
+      let detail = `${res.status}`;
+      try {
+        const body = await res.json();
+        detail = body.error ?? body.detail ?? detail;
+      } catch {
+        /* noop */
+      }
+      throw new Error(`HTTP ${res.status}: ${detail}`);
+    }
+    return res.json() as Promise<{ ok: true }>;
+  },
   armHome: (armId: string) =>
     postJson<{ ok: true; sent: ArmGoal }>(`/arm/${armId}/home`, {}),
   armTorque: (armId: string, enabled: boolean) =>
