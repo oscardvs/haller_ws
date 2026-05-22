@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 
 import { useTelemetry } from "@/lib/telemetry";
-import { api } from "@/lib/api";
+import { api, cameraStreamUrl, type CameraInfo } from "@/lib/api";
 import { JointSlider } from "./JointSlider";
 import { ModeToggle } from "./ModeToggle";
 import { CameraTile } from "./CameraTile";
@@ -32,7 +32,26 @@ export function ArmPanel({ armId }: { armId: string }) {
         : null;
   const [presetName, setPresetName] = useState("");
   const [presets, setPresets] = useState<string[] | null>(null);
+  const [wristCam, setWristCam] = useState<CameraInfo | null>(null);
   const joints = useMemo(() => Object.entries(arm?.joints ?? {}), [arm]);
+
+  // Find the wrist camera bound to this arm (config.yaml: arm_id + role: wrist).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .cameras()
+      .then((r) => {
+        if (cancelled) return;
+        const match = r.cameras.find(
+          (c) => c.role === "wrist" && c.arm_id === armId,
+        );
+        setWristCam(match ?? null);
+      })
+      .catch(() => setWristCam(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [armId]);
 
   const refreshPresets = useCallback(async () => {
     try {
@@ -88,7 +107,15 @@ export function ArmPanel({ armId }: { armId: string }) {
       </div>
 
       <CardContent className="p-3 space-y-3">
-        <CameraTile id={`${armId}_wrist`} role="wrist" />
+        <CameraTile
+          id={wristCam?.id ?? `${armId}_wrist`}
+          role="wrist"
+          streamUrl={wristCam?.active ? cameraStreamUrl(wristCam.id) : undefined}
+          active={wristCam?.active}
+          width={wristCam?.width}
+          height={wristCam?.height}
+          fps={wristCam?.fps}
+        />
 
         {/* Joint stack header */}
         <div className="flex items-center gap-2 pb-1 border-b border-border/70">

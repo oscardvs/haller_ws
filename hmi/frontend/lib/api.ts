@@ -32,6 +32,22 @@ export async function getJson<T>(path: string): Promise<T> {
 // Convenience wrappers
 export type ArmGoal = Record<string, number>;
 
+export type CameraInfo = {
+  id: string;
+  role: "wrist" | "base";
+  source: "placeholder" | "opencv" | "mjpeg" | "webrtc";
+  arm_id?: string | null;
+  active: boolean;
+  width: number;
+  height: number;
+  fps: number;
+};
+
+export const cameraSnapshotUrl = (id: string) =>
+  `${BACKEND_URL}/cameras/${encodeURIComponent(id)}/snapshot`;
+export const cameraStreamUrl = (id: string) =>
+  `${BACKEND_URL}/cameras/${encodeURIComponent(id)}/stream`;
+
 export const api = {
   health: () => getJson<{ status: string }>("/health"),
   config: () => getJson<{
@@ -39,6 +55,7 @@ export const api = {
     arms: { id: string; model: string; port: string; mode: string }[];
     cameras: { id: string; role: string; source: string; arm_id?: string }[];
   }>("/config"),
+  cameras: () => getJson<{ cameras: CameraInfo[] }>("/cameras"),
   cmdVel: (linear: number, angular: number) =>
     postJson<{ ok: true; linear: number; angular: number }>("/base/cmd_vel", { linear, angular }),
   armGoal: (armId: string, goal: ArmGoal) =>

@@ -6,11 +6,13 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .arm import ArmManager
+from .cameras import CameraManager
 from .config import load_config
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
@@ -25,6 +27,7 @@ VERSION = "0.1.0"
 # Globals — wired in lifespan
 cfg = load_config()
 arms = ArmManager(cfg.arms)
+cameras = CameraManager(cfg.cameras)
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
@@ -70,6 +73,7 @@ async def _lifespan(app: FastAPI):
     global telemetry
     logger.info("haller-hmi backend starting (version %s)", VERSION)
     arms.connect_all()
+    cameras.connect_all()
     ros.start()
     telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz, teleop=teleop)
     telemetry.start()
@@ -78,6 +82,7 @@ async def _lifespan(app: FastAPI):
     if telemetry is not None:
         await telemetry.stop()
     teleop.stop()
+    cameras.disconnect_all()
     arms.disconnect_all()
     ros.stop()
 
@@ -219,6 +224,38 @@ async def post_arm_preset_record(arm_id: str, body: PresetBody):
     current = {j: v["pos"] for j, v in snap["joints"].items()}
     presets.save(body.name, arm_id, current)
     return {"ok": True, "saved": current}
+
+
+@app.get("/cameras")
+async def get_cameras():
+    return {"cameras": cameras.list()}
+
+
+@app.get("/cameras/{camera_id}/snapshot")
+async def get_camera_snapshot(camera_id: str):
+    try:
+        handle = cameras[camera_id]
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    jpeg = handle.latest_jpeg()
+    if jpeg is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"no frame available for {camera_id!r} (placeholder source or capture failure)",
+        )
+    return Response(content=jpeg, media_type="image/jpeg")
+
+
+@app.get("/cameras/{camera_id}/stream")
+async def get_camera_stream(camera_id: str):
+    try:
+        cameras[camera_id]
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return StreamingResponse(
+        cameras.mjpeg_stream(camera_id),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @app.post("/estop")

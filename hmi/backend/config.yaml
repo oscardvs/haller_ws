@@ -23,10 +23,20 @@ ros:
 telemetry:
   hz: 20
 cameras:
+  # source: placeholder | opencv | mjpeg | webrtc
+  # When source: opencv, the HMI captures via lerobot.cameras.opencv and exposes
+  # /cameras/<id>/snapshot + /cameras/<id>/stream. The same (index_or_path,
+  # width, height, fps) tuple is what `lerobot-record --robot.cameras=...` wants,
+  # so swapping a camera in here also wires it for dataset collection.
   - id: wrist_right
     role: wrist
     arm_id: right
-    source: placeholder  # one of: placeholder, mjpeg, webrtc
+    source: placeholder  # set source: opencv + index_or_path when wrist cam arrives
   - id: base_front
     role: base
-    source: placeholder
+    source: opencv
+    # Laptop integrated webcam for now — swap to the real base-mounted cam when plugged in.
+    index_or_path: /dev/video0
+    width: 640
+    height: 480
+    fps: 30

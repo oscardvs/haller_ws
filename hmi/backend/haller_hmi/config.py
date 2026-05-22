@@ -38,8 +38,13 @@ class TelemetryConfig:
 class CameraConfig:
     id: str
     role: str  # "wrist" or "base"
-    source: str  # "placeholder" | "mjpeg" | "webrtc"
+    source: str  # "placeholder" | "opencv" | "mjpeg" | "webrtc"
     arm_id: str | None = None
+    # OpenCV-specific. Required when source == "opencv".
+    index_or_path: str | int | None = None
+    width: int = 640
+    height: int = 480
+    fps: int = 30
 
 
 @dataclass
