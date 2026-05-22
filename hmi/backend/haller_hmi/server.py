@@ -481,6 +481,22 @@ async def ws_telemetry(ws: WebSocket):
         return
 
 
+@app.websocket("/ws/teleop/human/in")
+async def ws_human_teleop_in(ws: WebSocket):
+    await ws.accept()
+    try:
+        while True:
+            frame = await ws.receive_json()
+            try:
+                human_teleop.ingest_frame(frame)
+            except Exception:
+                # Don't kill the socket over a bad frame — log and continue.
+                logger.exception("human teleop ingest_frame failed")
+    except WebSocketDisconnect:
+        human_teleop.notify_ws_disconnected()
+        return
+
+
 def run() -> None:
     """Entry point for the `haller-hmi` console script."""
     import uvicorn

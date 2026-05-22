@@ -301,3 +301,24 @@ def test_get_human_teleop(app_with_mocks):
     assert r.status_code == 200
     body = r.json()
     assert "state" in body
+
+
+def test_ws_human_teleop_in_accepts_frame_and_forwards_to_session(app_with_mocks):
+    client = app_with_mocks
+    with client.websocket_connect("/ws/teleop/human/in") as ws:
+        ws.send_json({
+            "type": "keypoints",
+            "ts_ms": 1234,
+            "dead_man": False,
+            "pinch_calib": {
+                "left":  {"min_m": 0.02, "max_m": 0.18},
+                "right": {"min_m": 0.02, "max_m": 0.18},
+            },
+            "left":  None,
+            "right": None,
+        })
+        # Server acknowledges; no payload required, just that the socket stays open.
+        ws.close()
+    # `human_teleop.ingest_frame` must have been called once.
+    import haller_hmi.server as srv_mod
+    srv_mod.human_teleop.ingest_frame.assert_called()
