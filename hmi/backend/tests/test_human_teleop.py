@@ -236,3 +236,42 @@ def test_commit_loop_clamps_to_arm_joint_limits():
             assert -5.0 <= action["shoulder_pan.pos"] <= 5.0
     finally:
         sess.stop()
+
+
+def test_per_arm_tracking_loss_freezes_only_that_side():
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0,
+                              frame_age_ms_loss=80.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        # Drive a frame where only the left side has fresh keypoints.
+        frame = _kp_frame(dead_man=True)
+        sess.ingest_frame(frame)
+        _wait_until(lambda: arms["left"].robot.send_action.called)
+        # Now stop the right side from being updated; the left keeps ticking.
+        frame_left_only = _kp_frame(dead_man=True)
+        frame_left_only["right"] = None
+        # Pump a few left-only frames over ~150 ms (> 80 ms threshold).
+        for _ in range(20):
+            sess.ingest_frame(frame_left_only)
+            _time.sleep(0.01)
+        status = sess.status()
+        assert status["tracking"]["right"]["lost"] is True
+        assert status["tracking"]["left"]["lost"] is False
+    finally:
+        sess.stop()
+
+
+def test_session_demotes_to_armed_on_ws_disconnect_window():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0,
+                              ws_disconnect_grace_s=0.1)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(lambda: sess.state is HumanState.DRIVING)
+        sess.notify_ws_disconnected()
+        # After the grace window, the loop should auto-stop the session.
+        assert _wait_until(lambda: sess.state is HumanState.IDLE, timeout=1.0)
+    finally:
+        sess.stop()

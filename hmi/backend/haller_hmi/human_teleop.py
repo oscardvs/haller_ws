@@ -46,7 +46,14 @@ class _SessionConfig:
 class HumanTeleopSession:
     """One global session. Mutually exclusive with leader/follower TeleopSession."""
 
-    def __init__(self, arms: ArmManager, *, hz_override: float | None = None):
+    def __init__(
+        self,
+        arms: ArmManager,
+        *,
+        hz_override: float | None = None,
+        frame_age_ms_loss: float = 300.0,
+        ws_disconnect_grace_s: float = 5.0,
+    ):
         self._arms = arms
         self._lock = threading.Lock()
         self._state: HumanState = HumanState.IDLE
@@ -62,14 +69,17 @@ class HumanTeleopSession:
         self._target_right: dict | None = None
         self._pinch_calib_left: dict = {"min_m": 0.02, "max_m": 0.18}
         self._pinch_calib_right: dict = {"min_m": 0.02, "max_m": 0.18}
-        # Smoothed (last-committed) per-arm goals — used as the LPF state.
         self._committed_left: dict[str, float] = {}
         self._committed_right: dict[str, float] = {}
         self._hz_override = hz_override
-        # Per-joint rate cap, in degrees per tick at the configured commit rate.
-        # ≈ 240°/s at 60 Hz → 4°/tick. Tests at higher Hz keep the same per-tick cap,
-        # which is intentionally conservative.
         self._rate_cap_deg_per_tick = 4.0
+        # T8: tracking-loss + WS disconnect grace
+        self._frame_age_ms_loss = frame_age_ms_loss
+        self._ws_disconnect_grace_s = ws_disconnect_grace_s
+        self._ws_disconnected_at_perf: float | None = None
+        # Per-arm last-frame timestamps (perf_counter), for tracking-loss.
+        self._last_left_perf: float = 0.0
+        self._last_right_perf: float = 0.0
 
     # ---- public API ------------------------------------------------------
 
@@ -84,6 +94,9 @@ class HumanTeleopSession:
     def status(self) -> dict:
         with self._lock:
             cfg = self._cfg
+            now = time.perf_counter()
+            left_age = (now - self._last_left_perf) * 1000.0 if self._last_left_perf else None
+            right_age = (now - self._last_right_perf) * 1000.0 if self._last_right_perf else None
             return {
                 "running": self.running,
                 "state": self._state.value,
@@ -92,6 +105,20 @@ class HumanTeleopSession:
                 "swap": cfg.swap if cfg else False,
                 "started_at": self._started_at,
                 "last_error": self._last_error,
+                "tracking": {
+                    "left":  {
+                        "age_ms": left_age,
+                        "lost":   left_age is not None and left_age > self._frame_age_ms_loss,
+                    },
+                    "right": {
+                        "age_ms": right_age,
+                        "lost":   right_age is not None and right_age > self._frame_age_ms_loss,
+                    },
+                },
+                "goal_deg": {
+                    "left":  dict(self._committed_left),
+                    "right": dict(self._committed_right),
+                },
             }
 
     def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0) -> None:
@@ -151,8 +178,7 @@ class HumanTeleopSession:
         """Apply a KeypointFrame from the browser. Thread-safe."""
         with self._lock:
             if not self.running:
-                return  # drop frames received outside an active session
-            # Track dead-man + per-side pinch calibration if present.
+                return
             self._dead_man = bool(frame.get("dead_man", False))
             calib = frame.get("pinch_calib") or {}
             if "left" in calib:
@@ -160,24 +186,25 @@ class HumanTeleopSession:
             if "right" in calib:
                 self._pinch_calib_right = calib["right"]
             self._latest_frame_ts_ms = int(frame.get("ts_ms", 0))
-            self._latest_arrival_perf = time.perf_counter()
+            now_perf = time.perf_counter()
+            self._latest_arrival_perf = now_perf
+            # WS is healthy: cancel any pending grace window.
+            self._ws_disconnected_at_perf = None
 
             mirror = bool(self._cfg and self._cfg.swap)
-            # In default (mirror=False) mode the human's left hand drives the
-            # robot's left arm. When `swap` is on, we flip which side mirrors:
-            # the LEFT side gets mirrored, the RIGHT side does not.
             left_side = frame.get("left")
             right_side = frame.get("right")
             if left_side is not None:
                 self._target_left = retarget.compute_joint_goal(
                     left_side, self._pinch_calib_left, mirror=mirror,
                 )
+                self._last_left_perf = now_perf
             if right_side is not None:
                 self._target_right = retarget.compute_joint_goal(
                     right_side, self._pinch_calib_right, mirror=not mirror,
                 )
+                self._last_right_perf = now_perf
 
-            # State transitions driven by ingest
             if self._state is HumanState.ARMED:
                 self._state = HumanState.TRACKING
             if self._state is HumanState.TRACKING and self._dead_man:
@@ -188,6 +215,12 @@ class HumanTeleopSession:
     def target_goals(self) -> dict:
         with self._lock:
             return {"left": self._target_left, "right": self._target_right}
+
+    def notify_ws_disconnected(self) -> None:
+        with self._lock:
+            if not self.running:
+                return
+            self._ws_disconnected_at_perf = time.perf_counter()
 
     @staticmethod
     def _observed_or_zero(handle) -> dict[str, float]:
@@ -259,8 +292,21 @@ class HumanTeleopSession:
                     self._committed_right, target_right, right.joint_limits_deg, alpha,
                 )
                 if driving:
-                    self._commit(left, self._committed_left)
-                    self._commit(right, self._committed_right)
+                    # Gate per-side: don't write to an arm whose tracking is lost.
+                    now_perf = time.perf_counter()
+                    left_age_ms = (now_perf - self._last_left_perf) * 1000.0 if self._last_left_perf else float("inf")
+                    right_age_ms = (now_perf - self._last_right_perf) * 1000.0 if self._last_right_perf else float("inf")
+                    if left_age_ms <= self._frame_age_ms_loss:
+                        self._commit(left, self._committed_left)
+                    if right_age_ms <= self._frame_age_ms_loss:
+                        self._commit(right, self._committed_right)
+                # WS disconnect grace window: if too much time has passed, auto-stop.
+                with self._lock:
+                    disc_at = self._ws_disconnected_at_perf
+                if disc_at is not None and (time.perf_counter() - disc_at) > self._ws_disconnect_grace_s:
+                    logger.info("human teleop WS disconnect grace exceeded; stopping")
+                    threading.Thread(target=self.stop, daemon=True).start()
+                    break
                 with self._lock:
                     self._last_error = None
             except Exception as e:
