@@ -124,9 +124,11 @@ def compute_wrist_angles(
 
     Neutral pose: forearm and hand point along +Z, palm faces -Y (down).
     `wrist_flex` is the signed angle of the middle-finger ray relative to the
-    forearm, measured around the palm-normal axis. `wrist_roll` is the signed
-    rotation of the palm normal around the forearm axis relative to the
-    neutral-palm-down direction.
+    forearm, measured around the wrist's lateral axis — `cross(palm_normal,
+    forearm)`, i.e. the axis pointing sideways out of the hand. Positive
+    flex = hand bends up (middle finger rotates toward palm-normal direction).
+    `wrist_roll` is the signed rotation of the palm normal around the forearm
+    axis relative to the neutral palm-down direction.
     """
     F = _np(forearm)
     f_hat = F / _safe_norm(F)
@@ -153,6 +155,9 @@ def compute_wrist_angles(
     # measured around the wrist-side axis (perpendicular to both forearm and
     # palm normal). For a flat palm-down hand with forearm +Z, this axis is
     # along ±X, so bending the hand up (middle finger +Y) gives ±90°.
+    # flex_axis collapses when palm_normal is parallel to forearm (wrist
+    # supinated along the arm axis). _signed_angle_deg returns 0.0 in that
+    # case via its zero-length-input guard.
     flex_axis = np.cross(palm_normal_hat, f_hat)
     wflex = _signed_angle_deg(f_hat, middle_dir, flex_axis)
 

@@ -126,7 +126,8 @@ def test_compute_wrist_angles_flex_90_up():
     forearm = _vec(0.0, 0.0, 0.3)
     hand = _flat_hand(forearm_dir=(0.0, 1.0, 0.0), palm_down=True)
     wflex, _ = retarget.compute_wrist_angles(forearm, hand)
-    assert abs(abs(wflex) - 90.0) < TOLERANCE_DEG
+    # Sign pinned: forearm=+Z, palm_normal=-Y, middle=+Y → wflex = +90°.
+    assert abs(wflex - 90.0) < TOLERANCE_DEG
 
 
 def test_compute_wrist_angles_roll_180_palm_up():
