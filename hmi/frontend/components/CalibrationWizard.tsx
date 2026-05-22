@@ -126,7 +126,7 @@ export function CalibrationWizard({ armId, onClose }: Props) {
 
         {phase === "review" && (
           <ReviewStep
-            armId={armId} busy={busy} proposed={proposed} current={current}
+            busy={busy} proposed={proposed} current={current}
             onSave={() => guarded(async () => {
               await saveCalibration(BACKEND_URL, armId);
               isDoneRef.current = true;
@@ -185,6 +185,55 @@ function SweepingStep({
     </section>
   );
 }
-function ReviewStep(props: any) {
-  return <section className="py-4"><Button onClick={props.onSave}>Save</Button></section>;
+function ReviewStep({
+  busy, proposed, current, onSave, onCancel,
+}: {
+  busy: boolean;
+  proposed: ProposedMap | null;
+  current: ProposedMap | null;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const joints = Object.keys(proposed ?? {});
+  return (
+    <section className="space-y-4 py-4">
+      <h3 className="font-medium">Step 3 of 3 — Review</h3>
+      <p className="text-sm text-muted-foreground">
+        Review the new calibration. The previous file is preserved as a <code>.bak-&lt;ts&gt;</code> sibling.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Joint</TableHead>
+            <TableHead className="text-right">old min → new min</TableHead>
+            <TableHead className="text-right">old max → new max</TableHead>
+            <TableHead className="text-right">old offset → new offset</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {joints.map(j => {
+            const p = proposed?.[j]; const c = current?.[j];
+            return (
+              <TableRow key={j}>
+                <TableCell>{j}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <span>{c?.range_min ?? "—"}</span> → <strong>{p?.range_min}</strong>
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <span>{c?.range_max ?? "—"}</span> → <strong>{p?.range_max}</strong>
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <span>{c?.homing_offset ?? "—"}</span> → <strong>{p?.homing_offset}</strong>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+      <div className="flex gap-2">
+        <Button disabled={busy} onClick={onSave}>Save</Button>
+        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+      </div>
+    </section>
+  );
 }

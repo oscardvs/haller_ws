@@ -38,6 +38,29 @@ describe("CalibrationWizard step 2 (sweeping)", () => {
   });
 });
 
+describe("CalibrationWizard step 3 (review)", () => {
+  it("renders the diff table in review and Save calls saveCalibration", async () => {
+    (tele.useTelemetry as any).mockImplementation((sel: any) =>
+      sel({ lastFrame: { arms: { right: { mode: "manual", torque: false, joints: {} } } } }));
+    (cal.fetchCalibrationStatus as any).mockResolvedValue({
+      arms: [],
+      current_session: {
+        arm_id: "right", state: "review",
+        proposed: { shoulder_pan: { id: 1, drive_mode: 0, homing_offset: 0, range_min: 500, range_max: 3500 } },
+        current:  { shoulder_pan: { id: 1, drive_mode: 0, homing_offset: 0, range_min: 100, range_max: 200  } },
+      },
+    });
+    (cal.saveCalibration as any).mockResolvedValue({ ok: true, state: "done", path: "/x", backup_path: "/x.bak-1" });
+
+    render(<CalibrationWizard armId="right" onClose={() => {}} />);
+    expect(await screen.findByText("500")).toBeInTheDocument();   // proposed min
+    expect(await screen.findByText("3500")).toBeInTheDocument();  // proposed max
+    expect(await screen.findByText("100")).toBeInTheDocument();   // current min
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    await waitFor(() => expect(cal.saveCalibration).toHaveBeenCalledWith(expect.any(String), "right"));
+  });
+});
+
 describe("CalibrationWizard step 1 (homing)", () => {
   it("renders the live ticks table", async () => {
     render(<CalibrationWizard armId="right" onClose={() => {}} />);
