@@ -1,6 +1,6 @@
 // hmi/frontend/__tests__/CalibrationWizard.test.tsx
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { CalibrationWizard } from "../components/CalibrationWizard";
 import * as cal from "../lib/calibration";
 import * as tele from "../lib/telemetry";
@@ -124,5 +124,52 @@ describe("CalibrationWizard bus error handling", () => {
     (tele.useTelemetry as any).mockImplementation((sel: any) => sel({ lastFrame: frame }));
     rerender(<CalibrationWizard armId="right" onClose={() => {}} />);
     expect(await screen.findByText(/calibration was aborted/i)).toBeInTheDocument();
+  });
+});
+
+describe("CalibrationWizard confirm-before-cancel", () => {
+  it("step 1 Cancel closes directly without confirmation", async () => {
+    const onClose = vi.fn();
+    render(<CalibrationWizard armId="right" onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/discard the range/i)).not.toBeInTheDocument();
+  });
+
+  it("step 2 Cancel opens confirm dialog; Discard then closes", async () => {
+    (tele.useTelemetry as any).mockImplementation((sel: any) =>
+      sel({ lastFrame: { arms: { right: { mode: "manual", torque: false, joints: {},
+        calibration: { state: "sweeping",
+                       ticks: { shoulder_pan: 2048 },
+                       min: { shoulder_pan: 2048 },
+                       max: { shoulder_pan: 2048 } } } } } }));
+    (cal.fetchCalibrationStatus as any).mockResolvedValue({
+      arms: [], current_session: { arm_id: "right", state: "sweeping" },
+    });
+    const onClose = vi.fn();
+    render(<CalibrationWizard armId="right" onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+    expect(await screen.findByText(/discard the range/i)).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /^discard$/i }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("step 2 Cancel then Keep going does NOT close", async () => {
+    (tele.useTelemetry as any).mockImplementation((sel: any) =>
+      sel({ lastFrame: { arms: { right: { mode: "manual", torque: false, joints: {},
+        calibration: { state: "sweeping",
+                       ticks: { shoulder_pan: 2048 },
+                       min: { shoulder_pan: 2048 },
+                       max: { shoulder_pan: 2048 } } } } } }));
+    (cal.fetchCalibrationStatus as any).mockResolvedValue({
+      arms: [], current_session: { arm_id: "right", state: "sweeping" },
+    });
+    const onClose = vi.fn();
+    render(<CalibrationWizard armId="right" onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+    await screen.findByText(/discard the range/i);
+    fireEvent.click(screen.getByRole("button", { name: /keep going/i }));
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

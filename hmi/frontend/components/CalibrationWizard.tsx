@@ -5,6 +5,16 @@ import * as React from "react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useTelemetry } from "@/lib/telemetry";
 import {
   startCalibration, captureNeutral, finishSweep, saveCalibration, abortCalibration,
@@ -28,6 +38,13 @@ export function CalibrationWizard({ armId, onClose }: Props) {
   const [current, setCurrent] = React.useState<ProposedMap | null>(null);
   const sawCalibrationRef = React.useRef(false);
   const [sessionAborted, setSessionAborted] = React.useState(false);
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+
+  const needsConfirm = phase === "sweeping" || phase === "review";
+  const attemptClose = () => {
+    if (needsConfirm) setConfirmOpen(true);
+    else onClose();
+  };
 
   // Bootstrap: start the session if no session exists for this arm; re-attach if one already does.
   React.useEffect(() => {
@@ -90,7 +107,7 @@ export function CalibrationWizard({ armId, onClose }: Props) {
                  : Object.keys(proposed ?? current ?? {});
 
   return (
-    <Sheet open onOpenChange={(o) => { if (!o) onClose(); }}>
+    <Sheet open onOpenChange={(o) => { if (!o) attemptClose(); }}>
       <SheetContent side="right" className="w-[480px] sm:max-w-md">
         <SheetHeader>
           <SheetTitle>Calibrate: {armId} arm</SheetTitle>
@@ -140,7 +157,7 @@ export function CalibrationWizard({ armId, onClose }: Props) {
               setProposed(res.proposed); setCurrent(res.current);
               setPhase("review");
             })}
-            onCancel={onClose}
+            onCancel={attemptClose}
           />
         )}
 
@@ -152,9 +169,30 @@ export function CalibrationWizard({ armId, onClose }: Props) {
               isDoneRef.current = true;
               onClose();
             })}
-            onCancel={onClose}
+            onCancel={attemptClose}
           />
         )}
+
+        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {phase === "sweeping" ? "Discard the range-of-motion sweep?" : "Discard the proposed calibration?"}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                Closing now aborts the calibration session. The arm reverts to manual and torque is restored. Nothing is saved.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>
+                {phase === "sweeping" ? "Keep going" : "Keep reviewing"}
+              </AlertDialogCancel>
+              <AlertDialogAction onClick={() => { setConfirmOpen(false); onClose(); }}>
+                Discard
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </SheetContent>
     </Sheet>
   );
