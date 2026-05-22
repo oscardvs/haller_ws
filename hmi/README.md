@@ -13,12 +13,12 @@ hmi/
 ├── backend/      Python service (uvicorn + FastAPI)
 │   ├── config.yaml             arms, ROS topics, telemetry rate, cameras
 │   ├── haller_hmi/             package
-│   └── tests/                  pytest (25 tests)
+│   └── tests/                  pytest (85 tests)
 └── frontend/     Next.js app (standalone-built)
     ├── app/                    pages: /, /arm/[id], /base, /settings
     ├── components/             ArmPanel, BasePanel, JointSlider, EStopButton, …
     ├── lib/                    api client, telemetry WS store, config
-    └── __tests__/              vitest (6 tests)
+    └── __tests__/              vitest (19 tests)
 ```
 
 ## Prerequisites
