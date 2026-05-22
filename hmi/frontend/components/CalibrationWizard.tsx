@@ -113,7 +113,7 @@ export function CalibrationWizard({ armId, onClose }: Props) {
 
         {phase === "sweeping" && (
           <SweepingStep
-            armId={armId} busy={busy} joints={joints}
+            busy={busy} joints={joints}
             ticks={ticks} mins={mins} maxes={maxes}
             onDone={() => guarded(async () => {
               const res = await finishSweep(BACKEND_URL, armId);
@@ -140,9 +140,50 @@ export function CalibrationWizard({ armId, onClose }: Props) {
   );
 }
 
-// Stubs for T11/T12; implemented incrementally.
-function SweepingStep(props: any) {
-  return <section className="py-4"><Button onClick={props.onDone}>Done sweeping</Button></section>;
+function SweepingStep({
+  busy, joints, ticks, mins, maxes, onDone, onCancel,
+}: {
+  busy: boolean;
+  joints: string[];
+  ticks: Record<string, number>;
+  mins: Record<string, number>;
+  maxes: Record<string, number>;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <section className="space-y-4 py-4">
+      <h3 className="font-medium">Step 2 of 3 — Range of motion</h3>
+      <p className="text-sm text-muted-foreground">
+        Wiggle every joint to its physical limits. The table records the
+        extremes; click <strong>Done sweeping</strong> when every joint has both a min and a max.
+      </p>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Joint</TableHead>
+            <TableHead className="text-right">min</TableHead>
+            <TableHead className="text-right">POS</TableHead>
+            <TableHead className="text-right">max</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {joints.map(j => (
+            <TableRow key={j}>
+              <TableCell>{j}</TableCell>
+              <TableCell className="text-right tabular-nums">{mins[j] ?? "–"}</TableCell>
+              <TableCell className="text-right tabular-nums font-medium">{ticks[j] ?? "–"}</TableCell>
+              <TableCell className="text-right tabular-nums">{maxes[j] ?? "–"}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <div className="flex gap-2">
+        <Button disabled={busy} onClick={onDone}>Done sweeping</Button>
+        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+      </div>
+    </section>
+  );
 }
 function ReviewStep(props: any) {
   return <section className="py-4"><Button onClick={props.onSave}>Save</Button></section>;

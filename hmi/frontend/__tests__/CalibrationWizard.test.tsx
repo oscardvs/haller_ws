@@ -20,6 +20,24 @@ beforeEach(() => {
   });
 });
 
+describe("CalibrationWizard step 2 (sweeping)", () => {
+  it("renders min | POS | max columns in the sweep step", async () => {
+    (tele.useTelemetry as any).mockImplementation((sel: any) =>
+      sel({ lastFrame: { arms: { right: { mode: "manual", torque: false, joints: {},
+        calibration: { state: "sweeping",
+                       ticks: { shoulder_pan: 2200 },
+                       min:   { shoulder_pan: 1000 },
+                       max:   { shoulder_pan: 3500 } } } } } }));
+    (cal.fetchCalibrationStatus as any).mockResolvedValue({
+      arms: [], current_session: { arm_id: "right", state: "sweeping" },
+    });
+    render(<CalibrationWizard armId="right" onClose={() => {}} />);
+    expect(await screen.findByText("1000")).toBeInTheDocument();
+    expect(await screen.findByText("2200")).toBeInTheDocument();
+    expect(await screen.findByText("3500")).toBeInTheDocument();
+  });
+});
+
 describe("CalibrationWizard step 1 (homing)", () => {
   it("renders the live ticks table", async () => {
     render(<CalibrationWizard armId="right" onClose={() => {}} />);
@@ -38,7 +56,7 @@ describe("CalibrationWizard step 1 (homing)", () => {
     render(<CalibrationWizard armId="right" onClose={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: /capture neutral/i }));
     await waitFor(() => expect(cal.captureNeutral).toHaveBeenCalledWith(expect.any(String), "right"));
-    expect(await screen.findByText(/done sweeping/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /done sweeping/i })).toBeInTheDocument();
   });
 
   it("calls /abort exactly once on unmount", async () => {
