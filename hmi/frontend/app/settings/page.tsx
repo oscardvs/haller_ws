@@ -1,8 +1,17 @@
 // hmi/frontend/app/settings/page.tsx
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import { CalibrationStatusCard } from "@/components/CalibrationStatusCard";
+import {
+  fetchCalibrationStatus,
+  type CalibrationStatusResponse,
+} from "@/lib/calibration";
+import { BACKEND_URL } from "@/lib/config";
+import { useTelemetry, type ArmState } from "@/lib/telemetry";
+
+const EMPTY_ARMS: Record<string, ArmState> = {};
 
 type ConfigBody = Awaited<ReturnType<typeof api.config>>;
 
@@ -13,6 +22,30 @@ export default function SettingsPage() {
     api.config().then(setCfg).catch(console.error);
     api.health().then(setHealth).catch(console.error);
   }, []);
+
+  const armsTelemetry = useTelemetry((s) => s.lastFrame?.arms ?? EMPTY_ARMS);
+  const [calStatus, setCalStatus] = useState<CalibrationStatusResponse | null>(null);
+  const [wizardArm, setWizardArm] = useState<string | null>(null);
+
+  const refreshCal = useCallback(async () => {
+    try {
+      setCalStatus(await fetchCalibrationStatus(BACKEND_URL));
+    } catch {
+      /* offline */
+    }
+  }, []);
+  useEffect(() => {
+    void refreshCal();
+  }, [refreshCal]);
+
+  const allManual = Object.values(armsTelemetry).every((a) => a.mode === "manual");
+  const someSession = calStatus?.current_session != null;
+  const blockedReason = !allManual
+    ? "Put every arm in manual first"
+    : someSession
+    ? "Another calibration is in progress"
+    : undefined;
+  const canStart = allManual && !someSession;
 
   return (
     <main className="p-3 space-y-3">
@@ -87,6 +120,42 @@ export default function SettingsPage() {
           </table>
         </CardContent>
       </Card>
+
+      <Card className="overflow-hidden p-0">
+        <SectionHeader title="Calibration" right={`${calStatus?.arms.length ?? 0} arms`} />
+        <CardContent className="p-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {(calStatus?.arms ?? []).map((s) => (
+              <CalibrationStatusCard
+                key={s.id}
+                status={s}
+                canStart={canStart}
+                blockedReason={blockedReason}
+                onCalibrate={() => setWizardArm(s.id)}
+              />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {wizardArm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-card border rounded p-6 max-w-sm">
+            <p className="text-sm mb-3">
+              Wizard for {wizardArm} — T10 not yet implemented.
+            </p>
+            <button
+              className="px-3 py-1.5 border rounded text-sm"
+              onClick={async () => {
+                setWizardArm(null);
+                await refreshCal();
+              }}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
