@@ -85,16 +85,13 @@ The dashboard's **Teleop** card lets you turn the HMI into a leader/follower bri
 
 E-STOP also stops teleop before disabling torque — so the follower can't jump to a stale queued goal when you next re-engage.
 
-**Calibration caveat.** If the two arms were calibrated independently, their `(range_min + range_max) / 2` midpoints — which lerobot uses as the "0°" reference — won't line up exactly in physical space. Expect a per-joint offset of a few degrees; `shoulder_lift` makes it most visible because it changes arm height. The fix is to re-calibrate one arm holding the same physical neutral pose as the other:
+**Calibrating an arm.** Open the Settings page and click **Calibrate** on the arm's card, or use the dashboard banner that appears when an arm has no calibration file. The wizard walks you through three steps:
 
-```bash
-lerobot-calibrate \
-    --robot.type=so101_follower \
-    --robot.port=/dev/haller_arm_leader \
-    --robot.id=haller_leader
-```
+1. **Set neutral pose** — torque off; pose the arm by hand; click *Capture neutral*.
+2. **Range of motion** — wiggle every joint to its limits; the live table shows `min | POS | max`; click *Done sweeping*.
+3. **Review** — verify the old → new diff; click *Save*. The previous calibration file (and any sibling teleop file) is preserved as `<id>.json.bak-<timestamp>`.
 
-An HMI-driven calibration wizard is on the roadmap (see `docs/superpowers/specs/...` once the spec is written).
+To fix a leader↔follower midpoint mismatch (`shoulder_lift` looks the most off), re-run the wizard on one arm while it holds the same physical neutral pose as the other.
 
 ## Cameras
 
@@ -231,6 +228,16 @@ Adding the second arm later is a config edit; see the "Roadmap: leader → secon
 - **Joint sliders show 0° for everything.** Telemetry is connected but the backend's `state_snapshot` is failing — most likely the calibration file doesn't match the configured `calibration_id`. Check the backend log for the arm-telemetry warning.
 - **Backend startup fails with `No calibration for arm ... (calibration_id=...)`.** The arm has no calibration file in either `robots/so_follower/` or `teleoperators/*/`. The log includes the exact `lerobot-calibrate` command. Run it, then restart `haller-hmi`.
 - **Backend crashes at startup with `Could not open port`.** The USB symlink doesn't exist. `ls -l /dev/haller_arm_follower` — if missing, the udev rules aren't installed or the board isn't plugged in.
-- **Teleop follower position is offset from leader (especially `shoulder_lift`).** The two arms have different calibration midpoints — see the "Calibration caveat" under the Teleop section above. Re-calibrate one arm against the other's physical neutral pose.
+- **Teleop follower position is offset from leader (especially `shoulder_lift`).** The two arms have different calibration midpoints — see "Calibrating an arm" under the Teleop section above. Re-run the calibration wizard on one arm while it holds the same physical neutral pose as the other.
 - **Teleop start returns 400 "leader and follower must be different arms".** Pick different arms in the two dropdowns (click `⇄` to swap).
 - **Teleop start returns 409 "teleop already running".** Stop the current session first, then start a new one.
+
+### Verifying the calibration wizard end-to-end
+
+1. Stop the backend; move `~/.cache/huggingface/lerobot/calibration/robots/so_follower/haller_follower.json` aside.
+2. Restart the backend, open the dashboard — the banner should read "Arm right has no calibration file."
+3. Click *Calibrate right*. Hand-pose the arm; click *Capture neutral*.
+4. Wiggle every joint; verify the `min | POS | max` table moves; click *Done sweeping*.
+5. Click *Save*. Confirm `haller_follower.json` is back on disk and a `haller_follower.json.bak-<ts>` sibling exists.
+6. Repeat for the leader-as-follower (`haller_leader`) to verify the teleop sibling file at `teleoperators/*/haller_leader.json` is also written and backed up.
+7. Run a short leader↔follower teleop session to confirm the new calibration loads correctly.
