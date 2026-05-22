@@ -2,9 +2,17 @@
 arms:
   - id: right
     model: so101_follower
-    port: /dev/ttyACM0
+    port: /dev/haller_arm_follower   # udev symlink from scripts/99-haller-devices.rules
     calibration_id: haller_follower  # matches the haller_follower.json on disk
     enabled: true
+  # Second arm (the leader) — disabled until it gets recalibrated as a follower.
+  # When converting, swap `enabled: true` and set calibration_id to whatever you
+  # use in `lerobot-calibrate --robot.id=...`.
+  # - id: left
+  #   model: so101_follower
+  #   port: /dev/haller_arm_leader
+  #   calibration_id: haller_left
+  #   enabled: false
 ros:
   cmd_vel_topic: /cmd_vel
   odom_topic: /odom

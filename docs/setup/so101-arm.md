@@ -1,10 +1,14 @@
-# SO-101 arm: motor configuration & calibration
+# SO-101 arms: motor configuration & calibration
 
-This guide brings up a single SO-101 follower arm. It assumes the [LeRobot environment](./lerobot-environment.md) is already installed.
+This guide brings up the SO-101 arms on Haller. It assumes the [LeRobot environment](./lerobot-environment.md) is already installed.
 
 Source: official LeRobot SO-101 docs — [huggingface.co/docs/lerobot/so101](https://huggingface.co/docs/lerobot/so101).
 
-> **Status note (2026-05-22):** this document is being written alongside the actual bring-up of Haller's first arm. Sections marked **TODO** will be filled in once that step is performed on hardware.
+Haller has **two** SO-101 arms:
+- A **follower** — six STS3215 motors, calibrated as `haller_follower`, USB symlink `/dev/haller_arm_follower`. Controlled by the HMI.
+- A **leader** — also six STS3215 motors (same gear ratio as the follower — deliberate symmetric-hardware choice, see "Leader bring-up" below), calibrated as `haller_leader`, USB symlink `/dev/haller_arm_leader`. Used for hand-driven teleop and demonstration data collection.
+
+Both bring-ups follow the same pattern (find port → configure motor IDs → daisy-chain → calibrate → smoke test). The instructions below describe the **follower** flow in detail; the leader-specific deltas are at the end.
 
 ---
 
@@ -12,18 +16,17 @@ Source: official LeRobot SO-101 docs — [huggingface.co/docs/lerobot/so101](htt
 
 Before you start:
 
-- [ ] SO-101 follower arm mechanically assembled per the [TheRobotStudio assembly instructions](https://github.com/TheRobotStudio/SO-ARM100).
-- [ ] 6× Feetech STS3215 servos with **1/345 gear ratio** (the follower-arm spec — the leader uses a mix of 1/191, 1/345, 1/147 across joints; do not confuse them).
-- [ ] **Check the voltage variant of your servos** — STS3215 ships in multiple SKUs and the label tells you which:
-  - **7.4 V variant**: operating range **6.0–7.4 V**. Use a **7.4 V supply**.
-  - **12 V variant**: operating range 4–14 V. Use a **12 V supply** (the official SO-101 kit's 12 V / 5 A brick).
-  - The two variants look identical but have different voltage tolerance. Wrong supply on the 7.4 V variant = "Input voltage error" + alarm LED at best, dead servos at worst.
+- [ ] SO-101 arm mechanically assembled per the [TheRobotStudio assembly instructions](https://github.com/TheRobotStudio/SO-ARM100).
+- [ ] 6× Feetech STS3215 servos. Check the voltage variant on the servo label:
+  - **7.4 V variant** (operating range 6.0–7.4 V) — use a **7.4 V supply** (e.g. bench DC set to 7.0–7.4 V at ≥2 A).
+  - **12 V variant** (operating range 4–14 V) — use the official SO-101 kit's **12 V / 5 A** brick.
+  - Wrong supply on the 7.4 V variant = "Input voltage error" + alarm LED at best, dead servos at worst.
 - [ ] Feetech bus servo adapter board (Waveshare or equivalent).
   - The two jumpers select the **control path**, not the power source:
-    - **`A` channel** = UART control (Pi Zero, ESP32, Arduino, STM32).
-    - **`B` channel** = USB control (PCs, Pi 4B, Jetson Orin Nano). This is what you want for a desktop or Jetson host.
-  - **USB does not power the servo bus.** The servos are powered exclusively from the barrel jack. You can't skip the supply by "powering from USB" — that only powers the on-board logic.
-- [ ] Power supply matching your servo variant (see above), with a center-positive barrel plug that physically fits the board's DC5521 jack.
+    - `A` channel = UART control (Pi Zero, ESP32, Arduino, STM32).
+    - `B` channel = USB control (PCs, Pi 4B, Jetson Orin Nano). This is what you want for a desktop or Jetson host.
+  - **USB does not power the servo bus.** The servos are powered exclusively from the barrel jack — USB only powers the on-board USB-to-TTL logic.
+- [ ] Power supply matching your servo variant, with a center-positive barrel plug that physically fits the board's DC5521 jack.
 - [ ] USB cable from the adapter board to the workstation.
 - [ ] At least one 3-pin TTL cable for connecting one motor at a time during configuration.
 
@@ -33,37 +36,55 @@ You also need shell access on the workstation with the `lerobot` conda env activ
 conda activate lerobot
 ```
 
+---
+
 ## 1. Find the serial port for the bus adapter
 
-Plug the bus adapter into the **barrel-jack power supply** (matched to your servo voltage variant — see checklist) and into the workstation via USB. Jumpers on **B**. Then:
+Plug the bus adapter into the **barrel-jack power supply** and into the workstation via USB. Jumpers on `B`. Then:
 
 ```bash
 lerobot-find-port
 ```
 
-The tool lists all serial devices, asks you to **unplug** the adapter and press Enter, and then reports which port disappeared. On Linux this is usually `/dev/ttyACM0`.
+The tool lists all serial devices, asks you to **unplug** the adapter and press Enter, and then reports which port disappeared. On Linux it's typically `/dev/ttyACM0` on the first plug.
 
-Grant access to the port (one-time, per session — see "Persistent permissions" below for a permanent fix):
+**For Haller specifically**, both bus adapters get a stable udev symlink (see [Persistent permissions](#persistent-permissions) below), so we use:
+- Follower: `/dev/haller_arm_follower`
+- Leader: `/dev/haller_arm_leader`
 
-```bash
-sudo chmod 666 /dev/ttyACM0          # adjust to the port you found
-```
+Use those names in every subsequent command — they survive reboots, USB port reorderings, and dual-arm plug-in order changes.
 
-> **TODO:** record the actual port string for Haller's follower arm here so future bring-ups can skip the discovery step.
+### Persistent permissions
 
-### Persistent permissions (recommended)
-
-Adding your user to the `dialout` group lets you skip `chmod` on every reboot. Log out and back in afterwards.
+Add your user to the `dialout` group (log out and back in to take effect):
 
 ```bash
 sudo usermod -aG dialout "$USER"
 ```
 
-For predictable device names across reboots, consider a udev rule analogous to Haller's existing `scripts/99-haller-devices.rules`.
+For stable device names across reboots, Haller ships udev rules in [`scripts/99-haller-devices.rules`](../../scripts/99-haller-devices.rules) keyed by USB serial number. Install once:
+
+```bash
+sudo cp scripts/99-haller-devices.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+The rules set mode `0666` on each symlink, so chmod-on-every-boot is no longer needed.
+
+To map a new board to a new symlink, find its serial first:
+
+```bash
+udevadm info -a -n /dev/ttyACM0 | grep '{serial}' | head -1
+```
+
+…then add a line to `99-haller-devices.rules` matching that serial and pick a symlink name.
+
+---
 
 ## 2. Configure motor IDs and baud rate
 
-Brand-new Feetech motors all ship with ID = `1`. The bus servo protocol requires unique IDs (1–6 for the SO-101 follower), and the controller and all motors must share a baud rate. These values are written to motor EEPROM, so this step is **one-time per motor**.
+Brand-new Feetech motors all ship with ID `1`. The bus servo protocol requires unique IDs (1–6 for the SO-101) and a shared baud rate. These values are written to motor EEPROM, so this step is **one-time per motor**.
 
 > **Critical:** only **one motor** may be connected to the bus during this step. The script writes ID `n` to whatever motor it can see — if multiple are on the bus, you'll overwrite IDs you've already set.
 
@@ -72,15 +93,17 @@ Run the LeRobot setup tool for the follower:
 ```bash
 lerobot-setup-motors \
     --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0       # adjust to your port
+    --robot.port=/dev/haller_arm_follower \
+    --robot.id=haller_follower
 ```
 
-The script walks you through motors 1 → 6 in order: `shoulder_pan`, `shoulder_lift`, `elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`. For each one:
+The script walks motors in REVERSE order: `gripper` (ID 6) → `wrist_roll` (5) → `wrist_flex` (4) → `elbow_flex` (3) → `shoulder_lift` (2) → `shoulder_pan` (1). For each one:
 
-1. Disconnect the 3-pin cable from the controller board.
-2. Plug the cable into the next motor only (the previous motor can stay attached to its own cable, just unplug from the board).
-3. Press Enter. The tool prints e.g. `'gripper' motor id set to 6`.
-4. Repeat until done.
+1. Connect a single motor to the board with a 3-pin cable.
+2. Press Enter. The tool prints e.g. `'gripper' motor id set to 6`.
+3. Swap to the next motor and repeat.
+
+Tape-label each motor `1`–`6` (or by name) as you go — they're visually indistinguishable once the EEPROM is written.
 
 If a motor doesn't respond:
 
@@ -92,37 +115,126 @@ If a motor doesn't respond:
 
 ### After all six motors are configured
 
-You can now **daisy-chain** the motors with 3-pin cables and connect the chain to the controller board. Plug the chain so that `shoulder_pan` (ID 1) is closest to the controller board and `gripper` (ID 6) is at the far end.
+Daisy-chain the motors with 3-pin cables and connect the chain to the controller board. Plug the chain so that `shoulder_pan` (ID 1) is closest to the controller board and `gripper` (ID 6) is at the far end.
 
-> **TODO:** photo of Haller's wiring + cable-routing convention.
+---
 
-## 3. Calibrate the arm
+## 3. Calibrate the follower
 
-Calibration aligns the motors' raw encoder positions with the arm's mechanical zero/limits so a model trained on one SO-101 can transfer to another.
+Calibration aligns the motors' raw encoder positions with the arm's mechanical zero/limits.
 
 ```bash
 lerobot-calibrate \
     --robot.type=so101_follower \
-    --robot.port=/dev/ttyACM0       # your port
+    --robot.port=/dev/haller_arm_follower \
+    --robot.id=haller_follower
 ```
 
-Follow the on-screen prompts; the tool will ask you to physically move the arm to defined poses (typically: home, full extension at each joint, gripper open/closed). Calibration data is written to `~/.cache/huggingface/lerobot/calibration/` (verify the exact path on first run).
+The tool prompts you to (1) move the arm to the middle of its range and press Enter, then (2) sweep each joint (except `wrist_roll`, which is treated as continuous) through its full range while it records min/max ticks.
 
-> **TODO:** record the calibration output path and copy the calibration file into this repo (e.g. `config/so101/<arm-name>.json`) so it lives next to the rest of the robot config.
+Calibration is saved to:
 
-## 4. Smoke test
+```
+~/.cache/huggingface/lerobot/calibration/robots/so_follower/haller_follower.json
+```
 
-For a follower-only setup (no leader arm yet), run a basic motion check that reads positions and homes the arm:
+Each motor entry has `id`, `drive_mode`, `homing_offset`, `range_min`, `range_max` in raw ticks (4096 ticks = 360°).
 
-> **TODO:** insert the verified smoke-test command after the first run. Likely a `lerobot-teleoperate` with a keyboard teleop, or a direct Python snippet using `lerobot.common.robot_devices.robots.so101_follower.SO101Follower` to move to home.
+---
 
-## Adding a second arm
+## 4. Smoke test (follower)
 
-Haller will eventually carry two arms. When you bring up the second:
+The repo ships a read-only smoke test that streams joint positions while you back-drive the arm by hand:
 
-1. Repeat steps 1–3 using a **different USB port** so each adapter is uniquely identified.
-2. Use a different `id` flag (e.g. `--robot.id=left` vs `right`) so calibration data doesn't collide.
-3. Capture the serial port mapping in `scripts/99-haller-devices.rules` so the assignment survives reboots.
+```bash
+cd ~/haller_ws
+python scripts/test_so101_arm.py --port /dev/haller_arm_follower --id haller_follower
+```
+
+Move each joint — values in the table should update at ~5 Hz. Exit with Ctrl-C. Torque is disabled during the test so the arm is freely back-drivable.
+
+---
+
+## 5. Bring up the leader
+
+The leader hardware on Haller is **identical to the follower** (six STS3215 1/345-ratio motors) — a deliberate symmetric-hardware choice, not the mixed-gear-ratio leader spec from the upstream SO-101 docs. Teleop with this leader is slightly stiffer to back-drive than a "true" leader, but the arm is hardware-interchangeable with the follower and converts cleanly when needed.
+
+Same workflow as above, with the type and id swapped:
+
+```bash
+# 1. Configure motor IDs (one at a time, gripper first; same EEPROM dance as the follower)
+lerobot-setup-motors \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/haller_arm_leader \
+    --teleop.id=haller_leader
+
+# 2. Daisy-chain, then calibrate
+lerobot-calibrate \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/haller_arm_leader \
+    --teleop.id=haller_leader
+```
+
+Leader calibration lands at:
+
+```
+~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/haller_leader.json
+```
+
+Note the path differs from the follower's (`robots/so_follower/`) — lerobot stores teleoperators and robots in separate sub-trees.
+
+### Verify end-to-end teleop
+
+With both arms wired and the follower's 7.4 V supply on:
+
+```bash
+lerobot-teleoperate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/haller_arm_follower \
+    --robot.id=haller_follower \
+    --teleop.type=so101_leader \
+    --teleop.port=/dev/haller_arm_leader \
+    --teleop.id=haller_leader
+```
+
+Move the leader by hand — the follower should mirror its motion at ~60 Hz. Quit with Ctrl-C; the follower's torque drops on disconnect (`disable_torque_on_disconnect=True`), leaving the arm back-drivable.
+
+### Roadmap: leader → second follower
+
+When you decide to convert the leader into a second HMI-controllable follower:
+
+1. Re-calibrate as a follower with a new id (e.g. `haller_left`):
+   ```bash
+   lerobot-calibrate \
+       --robot.type=so101_follower \
+       --robot.port=/dev/haller_arm_leader \
+       --robot.id=haller_left
+   ```
+2. Add it to [`hmi/backend/config.yaml`](../../hmi/backend/config.yaml):
+   ```yaml
+   arms:
+     - id: right
+       model: so101_follower
+       port: /dev/haller_arm_follower
+       calibration_id: haller_follower
+       enabled: true
+     - id: left
+       model: so101_follower
+       port: /dev/haller_arm_leader
+       calibration_id: haller_left
+       enabled: true
+   ```
+3. Restart the HMI (`systemctl restart haller-hmi.service` on the Orin, or just re-run `haller-hmi` on a laptop).
+
+The HMI is already two-arm-keyed; the conversion is a config change, not a code change.
+
+---
+
+## Next: drive it from the web HMI
+
+The Haller HMI provides a browser-based control surface for the follower (and eventually both arms). See [`../../hmi/README.md`](../../hmi/README.md) for the full launch and operation walkthrough — backend + frontend bring-up, joint sliders, presets, base teleop, E-STOP.
+
+---
 
 ## References
 
