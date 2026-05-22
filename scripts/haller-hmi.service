@@ -1,0 +1,18 @@
+# scripts/haller-hmi.service
+[Unit]
+Description=Haller Unified HMI (FastAPI + Next.js)
+After=network-online.target haller-ap.service
+Wants=network-online.target
+Conflicts=haller-robot.service
+
+[Service]
+Type=simple
+User=orin
+WorkingDirectory=/home/orin/haller_ws
+Environment=ROS_DOMAIN_ID=0
+ExecStart=/home/orin/haller_ws/scripts/run_hmi.sh
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

@@ -94,8 +94,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'enable_web_teleop',
-            default_value='true',
-            description='Enable web-based teleop interface on port 8080'
+            default_value='false',
+            description='DEPRECATED: enable legacy web_teleop. Use haller-hmi.service instead.'
         ),
 
         # ==================== Logging ====================
