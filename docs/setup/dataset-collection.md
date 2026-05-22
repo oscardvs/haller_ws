@@ -264,11 +264,12 @@ Things to check:
 |-------------------------------------|------|
 | Train ACT from scratch (single task, ≥50 episodes) | `lerobot-train --policy.type=act --dataset.repo_id=...` — fits on a laptop GPU. |
 | LoRA-finetune SmolVLA-base          | `--policy.path=lerobot/smolvla_base --policy.peft_config.use_peft=true` on a 16 GB+ cloud GPU. |
-| LoRA-finetune π0.5                  | `--policy.path=lerobot/pi05_base --policy.peft_config.use_peft=true` on a 24 GB+ cloud GPU. |
+| LoRA-finetune π0.5 (recommended VLA path) | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/finetune_pi05_lora.sh <your-dataset>` is the one-liner. |
+| Replay-eval an existing policy on your data | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/replay_eval.py` runs π0.5 / pi0 against your dataset and dumps per-joint error + plots. |
 | Finetune NVIDIA GR00T N1.7          | Follow [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning) — official guide, ports cleanly to N1.7. |
 
-Inference and live evaluation are out of scope of this guide; see the
-[LeRobot imitation-learning tutorial](https://huggingface.co/docs/lerobot/il_robots)
+Live closed-loop evaluation on the real arm is out of scope of this guide;
+see the [LeRobot imitation-learning tutorial](https://huggingface.co/docs/lerobot/il_robots)
 once you have a trained policy.
 
 ---

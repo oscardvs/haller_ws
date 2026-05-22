@@ -27,7 +27,8 @@ haller_ws/
 │   ├── setup/
 │   │   ├── lerobot-environment.md   ← Python/conda env for the arms
 │   │   ├── so101-arm.md             ← SO-101 motor configuration + calibration
-│   │   └── dataset-collection.md    ← record SO-101 datasets + push to HF Hub
+│   │   ├── dataset-collection.md    ← record SO-101 datasets + push to HF Hub
+│   │   └── runpod-inference.md      ← cloud-GPU inference + LoRA finetune (π0.5, GR00T, …)
 │   └── *.pdf                        ← LK-TECH MF5010 manuals (drive motors)
 ├── scripts/                         ← provisioning, services, udev rules
 │   ├── install.sh
@@ -36,6 +37,7 @@ haller_ws/
 │   ├── haller-robot.service         ← systemd unit, robot bringup on boot
 │   ├── haller-ap.service            ← systemd unit, Wi-Fi AP fallback
 │   ├── record_dataset.sh            ← wrapper around lerobot-record (Phase 1 data collection)
+│   ├── runpod/                      ← cloud-GPU recipes (setup, smoke test, replay eval, LoRA finetune)
 │   └── setup_ap.sh
 ├── src/                             ← ROS 2 colcon workspace
 │   ├── haller_ros/                  ← core ROS 2 packages
@@ -78,6 +80,7 @@ Two guides, run them in order:
 2. **[`docs/setup/so101-arm.md`](./docs/setup/so101-arm.md)** — find the bus servo adapter's serial port, configure each motor's ID and baud rate one-by-one, wire the arm, calibrate, and run a smoke test.
 3. **[`hmi/README.md`](./hmi/README.md)** — bring up the unified HMI (FastAPI backend + Next.js + shadcn frontend) that replaces the legacy `web_teleop.py`.
 4. **[`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md)** — wire your cameras, record an SO-101 teleop dataset with `scripts/record_dataset.sh`, push to the Hugging Face Hub. Prerequisite for training or finetuning a policy on your own task.
+5. **[`docs/setup/runpod-inference.md`](./docs/setup/runpod-inference.md)** — rent a cloud GPU on RunPod, run π0.5 / GR00T inference against your dataset, and LoRA-finetune on top. The whole "see what a generalist VLA does on my data" flow.
 
 ## License
 
