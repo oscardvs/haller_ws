@@ -88,3 +88,41 @@ describe("CalibrationWizard step 1 (homing)", () => {
     await waitFor(() => expect(cal.abortCalibration).toHaveBeenCalledTimes(1));
   });
 });
+
+describe("CalibrationWizard bus error handling", () => {
+  it("displays calibration.error inline when present", async () => {
+    (tele.useTelemetry as any).mockImplementation((sel: any) =>
+      sel({ lastFrame: { arms: { right: { mode: "manual", torque: false, joints: {},
+        calibration: { state: "sweeping",
+                       ticks: { shoulder_pan: 2200 },
+                       min: { shoulder_pan: 1000 },
+                       max: { shoulder_pan: 3500 },
+                       error: "bus disconnect" } } } } }));
+    (cal.fetchCalibrationStatus as any).mockResolvedValue({
+      arms: [], current_session: { arm_id: "right", state: "sweeping" },
+    });
+    render(<CalibrationWizard armId="right" onClose={() => {}} />);
+    expect(await screen.findByText(/bus disconnect/i)).toBeInTheDocument();
+  });
+
+  it("shows session-aborted message when calibration block disappears mid-session", async () => {
+    // First render: block is present (simulates initial sweeping state)
+    let frame: any = { arms: { right: { mode: "manual", torque: false, joints: {},
+      calibration: { state: "sweeping",
+                     ticks: { shoulder_pan: 2048 },
+                     min: { shoulder_pan: 2048 },
+                     max: { shoulder_pan: 2048 } } } } };
+    (tele.useTelemetry as any).mockImplementation((sel: any) => sel({ lastFrame: frame }));
+    (cal.fetchCalibrationStatus as any).mockResolvedValue({
+      arms: [], current_session: { arm_id: "right", state: "sweeping" },
+    });
+    const { rerender } = render(<CalibrationWizard armId="right" onClose={() => {}} />);
+    // Wait for initial frame to be observed
+    await screen.findByRole("button", { name: /done sweeping/i });
+    // Simulate backend abort: calibration block disappears
+    frame = { arms: { right: { mode: "manual", torque: false, joints: {} } } } as any;
+    (tele.useTelemetry as any).mockImplementation((sel: any) => sel({ lastFrame: frame }));
+    rerender(<CalibrationWizard armId="right" onClose={() => {}} />);
+    expect(await screen.findByText(/calibration was aborted/i)).toBeInTheDocument();
+  });
+});

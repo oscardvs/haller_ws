@@ -26,6 +26,8 @@ export function CalibrationWizard({ armId, onClose }: Props) {
   const [error, setError] = React.useState<string | null>(null);
   const [proposed, setProposed] = React.useState<ProposedMap | null>(null);
   const [current, setCurrent] = React.useState<ProposedMap | null>(null);
+  const sawCalibrationRef = React.useRef(false);
+  const [sessionAborted, setSessionAborted] = React.useState(false);
 
   // Bootstrap: start the session if no session exists for this arm; re-attach if one already does.
   React.useEffect(() => {
@@ -57,6 +59,16 @@ export function CalibrationWizard({ armId, onClose }: Props) {
     if (stateFromTele && stateFromTele !== "review") setPhase(stateFromTele);
   }, [stateFromTele]);
 
+  // Detect session aborted by backend: calibration block disappears mid-session.
+  React.useEffect(() => {
+    if (calBlock) {
+      sawCalibrationRef.current = true;
+      setSessionAborted(false);
+    } else if (sawCalibrationRef.current && (phase === "homing" || phase === "sweeping")) {
+      setSessionAborted(true);
+    }
+  }, [calBlock, phase]);
+
   // Always abort on unmount unless the wizard reached "done" (Save handles its own cleanup).
   const isDoneRef = React.useRef(false);
   React.useEffect(() => () => {
@@ -85,6 +97,14 @@ export function CalibrationWizard({ armId, onClose }: Props) {
         </SheetHeader>
 
         {error && <p className="text-sm text-destructive py-2">{error}</p>}
+        {calBlock?.error && (
+          <p className="text-sm text-destructive py-2">Bus error: {calBlock.error}</p>
+        )}
+        {sessionAborted && (
+          <p className="text-sm text-destructive py-2">
+            Calibration was aborted (bus error or arm disconnected). Close and retry.
+          </p>
+        )}
 
         {phase === "homing" && (
           <section className="space-y-4 py-4">
@@ -100,7 +120,7 @@ export function CalibrationWizard({ armId, onClose }: Props) {
             </Table>
             <div className="flex gap-2">
               <Button
-                disabled={busy}
+                disabled={busy || sessionAborted}
                 onClick={() => guarded(async () => {
                   await captureNeutral(BACKEND_URL, armId);
                   setPhase("sweeping");
@@ -113,7 +133,7 @@ export function CalibrationWizard({ armId, onClose }: Props) {
 
         {phase === "sweeping" && (
           <SweepingStep
-            busy={busy} joints={joints}
+            busy={busy} sessionAborted={sessionAborted} joints={joints}
             ticks={ticks} mins={mins} maxes={maxes}
             onDone={() => guarded(async () => {
               const res = await finishSweep(BACKEND_URL, armId);
@@ -141,9 +161,10 @@ export function CalibrationWizard({ armId, onClose }: Props) {
 }
 
 function SweepingStep({
-  busy, joints, ticks, mins, maxes, onDone, onCancel,
+  busy, sessionAborted, joints, ticks, mins, maxes, onDone, onCancel,
 }: {
   busy: boolean;
+  sessionAborted: boolean;
   joints: string[];
   ticks: Record<string, number>;
   mins: Record<string, number>;
@@ -179,7 +200,7 @@ function SweepingStep({
         </TableBody>
       </Table>
       <div className="flex gap-2">
-        <Button disabled={busy} onClick={onDone}>Done sweeping</Button>
+        <Button disabled={busy || sessionAborted} onClick={onDone}>Done sweeping</Button>
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
       </div>
     </section>
