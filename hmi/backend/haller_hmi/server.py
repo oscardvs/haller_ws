@@ -22,6 +22,7 @@ from .calibration import (
 )
 from .cameras import CameraManager
 from .config import load_config
+from .human_teleop import HumanTeleopSession
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
 from .safety import Mode, ModeError
@@ -39,6 +40,9 @@ cameras = CameraManager(cfg.cameras)
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
+human_teleop = HumanTeleopSession(arms)
+teleop.attach_peer(human_teleop)
+human_teleop.attach_peer(teleop)
 calibration = CalibrationManager()
 telemetry: TelemetryBroadcaster | None = None
 
@@ -92,6 +96,7 @@ async def _lifespan(app: FastAPI):
     if telemetry is not None:
         await telemetry.stop()
     teleop.stop()
+    human_teleop.stop()
     cameras.disconnect_all()
     arms.disconnect_all()
     ros.stop()
@@ -281,6 +286,7 @@ async def post_estop():
     logger.warning("E-STOP triggered")
     calibration.abort()
     teleop.stop()
+    human_teleop.stop()
     for handle in arms.values():
         handle.disable_torque()
         handle.guard.set(Mode.STOP)

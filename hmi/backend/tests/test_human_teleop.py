@@ -275,3 +275,20 @@ def test_session_demotes_to_armed_on_ws_disconnect_window():
         assert _wait_until(lambda: sess.state is HumanState.IDLE, timeout=1.0)
     finally:
         sess.stop()
+
+
+def test_cannot_start_human_teleop_while_leader_follower_is_running(monkeypatch):
+    from haller_hmi.teleop import TeleopSession
+    mgr, _ = _fake_arm_manager()
+    lf = TeleopSession(mgr)
+    # Mark leader/follower as running without actually spawning a thread.
+    monkeypatch.setattr(lf, "_state", lf._state.__class__(running=True, leader="left",
+                                                         follower="right",
+                                                         hz=60.0, tick_count=0,
+                                                         last_error=None,
+                                                         started_at=_time.time()))
+
+    sess = HumanTeleopSession(mgr)
+    sess.attach_peer(lf)  # share the "is anyone teleoping?" check
+    with pytest.raises(RuntimeError):
+        sess.start(left_arm="left", right_arm="right", swap=False)

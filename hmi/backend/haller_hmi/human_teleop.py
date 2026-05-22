@@ -80,6 +80,7 @@ class HumanTeleopSession:
         # Per-arm last-frame timestamps (perf_counter), for tracking-loss.
         self._last_left_perf: float = 0.0
         self._last_right_perf: float = 0.0
+        self._peer = None
 
     # ---- public API ------------------------------------------------------
 
@@ -90,6 +91,11 @@ class HumanTeleopSession:
     @property
     def running(self) -> bool:
         return self._state is not HumanState.IDLE
+
+    def attach_peer(self, peer: object) -> None:
+        """Register the sibling TeleopSession so we can refuse to start
+        concurrently. Both sessions call .status() on each other."""
+        self._peer = peer
 
     def status(self) -> dict:
         with self._lock:
@@ -123,6 +129,8 @@ class HumanTeleopSession:
 
     def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0) -> None:
         with self._lock:
+            if self._peer is not None and getattr(self._peer, "status", lambda: {})().get("running"):
+                raise RuntimeError("leader/follower teleop is running; stop it first")
             if self.running:
                 raise RuntimeError("human teleop already running; stop it first")
             if left_arm == right_arm:

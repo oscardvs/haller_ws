@@ -60,6 +60,10 @@ class TeleopSession:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._peer = None
+
+    def attach_peer(self, peer: object) -> None:
+        self._peer = peer
 
     def status(self) -> dict:
         with self._lock:
@@ -67,6 +71,8 @@ class TeleopSession:
 
     def start(self, leader_id: str, follower_id: str, hz: float = 60.0) -> None:
         with self._lock:
+            if self._peer is not None and getattr(self._peer, "status", lambda: {})().get("running"):
+                raise RuntimeError("human teleop is running; stop it first")
             if self._state.running:
                 raise RuntimeError("teleop already running; stop it first")
             if leader_id == follower_id:
