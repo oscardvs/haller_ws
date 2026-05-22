@@ -1,0 +1,23 @@
+# hmi/backend/config.yaml
+arms:
+  - id: right
+    model: so101_follower
+    port: /dev/ttyACM0
+    calibration_id: haller_follower  # matches the haller_follower.json on disk
+    enabled: true
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+telemetry:
+  hz: 20
+cameras:
+  - id: wrist_right
+    role: wrist
+    arm_id: right
+    source: placeholder  # one of: placeholder, mjpeg, webrtc
+  - id: base_front
+    role: base
+    source: placeholder

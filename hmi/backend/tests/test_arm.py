@@ -1,0 +1,82 @@
+# hmi/backend/tests/test_arm.py
+from unittest.mock import MagicMock
+
+import pytest
+
+from haller_hmi.arm import ArmManager, ArmHandle
+from haller_hmi.config import ArmConfig
+from haller_hmi.safety import Mode, ModeError
+
+
+def _make_handle(monkeypatch) -> ArmHandle:
+    # Patch SO101Follower so we never touch real hardware.
+    fake_robot = MagicMock()
+    fake_robot.bus.motors = {
+        "shoulder_pan": MagicMock(id=1),
+        "shoulder_lift": MagicMock(id=2),
+        "elbow_flex": MagicMock(id=3),
+        "wrist_flex": MagicMock(id=4),
+        "wrist_roll": MagicMock(id=5),
+        "gripper": MagicMock(id=6),
+    }
+    fake_robot.calibration = {
+        "shoulder_pan":  MagicMock(range_min=0,    range_max=4095),
+        "shoulder_lift": MagicMock(range_min=0,    range_max=4095),
+        "elbow_flex":    MagicMock(range_min=0,    range_max=4095),
+        "wrist_flex":    MagicMock(range_min=0,    range_max=4095),
+        "wrist_roll":    MagicMock(range_min=0,    range_max=4095),
+        "gripper":       MagicMock(range_min=0,    range_max=4095),
+    }
+    fake_robot.get_observation.return_value = {
+        f"{j}.pos": 0.0 for j in fake_robot.bus.motors
+    }
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: fake_robot)
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    handle = ArmHandle(cfg, joint_limits_deg={
+        "shoulder_pan": (-120, 120), "shoulder_lift": (-100, 100),
+        "elbow_flex": (-110, 110), "wrist_flex": (-90, 90),
+        "wrist_roll": (-180, 180), "gripper": (0, 100),
+    })
+    handle.robot = fake_robot
+    return handle
+
+
+def test_send_goal_in_auto_mode_raises(monkeypatch):
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.AUTO)
+    with pytest.raises(ModeError):
+        handle.send_goal({"shoulder_pan": 30.0})
+
+
+def test_send_goal_clamps_and_calls_lerobot(monkeypatch):
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    sent = handle.send_goal({"shoulder_pan": 999.0, "gripper": -50.0, "unknown": 10.0})
+    assert sent == {"shoulder_pan": 120.0, "gripper": 0.0}
+    handle.robot.send_action.assert_called_once_with({"shoulder_pan.pos": 120.0,
+                                                      "gripper.pos": 0.0})
+
+
+def test_state_snapshot_returns_joints_with_limits(monkeypatch):
+    handle = _make_handle(monkeypatch)
+    snap = handle.state_snapshot()
+    assert set(snap["joints"].keys()) == {
+        "shoulder_pan", "shoulder_lift", "elbow_flex",
+        "wrist_flex", "wrist_roll", "gripper",
+    }
+    assert snap["joints"]["shoulder_pan"]["min"] == -120
+    assert snap["joints"]["shoulder_pan"]["max"] == 120
+    assert snap["mode"] in {"auto", "manual", "stop"}
+
+
+def test_arm_manager_lookup_by_id(monkeypatch):
+    cfg_right = ArmConfig(id="right", model="so101_follower",
+                          port="/dev/null", calibration_id="haller_follower")
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
+    monkeypatch.setattr("haller_hmi.arm.ArmHandle._load_joint_limits",
+                        lambda self: {"gripper": (0, 100)})
+    mgr = ArmManager([cfg_right])
+    assert mgr["right"].config.id == "right"
+    with pytest.raises(KeyError):
+        _ = mgr["left"]
