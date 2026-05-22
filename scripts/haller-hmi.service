@@ -3,7 +3,6 @@
 Description=Haller Unified HMI (FastAPI + Next.js)
 After=network-online.target haller-ap.service
 Wants=network-online.target
-Conflicts=haller-robot.service
 
 [Service]
 Type=simple

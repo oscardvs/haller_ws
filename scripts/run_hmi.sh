@@ -10,6 +10,15 @@ FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 
 cd "$HOME/haller_ws"
 
+# Next.js standalone output doesn't bundle .next/static or public/; copy them so the prebuilt server can find them.
+STANDALONE_DIR="hmi/frontend/.next/standalone"
+if [ -d "hmi/frontend/.next/static" ] && [ ! -d "$STANDALONE_DIR/.next/static" ]; then
+    cp -r hmi/frontend/.next/static "$STANDALONE_DIR/.next/"
+fi
+if [ -d "hmi/frontend/public" ] && [ ! -d "$STANDALONE_DIR/public" ]; then
+    cp -r hmi/frontend/public "$STANDALONE_DIR/"
+fi
+
 # Start backend
 uvicorn haller_hmi.server:app --host 0.0.0.0 --port "$BACKEND_PORT" --app-dir hmi/backend &
 BACKEND_PID=$!
