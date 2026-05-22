@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from haller_hmi.telemetry import TelemetryBroadcaster
+from haller_hmi.calibration import CalibrationManager, CalibrationState
+from haller_hmi.safety import Mode
 
 
 @pytest.mark.asyncio
@@ -53,3 +55,71 @@ async def test_multiple_subscribers_get_same_frame():
         await bcast.stop()
     # both subscribers see a frame (timing may differ by one tick, that's fine)
     assert "t" in f1 and "t" in f2
+
+
+@pytest.mark.asyncio
+async def test_frame_contains_calibration_block_when_session_active():
+    handle = MagicMock()
+    handle.state_snapshot.return_value = {
+        "mode": "manual", "torque": False,
+        "joints": {"gripper": {"pos": 0.0, "min": 0.0, "max": 100.0, "torque": False}},
+    }
+    handle.config = MagicMock(id="right")
+    arms = MagicMock()
+    arms.keys.return_value = ["right"]
+    arms.__getitem__.return_value = handle
+
+    ros = MagicMock()
+    ros.snapshot.return_value = MagicMock(linear=0.0, angular=0.0, odom={}, scan_min_range=None)
+
+    cal_mgr = CalibrationManager()
+    # Move the session to SWEEPING manually (capture_neutral is fully tested elsewhere).
+    # CalibrationManager.start() uses `is not Mode.MANUAL` identity check, so we must
+    # set the real enum value — not a MagicMock.
+    handle.guard = MagicMock()
+    handle.guard.mode = Mode.MANUAL
+    handle.robot = MagicMock()
+    handle.robot.bus.motors = {"gripper": MagicMock(model="sts3215", id=6)}
+    handle.robot.bus.model_resolution_table = {"sts3215": 4096}
+    handle.robot.bus.sync_read.return_value = {"gripper": 2048}
+    handle.robot.calibration = None
+    handle.torque_enabled = True
+    arms.values.return_value = [handle]
+    session = cal_mgr.start(arms, "right")
+    session.capture_neutral(handle)
+
+    bcast = TelemetryBroadcaster(arms, ros, hz=200.0, calibration=cal_mgr)
+    bcast.start()
+    try:
+        sub = bcast.subscribe()
+        frame = await asyncio.wait_for(sub.__anext__(), timeout=0.2)
+    finally:
+        await bcast.stop()
+
+    block = frame["arms"]["right"]["calibration"]
+    assert block["state"] == "sweeping"
+    assert "ticks" in block and "gripper" in block["ticks"]
+    assert "min" in block and "max" in block
+
+
+@pytest.mark.asyncio
+async def test_frame_has_no_calibration_block_when_idle():
+    handle = MagicMock()
+    handle.state_snapshot.return_value = {
+        "mode": "manual", "torque": True, "joints": {},
+    }
+    arms = MagicMock()
+    arms.keys.return_value = ["right"]
+    arms.__getitem__.return_value = handle
+
+    ros = MagicMock()
+    ros.snapshot.return_value = MagicMock(linear=0.0, angular=0.0, odom={}, scan_min_range=None)
+
+    bcast = TelemetryBroadcaster(arms, ros, hz=200.0, calibration=CalibrationManager())
+    bcast.start()
+    try:
+        sub = bcast.subscribe()
+        frame = await asyncio.wait_for(sub.__anext__(), timeout=0.2)
+    finally:
+        await bcast.stop()
+    assert "calibration" not in frame["arms"]["right"]

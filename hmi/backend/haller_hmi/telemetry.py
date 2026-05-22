@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class TelemetryBroadcaster:
-    def __init__(self, arms, ros, hz: float = 20.0, teleop=None):
+    def __init__(self, arms, ros, hz: float = 20.0, teleop=None, calibration=None):
         self._arms = arms
         self._ros = ros
         self._teleop = teleop
+        self._calibration = calibration
         self._period = 1.0 / hz
         self._subscribers: list[asyncio.Queue] = []
         self._task: asyncio.Task | None = None
@@ -61,9 +62,14 @@ class TelemetryBroadcaster:
             "alerts": [],
             "teleop": self._teleop.status() if self._teleop is not None else {"running": False},
         }
+        active = (
+            self._calibration.current
+            if self._calibration is not None
+            else None
+        )
         for arm_id in self._arms.keys():
             try:
-                frame["arms"][arm_id] = self._arms[arm_id].state_snapshot()
+                snap = self._arms[arm_id].state_snapshot()
             except Exception as e:
                 logger.warning("arm %s telemetry failed: %s", arm_id, e)
                 frame["alerts"].append({
@@ -72,7 +78,29 @@ class TelemetryBroadcaster:
                     "message": str(e),
                     "source": f"arm:{arm_id}",
                 })
+                continue
+            if active is not None and active.arm_id == arm_id:
+                snap["calibration"] = self._calibration_block(active, arm_id)
+            frame["arms"][arm_id] = snap
         return frame
+
+    def _calibration_block(self, session, arm_id: str) -> dict:
+        block: dict = {"state": session.state.value}
+        try:
+            handle = self._arms[arm_id]
+            if session.state.value == "homing":
+                bus = handle.robot.bus
+                motors = list(bus.motors.keys())
+                block["ticks"] = {m: int(v) for m, v in
+                                  bus.sync_read("Present_Position", motors, normalize=False).items()}
+            elif session.state.value == "sweeping":
+                block["ticks"] = session.tick_sweep(handle)
+                block["min"] = dict(session.mins)
+                block["max"] = dict(session.maxes)
+        except Exception as e:
+            logger.warning("calibration tick failed: %s", e)
+            block["error"] = str(e)
+        return block
 
     async def _run(self) -> None:
         while not self._stop.is_set():
