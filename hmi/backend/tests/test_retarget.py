@@ -71,3 +71,12 @@ def test_compute_arm_angles_handles_zero_length_upper_arm():
     W = _vec(0.0, 1.4, 0.3)
     pan, lift, elbow = retarget.compute_arm_angles(S, E, W)
     assert all(math.isfinite(v) for v in (pan, lift, elbow))
+
+
+def test_signed_angle_deg_returns_zero_for_zero_length_input():
+    import numpy as np
+    zero = np.zeros(3)
+    nonzero = np.array([1.0, 0.0, 0.0])
+    axis = np.array([0.0, 1.0, 0.0])
+    assert retarget._signed_angle_deg(zero, nonzero, axis) == 0.0
+    assert retarget._signed_angle_deg(nonzero, zero, axis) == 0.0

@@ -72,9 +72,17 @@ def _safe_norm(v: np.ndarray, eps: float = 1e-9) -> float:
 
 
 def _signed_angle_deg(a: np.ndarray, b: np.ndarray, axis: np.ndarray) -> float:
-    """Signed angle from a to b around `axis` (right-hand rule), in degrees."""
-    a_n = a / _safe_norm(a)
-    b_n = b / _safe_norm(b)
+    """Signed angle from a to b around `axis` (right-hand rule), in degrees.
+
+    Returns 0.0 if either input vector is degenerate (length < 1e-9), so
+    callers don't have to guard zero-length cases themselves.
+    """
+    a_norm = float(np.linalg.norm(a))
+    b_norm = float(np.linalg.norm(b))
+    if a_norm < 1e-9 or b_norm < 1e-9:
+        return 0.0
+    a_n = a / a_norm
+    b_n = b / b_norm
     cross = np.cross(a_n, b_n)
     sin_t = float(np.dot(cross, axis / _safe_norm(axis)))
     cos_t = float(np.dot(a_n, b_n))
