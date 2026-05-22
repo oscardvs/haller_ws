@@ -30,6 +30,7 @@ export function ArmPanel({ armId }: { armId: string }) {
       : teleop?.running && teleop.follower === armId
         ? "follower"
         : null;
+  const isCalibrating = Boolean(arm?.calibration);
   const [presetName, setPresetName] = useState("");
   const [presets, setPresets] = useState<string[] | null>(null);
   const [wristCam, setWristCam] = useState<CameraInfo | null>(null);
@@ -77,7 +78,7 @@ export function ArmPanel({ armId }: { armId: string }) {
     );
   }
 
-  const disabled = arm.mode !== "manual" || teleopRole !== null;
+  const disabled = arm.mode !== "manual" || teleopRole !== null || isCalibrating;
   const torqueOn = joints.some(([, j]) => j.torque);
 
   return (
@@ -97,7 +98,11 @@ export function ArmPanel({ armId }: { armId: string }) {
             />
             {torqueOn ? "torque" : "free"}
           </span>
-          {teleopRole ? (
+          {isCalibrating ? (
+            <span className="ml-2 inline-flex items-center gap-1.5 rounded-sm bg-blue-700 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-blue-50">
+              calibrating
+            </span>
+          ) : teleopRole ? (
             <span className="ml-2 inline-flex items-center gap-1.5 rounded-sm bg-[var(--haller-live)]/20 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--haller-live)]">
               teleop · {teleopRole}
             </span>
