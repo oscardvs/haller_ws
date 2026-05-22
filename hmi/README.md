@@ -196,7 +196,7 @@ Backend:
 source ~/venvs/haller-hmi/bin/activate-haller-hmi
 cd ~/haller_ws/hmi/backend
 pytest -v
-# 78 passed
+# 85 passed
 ```
 
 Frontend:
@@ -204,7 +204,7 @@ Frontend:
 ```bash
 cd ~/haller_ws/hmi/frontend
 pnpm test
-# 14 passed
+# 19 passed
 ```
 
 Frontend build:
