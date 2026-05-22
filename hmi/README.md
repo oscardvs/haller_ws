@@ -93,6 +93,33 @@ E-STOP also stops teleop before disabling torque — so the follower can't jump 
 
 To fix a leader↔follower midpoint mismatch (`shoulder_lift` looks the most off), re-run the wizard on one arm while it holds the same physical neutral pose as the other.
 
+## Human teleop (vision)
+
+The dashboard's **Human teleop** link opens `/teleop/human`, a new mode that drives both SO-101 arms from your laptop webcam.
+
+1. Pick the two arms in **assign**.
+2. Click **open · capture**, hold your hand open, then **pinch · capture** with thumb and index touching. Repeat for the other side.
+3. Position yourself in front of the camera (both shoulders + both hands visible). The skeleton overlay will appear on the feed.
+4. **Hold SPACE** to drive. The robots track your joint angles 1:1. Release SPACE to freeze instantly.
+5. **Stop** ends the session and restores both arms to MANUAL.
+
+**Mutual exclusion.** Only one teleop kind runs at a time. Starting human teleop while leader/follower teleop is running returns 409 (and vice versa).
+
+**Tracking loss.** If one hand exits the frame, that arm freezes in place; the other arm continues. The HUD shows `tracking lost (side)`.
+
+**E-STOP** stops human teleop just like leader/follower, drops torque, and zeroes `/cmd_vel`.
+
+### Manual smoke tests
+
+1. Cold start with no camera → permission prompt → error state → no robot motion.
+2. Calibrate pinch → engage SPACE → wave one arm → the other stays in place.
+3. Mid-drive: hand exits frame → that arm freezes, other continues, chip turns amber.
+4. Mid-drive: release SPACE → both arms freeze within ~16 ms.
+5. Global E-STOP while driving → session stops, torque drops, E-STOP banner.
+6. Try to start leader/follower while human teleop is running → 409, no state change.
+
+See [`docs/superpowers/specs/2026-05-22-human-pose-teleop-design.md`](../docs/superpowers/specs/2026-05-22-human-pose-teleop-design.md) for the full design.
+
 ## Cameras
 
 Cameras are declared in [`backend/config.yaml`](./backend/config.yaml). Each entry has:
@@ -174,6 +201,12 @@ The legacy `web_teleop.py` is disabled at the launch-arg level (`enable_web_tele
 | GET  | `/teleop` | — | current teleop status |
 | POST | `/teleop/start` | `{leader, follower, hz}` | start the leader→follower loop |
 | POST | `/teleop/stop` | `{}` | stop the teleop loop and restore both arms |
+| GET | `/teleop/human` | — | current human-teleop status |
+| POST | `/teleop/human/start` | `{left_arm, right_arm, swap, hz?}` | start bimanual webcam teleop (409 if leader/follower running) |
+| POST | `/teleop/human/stop` | `{}` | stop the human-teleop loop |
+| POST | `/teleop/human/swap` | `{swap}` | flip the human-side ↔ robot-arm assignment |
+| POST | `/teleop/human/calibrate` | `{left?, right?: {min_m, max_m}}` | set per-side pinch range (gripper aperture mapping) |
+| WS | `/ws/teleop/human/in` | — | keypoint frames from the browser pose pipeline |
 | GET  | `/calibration/status` | — | per-arm calibration file status; current session if active |
 | POST | `/calibration/{arm_id}/start` | — | begin a calibration session; 409 if any arm isn't manual |
 | POST | `/calibration/{arm_id}/capture_neutral` | — | capture current pose as the new 0°; transitions to sweep |

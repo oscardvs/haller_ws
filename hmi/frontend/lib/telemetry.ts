@@ -2,6 +2,7 @@
 "use client";
 import { create } from "zustand";
 import { WS_URL } from "./config";
+import type { HumanTeleopStatus } from "./api";
 
 export type JointState = {
   pos: number;
@@ -48,6 +49,7 @@ export type TelemetryFrame = {
   arms: Record<string, ArmState>;
   alerts: { level: string; code: string; message: string; source: string }[];
   teleop?: TeleopFrameState;
+  human_teleop?: HumanTeleopStatus;
 };
 
 type Store = {

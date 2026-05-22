@@ -72,6 +72,13 @@ export default function Dashboard() {
 
       <TeleopLauncher armIds={cfg.arms.map((a) => a.id)} />
 
+      <a
+        href="/teleop/human"
+        className="inline-flex items-center gap-2 rounded-sm border border-border px-3 py-1 text-[12px] font-mono hover:bg-muted"
+      >
+        Human teleop →
+      </a>
+
       <div className="grid grid-cols-12 gap-3">
         <div className="col-span-12 lg:col-span-7">
           <BasePanel />
