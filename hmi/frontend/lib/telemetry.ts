@@ -12,6 +12,7 @@ export type JointState = {
 
 export type ArmState = {
   mode: "auto" | "manual" | "stop";
+  torque?: boolean;
   joints: Record<string, JointState>;
 };
 

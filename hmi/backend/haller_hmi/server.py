@@ -51,6 +51,10 @@ class PresetBody(BaseModel):
     name: str
 
 
+class TorqueBody(BaseModel):
+    enabled: bool
+
+
 # ---- lifespan ------------------------------------------------------------
 
 @asynccontextmanager
@@ -141,7 +145,32 @@ async def post_arm_mode(arm_id: str, body: ArmModeBody):
     handle.guard.set(new_mode)
     if new_mode is Mode.STOP:
         handle.disable_torque()
+    else:
+        # Leaving STOP (or staying in auto/manual): make sure torque is engaged so
+        # subsequent goals actually move the arm.
+        if not handle.torque_enabled:
+            handle.enable_torque()
     return {"ok": True, "mode": new_mode.value}
+
+
+@app.post("/arm/{arm_id}/home")
+async def post_arm_home(arm_id: str):
+    handle = _arm_or_404(arm_id)
+    try:
+        sent = handle.home()
+    except ModeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "sent": sent}
+
+
+@app.post("/arm/{arm_id}/torque")
+async def post_arm_torque(arm_id: str, body: TorqueBody):
+    handle = _arm_or_404(arm_id)
+    if body.enabled:
+        handle.enable_torque()
+    else:
+        handle.disable_torque()
+    return {"ok": True, "torque": handle.torque_enabled}
 
 
 @app.post("/arm/{arm_id}/preset")

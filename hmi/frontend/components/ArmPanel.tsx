@@ -92,6 +92,47 @@ export function ArmPanel({ armId }: { armId: string }) {
           ))}
         </div>
 
+        {/* Action row — Home + Free-drive. */}
+        <div className="flex items-center gap-2 pt-2 border-t border-border/70">
+          <span className="label-tracked text-muted-foreground shrink-0">
+            Actions
+          </span>
+          <Button
+            size="sm"
+            className="h-7 px-2 label-micro"
+            disabled={disabled}
+            onClick={async () => {
+              try {
+                await api.armHome(armId);
+                toast.success("homing arm");
+              } catch (e) {
+                toast.error(`home failed: ${(e as Error).message}`);
+              }
+            }}
+          >
+            home
+          </Button>
+          <Button
+            size="sm"
+            variant={torqueOn ? "outline" : "default"}
+            className="h-7 px-2 label-micro"
+            onClick={async () => {
+              try {
+                await api.armTorque(armId, !torqueOn);
+                toast.message(
+                  torqueOn
+                    ? "torque off — arm is free-drivable"
+                    : "torque engaged",
+                );
+              } catch (e) {
+                toast.error(`torque toggle failed: ${(e as Error).message}`);
+              }
+            }}
+          >
+            {torqueOn ? "free-drive" : "engage"}
+          </Button>
+        </div>
+
         {/* Preset row — quieter, separated. */}
         <div className="flex items-center gap-2 pt-2 border-t border-border/70">
           <span className="label-tracked text-muted-foreground shrink-0">

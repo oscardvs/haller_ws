@@ -31,6 +31,7 @@ class ArmHandle:
     joint_limits_deg: dict[str, tuple[float, float]] = field(default_factory=dict)
     guard: ModeGuard = field(default_factory=lambda: ModeGuard(Mode.MANUAL))
     robot: SO101Follower | None = None
+    torque_enabled: bool = True
 
     def connect(self) -> None:
         cfg = SO101FollowerConfig(
@@ -70,6 +71,11 @@ class ArmHandle:
 
     def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
         self.guard.assert_manual()
+        # If the user previously disabled torque (free-drive), re-engage it before
+        # commanding new positions — otherwise the goal is silently stored but the
+        # arm doesn't move.
+        if not self.torque_enabled:
+            self.enable_torque()
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
         # lerobot expects keys suffixed with ".pos"
         action = {f"{j}.pos": v for j, v in clamped.items()}
@@ -77,9 +83,20 @@ class ArmHandle:
         self.robot.send_action(action)
         return clamped
 
+    def home(self) -> dict[str, float]:
+        """Go to the calibrated home pose (0° on every joint)."""
+        goal = {j: 0.0 for j in self.joint_limits_deg}
+        return self.send_goal(goal)
+
     def disable_torque(self) -> None:
         if self.robot is not None:
             self.robot.bus.disable_torque()
+            self.torque_enabled = False
+
+    def enable_torque(self) -> None:
+        if self.robot is not None:
+            self.robot.bus.enable_torque()
+            self.torque_enabled = True
 
     def state_snapshot(self) -> dict:
         assert self.robot is not None
@@ -90,10 +107,11 @@ class ArmHandle:
                 "pos": float(obs.get(f"{joint}.pos", 0.0)),
                 "min": float(lo),
                 "max": float(hi),
-                "torque": True,  # lerobot doesn't expose per-joint torque cheaply; placeholder
+                "torque": self.torque_enabled,
             }
         return {
             "mode": self.guard.mode.value,
+            "torque": self.torque_enabled,
             "joints": joints,
         }
 

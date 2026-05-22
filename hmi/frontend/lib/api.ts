@@ -49,5 +49,9 @@ export const api = {
     postJson<{ ok: true; sent: ArmGoal }>(`/arm/${armId}/preset`, { name }),
   armPresetRecord: (armId: string, name: string) =>
     postJson<{ ok: true; saved: ArmGoal }>(`/arm/${armId}/preset/record`, { name }),
+  armHome: (armId: string) =>
+    postJson<{ ok: true; sent: ArmGoal }>(`/arm/${armId}/home`, {}),
+  armTorque: (armId: string, enabled: boolean) =>
+    postJson<{ ok: true; torque: boolean }>(`/arm/${armId}/torque`, { enabled }),
   estop: () => postJson<{ ok: true }>("/estop", {}),
 };
