@@ -24,3 +24,7 @@ log/
 .vscode/
 .cursor/
 .claude/
+
+# Python packaging artifacts
+*.egg-info/
+dist/
