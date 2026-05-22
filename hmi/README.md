@@ -174,6 +174,12 @@ The legacy `web_teleop.py` is disabled at the launch-arg level (`enable_web_tele
 | GET  | `/teleop` | — | current teleop status |
 | POST | `/teleop/start` | `{leader, follower, hz}` | start the leader→follower loop |
 | POST | `/teleop/stop` | `{}` | stop the teleop loop and restore both arms |
+| GET  | `/calibration/status` | — | per-arm calibration file status; current session if active |
+| POST | `/calibration/{arm_id}/start` | — | begin a calibration session; 409 if any arm isn't manual |
+| POST | `/calibration/{arm_id}/capture_neutral` | — | capture current pose as the new 0°; transitions to sweep |
+| POST | `/calibration/{arm_id}/finish_sweep` | — | end the range-of-motion sweep; 422 if any joint unmoved |
+| POST | `/calibration/{arm_id}/save` | — | write the new calibration (with backup) and reload the arm |
+| POST | `/calibration/{arm_id}/abort` | — | cancel the session (idempotent); restores torque |
 | GET  | `/cameras` | — | configured cameras + runtime `active` flag |
 | GET  | `/cameras/{id}/snapshot` | — | single JPEG (503 if placeholder or disconnected) |
 | GET  | `/cameras/{id}/stream` | — | `multipart/x-mixed-replace` MJPEG live feed (~15 Hz to the browser) |
@@ -190,7 +196,7 @@ Backend:
 source ~/venvs/haller-hmi/bin/activate-haller-hmi
 cd ~/haller_ws/hmi/backend
 pytest -v
-# 25 passed
+# 78 passed
 ```
 
 Frontend:
@@ -198,7 +204,7 @@ Frontend:
 ```bash
 cd ~/haller_ws/hmi/frontend
 pnpm test
-# 6 passed (api + EStopButton + JointSlider)
+# 14 passed
 ```
 
 Frontend build:
