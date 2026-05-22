@@ -177,3 +177,62 @@ def test_ingest_handles_missing_side_gracefully():
         assert targets.get("right") is None
     finally:
         sess.stop()
+
+
+import time as _time
+
+
+def _wait_until(predicate, timeout: float = 1.0, interval: float = 0.01) -> bool:
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if predicate():
+            return True
+        _time.sleep(interval)
+    return False
+
+
+def test_commit_loop_writes_to_arms_when_driving():
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)  # fast loop for tests
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        # The loop should call send_action on both arms within ~50 ms.
+        assert _wait_until(lambda: arms["left"].robot.send_action.called)
+        assert _wait_until(lambda: arms["right"].robot.send_action.called)
+    finally:
+        sess.stop()
+
+
+def test_commit_loop_does_not_write_when_not_driving():
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=False))
+        _time.sleep(0.05)
+        assert not arms["left"].robot.send_action.called
+        assert not arms["right"].robot.send_action.called
+    finally:
+        sess.stop()
+
+
+def test_commit_loop_clamps_to_arm_joint_limits():
+    mgr, arms = _fake_arm_manager()
+    # Squeeze the left arm's pan limit so retarget output gets clamped.
+    arms["left"].joint_limits_deg["shoulder_pan"] = (-5.0, 5.0)
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        # Build a frame whose left-arm pan should retarget to ≈ +90° (far above 5°).
+        frame = _kp_frame(dead_man=True)
+        frame["left"]["pose"]["elbow"] = [0.3, 1.4, 0.0]
+        frame["left"]["pose"]["wrist"] = [0.6, 1.4, 0.0]
+        sess.ingest_frame(frame)
+        _wait_until(lambda: arms["left"].robot.send_action.called)
+        sent_actions = [c.args[0] for c in arms["left"].robot.send_action.call_args_list]
+        # Every commanded shoulder_pan must be inside [-5, 5].
+        for action in sent_actions:
+            assert -5.0 <= action["shoulder_pan.pos"] <= 5.0
+    finally:
+        sess.stop()
