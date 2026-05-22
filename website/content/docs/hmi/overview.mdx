@@ -1,0 +1,131 @@
+---
+title: HMI overview
+description: The unified web interface — backend stack, frontend stack, what's on the dashboard, how to bring it up.
+---
+
+The Haller HMI is a single web application that operates both SO-101 arms and the base. It replaces the legacy `web_teleop.py` single-file Python HTML server with a proper full-stack app.
+
+- **Frontend:** Next.js 16 + shadcn/ui + Tailwind v4 (Node 20+).
+- **Backend:** FastAPI, wrapping `lerobot` (arms) and `rclpy` (base) in one process.
+- **Wire protocol:** REST for commands, WebSocket for ~20 Hz telemetry.
+
+## Prerequisites
+
+- Python venv with ROS 2 Jazzy access and lerobot installed — see [LeRobot environment](/docs/setup/lerobot-environment).
+- At least one SO-101 follower configured and calibrated — see [SO-101 arms](/docs/setup/so101-arm). The default config expects calibration id `haller_follower` reachable at `/dev/haller_arm_follower`.
+- Node 20+ and pnpm 9.x on whichever host runs the frontend.
+
+## Quick start (operator laptop)
+
+Two terminals. First, the backend:
+
+```bash
+source ~/venvs/haller-hmi/bin/activate-haller-hmi
+cd ~/haller_ws/hmi/backend
+haller-hmi                       # uvicorn on http://0.0.0.0:8000
+```
+
+Second, the frontend:
+
+```bash
+cd ~/haller_ws/hmi/frontend
+pnpm install                     # first time only
+pnpm dev                         # Next dev server on http://localhost:3000
+```
+
+Open [http://localhost:3000](http://localhost:3000). You should see:
+
+- A "live" badge top-right (green) once the WebSocket connects.
+- A Base panel with a joystick on the left.
+- An "Arm: right" panel on the right with six joint sliders.
+- A red E-STOP pinned top-right of every page.
+
+### Pointing the frontend at a remote backend
+
+```bash
+NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm dev
+```
+
+## Operating an arm
+
+Each arm card has a header strip (id + mode toggle), a wrist-camera placeholder, the six joint sliders, an Actions row, a Pose row, and a Saved-poses chip strip.
+
+1. **Switch the arm to manual.** Top-right of the Arm card, click `manual`. The joint sliders, Home button, and preset replay are enabled. Manual writes are rejected (HTTP 409) in `auto`.
+2. **Drag a joint slider.** Each drag debounces at 50 ms and posts `POST /arm/{id}/goal` — the arm tracks toward the slider value, clamped to the calibrated joint limits.
+3. **`home`** — sends every joint to its calibrated 0° (range midpoint). Manual mode only. If the arm was free-drive, torque re-engages first.
+4. **`free-drive` ↔ `engage`** — toggles torque on the entire arm. With torque off, you can hand-move the arm and the sliders just track the live position. Clicking a slider or `home` (or pressing `engage`) re-engages torque.
+5. **Record a pose.** Type a name in the Pose input, click `save`. Current joint positions are written to `~/.haller/presets.json` keyed by `(arm id, name)`.
+6. **Replay a pose.** Click any chip in the **Saved** strip to drive the arm to that pose, or type a name and click `go to`. Click `×` on a chip to delete the pose.
+7. **Hand back to autonomy.** Click `auto`. A VLA process / external driver can now write goals; HMI manual writes return HTTP 409.
+8. **Emergency.** Click E-STOP (top-right of every page). Torque drops on every arm, the base goes to zero, any active teleop session stops, no confirmation modal.
+
+## Operating the base
+
+The Base panel ports the existing teleop UX onto shadcn:
+
+- **Joystick** (left): drag a 2D pad — vertical = linear, horizontal = angular. 10 Hz polling to `POST /base/cmd_vel`.
+- **WASD or arrow keys** (anywhere on the page): same effect as moving the joystick.
+- **Speed slider** (right): scales the commanded velocity 0.1×–1.0× — a safety margin while learning the feel.
+- **STOP button**: zeros the command. Independent of E-STOP (which also touches the arms).
+
+## What else is on the dashboard
+
+- **Calibration banner** — shown when an arm has no calibration file. Click *Calibrate &lt;arm&gt;* to open the [calibration wizard](/docs/hmi/calibration-wizard).
+- **Teleop card** — leader↔follower mirroring between the two arms at 60 Hz. See [Teleop](/docs/hmi/teleop).
+- **Cameras strip** — every camera configured in `backend/config.yaml`, live MJPEG thumbnails.
+- **Recording panel** — builds the exact `lerobot-record` command for a dataset collection session.
+
+## Production (Jetson Orin Nano)
+
+The HMI runs alongside the existing `haller-robot.service` (which brings up the ROS hardware stack — motors, lidar, odom). They are NOT in conflict; the HMI subscribes to `/odom`, `/scan` and publishes `/cmd_vel`, all topics the hardware stack already exposes.
+
+1. Build the frontend standalone bundle:
+   ```bash
+   cd hmi/frontend
+   pnpm install
+   pnpm build
+   ```
+2. Install the systemd unit:
+   ```bash
+   sudo cp scripts/haller-hmi.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now haller-hmi.service
+   ```
+3. Watch the logs:
+   ```bash
+   journalctl -u haller-hmi.service -f
+   ```
+
+`scripts/run_hmi.sh` (the unit's `ExecStart`) activates the backend venv, copies the Next.js static assets into `.next/standalone/` (Next 16's standalone output doesn't bundle them by default), then launches both `uvicorn` (`:8000`) and the prebuilt Next server (`:3000`).
+
+## REST endpoints
+
+The backend exposes a stable REST surface plus one WebSocket. See [the unified-HMI design spec](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/specs/2026-05-22-haller-unified-hmi-design.md) for frame schemas and design rationale.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/health` | liveness |
+| GET | `/config` | arms, cameras, version |
+| POST | `/base/cmd_vel` | publishes Twist on `/cmd_vel` |
+| POST | `/arm/{id}/goal` | manual mode only (409 in auto) |
+| POST | `/arm/{id}/mode` | `auto` / `manual` / `stop`; 409 during calibration |
+| POST | `/arm/{id}/home` | drive all joints to 0° (manual mode only) |
+| POST | `/arm/{id}/torque` | engage/disengage torque on the whole arm |
+| POST | `/arm/{id}/preset/record` | save current joint positions |
+| POST | `/arm/{id}/preset` | replay a saved pose |
+| GET  | `/arm/{id}/presets` | list saved poses |
+| DEL  | `/arm/{id}/preset/{name}` | delete a saved pose |
+| GET  | `/teleop` | current teleop status |
+| POST | `/teleop/start` | start the leader→follower loop |
+| POST | `/teleop/stop` | stop teleop and restore both arms |
+| GET  | `/calibration/status` | per-arm calibration file status; current session if active |
+| POST | `/calibration/{arm_id}/start` | begin a calibration session |
+| POST | `/calibration/{arm_id}/capture_neutral` | capture neutral pose; transitions to sweep |
+| POST | `/calibration/{arm_id}/finish_sweep` | end the sweep (422 if any joint unmoved) |
+| POST | `/calibration/{arm_id}/save` | write new calibration with backup; reload the arm |
+| POST | `/calibration/{arm_id}/abort` | cancel the session (idempotent) |
+| GET  | `/cameras` | configured cameras + runtime active flag |
+| GET  | `/cameras/{id}/snapshot` | single JPEG |
+| GET  | `/cameras/{id}/stream` | `multipart/x-mixed-replace` MJPEG (~15 Hz) |
+| POST | `/estop` | stop teleop, torque off all arms, zero `/cmd_vel`, abort any calibration |
+| WS | `/ws/telemetry` | ~20 Hz frames: base + arms state + teleop + alerts |

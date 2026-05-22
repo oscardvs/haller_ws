@@ -1,0 +1,4 @@
+{
+  "title": "HMI",
+  "pages": ["overview", "calibration-wizard", "teleop"]
+}

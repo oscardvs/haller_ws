@@ -1,0 +1,36 @@
+---
+title: Overview
+description: What Haller is, what's in this repo, and where to start.
+---
+
+Haller is an open-source mobile-manipulation robot: a four-wheeled differential-drive base that carries **two SO-101 arms** for bimanual manipulation. The repo (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, the unified web HMI, and the documentation you're reading.
+
+## Hardware overview
+
+| Subsystem        | Components                                                              |
+| ---------------- | ----------------------------------------------------------------------- |
+| Compute          | NVIDIA Jetson Orin Nano                                                 |
+| Mobile base      | 4-wheel differential drive, LK-TECH MF5010 BLDC motors over CAN          |
+| Perception       | Slamtec RPLIDAR A1M8 (2D LiDAR), camera modules                          |
+| Arms             | 2× SO-ARM101 ("SO-101") follower arms with Feetech STS3215 servos        |
+| Servo bus        | Feetech bus servo adapter (USB ↔ TTL half-duplex daisy-chain)           |
+| Networking       | Wi-Fi access point fallback                                              |
+
+The SO-101 mechanical design comes from [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100). The rest is in this repository.
+
+## Where to start
+
+<Cards>
+  <Card title="Set up the LeRobot environment" href="/docs/setup/lerobot-environment" />
+  <Card title="Configure and calibrate an SO-101 arm" href="/docs/setup/so101-arm" />
+  <Card title="Bring up the HMI" href="/docs/hmi/overview" />
+  <Card title="Calibrate via the wizard" href="/docs/hmi/calibration-wizard" />
+</Cards>
+
+## Status
+
+The mobile base is operational under ROS 2. Both SO-101 arms run through the unified HMI (FastAPI + Next.js + shadcn/ui) on main. Per-arm controls (joint sliders, home, free-drive, pose presets), a leader↔follower teleop launcher at 60 Hz, an in-browser calibration wizard (homing + range-of-motion sweep + save with automatic backup), live MJPEG camera streams, and a dataset-recording panel are all live.
+
+## License
+
+Apache-2.0. The SO-101 mechanical design is licensed under its own terms by TheRobotStudio.

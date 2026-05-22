@@ -1,0 +1,74 @@
+---
+title: Calibration wizard
+description: Calibrate an SO-101 arm end-to-end in the browser — homing, range-of-motion sweep, review, save with automatic backup.
+---
+
+The HMI ships an in-browser wizard that replaces the `lerobot-calibrate` CLI step for routine recalibration. It does the same job: capture a new "0° / neutral" pose and record each joint's physical range, then write a calibration JSON that's byte-compatible with `lerobot-calibrate`'s own output.
+
+## When to use it
+
+- **First-time bring-up** of an arm that doesn't have a calibration file yet. The dashboard shows a banner ("Arm right has no calibration file") with a one-click Calibrate button.
+- **Fixing a leader↔follower midpoint mismatch**, where teleop tracking is offset by a few degrees on `shoulder_lift` (see [calibrating two arms](/docs/setup/so101-arm#calibrating-two-arms-that-will-teleop-together)). Re-run the wizard on one arm while it holds the other arm's physical neutral pose.
+- **After mechanical changes** — replacing a servo, tightening a gear, repairing a joint stop — that change a joint's range.
+
+## How to launch
+
+Two entry points:
+
+1. **Dashboard banner** — appears for every arm with no on-disk calibration. Click *Calibrate &lt;arm&gt;*.
+2. **Settings page → Calibration card** — one card per configured arm, showing file status (OK / MISSING) and mtime. Click *Calibrate*. Button is disabled if any arm isn't in manual mode (tooltip explains why).
+
+## The three steps
+
+### Step 1 — Set neutral pose
+
+The wizard disables torque on the target arm. Move it by hand to the pose you want to be "0°" — typically arm extended forward, shoulder centered, wrist horizontal. The live table shows the current ticks of each joint. Click **Capture neutral**.
+
+If you're calibrating to match another arm, hold the same physical pose you used for that arm.
+
+### Step 2 — Range of motion
+
+Wiggle every joint to its physical limits. The table shows `min | POS | max` columns updating live. The `min` and `max` columns track the extremes seen so far across the entire sweep.
+
+When every joint has both a min and a max different from each other, click **Done sweeping**. If a joint never moved, the backend returns a 422 and the wizard inline-lists the offending joints — keep wiggling and click again.
+
+### Step 3 — Review
+
+The wizard shows old → new for `range_min`, `range_max`, and `homing_offset` per joint. Verify the diff is roughly what you'd expect (no joint's range should collapse to a tiny window, no offset should be wildly different from the prior file). Click **Save**.
+
+The backend:
+
+1. Writes the new JSON to a `.tmp` sibling first.
+2. Moves the existing file to `<id>.json.bak-<timestamp>`.
+3. Atomically renames the `.tmp` into place via `os.replace` (so the canonical path is never empty mid-write).
+4. Does the same for any sibling teleop calibration (`teleoperators/*/{id}.json`) — keeps leader↔follower in sync.
+5. Disconnects and reconnects the arm so subsequent commands use the new calibration immediately.
+
+The wizard closes and the banner disappears.
+
+## Cancellation and safety
+
+- **Cancel in step 1** closes immediately — no work to lose.
+- **Cancel in steps 2 or 3** opens a confirm dialog ("Discard the range-of-motion sweep?" / "Discard the proposed calibration?"). Confirm with *Discard* to abort. Backend `/abort` is idempotent.
+- **E-STOP** at any point aborts the calibration session before disabling torque on all arms.
+- **Bus error during sweep** auto-aborts the session and shows an error banner ("Calibration was aborted (bus error or arm disconnected). Close and retry.") with action buttons disabled.
+- **Mode-change attempts** on the calibrating arm (e.g. someone clicking auto/stop in another tab) return 409 while a session is active.
+- **Only one session at a time** across the HMI. A second wizard for the same or another arm gets 409.
+- **Page reload mid-session** — the wizard re-attaches to whichever step the backend is in. The session survives the reload; only `/save` or `/abort` clears it.
+
+## Verifying it end-to-end
+
+If you want to walk through the wizard without committing to a real recalibration:
+
+1. Stop the backend; move `~/.cache/huggingface/lerobot/calibration/robots/so_follower/haller_follower.json` aside.
+2. Restart the backend, open the dashboard — the banner should read "Arm right has no calibration file."
+3. Click *Calibrate right*. Hand-pose the arm; click *Capture neutral*.
+4. Wiggle every joint; verify the `min | POS | max` table moves; click *Done sweeping*.
+5. Click *Save*. Confirm `haller_follower.json` is back on disk and a `haller_follower.json.bak-<ts>` sibling exists.
+6. Repeat for the leader-as-follower (`haller_leader`) to verify the teleop sibling file at `teleoperators/*/haller_leader.json` is also written and backed up.
+7. Run a short leader↔follower teleop session to confirm the new calibration loads correctly.
+
+## Design references
+
+- Design spec: [`docs/superpowers/specs/2026-05-22-calibration-wizard-design.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/specs/2026-05-22-calibration-wizard-design.md)
+- Implementation plan: [`docs/superpowers/plans/2026-05-22-calibration-wizard.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/plans/2026-05-22-calibration-wizard.md)
