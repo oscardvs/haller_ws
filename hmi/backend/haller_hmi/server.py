@@ -110,7 +110,7 @@ async def _lifespan(app: FastAPI):
     cameras.connect_all()
     ros.start()
     telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz,
-                                     teleop=teleop, calibration=calibration)
+                                     teleop=teleop, human_teleop=human_teleop, calibration=calibration)
     telemetry.start()
     yield
     logger.info("haller-hmi backend shutting down")

@@ -11,10 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class TelemetryBroadcaster:
-    def __init__(self, arms, ros, hz: float = 20.0, teleop=None, calibration=None):
+    def __init__(self, arms, ros, hz: float = 20.0, teleop=None, human_teleop=None, calibration=None):
         self._arms = arms
         self._ros = ros
         self._teleop = teleop
+        self._human_teleop = human_teleop
         self._calibration = calibration
         self._period = 1.0 / hz
         self._subscribers: list[asyncio.Queue] = []
@@ -61,6 +62,7 @@ class TelemetryBroadcaster:
             "arms": {},
             "alerts": [],
             "teleop": self._teleop.status() if self._teleop is not None else {"running": False},
+            "human_teleop": self._human_teleop.status() if self._human_teleop is not None else {"running": False, "state": "idle"},
         }
         active = (
             self._calibration.current

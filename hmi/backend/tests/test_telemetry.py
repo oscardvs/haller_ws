@@ -170,3 +170,30 @@ async def test_bus_error_during_sweep_aborts_session_and_emits_alert():
                for a in alerts), f"expected calibration_bus_error alert, got {alerts}"
     # Session was auto-aborted
     assert cal_mgr.current is None
+
+
+@pytest.fixture()
+def broadcaster_with_human_teleop():
+    from unittest.mock import MagicMock
+    from haller_hmi.telemetry import TelemetryBroadcaster
+    arms = MagicMock()
+    arms.keys.return_value = []
+    ros = MagicMock()
+    ros.snapshot.return_value = MagicMock(linear=0.0, angular=0.0, odom={}, scan_min_range=None)
+    teleop = MagicMock()
+    teleop.status.return_value = {"running": False}
+    human_teleop = MagicMock()
+    human_teleop.status.return_value = {
+        "running": False, "state": "idle",
+        "tracking": {"left": {"age_ms": None, "lost": False},
+                     "right": {"age_ms": None, "lost": False}},
+    }
+    return TelemetryBroadcaster(arms, ros, hz=20.0,
+                                teleop=teleop, human_teleop=human_teleop)
+
+
+def test_telemetry_frame_includes_human_teleop_block(broadcaster_with_human_teleop):
+    frame = broadcaster_with_human_teleop._build_frame()
+    assert "human_teleop" in frame
+    ht = frame["human_teleop"]
+    assert "state" in ht and "tracking" in ht
