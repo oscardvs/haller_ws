@@ -57,14 +57,44 @@ Open <http://localhost:3000>. You should see:
 NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm dev
 ```
 
-## Operating the arm
+## Operating an arm
 
-1. **Switch the arm to manual.** Top-right of the Arm card, click `manual`. The joint sliders become enabled.
-2. **Drag a joint slider.** Each drag debounces at 50 ms and posts `POST /arm/right/goal` — the arm tracks toward the slider value.
-3. **Record a pose.** Type a name (e.g. `home`) in the preset input, click `Save pose`. The current joint positions are saved to `~/.haller/presets.json` under the arm id.
-4. **Replay a pose.** Type the name and click `Go to pose`. Replays from EEPROM presets (manual mode only).
-5. **Hand back to autonomy.** Click `auto` on the mode toggle. Manual writes are rejected (HTTP 409); a VLA process or whatever is driving the arm autonomously takes over.
-6. **Emergency.** Click E-STOP (top-right). Torque drops on every arm, base velocity zeros immediately, no confirmation modal.
+Each arm card has a header strip (id + mode toggle), a wrist-camera placeholder, the six joint sliders, an Actions row, a Pose row, and a Saved-poses chip strip.
+
+1. **Switch the arm to manual.** Top-right of the Arm card, click `manual`. The joint sliders, Home button, and preset replay are enabled. Manual writes are rejected (HTTP 409) in `auto`.
+2. **Drag a joint slider.** Each drag debounces at 50 ms and posts `POST /arm/{id}/goal` — the arm tracks toward the slider value, clamped to the calibrated joint limits.
+3. **`home`** — sends every joint to its calibrated 0° (range midpoint). Manual mode only. If the arm was free-drive, torque re-engages first.
+4. **`free-drive` ↔ `engage`** — toggles torque on the entire arm. With torque off, you can hand-move the arm and the sliders just track the live position. Clicking a slider or `home` (or pressing `engage`) re-engages torque.
+5. **Record a pose.** Type a name in the Pose input, click `save`. Current joint positions are written to `~/.haller/presets.json` keyed by `(arm id, name)`.
+6. **Replay a pose.** Click any chip in the **Saved** strip to drive the arm to that pose, or type a name and click `go to`. Click `×` on a chip to delete the pose.
+7. **Hand back to autonomy.** Click `auto`. A VLA process / external driver can now write goals; HMI manual writes return HTTP 409.
+8. **Emergency.** Click E-STOP (top-right of every page). Torque drops on every arm, the base goes to zero, any active teleop session stops, no confirmation modal.
+
+## Teleop (leader ↔ follower)
+
+The dashboard's **Teleop** card lets you turn the HMI into a leader/follower bridge between the two physical arms:
+
+1. Pick the arm you'll back-drive in the **Leader** dropdown.
+2. Pick the arm that should mirror it in the **Follower** dropdown (or click `⇄` to swap).
+3. Click **start**. The backend:
+   - disables torque on the leader (so you can move it freely),
+   - enables torque on the follower,
+   - spawns a thread reading the leader's positions, clamping to the follower's calibrated limits, and writing them as the follower's goal at **60 Hz**.
+4. Move the leader arm by hand. The follower mirrors. The header chip on each arm card flips to `TELEOP · LEADER` / `TELEOP · FOLLOWER` (green), and joint sliders / Home / preset replay are disabled for the duration.
+5. Click **stop** to end. Both arms restore to `manual` with torque on.
+
+E-STOP also stops teleop before disabling torque — so the follower can't jump to a stale queued goal when you next re-engage.
+
+**Calibration caveat.** If the two arms were calibrated independently, their `(range_min + range_max) / 2` midpoints — which lerobot uses as the "0°" reference — won't line up exactly in physical space. Expect a per-joint offset of a few degrees; `shoulder_lift` makes it most visible because it changes arm height. The fix is to re-calibrate one arm holding the same physical neutral pose as the other:
+
+```bash
+lerobot-calibrate \
+    --robot.type=so101_follower \
+    --robot.port=/dev/haller_arm_leader \
+    --robot.id=haller_leader
+```
+
+An HMI-driven calibration wizard is on the roadmap (see `docs/superpowers/specs/...` once the spec is written).
 
 ## Operating the base
 
@@ -109,10 +139,17 @@ The legacy `web_teleop.py` is disabled at the launch-arg level (`enable_web_tele
 | POST | `/base/cmd_vel` | `{linear, angular}` | publishes Twist on `/cmd_vel` |
 | POST | `/arm/{id}/goal` | `{joint_name: deg, …}` (subset) | manual mode only (409 in auto) |
 | POST | `/arm/{id}/mode` | `{mode: "auto"\|"manual"\|"stop"}` | `stop` also drops torque |
+| POST | `/arm/{id}/home` | `{}` | drive all joints to 0° (manual mode only) |
+| POST | `/arm/{id}/torque` | `{enabled}` | engage/disengage torque on the whole arm |
 | POST | `/arm/{id}/preset` | `{name}` | replay a saved pose |
 | POST | `/arm/{id}/preset/record` | `{name}` | save current joint positions |
-| POST | `/estop` | `{}` | torque off all arms + zero `/cmd_vel` |
-| WS | `/ws/telemetry` | — | ~20 Hz frames: base + arms state + alerts |
+| GET  | `/arm/{id}/presets` | — | `{names: [...]}` saved poses for this arm |
+| DEL  | `/arm/{id}/preset/{name}` | — | delete a saved pose |
+| GET  | `/teleop` | — | current teleop status |
+| POST | `/teleop/start` | `{leader, follower, hz}` | start the leader→follower loop |
+| POST | `/teleop/stop` | `{}` | stop the teleop loop and restore both arms |
+| POST | `/estop` | `{}` | stop teleop, torque off all arms, zero `/cmd_vel` |
+| WS | `/ws/telemetry` | — | ~20 Hz frames: base + arms state + teleop + alerts |
 
 See `docs/superpowers/specs/2026-05-22-haller-unified-hmi-design.md` for the design rationale and frame schemas.
 
@@ -158,6 +195,10 @@ Adding the second arm later is a config edit; see the "Roadmap: leader → secon
 - **Frontend shows "disconnected" in the live badge.** Backend isn't reachable on `NEXT_PUBLIC_BACKEND_URL`. Confirm `curl http://localhost:8000/health` returns `{"status":"ok"}`.
 - **`/arm/right/goal` returns 409.** Arm is in `auto` mode. Click `manual` first.
 - **`/arm/right/goal` returns 404 with "unknown arm id".** Either the arm id in the URL is wrong, or the arm is disabled in `config.yaml`.
-- **Sliders are disabled and don't move.** Check the mode badge — only `manual` enables them.
+- **Sliders are disabled and don't move.** Check the mode badge — only `manual` enables them. Also disabled while teleop is running for participating arms.
 - **Joint sliders show 0° for everything.** Telemetry is connected but the backend's `state_snapshot` is failing — most likely the calibration file doesn't match the configured `calibration_id`. Check the backend log for the arm-telemetry warning.
+- **Backend startup fails with `No calibration for arm ... (calibration_id=...)`.** The arm has no calibration file in either `robots/so_follower/` or `teleoperators/*/`. The log includes the exact `lerobot-calibrate` command. Run it, then restart `haller-hmi`.
 - **Backend crashes at startup with `Could not open port`.** The USB symlink doesn't exist. `ls -l /dev/haller_arm_follower` — if missing, the udev rules aren't installed or the board isn't plugged in.
+- **Teleop follower position is offset from leader (especially `shoulder_lift`).** The two arms have different calibration midpoints — see the "Calibration caveat" under the Teleop section above. Re-calibrate one arm against the other's physical neutral pose.
+- **Teleop start returns 400 "leader and follower must be different arms".** Pick different arms in the two dropdowns (click `⇄` to swap).
+- **Teleop start returns 409 "teleop already running".** Stop the current session first, then start a new one.

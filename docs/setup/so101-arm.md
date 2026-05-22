@@ -199,6 +199,14 @@ lerobot-teleoperate \
 
 Move the leader by hand — the follower should mirror its motion at ~60 Hz. Quit with Ctrl-C; the follower's torque drops on disconnect (`disable_torque_on_disconnect=True`), leaving the arm back-drivable.
 
+### Calibrating two arms that will teleop together
+
+`lerobot-calibrate` sets each arm's "0°" reference at whatever physical pose you happen to hold the arm in when it prompts "move to the middle of the range." If you calibrate two arms in **different neutral poses**, their midpoints won't match in physical space and teleop (leader → follower) will show a per-joint offset — typically a few degrees, most visible on `shoulder_lift` because that joint changes arm height.
+
+When calibrating the second arm, hold it in the **same physical neutral pose** you used for the first arm (e.g. arm extended straight forward, shoulder centered, elbow centered, wrist horizontal). The midpoints will then line up and teleop tracks 1:1.
+
+If you've already calibrated and noticed a drift, just re-run `lerobot-calibrate` on one of the arms with attention to matching the other.
+
 ### Roadmap: leader → second follower
 
 When you decide to convert the leader into a second HMI-controllable follower:

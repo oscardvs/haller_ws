@@ -2,7 +2,7 @@
 
 Haller is an open-source mobile-manipulation robot: a four-wheeled differential-drive base that carries **two SO-101 arms** for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, scripts for deployment, and documentation for reproducing the build.
 
-> **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms built — follower calibrated as `haller_follower`, leader calibrated as `haller_leader`; end-to-end leader → follower teleop verified at ~60 Hz. Unified HMI (FastAPI + Next.js + shadcn) live on main.
+> **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms running through the unified HMI (FastAPI + Next.js + shadcn) on main. Per-arm controls (joint sliders, home, free-drive, pose presets) and a leader↔follower teleop launcher at 60 Hz are live. Next: HMI-driven calibration wizard.
 
 ## Hardware overview
 
