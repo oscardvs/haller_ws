@@ -10,10 +10,19 @@ export type JointState = {
   torque: boolean;
 };
 
+export type CalibrationTelemetryBlock = {
+  state: "homing" | "sweeping" | "review" | "done" | "aborted";
+  ticks?: Record<string, number>;
+  min?: Record<string, number>;
+  max?: Record<string, number>;
+  error?: string;
+};
+
 export type ArmState = {
   mode: "auto" | "manual" | "stop";
   torque?: boolean;
   joints: Record<string, JointState>;
+  calibration?: CalibrationTelemetryBlock;
 };
 
 export type BaseState = {

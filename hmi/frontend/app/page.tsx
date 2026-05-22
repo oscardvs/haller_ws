@@ -2,6 +2,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { ArmPanel } from "@/components/ArmPanel";
+import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { BasePanel } from "@/components/BasePanel";
 import { CamerasPanel } from "@/components/CamerasPanel";
 import { RecordingPanel } from "@/components/RecordingPanel";
@@ -98,20 +99,15 @@ export default function Dashboard() {
       </div>
 
       {wizardArm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-card border rounded p-6 max-w-sm">
-            <p className="text-sm mb-3">Wizard for {wizardArm} — T10 not yet implemented.</p>
-            <button
-              className="px-3 py-1.5 border rounded text-sm"
-              onClick={async () => {
-                setWizardArm(null);
-                try {
-                  setCalStatus(await fetchCalibrationStatus(BACKEND_URL));
-                } catch { /* offline */ }
-              }}
-            >Close</button>
-          </div>
-        </div>
+        <CalibrationWizard
+          armId={wizardArm}
+          onClose={async () => {
+            setWizardArm(null);
+            try {
+              setCalStatus(await fetchCalibrationStatus(BACKEND_URL));
+            } catch { /* offline */ }
+          }}
+        />
       )}
     </main>
   );
