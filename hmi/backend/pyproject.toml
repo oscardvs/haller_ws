@@ -16,6 +16,12 @@ dependencies = [
     "pydantic>=2.9",
     "pyyaml>=6.0",
     "pandas>=2.2.2",
+    # numexpr + bottleneck are pandas optional-deps that get auto-imported.
+    # The --system-site-packages venv inherits Debian's numpy-1 builds; we shadow
+    # them with numpy-2-compatible wheels so the noisy "compiled using NumPy 1.x"
+    # walls of text never appear on startup.
+    "numexpr>=2.10",
+    "bottleneck>=1.4",
     "lerobot[feetech]>=0.5,<0.6",
 ]
 
