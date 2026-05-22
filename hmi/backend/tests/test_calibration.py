@@ -294,3 +294,35 @@ def test_save_keeps_original_when_write_fails(tmp_path, monkeypatch):
     # Canonical file must still be readable with the original content
     assert existing.exists()
     assert existing.read_text() == '{"original": true}'
+
+
+# ---------------------------------------------------------------------------
+# FU1: Safety hardening — try/finally cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_abort_clears_session_even_if_enable_torque_raises():
+    handle = _make_handle()
+    handle.enable_torque.side_effect = RuntimeError("bus down")
+    arms = _make_arms(handle)
+    mgr = CalibrationManager()
+    mgr.start(arms, "right")
+    mgr.abort()  # must NOT raise
+    assert mgr.current is None
+    assert mgr._handle is None
+
+
+def test_save_clears_session_even_if_reload_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".cache" / "huggingface" / "lerobot" / "calibration" / "robots" / "so_follower").mkdir(parents=True)
+    handle = _make_handle("right")
+    handle.robot.bus.motors = {
+        j: MagicMock(model="sts3215", id=i + 1) for i, j in enumerate(JOINTS)
+    }
+    handle.connect.side_effect = RuntimeError("reload failed")
+    mgr, arms = _populate_session_through_review(handle)
+    with pytest.raises(RuntimeError, match="reload failed"):
+        mgr.save(arms)
+    # Files are written, session is cleared, even though connect raised
+    assert mgr.current is None
+    assert mgr._handle is None

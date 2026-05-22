@@ -80,7 +80,20 @@ class TelemetryBroadcaster:
                 })
                 continue
             if active is not None and active.arm_id == arm_id:
-                snap["calibration"] = self._calibration_block(active, arm_id)
+                cal_block = self._calibration_block(active, arm_id)
+                snap["calibration"] = cal_block
+                if cal_block.get("error"):
+                    frame["alerts"].append({
+                        "level": "error",
+                        "code": "calibration_bus_error",
+                        "message": cal_block["error"],
+                        "source": f"arm:{arm_id}",
+                    })
+                    # Single-tick auto-abort per spec §6. The next tick will not emit a
+                    # calibration block (current is None), which the frontend uses as the
+                    # signal that the session ended.
+                    if self._calibration is not None:
+                        self._calibration.abort()
             frame["arms"][arm_id] = snap
         return frame
 

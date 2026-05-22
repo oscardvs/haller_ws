@@ -166,24 +166,35 @@ class CalibrationManager:
                     first_backup = bak
             os.replace(str(tmp), str(p))
 
-        handle.disconnect()
-        handle.connect()
+        # Files are committed to disk. Reload the arm so subsequent commands use the
+        # new calibration — but clear the session regardless of reload outcome.
+        try:
+            handle.disconnect()
+            handle.connect()
+        except Exception as e:
+            logger.warning("calibration: arm reload after save failed: %s", e)
+            raise
+        finally:
+            target = paths[0]
+            self.current = None
+            self._handle = None
+            logger.info("calibration: saved arm %s to %s (backup=%s)", arm_id, target, first_backup)
 
-        target = paths[0]
-        self.current = None
-        self._handle = None
-        logger.info("calibration: saved arm %s to %s (backup=%s)", arm_id, target, first_backup)
         return target, first_backup
 
     def abort(self) -> None:
         if self.current is None:
             return
-        if self._handle is not None:
-            self._handle.enable_torque()
         prev = self.current.arm_id
-        self.current = None
-        self._handle = None
-        logger.info("calibration: session aborted (was arm %s)", prev)
+        try:
+            if self._handle is not None:
+                self._handle.enable_torque()
+        except Exception as e:
+            logger.warning("calibration: enable_torque during abort failed: %s", e)
+        finally:
+            self.current = None
+            self._handle = None
+            logger.info("calibration: session aborted (was arm %s)", prev)
 
 
 CALIB_ROOT_REL = ".cache/huggingface/lerobot/calibration"
