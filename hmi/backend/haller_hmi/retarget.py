@@ -60,3 +60,50 @@ class JointGoal(TypedDict):
 
 
 Side = Literal["left", "right"]
+
+
+def _np(v: Vec3) -> np.ndarray:
+    return np.asarray(v, dtype=np.float64)
+
+
+def _safe_norm(v: np.ndarray, eps: float = 1e-9) -> float:
+    n = float(np.linalg.norm(v))
+    return n if n > eps else eps
+
+
+def _signed_angle_deg(a: np.ndarray, b: np.ndarray, axis: np.ndarray) -> float:
+    """Signed angle from a to b around `axis` (right-hand rule), in degrees."""
+    a_n = a / _safe_norm(a)
+    b_n = b / _safe_norm(b)
+    cross = np.cross(a_n, b_n)
+    sin_t = float(np.dot(cross, axis / _safe_norm(axis)))
+    cos_t = float(np.dot(a_n, b_n))
+    return math.degrees(math.atan2(sin_t, cos_t))
+
+
+def compute_arm_angles(
+    shoulder: Vec3, elbow: Vec3, wrist: Vec3
+) -> tuple[float, float, float]:
+    """Return (shoulder_pan, shoulder_lift, elbow_flex) in degrees.
+
+    Coordinate convention (after upstream rebase): +X right, +Y up, +Z away
+    from the camera. The retargeted angles are *signed*, centred on a
+    straight-arm-pointing-forward neutral pose (pan=0, lift=0, elbow=0).
+    """
+    S, E, W = _np(shoulder), _np(elbow), _np(wrist)
+    U = E - S                          # upper-arm vector
+    F = W - E                          # forearm vector
+    u_len = _safe_norm(U)
+
+    # Shoulder pan: azimuth of U projected onto the horizontal (X,Z) plane.
+    # pan = 0 when U points purely +Z; pan = +90° when U points purely +X.
+    pan = math.degrees(math.atan2(U[0], U[2]))
+
+    # Shoulder lift: elevation of U above horizontal. lift = +90° straight up.
+    lift = math.degrees(math.asin(max(-1.0, min(1.0, U[1] / u_len))))
+
+    # Elbow flex: angle between U and F. 0° = straight, 90° = right angle.
+    cos_t = float(np.dot(U / u_len, F / _safe_norm(F)))
+    elbow = math.degrees(math.acos(max(-1.0, min(1.0, cos_t))))
+
+    return pan, lift, elbow
