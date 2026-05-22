@@ -115,3 +115,45 @@ def compute_arm_angles(
     elbow = math.degrees(math.acos(max(-1.0, min(1.0, cos_t))))
 
     return pan, lift, elbow
+
+
+def compute_wrist_angles(
+    forearm: Vec3, hand: HandLandmarks
+) -> tuple[float, float]:
+    """Return (wrist_flex, wrist_roll) in degrees.
+
+    Neutral pose: forearm and hand point along +Z, palm faces -Y (down).
+    `wrist_flex` is the signed angle of the middle-finger ray relative to the
+    forearm, measured around the palm-normal axis. `wrist_roll` is the signed
+    rotation of the palm normal around the forearm axis relative to the
+    neutral-palm-down direction.
+    """
+    F = _np(forearm)
+    f_hat = F / _safe_norm(F)
+
+    w = _np(hand["wrist"])
+    middle_dir = _np(hand["middle_mcp"]) - w
+    index_dir = _np(hand["index_mcp"]) - w
+    pinky_dir = _np(hand["pinky_mcp"]) - w
+
+    # Palm normal as it currently is.
+    palm_normal = np.cross(index_dir, pinky_dir)
+    palm_normal_hat = palm_normal / _safe_norm(palm_normal)
+
+    # "Neutral palm-down" reference: the world-down direction (-Y), projected
+    # onto the plane perpendicular to the forearm and renormalised.
+    world_down = np.array([0.0, -1.0, 0.0])
+    neutral_palm = world_down - np.dot(world_down, f_hat) * f_hat
+    neutral_palm_hat = neutral_palm / _safe_norm(neutral_palm)
+
+    # wrist_roll: signed rotation of palm_normal around forearm, relative to neutral.
+    wroll = _signed_angle_deg(neutral_palm_hat, palm_normal_hat, f_hat)
+
+    # wrist_flex: signed angle from forearm to middle-finger direction,
+    # measured around the wrist-side axis (perpendicular to both forearm and
+    # palm normal). For a flat palm-down hand with forearm +Z, this axis is
+    # along ±X, so bending the hand up (middle finger +Y) gives ±90°.
+    flex_axis = np.cross(palm_normal_hat, f_hat)
+    wflex = _signed_angle_deg(f_hat, middle_dir, flex_axis)
+
+    return wflex, wroll
