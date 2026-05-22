@@ -23,6 +23,13 @@ import { CameraTile } from "./CameraTile";
  */
 export function ArmPanel({ armId }: { armId: string }) {
   const arm = useTelemetry((s) => s.lastFrame?.arms[armId]);
+  const teleop = useTelemetry((s) => s.lastFrame?.teleop);
+  const teleopRole: "leader" | "follower" | null =
+    teleop?.running && teleop.leader === armId
+      ? "leader"
+      : teleop?.running && teleop.follower === armId
+        ? "follower"
+        : null;
   const [presetName, setPresetName] = useState("");
   const [presets, setPresets] = useState<string[] | null>(null);
   const joints = useMemo(() => Object.entries(arm?.joints ?? {}), [arm]);
@@ -51,7 +58,7 @@ export function ArmPanel({ armId }: { armId: string }) {
     );
   }
 
-  const disabled = arm.mode !== "manual";
+  const disabled = arm.mode !== "manual" || teleopRole !== null;
   const torqueOn = joints.some(([, j]) => j.torque);
 
   return (
@@ -71,6 +78,11 @@ export function ArmPanel({ armId }: { armId: string }) {
             />
             {torqueOn ? "torque" : "free"}
           </span>
+          {teleopRole ? (
+            <span className="ml-2 inline-flex items-center gap-1.5 rounded-sm bg-[var(--haller-live)]/20 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--haller-live)]">
+              teleop · {teleopRole}
+            </span>
+          ) : null}
         </div>
         <ModeToggle armId={armId} mode={arm.mode} />
       </div>

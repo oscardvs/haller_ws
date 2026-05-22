@@ -15,6 +15,7 @@ from .config import load_config
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
 from .safety import Mode, ModeError
+from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ cfg = load_config()
 arms = ArmManager(cfg.arms)
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
+teleop = TeleopSession(arms)
 telemetry: TelemetryBroadcaster | None = None
 
 
@@ -55,6 +57,12 @@ class TorqueBody(BaseModel):
     enabled: bool
 
 
+class TeleopStartBody(BaseModel):
+    leader: str
+    follower: str
+    hz: float = 60.0
+
+
 # ---- lifespan ------------------------------------------------------------
 
 @asynccontextmanager
@@ -63,12 +71,13 @@ async def _lifespan(app: FastAPI):
     logger.info("haller-hmi backend starting (version %s)", VERSION)
     arms.connect_all()
     ros.start()
-    telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz)
+    telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz, teleop=teleop)
     telemetry.start()
     yield
     logger.info("haller-hmi backend shutting down")
     if telemetry is not None:
         await telemetry.stop()
+    teleop.stop()
     arms.disconnect_all()
     ros.stop()
 
@@ -215,11 +224,36 @@ async def post_arm_preset_record(arm_id: str, body: PresetBody):
 @app.post("/estop")
 async def post_estop():
     logger.warning("E-STOP triggered")
+    teleop.stop()
     for handle in arms.values():
         handle.disable_torque()
         handle.guard.set(Mode.STOP)
     ros.zero_cmd_vel()
     return {"ok": True}
+
+
+@app.get("/teleop")
+async def get_teleop():
+    return teleop.status()
+
+
+@app.post("/teleop/start")
+async def post_teleop_start(body: TeleopStartBody):
+    _arm_or_404(body.leader)
+    _arm_or_404(body.follower)
+    try:
+        teleop.start(body.leader, body.follower, hz=body.hz)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, **teleop.status()}
+
+
+@app.post("/teleop/stop")
+async def post_teleop_stop():
+    teleop.stop()
+    return {"ok": True, **teleop.status()}
 
 
 @app.websocket("/ws/telemetry")

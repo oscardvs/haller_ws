@@ -3,16 +3,17 @@ arms:
   - id: right
     model: so101_follower
     port: /dev/haller_arm_follower   # udev symlink from scripts/99-haller-devices.rules
-    calibration_id: haller_follower  # matches the haller_follower.json on disk
+    calibration_id: haller_follower  # robots/so_follower/haller_follower.json
     enabled: true
-  # Second arm (the leader) — disabled until it gets recalibrated as a follower.
-  # When converting, swap `enabled: true` and set calibration_id to whatever you
-  # use in `lerobot-calibrate --robot.id=...`.
-  # - id: left
-  #   model: so101_follower
-  #   port: /dev/haller_arm_leader
-  #   calibration_id: haller_left
-  #   enabled: false
+  - id: left
+    model: so101_follower
+    port: /dev/haller_arm_leader
+    # haller_leader was originally calibrated as a teleoperator. The HMI backend
+    # auto-copies the teleop calibration into robots/so_follower/ on startup so
+    # the same arm can be driven as a follower too — required for the teleop
+    # feature where left and right swap roles freely.
+    calibration_id: haller_leader
+    enabled: true
 ros:
   cmd_vel_topic: /cmd_vel
   odom_topic: /odom

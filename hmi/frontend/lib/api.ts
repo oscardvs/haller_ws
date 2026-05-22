@@ -72,5 +72,21 @@ export const api = {
     postJson<{ ok: true; sent: ArmGoal }>(`/arm/${armId}/home`, {}),
   armTorque: (armId: string, enabled: boolean) =>
     postJson<{ ok: true; torque: boolean }>(`/arm/${armId}/torque`, { enabled }),
+  teleopStatus: () =>
+    getJson<TeleopStatus>("/teleop"),
+  teleopStart: (leader: string, follower: string, hz = 60) =>
+    postJson<{ ok: true } & TeleopStatus>("/teleop/start", { leader, follower, hz }),
+  teleopStop: () =>
+    postJson<{ ok: true } & TeleopStatus>("/teleop/stop", {}),
   estop: () => postJson<{ ok: true }>("/estop", {}),
+};
+
+export type TeleopStatus = {
+  running: boolean;
+  leader: string | null;
+  follower: string | null;
+  hz: number;
+  tick_count?: number;
+  last_error?: string | null;
+  started_at?: number | null;
 };

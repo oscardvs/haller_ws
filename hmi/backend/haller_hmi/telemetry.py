@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class TelemetryBroadcaster:
-    def __init__(self, arms, ros, hz: float = 20.0):
+    def __init__(self, arms, ros, hz: float = 20.0, teleop=None):
         self._arms = arms
         self._ros = ros
+        self._teleop = teleop
         self._period = 1.0 / hz
         self._subscribers: list[asyncio.Queue] = []
         self._task: asyncio.Task | None = None
@@ -58,6 +59,7 @@ class TelemetryBroadcaster:
             },
             "arms": {},
             "alerts": [],
+            "teleop": self._teleop.status() if self._teleop is not None else {"running": False},
         }
         for arm_id in self._arms.keys():
             try:

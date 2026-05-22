@@ -127,6 +127,10 @@ class ArmManager:
             self._handles[cfg.id] = ArmHandle(cfg)
 
     def connect_all(self) -> None:
+        # Make sure every arm has a follower-style calibration file before we
+        # try to instantiate `SO101Follower` for it.
+        from .calibration_bootstrap import ensure_follower_calibrations
+        ensure_follower_calibrations([h.config for h in self._handles.values()])
         for handle in self._handles.values():
             handle.connect()
 

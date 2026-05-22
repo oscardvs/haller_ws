@@ -23,11 +23,22 @@ export type BaseState = {
   scan_min_range: number | null;
 };
 
+export type TeleopFrameState = {
+  running: boolean;
+  leader?: string | null;
+  follower?: string | null;
+  hz?: number;
+  tick_count?: number;
+  last_error?: string | null;
+  started_at?: number | null;
+};
+
 export type TelemetryFrame = {
   t: number;
   base: BaseState;
   arms: Record<string, ArmState>;
   alerts: { level: string; code: string; message: string; source: string }[];
+  teleop?: TeleopFrameState;
 };
 
 type Store = {

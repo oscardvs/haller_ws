@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { ArmPanel } from "@/components/ArmPanel";
 import { BasePanel } from "@/components/BasePanel";
+import { TeleopLauncher } from "@/components/TeleopLauncher";
 import { api } from "@/lib/api";
 
 export default function Dashboard() {
@@ -32,6 +33,8 @@ export default function Dashboard() {
           {cfg.cameras.length === 1 ? "" : "s"}
         </span>
       </div>
+
+      <TeleopLauncher armIds={cfg.arms.map((a) => a.id)} />
 
       <div className="grid grid-cols-12 gap-3">
         <div className="col-span-12 lg:col-span-7">
