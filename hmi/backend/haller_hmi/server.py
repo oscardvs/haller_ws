@@ -12,6 +12,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from .arm import ArmManager
+from .calibration import (
+    CalibrationManager,
+    CalibrationState,
+    ConflictError,
+    UnmovedJointsError,
+    WrongStateError,
+    _calibration_paths,
+)
 from .cameras import CameraManager
 from .config import load_config
 from .presets import PresetNotFound, PresetStore
@@ -31,6 +39,7 @@ cameras = CameraManager(cfg.cameras)
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
+calibration = CalibrationManager()
 telemetry: TelemetryBroadcaster | None = None
 
 
@@ -75,7 +84,8 @@ async def _lifespan(app: FastAPI):
     arms.connect_all()
     cameras.connect_all()
     ros.start()
-    telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz, teleop=teleop)
+    telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz,
+                                     teleop=teleop, calibration=calibration)
     telemetry.start()
     yield
     logger.info("haller-hmi backend shutting down")
@@ -107,6 +117,11 @@ def _arm_or_404(arm_id: str):
         return arms[arm_id]
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+def _require_calibration_session(arm_id: str) -> None:
+    if calibration.current is None or calibration.current.arm_id != arm_id:
+        raise HTTPException(status_code=409, detail="no active session for this arm")
 
 
 # ---- routes --------------------------------------------------------------
@@ -291,6 +306,94 @@ async def post_teleop_start(body: TeleopStartBody):
 async def post_teleop_stop():
     teleop.stop()
     return {"ok": True, **teleop.status()}
+
+
+@app.get("/calibration/status")
+def get_calibration_status():
+    out_arms = []
+    for h in arms.values():
+        paths = _calibration_paths(h.config.calibration_id)
+        target = paths[0]
+        in_session = (
+            calibration.current is not None
+            and calibration.current.arm_id == h.config.id
+        )
+        out_arms.append({
+            "id": h.config.id,
+            "has_file": target.exists(),
+            "path": str(target),
+            "mtime": target.stat().st_mtime if target.exists() else None,
+            "in_session": in_session,
+        })
+    session = calibration.current
+    current = None
+    if session is not None:
+        current = {"arm_id": session.arm_id, "state": session.state.value}
+        if session.state is CalibrationState.REVIEW:
+            current["proposed"] = session.proposed
+            current["current"] = session.current_on_disk
+    return {"arms": out_arms, "current_session": current}
+
+
+@app.post("/calibration/{arm_id}/start")
+async def post_calibration_start(arm_id: str):
+    _arm_or_404(arm_id)
+    try:
+        session = calibration.start(arms, arm_id)
+    except ConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "state": session.state.value}
+
+
+@app.post("/calibration/{arm_id}/capture_neutral")
+async def post_calibration_capture_neutral(arm_id: str):
+    handle = _arm_or_404(arm_id)
+    _require_calibration_session(arm_id)
+    try:
+        calibration.current.capture_neutral(handle)
+    except WrongStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "state": calibration.current.state.value,
+            "homing_offsets": calibration.current.homing_offsets}
+
+
+@app.post("/calibration/{arm_id}/finish_sweep")
+async def post_calibration_finish_sweep(arm_id: str):
+    handle = _arm_or_404(arm_id)
+    _require_calibration_session(arm_id)
+    try:
+        proposed = calibration.current.finish_sweep(handle)
+    except UnmovedJointsError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except WrongStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {
+        "ok": True,
+        "state": calibration.current.state.value,
+        "proposed": proposed,
+        "current": calibration.current.current_on_disk,
+    }
+
+
+@app.post("/calibration/{arm_id}/save")
+async def post_calibration_save(arm_id: str):
+    _arm_or_404(arm_id)
+    _require_calibration_session(arm_id)
+    try:
+        target, backup = calibration.save(arms)
+    except WrongStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"save failed: {e}")
+    return {"ok": True, "state": "done", "path": str(target),
+            "backup_path": str(backup) if backup else None}
+
+
+@app.post("/calibration/{arm_id}/abort")
+async def post_calibration_abort(arm_id: str):
+    _arm_or_404(arm_id)
+    calibration.abort()
+    return {"ok": True, "state": "aborted"}
 
 
 @app.websocket("/ws/telemetry")

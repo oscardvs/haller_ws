@@ -8,14 +8,28 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def app_with_mocks(monkeypatch, tmp_path):
     # Mock ArmManager + RosBridge + PresetStore before importing server
+    from haller_hmi.safety import Mode
+
     arm = MagicMock()
     arm.send_goal.return_value = {"shoulder_pan": 30.0}
     arm.state_snapshot.return_value = {
         "mode": "manual",
         "joints": {"shoulder_pan": {"pos": 0.0, "min": -120.0, "max": 120.0, "torque": True}},
     }
-    arm.config = MagicMock(id="right")
-    arm.guard = MagicMock(mode=MagicMock(value="manual"))
+    arm.config = MagicMock(id="right", calibration_id="haller_right")
+    arm.guard = MagicMock()
+    arm.guard.mode = Mode.MANUAL  # real enum — CalibrationManager.start() uses `is not` check
+
+    # Calibration-related robot/bus attributes
+    arm.robot = MagicMock()
+    arm.robot.bus.motors = {
+        "shoulder_pan": MagicMock(model="sts3215", id=1),
+        "gripper":      MagicMock(model="sts3215", id=6),
+    }
+    arm.robot.bus.model_resolution_table = {"sts3215": 4096}
+    arm.robot.bus.sync_read.return_value = {"shoulder_pan": 1000, "gripper": 3500}
+    arm.robot.calibration = None
+    arm.torque_enabled = True
 
     arm_mgr = MagicMock()
     arm_mgr.keys.return_value = ["right"]
@@ -38,6 +52,21 @@ def app_with_mocks(monkeypatch, tmp_path):
                                    list=lambda arm: ["home"]),
     )
 
+    # Real CalibrationManager (exercises actual state machine), but stub save()
+    # so we never touch disk.
+    from haller_hmi.calibration import CalibrationManager
+    cal_mgr = CalibrationManager()
+
+    def _fake_save(arms_arg):
+        cal_mgr.current = None
+        return (
+            tmp_path / "haller_right.json",
+            tmp_path / "haller_right.json.bak-2026-05-22T00-00-00Z",
+        )
+
+    cal_mgr.save = _fake_save  # type: ignore[method-assign]
+    monkeypatch.setattr("haller_hmi.server.CalibrationManager", lambda *a, **kw: cal_mgr)
+
     import importlib
     import haller_hmi.server as srv_mod
     importlib.reload(srv_mod)
@@ -51,6 +80,7 @@ def app_with_mocks(monkeypatch, tmp_path):
     teleop_mock = MagicMock()
     teleop_mock.status.return_value = {"running": False, "leader": None, "follower": None}
     srv_mod.teleop = teleop_mock
+    srv_mod.calibration = cal_mgr
     return TestClient(srv_mod.app)
 
 
@@ -133,3 +163,72 @@ def test_post_teleop_stop(app_with_mocks):
     r = app_with_mocks.post("/teleop/stop", json={})
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def test_get_calibration_status(app_with_mocks):
+    r = app_with_mocks.get("/calibration/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "arms" in body and isinstance(body["arms"], list)
+    assert "current_session" in body
+
+
+def test_post_calibration_start(app_with_mocks):
+    r = app_with_mocks.post("/calibration/right/start")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "state": "homing"}
+
+
+def test_post_calibration_start_unknown_arm_404(app_with_mocks):
+    r = app_with_mocks.post("/calibration/left/start")
+    assert r.status_code == 404
+
+
+def test_post_calibration_capture_neutral(app_with_mocks):
+    app_with_mocks.post("/calibration/right/start")
+    r = app_with_mocks.post("/calibration/right/capture_neutral")
+    assert r.status_code == 200
+    assert r.json()["state"] == "sweeping"
+
+
+def test_post_calibration_finish_sweep(app_with_mocks):
+    app_with_mocks.post("/calibration/right/start")
+    app_with_mocks.post("/calibration/right/capture_neutral")
+    # Drive ticks with different positions so min != max
+    import haller_hmi.server as srv
+    session = srv.calibration.current
+    arm_handle = srv.arms["right"]
+    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 500, "gripper": 100}
+    session.tick_sweep(arm_handle)
+    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 3600, "gripper": 4000}
+    session.tick_sweep(arm_handle)
+    r = app_with_mocks.post("/calibration/right/finish_sweep")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "review"
+    assert "proposed" in body
+
+
+def test_post_calibration_save_returns_paths(app_with_mocks):
+    app_with_mocks.post("/calibration/right/start")
+    app_with_mocks.post("/calibration/right/capture_neutral")
+    import haller_hmi.server as srv
+    session = srv.calibration.current
+    arm_handle = srv.arms["right"]
+    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 500, "gripper": 100}
+    session.tick_sweep(arm_handle)
+    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 3600, "gripper": 4000}
+    session.tick_sweep(arm_handle)
+    app_with_mocks.post("/calibration/right/finish_sweep")
+    r = app_with_mocks.post("/calibration/right/save")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == "done"
+    assert "path" in body and "backup_path" in body
+
+
+def test_post_calibration_abort_is_idempotent(app_with_mocks):
+    r1 = app_with_mocks.post("/calibration/right/abort")
+    assert r1.status_code == 200
+    r2 = app_with_mocks.post("/calibration/right/abort")
+    assert r2.status_code == 200
