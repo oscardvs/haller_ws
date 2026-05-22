@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pyyaml>=6.0",
+    "pandas>=2.2.2",
     "lerobot[feetech]>=0.5,<0.6",
 ]
 

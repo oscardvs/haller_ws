@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
@@ -56,8 +55,9 @@ class ArmHandle:
 
     def _load_joint_limits(self) -> dict[str, tuple[float, float]]:
         # SO101Follower stores calibration as dict[motor_name, MotorCalibration]
-        # with range_min/range_max in raw ticks. Convert to centered degrees by
-        # subtracting the motor's home (encoded via homing_offset).
+        # with range_min/range_max in raw ticks. We center on the mid-point of
+        # that range and convert to degrees — symmetric clamping, independent
+        # of the motor's homing_offset.
         out: dict[str, tuple[float, float]] = {}
         if self.robot is None or not self.robot.calibration:
             return out
