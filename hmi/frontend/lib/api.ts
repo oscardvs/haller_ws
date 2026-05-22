@@ -95,6 +95,16 @@ export const api = {
     postJson<{ ok: true } & TeleopStatus>("/teleop/start", { leader, follower, hz }),
   teleopStop: () =>
     postJson<{ ok: true } & TeleopStatus>("/teleop/stop", {}),
+  humanTeleopStatus: () =>
+    getJson<HumanTeleopStatus>("/teleop/human"),
+  humanTeleopStart: (body: { left_arm: string; right_arm: string; swap: boolean; hz?: number }) =>
+    postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/start", body),
+  humanTeleopStop: () =>
+    postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/stop", {}),
+  humanTeleopSwap: (swap: boolean) =>
+    postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/swap", { swap }),
+  humanTeleopCalibrate: (body: { left?: PinchCalibSide; right?: PinchCalibSide }) =>
+    postJson<{ ok: true }>("/teleop/human/calibrate", body),
   estop: () => postJson<{ ok: true }>("/estop", {}),
 };
 
@@ -106,4 +116,24 @@ export type TeleopStatus = {
   tick_count?: number;
   last_error?: string | null;
   started_at?: number | null;
+};
+
+export type HumanTeleopState = "idle" | "armed" | "tracking" | "driving";
+
+export type PinchCalibSide = { min_m: number; max_m: number };
+
+export type HumanTeleopStatus = {
+  running: boolean;
+  state: HumanTeleopState;
+  left_arm: string | null;
+  right_arm: string | null;
+  swap: boolean;
+  started_at: number | null;
+  last_error: string | null;
+  tracking: {
+    left:  { age_ms: number | null; lost: boolean };
+    right: { age_ms: number | null; lost: boolean };
+  };
+  frame_age_ms?: number;
+  goal_deg?: { left?: Record<string, number>; right?: Record<string, number> };
 };
