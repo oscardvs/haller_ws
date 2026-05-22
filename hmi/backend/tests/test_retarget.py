@@ -137,3 +137,75 @@ def test_compute_wrist_angles_roll_180_palm_up():
     _, wroll = retarget.compute_wrist_angles(forearm, hand)
     # Palm flipped: roll should be ±180°.
     assert abs(abs(wroll) - 180.0) < TOLERANCE_DEG
+
+
+def test_compute_pinch_open_returns_one():
+    calib = {"min_m": 0.02, "max_m": 0.18}
+    g = retarget.compute_pinch((0.0, 0.0, 0.0), (0.18, 0.0, 0.0), calib)
+    assert abs(g - 1.0) < 1e-3
+
+
+def test_compute_pinch_closed_returns_zero():
+    calib = {"min_m": 0.02, "max_m": 0.18}
+    g = retarget.compute_pinch((0.0, 0.0, 0.0), (0.02, 0.0, 0.0), calib)
+    assert abs(g) < 1e-3
+
+
+def test_compute_pinch_clamps_below_min():
+    calib = {"min_m": 0.02, "max_m": 0.18}
+    g = retarget.compute_pinch((0.0, 0.0, 0.0), (0.001, 0.0, 0.0), calib)
+    assert g == 0.0
+
+
+def test_compute_pinch_clamps_above_max():
+    calib = {"min_m": 0.02, "max_m": 0.18}
+    g = retarget.compute_pinch((0.0, 0.0, 0.0), (0.30, 0.0, 0.0), calib)
+    assert g == 1.0
+
+
+def test_apply_mirror_flips_pan_and_roll_only():
+    g = {
+        "shoulder_pan": 30.0, "shoulder_lift": 20.0, "elbow_flex": 45.0,
+        "wrist_flex": 10.0, "wrist_roll": 18.0, "gripper": 0.5,
+    }
+    mirrored = retarget.apply_mirror(g)
+    assert mirrored["shoulder_pan"] == -30.0
+    assert mirrored["wrist_roll"] == -18.0
+    # Everything else unchanged
+    assert mirrored["shoulder_lift"] == 20.0
+    assert mirrored["elbow_flex"] == 45.0
+    assert mirrored["wrist_flex"] == 10.0
+    assert mirrored["gripper"] == 0.5
+
+
+def test_compute_joint_goal_combines_everything():
+    side = {
+        "pose": {
+            "shoulder": _vec(0.0, 1.4, 0.0),
+            "elbow":    _vec(0.0, 1.4, 0.3),
+            "wrist":    _vec(0.0, 1.4, 0.6),
+        },
+        "hand": _flat_hand(forearm_dir=(0.0, 0.0, 1.0), palm_down=True),
+        "confidence": 0.9,
+    }
+    calib = {"min_m": 0.02, "max_m": 0.18}
+    goal = retarget.compute_joint_goal(side, calib, mirror=False)
+    assert goal is not None
+    # Arm straight forward, flat-hand palm down: all near-zero except gripper.
+    for k in ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"):
+        assert abs(goal[k]) < TOLERANCE_DEG, f"{k}={goal[k]}"
+    assert 0.0 <= goal["gripper"] <= 1.0
+
+
+def test_compute_joint_goal_returns_none_if_low_confidence():
+    side = {
+        "pose": {
+            "shoulder": _vec(0.0, 1.4, 0.0),
+            "elbow":    _vec(0.0, 1.4, 0.3),
+            "wrist":    _vec(0.0, 1.4, 0.6),
+        },
+        "hand": _flat_hand(forearm_dir=(0.0, 0.0, 1.0), palm_down=True),
+        "confidence": 0.2,  # below threshold
+    }
+    calib = {"min_m": 0.02, "max_m": 0.18}
+    assert retarget.compute_joint_goal(side, calib, mirror=False) is None

@@ -162,3 +162,64 @@ def compute_wrist_angles(
     wflex = _signed_angle_deg(f_hat, middle_dir, flex_axis)
 
     return wflex, wroll
+
+
+# Minimum per-side confidence below which we refuse to emit a joint goal.
+CONFIDENCE_FLOOR = 0.4
+
+
+def compute_pinch(
+    thumb_tip: Vec3, index_tip: Vec3, calib: PinchCalib
+) -> float:
+    """Return gripper aperture in [0, 1].
+
+    Maps thumb-tip ↔ index-tip distance onto [calib.min_m, calib.max_m].
+    0 = fully closed pinch, 1 = fully open.
+    """
+    d = float(np.linalg.norm(_np(thumb_tip) - _np(index_tip)))
+    lo, hi = float(calib["min_m"]), float(calib["max_m"])
+    span = max(hi - lo, 1e-6)
+    return max(0.0, min(1.0, (d - lo) / span))
+
+
+def apply_mirror(goal: JointGoal) -> JointGoal:
+    """Flip the side-specific angles for the contralateral arm.
+
+    Mirroring across the operator's mid-sagittal plane negates only the
+    rotations that point sideways: shoulder_pan and wrist_roll. All other
+    joints (lift, elbow_flex, wrist_flex, gripper) are side-invariant.
+    """
+    return {
+        "shoulder_pan": -goal["shoulder_pan"],
+        "shoulder_lift": goal["shoulder_lift"],
+        "elbow_flex": goal["elbow_flex"],
+        "wrist_flex": goal["wrist_flex"],
+        "wrist_roll": -goal["wrist_roll"],
+        "gripper": goal["gripper"],
+    }
+
+
+def compute_joint_goal(
+    side: SideFrame, calib: PinchCalib, *, mirror: bool
+) -> JointGoal | None:
+    """End-to-end retargeting for one side. Returns None below the confidence floor."""
+    if side["confidence"] < CONFIDENCE_FLOOR:
+        return None
+    pan, lift, elbow = compute_arm_angles(
+        side["pose"]["shoulder"], side["pose"]["elbow"], side["pose"]["wrist"]
+    )
+    forearm = tuple(
+        np.asarray(side["pose"]["wrist"], dtype=np.float64)
+        - np.asarray(side["pose"]["elbow"], dtype=np.float64)
+    )
+    wflex, wroll = compute_wrist_angles(forearm, side["hand"])
+    gripper = compute_pinch(side["hand"]["thumb_tip"], side["hand"]["index_tip"], calib)
+    goal: JointGoal = {
+        "shoulder_pan": pan,
+        "shoulder_lift": lift,
+        "elbow_flex": elbow,
+        "wrist_flex": wflex,
+        "wrist_roll": wroll,
+        "gripper": gripper,
+    }
+    return apply_mirror(goal) if mirror else goal
