@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { TelemetryBar } from "@/components/TelemetryBar";
+import { ArmPanel } from "@/components/ArmPanel";
 import { api } from "@/lib/api";
 
 export default function Dashboard() {
@@ -21,10 +22,9 @@ export default function Dashboard() {
           <CardContent>Base panel coming in Task 14.</CardContent>
         </Card>
         {cfg.arms.map((arm) => (
-          <Card key={arm.id} className="col-span-5">
-            <CardHeader><CardTitle>Arm: {arm.id}</CardTitle></CardHeader>
-            <CardContent>Arm panel coming in Task 13.</CardContent>
-          </Card>
+          <div key={arm.id} className="col-span-5">
+            <ArmPanel armId={arm.id} />
+          </div>
         ))}
       </div>
     </main>
