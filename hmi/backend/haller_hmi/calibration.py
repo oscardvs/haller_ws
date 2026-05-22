@@ -8,9 +8,13 @@ Save mechanics live in this module too (see Task 2 in the plan).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import enum
 import logging
+import os
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .safety import Mode
 
@@ -138,6 +142,39 @@ class CalibrationManager:
         logger.info("calibration: session started for arm %s", arm_id)
         return session
 
+    def save(self, arms) -> tuple[Path, Path | None]:
+        if self.current is None or self.current.state is not CalibrationState.REVIEW:
+            raise WrongStateError("save requires an active session in REVIEW")
+        if self.current.proposed is None:
+            raise WrongStateError("save invariant violated: proposed is None in REVIEW state")
+        proposed = self.current.proposed
+        arm_id = self.current.arm_id
+        handle = self._handle
+        if handle is None:
+            raise WrongStateError("save invariant: _handle is None despite active session")
+        calibration_id = handle.config.calibration_id
+
+        paths = _calibration_paths(calibration_id)
+        first_backup: Path | None = None
+        for p in paths:
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            _save_calibration_to(tmp, proposed)
+            if p.exists():
+                bak = _backup_path(p)
+                shutil.move(str(p), str(bak))
+                if first_backup is None:
+                    first_backup = bak
+            os.replace(str(tmp), str(p))
+
+        handle.disconnect()
+        handle.connect()
+
+        target = paths[0]
+        self.current = None
+        self._handle = None
+        logger.info("calibration: saved arm %s to %s (backup=%s)", arm_id, target, first_backup)
+        return target, first_backup
+
     def abort(self) -> None:
         if self.current is None:
             return
@@ -147,6 +184,55 @@ class CalibrationManager:
         self.current = None
         self._handle = None
         logger.info("calibration: session aborted (was arm %s)", prev)
+
+
+CALIB_ROOT_REL = ".cache/huggingface/lerobot/calibration"
+
+
+def _cal_root() -> Path:
+    return Path.home() / CALIB_ROOT_REL
+
+
+def _calibration_paths(calibration_id: str) -> list[Path]:
+    """Return the follower path plus every existing teleop sibling for this id.
+
+    The follower path is always first and is always returned (even when the file
+    doesn't exist yet — save() needs the target).
+    """
+    root = _cal_root()
+    follower = root / "robots" / "so_follower" / f"{calibration_id}.json"
+    paths: list[Path] = [follower]
+    teleop_root = root / "teleoperators"
+    if teleop_root.exists():
+        for candidate in teleop_root.glob(f"*/{calibration_id}.json"):
+            if candidate.is_file():
+                paths.append(candidate)
+    return paths
+
+
+def _backup_path(path: Path) -> Path:
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    return path.with_name(path.name + f".bak-{ts}")
+
+
+def _save_calibration_to(path: Path, proposed: dict[str, dict]) -> None:
+    """Write the proposed JSON in the exact shape lerobot's _save_calibration emits."""
+    import draccus
+    from lerobot.motors.motors_bus import MotorCalibration
+
+    payload = {
+        motor: MotorCalibration(
+            id=entry["id"],
+            drive_mode=entry["drive_mode"],
+            homing_offset=entry["homing_offset"],
+            range_min=entry["range_min"],
+            range_max=entry["range_max"],
+        )
+        for motor, entry in proposed.items()
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f, draccus.config_type("json"):
+        draccus.dump(payload, f, indent=4)
 
 
 def _read_current_calibration(handle) -> dict[str, dict] | None:
