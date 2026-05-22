@@ -80,6 +80,16 @@ def app_with_mocks(monkeypatch, tmp_path):
     teleop_mock = MagicMock()
     teleop_mock.status.return_value = {"running": False, "leader": None, "follower": None}
     srv_mod.teleop = teleop_mock
+    human_teleop_mock = MagicMock()
+    human_teleop_mock.status.return_value = {
+        "running": False, "state": "idle",
+        "left_arm": None, "right_arm": None, "swap": False,
+        "started_at": None, "last_error": None,
+        "tracking": {"left": {"age_ms": None, "lost": False},
+                     "right": {"age_ms": None, "lost": False}},
+        "goal_deg": {"left": {}, "right": {}},
+    }
+    srv_mod.human_teleop = human_teleop_mock
     srv_mod.calibration = cal_mgr
     return TestClient(srv_mod.app)
 
@@ -254,3 +264,40 @@ def test_arm_mode_other_arm_unaffected_by_calibration(app_with_mocks):
     app_with_mocks.post("/calibration/right/start")
     r = app_with_mocks.post("/arm/left/mode", json={"mode": "manual"})
     assert r.status_code == 404
+
+
+def test_post_human_teleop_start_unknown_arm_404(app_with_mocks):
+    r = app_with_mocks.post(
+        "/teleop/human/start",
+        json={"left_arm": "left", "right_arm": "right", "swap": False},
+    )
+    # The fixture only knows about arm "right" → "left" is unknown → 404.
+    assert r.status_code == 404
+
+
+def test_post_human_teleop_stop(app_with_mocks):
+    r = app_with_mocks.post("/teleop/human/stop", json={})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_post_human_teleop_swap(app_with_mocks):
+    r = app_with_mocks.post("/teleop/human/swap", json={"swap": True})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
+def test_post_human_teleop_calibrate(app_with_mocks):
+    r = app_with_mocks.post(
+        "/teleop/human/calibrate",
+        json={"left": {"min_m": 0.02, "max_m": 0.18},
+              "right": {"min_m": 0.022, "max_m": 0.175}},
+    )
+    assert r.status_code == 200
+
+
+def test_get_human_teleop(app_with_mocks):
+    r = app_with_mocks.get("/teleop/human")
+    assert r.status_code == 200
+    body = r.json()
+    assert "state" in body

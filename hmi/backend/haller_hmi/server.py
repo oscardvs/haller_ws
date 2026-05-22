@@ -79,6 +79,27 @@ class TeleopStartBody(BaseModel):
     hz: float = 60.0
 
 
+class HumanTeleopStartBody(BaseModel):
+    left_arm: str
+    right_arm: str
+    swap: bool = False
+    hz: float = 60.0
+
+
+class HumanTeleopSwapBody(BaseModel):
+    swap: bool
+
+
+class HumanPinchCalibSide(BaseModel):
+    min_m: float
+    max_m: float
+
+
+class HumanTeleopCalibrateBody(BaseModel):
+    left: HumanPinchCalibSide | None = None
+    right: HumanPinchCalibSide | None = None
+
+
 # ---- lifespan ------------------------------------------------------------
 
 @asynccontextmanager
@@ -316,6 +337,48 @@ async def post_teleop_start(body: TeleopStartBody):
 async def post_teleop_stop():
     teleop.stop()
     return {"ok": True, **teleop.status()}
+
+
+@app.get("/teleop/human")
+async def get_human_teleop():
+    return human_teleop.status()
+
+
+@app.post("/teleop/human/start")
+async def post_human_teleop_start(body: HumanTeleopStartBody):
+    _arm_or_404(body.left_arm)
+    _arm_or_404(body.right_arm)
+    try:
+        human_teleop.start(
+            left_arm=body.left_arm, right_arm=body.right_arm,
+            swap=body.swap, hz=body.hz,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, **human_teleop.status()}
+
+
+@app.post("/teleop/human/stop")
+async def post_human_teleop_stop():
+    human_teleop.stop()
+    return {"ok": True, **human_teleop.status()}
+
+
+@app.post("/teleop/human/swap")
+async def post_human_teleop_swap(body: HumanTeleopSwapBody):
+    human_teleop.set_swap(body.swap)
+    return {"ok": True, **human_teleop.status()}
+
+
+@app.post("/teleop/human/calibrate")
+async def post_human_teleop_calibrate(body: HumanTeleopCalibrateBody):
+    human_teleop.set_pinch_calib(
+        left=body.left.model_dump() if body.left else None,
+        right=body.right.model_dump() if body.right else None,
+    )
+    return {"ok": True}
 
 
 @app.get("/calibration/status")

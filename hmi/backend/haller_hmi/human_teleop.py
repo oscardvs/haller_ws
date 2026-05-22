@@ -97,6 +97,18 @@ class HumanTeleopSession:
         concurrently. Both sessions call .status() on each other."""
         self._peer = peer
 
+    def set_swap(self, swap: bool) -> None:
+        with self._lock:
+            if self._cfg is not None:
+                self._cfg.swap = bool(swap)
+
+    def set_pinch_calib(self, *, left: dict | None, right: dict | None) -> None:
+        with self._lock:
+            if left is not None:
+                self._pinch_calib_left = dict(left)
+            if right is not None:
+                self._pinch_calib_right = dict(right)
+
     def status(self) -> dict:
         with self._lock:
             cfg = self._cfg
