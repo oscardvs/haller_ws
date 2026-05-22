@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from .arm import ArmManager
@@ -69,6 +70,16 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="haller-hmi", version=VERSION, lifespan=_lifespan)
+
+# Permissive CORS — the HMI is intended for trusted local networks (Wi-Fi or AP).
+# Add an env-flagged origin whitelist when we add auth.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,  # must be False when allow_origins is "*"
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---- helpers -------------------------------------------------------------
