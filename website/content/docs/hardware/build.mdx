@@ -4,82 +4,142 @@ description: Step-by-step assembly of a Haller robot — mechanical, electrical,
 ---
 
 <Callout type="warn">
-**Placeholder.** The full build guide is being authored from the actual assembly. The skeleton below is the intended structure; each section's content is TODO.
+**Photos pending.** Each section has the assembly steps and checkpoints in prose form; matching photos / CAD references / time-lapses are TODO.
 </Callout>
 
-## 1. Mobile base
+The build path has four passes. Each pass ends at a verifiable state you can power down at without losing progress:
 
-### 1.1 Chassis assembly
+1. **Mobile base** → first motor spin
+2. **Compute** → Jetson booting to a usable shell
+3. **Perception** → first LiDAR scan and first camera frame
+4. **Arms** → both SO-101s holding a stable pose under HMI control
 
-Mounting the LK-TECH MF5010 motors to the chassis plates, attaching wheels and caster, fastener torque specs, frame squareness.
+Skipping the [BOM](/docs/hardware/bom) is fine for now — parts can be ordered while you assemble in parallel — but every step below assumes that page's parts list is on the bench.
 
-**TODO** — photos + CAD references + torque table.
+## Pass 1 — Mobile base
 
-### 1.2 Drive electronics
+### 1.1 Mount the motors
 
-Wiring the two MF5010s to the CAN bus, terminator placement, battery connection, fuse sizing, e-stop wiring.
+Bolt each LK-TECH MF5010 to its motor mount, then bolt the motor mounts to the chassis plates. The two drive motors should sit symmetric about the chassis centerline at the documented wheel separation (`0.34 m` center-to-center — matches the URDF and `motor_params.yaml`; any deviation means odometry will drift).
 
-**TODO** — wiring diagram + photo of completed harness.
+Caster wheels go front + rear, freely rotating.
 
-### 1.3 First power-on
+**Checkpoint.** Lift the chassis, give each wheel a spin by hand. No rubbing on the frame, free rotation, no axial play.
 
-CAN bus bring-up (`sudo ip link set can0 up type can bitrate 1000000`), `can_test.py` sanity check, individual motor spin test.
+### 1.2 Wire the CAN bus
 
-**TODO** — link to bench-test script + expected console output.
+Both MF5010s share a single CAN bus.
 
-## 2. Perception
+- Connect motor A's CANH/CANL to motor B's CANH/CANL.
+- Add the 120 Ω termination resistor across CANH/CANL at the far end of the bus.
+- Connect the bus to the CANable2 adapter's CANH/CANL.
+- Plug the CANable2 into the Jetson via USB (you'll see it later as `/dev/haller_can`).
 
-### 2.1 LiDAR mounting
+### 1.3 Wire battery + E-stop
 
-RPLIDAR A1M8 mount location (centerline, height above floor for clean 2D scan), USB cable routing.
+Battery (+) → main fuse → **E-stop NC** → switched (+) → motor power input. Battery (–) → motor ground. Common ground between motor power, the 12 V → 5 V buck, and the Jetson.
 
-**TODO** — photo + height spec + a 2D scan capture.
+The E-stop **must** be on the motor power feed, not just signal. The HMI's software E-STOP zeros `/cmd_vel` and drops arm torque, but the hard E-stop is what protects you if either rclpy or the HMI hangs.
 
-### 2.2 Cameras
+**Checkpoint.** With the E-stop pressed: zero current draw on the battery. With it released: standby current only, no motor motion (no enable signal sent yet).
 
-IMX219 CSI camera mount (front-facing perception), USB webcams for the arm wrist + base view.
+### 1.4 First motor spin
 
-**TODO** — mount STL link + camera-to-arm geometry diagram.
+Power up. From a USB-tethered laptop with Linux:
 
-## 3. Compute
+```bash
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set up can0
+candump can0       # one terminal — should be silent until you poke a motor
+```
 
-### 3.1 Jetson mount
+Use the [`can_test.py`](https://github.com/oscardvs/haller_ws/blob/main/can_test.py) bench script in the repo root to send a single-motor command and read its encoder. Each MF5010 has a unique ID — verify both respond.
 
-Orin Nano dev kit mount, airflow, the wiring loom (USB hub upstream, power tail, fan).
+**Pass 1 done** once both motors spin under CAN command with the E-stop in the loop.
 
-**TODO** — photo of the compute deck.
+## Pass 2 — Compute
 
-### 3.2 First boot
+### 2.1 Mount the Jetson
 
-Flashing JetPack, expanding the rootfs, headless network setup.
+The Orin Nano dev kit lives on top of the chassis with line-of-sight access to: the CSI camera flex cable, the USB hub, and a power inlet from the buck converter.
 
-**TODO** — pointer to NVIDIA's JetPack flashing guide + the deltas we apply.
+Mind the airflow direction of the dev-kit fan — don't trap it under another plate.
 
-## 4. Arms
+### 2.2 Flash JetPack 6
 
-The two SO-101 arms are built from the [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) kit. Follow the upstream assembly guide for mechanical build, then come back to this site for:
+Flash a microSD or NVMe per [NVIDIA's JetPack guide](https://developer.nvidia.com/embedded/jetpack). Create the `orin` user — the [systemd unit files](/docs/deployment/jetson#what-the-deployment-does) hard-code this username.
 
-- Motor ID configuration → [SO-101 arms](/docs/setup/so101-arm#2-configure-motor-ids-and-baud-rate)
-- Calibration → [SO-101 arms](/docs/setup/so101-arm#3-calibrate-the-follower) or the [in-browser wizard](/docs/hmi/calibration-wizard)
+Boot, finish first-run setup, expand the rootfs, set up Wi-Fi *for the initial install only* — Haller's deployment puts the Jetson on its own AP afterwards.
 
-### 4.1 Mounting the arms on Haller
+**Checkpoint.** SSH into the Jetson over your local Wi-Fi. `nvidia-smi` (or `tegrastats` on Jetson) shows the GPU.
 
-Where each arm bolts to the chassis, cable strain relief, the workspace each arm can reach over the base footprint.
+### 2.3 Power from the buck converter
 
-**TODO** — CAD link + cable routing photo.
+Cut over from the bench USB-C supply to the on-board 12 V → 5 V buck converter. Voltage at the Jetson's input must stay in spec (5 V ± 5%) under load.
 
-## 5. Software bring-up
+## Pass 3 — Perception
 
-Once the hardware is assembled and powered, software bring-up is documented separately:
+### 3.1 RPLIDAR mount + USB
 
-- **Repo + ROS deps + colcon build** → [Mobile base](/docs/base/overview)
-- **LeRobot environment for the arms** → [LeRobot environment](/docs/setup/lerobot-environment)
-- **Arm motor configuration and calibration** → [SO-101 arms](/docs/setup/so101-arm)
-- **Unified HMI** → [HMI overview](/docs/hmi/overview)
+Mount the A1M8 on the chassis centerline, high enough to clear the workbench/arms in its 360° scan. Plug into the Jetson's powered USB hub directly — some unpowered hubs can't drive the LiDAR's motor cleanly.
 
-## TODO checklist for this page
+### 3.2 IMX219 CSI camera
 
-- [ ] Replace every "TODO" with assembly photos + steps
-- [ ] Add a single "minimum viable Haller" path (just base + LiDAR + Jetson) for readers who want to skip the arms initially
-- [ ] Add a troubleshooting section (motor doesn't enumerate, LiDAR USB power, etc.)
-- [ ] Link a complete reference build video / time-lapse
+Connect the IMX219 ribbon to the Jetson CSI slot, contacts down, lock the latch. Mount the camera looking forward at a slight downward pitch (matches `camera_pitch: 0.0` and `camera_height: 0.15` in the traversability config — adjust if you mount differently).
+
+Enable the CSI in JetPack:
+
+```bash
+sudo /opt/nvidia/jetson-io/jetson-io.py
+# Configure Jetson Nano CSI Connector → Camera IMX219-A → save → reboot
+```
+
+See [Vision pipeline / Hardware setup](/docs/base/vision#hardware-setup) for the rest.
+
+### 3.3 USB webcams
+
+Plug the wrist + base webcams into the USB hub. Confirm they enumerate:
+
+```bash
+v4l2-ctl --list-devices
+```
+
+**Pass 3 done** once `ros2 topic echo /scan --once` returns data and `curl http://localhost:8000/cameras/base_front/snapshot` returns a JPEG (this assumes the [Mobile base bring-up](/docs/base/overview) and [Jetson deployment](/docs/deployment/jetson) have happened — you can defer to Pass 4 if you're building all hardware first).
+
+## Pass 4 — Arms
+
+The two SO-101 arms are built from the [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) kit. Follow the upstream assembly guide for the mechanical build — that's the canonical reference for joint-by-joint assembly.
+
+### 4.1 Configure motors before assembly
+
+The Feetech STS3215 servos all ship with ID 1; you need 1–6 per arm. The [SO-101 motor configuration step](/docs/setup/so101-arm#2-configure-motor-ids-and-baud-rate) walks the IDs in reverse (gripper → shoulder_pan), one motor at a time. Do this **before** the arm is fully assembled — once motors are buried inside the kinematic chain, you can't easily get a single one on the bus alone.
+
+### 4.2 Mount each arm
+
+Bolt each SO-101 base to its arm mounting plate, then bolt the plate to the chassis. Match the kinematic conventions you'll use in [`hmi/backend/config.yaml`](https://github.com/oscardvs/haller_ws/blob/main/hmi/backend/config.yaml) — the `id: right` / `id: left` naming should reflect which side of the chassis each arm physically sits.
+
+Cable strain relief: the Feetech daisy-chain runs from the bus adapter board (mounted near the Jetson) through the arm's base, up through each joint to the gripper. Plan slack at each joint so the cable doesn't bind through the joint's range of motion.
+
+### 4.3 Power supplies
+
+Each arm needs its own servo power supply (don't share — the bus adapter only powers logic, not motors). Mount the supplies somewhere ventilated and route the barrel jacks to the bus adapter boards.
+
+### 4.4 Calibrate
+
+Per [SO-101 arms / Calibrate the follower](/docs/setup/so101-arm#3-calibrate-the-follower) and [Bring up the leader](/docs/setup/so101-arm#5-bring-up-the-leader), then verify with the [HMI's calibration wizard](/docs/hmi/calibration-wizard).
+
+**Pass 4 done** once you can teleop in the HMI: pick an arm card, switch to manual, drag the shoulder_pan slider, watch the joint move.
+
+## After Pass 4
+
+You have a Haller. Two natural next steps:
+
+- **Run it in sim first to gain confidence on workflows** without risking the hardware → [MuJoCo simulation](/docs/sim/mujoco).
+- **Deploy it as a self-starting unit** so power-on Just Works → [Jetson deployment](/docs/deployment/jetson).
+
+## TODO
+
+- Per-pass assembly photos.
+- CAD files for chassis plates, motor mounts, arm mounting plates.
+- A reference build video / time-lapse.
+- A "minimum viable Haller" path (no LiDAR, single arm) so a curious builder can validate the bring-up workflow at lower cost before committing.

@@ -46,6 +46,16 @@ Open [http://localhost:3000](http://localhost:3000). You should see:
 NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm dev
 ```
 
+### Choosing a config
+
+The backend reads `hmi/backend/config.yaml` by default. To run with a different config — most commonly one of the [MuJoCo sim presets](/docs/sim/mujoco) — pass `--config` to `run_hmi.sh`:
+
+```bash
+./scripts/run_hmi.sh --config hmi/backend/config.solo-sim.yaml
+```
+
+The flag is exported as `HALLER_HMI_CONFIG`, which `haller_hmi.config.load_config` honors. Useful for switching between real-hardware and sim configs without editing the systemd unit.
+
 ## Operating an arm
 
 Each arm card has a header strip (id + mode toggle), a wrist-camera placeholder, the six joint sliders, an Actions row, a Pose row, and a Saved-poses chip strip.

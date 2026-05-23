@@ -1,0 +1,184 @@
+---
+title: SO-101 MuJoCo simulation
+description: Three HMI-driven MuJoCo presets — solo follower, bimanual, leader+follower — that reuse the real HMI surface for dev without hardware, dataset generation, and closed-loop eval.
+---
+
+The HMI can drive a simulated SO-101 instead of a physical one. The browser surface is identical (per-arm panels, leader↔follower teleop, human-pose teleop, dataset recorder, overhead MJPEG camera) — you just point the backend at a sim config file and `lerobot`'s `SO101Follower` is replaced by a `SimArmHandle` that writes joint goals to a MuJoCo world running in the same process.
+
+Three preset configs ship in `hmi/backend/`: **solo follower**, **bimanual**, and **leader+follower**. Each is a single yaml.
+
+<Callout type="info">
+**Status (2026-05-23).** Shipped on `main`. `SimArmHandle` is a drop-in replacement for `SO101Follower`; the existing teleop loops, dataset recorder, and HMI panels work against sim without code changes. The MuJoCo physics + a vendored [trs_so_arm100](https://github.com/AlexanderKoch-Koch/trs_so_arm100) MJCF for the arm are the new pieces.
+</Callout>
+
+## Architecture
+
+```mermaid
+flowchart LR
+    classDef hmi fill:#3fb95022,stroke:#3fb950,color:inherit
+    classDef sim fill:#1f6feb22,stroke:#1f6feb,color:inherit
+    classDef real fill:#a371f722,stroke:#a371f7,color:inherit
+    classDef ui fill:#f8512922,stroke:#f85129,color:inherit
+
+    Browser[Browser - dashboard, /teleop/human, recorder]:::ui
+    Backend[FastAPI :8000]:::hmi
+    ArmMgr[ArmManager]:::hmi
+
+    Browser -->|REST + WS| Backend
+    Backend --> ArmMgr
+
+    ArmMgr -- "source: sim" --> SimArm[SimArmHandle]:::sim
+    ArmMgr -- "source: real" --> RealArm[SO101Follower - lerobot]:::real
+
+    SimArm --> World[MuJoCoWorld - stepper thread]:::sim
+    World --> MJCF[("Composed MJCF<br/>workbench + arm(s) + camera")]:::sim
+
+    World -. "render() at fps" .-> SimCam[SimCamera]:::sim
+    SimCam --> Backend
+    Backend -. "MJPEG /cameras/overhead_sim/stream" .-> Browser
+
+    RealArm --> Feetech[("Feetech bus<br/>physical STS3215×6")]:::real
+```
+
+The substitution lives at the `ArmManager` layer. Anything above it (REST endpoints, telemetry WS frames, teleop sessions, recording) is identical between real and sim.
+
+## Install
+
+The `mujoco` Python package is pinned in `hmi/backend/pyproject.toml`. Editable installs already have it; otherwise:
+
+```bash
+source ~/venvs/haller-hmi/bin/activate-haller-hmi
+pip install -e hmi/backend
+```
+
+The HMI runs headless by default and uses **EGL** for offscreen rendering. If your host lacks EGL, fall back to OSMesa:
+
+```bash
+export MUJOCO_GL=osmesa   # or 'egl' (default), or 'glfw' for the interactive viewer
+```
+
+## The three presets
+
+| Preset | Config | Arms | Scene |
+|---|---|---|---|
+| Solo follower | `hmi/backend/config.solo-sim.yaml` | 1 sim follower (right) | workbench + 1 cube |
+| Bimanual | `hmi/backend/config.bimanual-sim.yaml` | 2 sim followers (left + right) | workbench + 2 cubes |
+| Leader+follower | `hmi/backend/config.leader-follower-sim.yaml` | 2 sim arms (one drives, one mirrors) | workbench |
+
+Bring any one up with the `--config` flag (see [HMI overview](/docs/hmi/overview#choosing-a-config) for the flag itself):
+
+```bash
+./scripts/run_hmi.sh --config hmi/backend/config.solo-sim.yaml
+```
+
+Then open the HMI at `http://localhost:3000`. Joint sliders, presets, and the overhead camera all work against the sim. The MJPEG stream is at `http://localhost:8000/cameras/overhead_sim/stream`.
+
+## Watching the physics
+
+Two options:
+
+### Headless (default) — watch through the HMI camera
+
+The HMI's overhead camera streams the sim's scene at 15 fps to the browser, same as a real `opencv` camera. Good for desktop dev and for any flow that uses the dataset recorder (which needs a camera in `config.yaml` either way).
+
+### Interactive MuJoCo viewer
+
+```bash
+MUJOCO_VIEWER=1 ./scripts/run_hmi.sh --config hmi/backend/config.leader-follower-sim.yaml
+```
+
+Opens a desktop MuJoCo window with mouse-drag perturbation. Required for the leader+follower preset's mouse-drag mode (below) — there's no way to drag arm joints without the viewer.
+
+## Leader+follower modes
+
+The leader+follower preset has three operating modes for the leader side. They differ only in what the new `/teleop/sim/start` endpoint is told to read from:
+
+```mermaid
+flowchart LR
+    classDef src fill:#1f6feb22,stroke:#1f6feb,color:inherit
+    classDef bridge fill:#3fb95022,stroke:#3fb950,color:inherit
+    classDef fol fill:#f8512922,stroke:#f85129,color:inherit
+
+    A["MouseDragSource<br/>(viewer mouse → joints)"]:::src --> S
+    B["DatasetReplaySource<br/>(LeRobotDataset → joints)"]:::src --> S
+    C["Real SO-101 leader<br/>(via standard /teleop/start)"]:::src --> S
+
+    S["sim_teleop loop<br/>read leader 60 Hz<br/>clamp + write sim follower"]:::bridge --> F[Sim follower in MuJoCoWorld]:::fol
+```
+
+### Mouse-drag (default)
+
+```bash
+MUJOCO_VIEWER=1 ./scripts/run_hmi.sh --config hmi/backend/config.leader-follower-sim.yaml
+```
+
+Then start a sim teleop session:
+
+```bash
+curl -X POST http://localhost:8000/teleop/sim/start \
+    -H 'Content-Type: application/json' \
+    -d '{"follower":"right","leader":{"source":"mouse","arm_name":"left"},"hz":60}'
+```
+
+Drag the LEFT arm's joints in the MuJoCo viewer — the RIGHT arm mirrors at 60 Hz.
+
+### Dataset replay
+
+```bash
+curl -X POST http://localhost:8000/teleop/sim/start \
+    -H 'Content-Type: application/json' \
+    -d '{"follower":"right","leader":{"source":"replay","dataset_path":"/path/to/lerobot/dataset"},"hz":30}'
+```
+
+Replays the action stream from a recorded LeRobotDataset on the sim follower. Useful for sanity-checking that a dataset captures what you think it does, without spinning up the real arms.
+
+### Real leader → sim follower
+
+Edit `hmi/backend/config.leader-follower-sim.yaml` and switch the LEFT arm from `source: sim` to `source: real`, with the right `port` and `calibration_id`. Then use the **regular** `/teleop/start` endpoint — the HMI's existing `TeleopSession` does the rest:
+
+```bash
+curl -X POST http://localhost:8000/teleop/start \
+    -H 'Content-Type: application/json' \
+    -d '{"leader":"left","follower":"right","hz":60}'
+```
+
+This is one direction: real → sim. The opposite (sim leader → real follower) intentionally requires `/teleop/sim/start` and a `MouseDragSource` / `DatasetReplaySource` — you don't want a sim arm driving a physical one accidentally.
+
+## What's in the MJCF
+
+Each preset's world is composed at boot from three pieces:
+
+- `sim/assets/scenes/workbench.xml` — workbench geometry, lighting, an "overhead" camera pointed at the work surface.
+- The vendored `trs_so_arm100` MJCF for each arm, instanced once per `arms:` entry with `source: sim`.
+- One or more cubes for solo and bimanual.
+
+`hmi/backend/haller_hmi/sim/builder.py` is the composer. CamelCase ↔ snake_case translation between MJCF joint names and HMI joint names lives in `hmi/backend/haller_hmi/sim/arm.py`.
+
+## REST surface (sim-only)
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| POST | `/teleop/sim/start` | `{ follower, leader: { source, arm_name?, dataset_path? }, hz? }` | Start sim leader → sim follower bridge. 409 if any teleop is running. |
+| POST | `/teleop/sim/stop` | — | Stop the sim-teleop bridge. |
+| GET | `/teleop/sim/status` | — | Current state, configured arms, source kind. |
+
+Everything else (arm goals, mode, calibration, leader/follower, human teleop, dataset recorder, cameras) reuses the existing endpoints documented in [HMI overview](/docs/hmi/overview).
+
+## Troubleshooting
+
+- **`GLFWError: X11: Failed to open display`** — `MUJOCO_GL=glfw` requires a display. Use `MUJOCO_GL=egl` (default) or `MUJOCO_GL=osmesa` for headless.
+- **Sim camera frame is all black** — check the `<light>` in `sim/assets/scenes/workbench.xml` is in the composed MJCF (it always is — the builder includes the workbench unconditionally) and that the overhead camera's `pos`/`euler` actually point at the scene. Adjust the `<camera name="overhead" ...>` in `hmi/backend/haller_hmi/sim/builder.py` if your scene is tall or off-center.
+- **`lerobot.policies` import error on the dev laptop** — unrelated to the sim. Local scipy/numpy ABI quirk; VLA policy code lives on RunPod, not on the laptop.
+
+## Out of scope (for now)
+
+- Wrist cameras in sim.
+- Gripper / cube friction tuning for reliable picks (default MJCF likely needs work for real pick-and-place).
+- Domain randomization (textures, lighting, object pose).
+- A closed-loop policy-eval CLI (belongs on RunPod alongside `scripts/runpod/`).
+
+## Design reference
+
+- Design spec: [`docs/superpowers/specs/2026-05-23-so101-mujoco-sim-trio-design.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/specs/2026-05-23-so101-mujoco-sim-trio-design.md)
+- Implementation plan: [`docs/superpowers/plans/2026-05-23-so101-mujoco-sim-trio.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/plans/2026-05-23-so101-mujoco-sim-trio.md)
+- Vendored arm MJCF: [AlexanderKoch-Koch/trs_so_arm100](https://github.com/AlexanderKoch-Koch/trs_so_arm100)

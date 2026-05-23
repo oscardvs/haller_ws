@@ -7,55 +7,43 @@ This page is the one-screen mental model. Every subsystem has its own deeper pag
 
 ## The three planes
 
-```
-                                  ┌──────────────────────────────────────────┐
-                                  │  Operator laptop / phone                 │
-                                  │  Browser at http://10.42.0.1:3000        │
-                                  │  - Next.js HMI (dashboard, /teleop/human)│
-                                  │  - WebSocket /ws/telemetry  (~20 Hz)     │
-                                  │  - REST /arm/*  /base/*  /teleop/*       │
-                                  └────────────────┬─────────────────────────┘
-                                                   │   Wi-Fi (HallerRobot AP)
-─── Application plane ──────────────────────────── ┼ ──────────────────────────
-                                                   ▼
-   ┌─────────────────────────┐         ┌───────────────────────────────────────┐
-   │  lerobot CLI            │         │  haller-hmi.service                   │
-   │  (record/calibrate/     │  ───▶   │  ┌─ FastAPI :8000 (REST + WS)         │
-   │   train/visualize)      │ stops   │  ├─ ArmManager  (SO101Follower×2)    │
-   │  needs exclusive arms   │  HMI    │  │     direct USB ↔ Feetech bus       │
-   │  + cameras              │         │  ├─ Calibration session machine       │
-   └─────────────────────────┘         │  ├─ Teleop (leader↔follower 60 Hz)    │
-                                       │  ├─ HumanTeleopSession (webcam → 60Hz)│
-                                       │  ├─ Camera capture (~15 Hz MJPEG)     │
-                                       │  └─ rclpy bridge ↔ ROS topics         │
-                                       │                                       │
-                                       │  Next.js :3000 (prebuilt standalone)  │
-                                       └────────────────┬──────────────────────┘
-                                                        │
-                                                        │  ROS topics:
-                                                        │   pub  /cmd_vel
-                                                        │   sub  /odom /scan
-                                                        ▼
-─── ROS 2 plane ─────────────────────────────────────────────────────────────────
-                                       ┌──────────────────────────────────────┐
-                                       │  haller-robot.service                │
-                                       │  (ros2 launch haller_hardware …)     │
-                                       │  ┌─ robot_state_publisher (URDF/TF)  │
-                                       │  ├─ haller_motor_controller          │
-                                       │  │     /cmd_vel → SLCAN → MF5010×2   │
-                                       │  │     publishes /odom @ 50 Hz       │
-                                       │  ├─ sllidar_node → /scan             │
-                                       │  └─ haller_vision (camera/det/seg)   │
-                                       └─────────┬────────────┬────────────┬──┘
-                                                 │ CAN 1 Mbps │ USB        │ CSI
-─── Hardware plane ──────────────────────────────┼────────────┼────────────┼────
-                                                 ▼            ▼            ▼
-                                       ┌─────────────────────────────────────┐
-                                       │  2× LK-TECH MF5010   RPLIDAR  IMX219│
-                                       │   (drive)             A1M8     cam  │
-                                       │  + 2× SO-101 arms (Feetech bus      │
-                                       │     adapters, direct USB)           │
-                                       └─────────────────────────────────────┘
+```mermaid
+flowchart TB
+    classDef ui fill:#f8512922,stroke:#f85129,color:inherit
+    classDef app fill:#3fb95022,stroke:#3fb950,color:inherit
+    classDef ros fill:#1f6feb22,stroke:#1f6feb,color:inherit
+    classDef hw fill:#a371f722,stroke:#a371f7,color:inherit
+    classDef wire stroke-dasharray: 5 4
+
+    subgraph Operator["Operator laptop / phone"]
+        Browser["Browser → http://10.42.0.1:3000<br/>REST /arm/*  /base/*  /teleop/*<br/>WS /ws/telemetry  (~20 Hz)<br/>WS /ws/teleop/human/in"]:::ui
+    end
+
+    subgraph Application["Application plane"]
+        direction LR
+        HMI["haller-hmi.service<br/>FastAPI :8000 + Next.js :3000<br/>ArmManager (SO101Follower×2)<br/>Calibration / Teleop / HumanTeleop<br/>Camera capture (~15 Hz MJPEG)<br/>rclpy bridge"]:::app
+        Lerobot["lerobot CLI<br/>record / calibrate / train / visualize<br/>needs exclusive arms + cameras"]:::app
+        Lerobot -.->|"stops HMI before running"| HMI
+    end
+
+    subgraph ROS["ROS 2 plane"]
+        Robot["haller-robot.service<br/>ros2 launch haller_hardware<br/>robot_state_publisher · motor_controller<br/>sllidar_node · haller_vision"]:::ros
+    end
+
+    subgraph Hardware["Hardware plane"]
+        direction LR
+        Motors["2× LK-TECH MF5010<br/>(drive, CAN 1 Mbps)"]:::hw
+        Lidar["RPLIDAR A1M8<br/>(USB)"]:::hw
+        Cam["IMX219<br/>(CSI)"]:::hw
+        Arms["2× SO-101 arms<br/>(Feetech bus, USB)"]:::hw
+    end
+
+    Browser ==>|"Wi-Fi: HallerRobot AP"| HMI
+    HMI -- "pub /cmd_vel<br/>sub /odom /scan" --> Robot
+    HMI -- "direct USB" --> Arms
+    Robot -- "SLCAN" --> Motors
+    Robot -- "USB" --> Lidar
+    Robot -- "CSI" --> Cam
 ```
 
 Three observations from this picture:

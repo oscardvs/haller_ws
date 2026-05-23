@@ -31,31 +31,32 @@ The dead-man (SPACE) is the safety primitive. While SPACE is up, the backend ret
 
 Three pieces, in order from camera to motor:
 
-```
-┌─────────────────────────────────────┐
-│  Browser (/teleop/human)            │
-│  ┌─ getUserMedia → <video>          │
-│  ├─ MediaPipe Pose + Hands  (local) │
-│  ├─ KeypointFrame { left, right,    │
-│  │                  pinch_calib,    │
-│  │                  dead_man, ts }  │
-│  └─ HumanTeleopClient (WS sender)   │
-└──────────────┬──────────────────────┘
-               │  WS /ws/teleop/human/in
-               │  one frame per render tick
-┌──────────────▼──────────────────────┐
-│  Backend (FastAPI)                  │
-│  ┌─ ingest_frame                    │
-│  ├─ retarget.compute_joint_goal     │
-│  │     shoulder, elbow, wrist…      │
-│  │     pinch → gripper aperture     │
-│  ├─ rate cap (4°/tick) + clamp      │
-│  └─ ArmManager.write_goal @ 60 Hz   │
-└──────────────┬──────────────────────┘
-               │  Feetech bus
-┌──────────────▼──────────────────────┐
-│  Two SO-101 follower arms           │
-└─────────────────────────────────────┘
+```mermaid
+flowchart TB
+    classDef br fill:#f8512922,stroke:#f85129,color:inherit
+    classDef be fill:#3fb95022,stroke:#3fb950,color:inherit
+    classDef hw fill:#a371f722,stroke:#a371f7,color:inherit
+
+    subgraph Browser["Browser at /teleop/human"]
+        Cam[getUserMedia → video element]:::br
+        MP["MediaPipe Pose + Hands<br/>(local WebGL / WASM)"]:::br
+        Frame["KeypointFrame { left, right,<br/>pinch_calib, dead_man, ts }"]:::br
+        Client[HumanTeleopClient — WS sender]:::br
+        Cam --> MP --> Frame --> Client
+    end
+
+    subgraph Backend["FastAPI backend"]
+        Ingest[ingest_frame]:::be
+        Retarget["retarget.compute_joint_goal<br/>shoulder · elbow · wrist · pinch → gripper"]:::be
+        Cap["rate cap (4°/tick) + joint clamp"]:::be
+        Write["ArmManager.write_goal @ 60 Hz"]:::be
+        Ingest --> Retarget --> Cap --> Write
+    end
+
+    Arms[Two SO-101 follower arms]:::hw
+
+    Client -- "WS /ws/teleop/human/in<br/>one frame per render tick" --> Ingest
+    Write -- "Feetech bus" --> Arms
 ```
 
 The browser does **all** the perception. MediaPipe runs on WebGL/WASM locally; the backend only ever sees keypoint coordinates, never raw video. That keeps the wire skinny enough for 60 Hz over any decent network and means the HMI doesn't need a GPU.

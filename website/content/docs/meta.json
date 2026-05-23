@@ -11,6 +11,8 @@
     "setup",
     "---Operating the HMI---",
     "hmi",
+    "---Simulation---",
+    "sim",
     "---Data and policies---",
     "data",
     "---Deployment---",
