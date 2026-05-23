@@ -6,6 +6,17 @@ Unified web HMI for the Haller robot. Replaces the legacy `web_teleop.py`.
 - **Backend:** FastAPI wrapping `lerobot` (arms) and `rclpy` (base) in one process.
 - **Wire protocol:** REST for commands, WebSocket for ~20 Hz telemetry.
 
+## Simulation
+
+Three MuJoCo presets let you bring the HMI up against simulated arms — solo,
+bimanual, leader+follower. See [docs/setup/sim.md](../docs/setup/sim.md).
+
+```bash
+./scripts/run_hmi.sh --config hmi/backend/config.solo-sim.yaml
+./scripts/run_hmi.sh --config hmi/backend/config.bimanual-sim.yaml
+./scripts/run_hmi.sh --config hmi/backend/config.leader-follower-sim.yaml
+```
+
 ## Repository layout
 
 ```
