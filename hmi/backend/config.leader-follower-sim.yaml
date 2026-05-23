@@ -1,0 +1,46 @@
+# Leader+follower sim, default = mouse-drag the sim leader in the MuJoCo viewer.
+#
+# Variants:
+#   - Mouse (default): MUJOCO_VIEWER=1 ./scripts/run_hmi.sh --config <this file>,
+#     then drag the LEFT arm's joints in the viewer; the RIGHT arm mirrors via
+#     POST /teleop/sim/start {follower: "right", leader: {source: "mouse", arm_name: "left"}}.
+#
+#   - Replay: POST /teleop/sim/start {follower: "right", leader: {source: "replay",
+#     dataset_path: "/path/to/lerobot/dataset"}}.
+#
+#   - Real leader -> sim follower: REPLACE the `left` arm below with `source: real`
+#     and `port: /dev/haller_arm_leader` / `calibration_id: haller_leader`, then use
+#     the regular leader<->follower POST /teleop/start endpoint (not /teleop/sim/start).
+arms:
+  - id: left
+    model: so101_follower
+    port: "(sim)"
+    calibration_id: "(sim)"
+    source: sim
+    sim_arm_name: left
+    enabled: true
+  - id: right
+    model: so101_follower
+    port: "(sim)"
+    calibration_id: "(sim)"
+    source: sim
+    sim_arm_name: right
+    enabled: true
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+telemetry:
+  hz: 20
+cameras:
+  - id: overhead_sim
+    role: base
+    source: sim_camera
+    mjcf_camera: overhead
+    width: 640
+    height: 480
+    fps: 15
+sim_leader:
+  source: mouse

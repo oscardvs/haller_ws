@@ -1,0 +1,32 @@
+# Bimanual sim: two SO-101 followers facing the same workbench, two cubes.
+arms:
+  - id: left
+    model: so101_follower
+    port: "(sim)"
+    calibration_id: "(sim)"
+    source: sim
+    sim_arm_name: left
+    enabled: true
+  - id: right
+    model: so101_follower
+    port: "(sim)"
+    calibration_id: "(sim)"
+    source: sim
+    sim_arm_name: right
+    enabled: true
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+telemetry:
+  hz: 20
+cameras:
+  - id: overhead_sim
+    role: base
+    source: sim_camera
+    mjcf_camera: overhead
+    width: 640
+    height: 480
+    fps: 15
