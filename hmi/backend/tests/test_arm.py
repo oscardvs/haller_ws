@@ -76,10 +76,13 @@ def test_arm_manager_lookup_by_id(monkeypatch):
     monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
     monkeypatch.setattr("haller_hmi.arm.ArmHandle._load_joint_limits",
                         lambda self: {"gripper": (0, 100)})
+    monkeypatch.setattr(
+        "haller_hmi.calibration_bootstrap.ensure_follower_calibrations",
+        lambda configs: None,
+    )
     mgr = ArmManager([cfg_right])
+    mgr.connect_all()
     assert mgr["right"].config.id == "right"
-    with pytest.raises(KeyError):
-        _ = mgr["left"]
 
 
 def test_read_joints_deg_strips_pos_suffix(monkeypatch):

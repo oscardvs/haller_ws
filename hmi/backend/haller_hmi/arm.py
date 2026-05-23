@@ -132,28 +132,60 @@ class ArmHandle:
 
 
 class ArmManager:
-    """Lookup-by-id collection of ArmHandle instances."""
+    """Lookup-by-id collection of arm handles (real or sim)."""
 
     def __init__(self, arm_configs: list[ArmConfig]):
-        self._handles: dict[str, ArmHandle] = {}
-        for cfg in arm_configs:
-            if not cfg.enabled:
-                continue
-            self._handles[cfg.id] = ArmHandle(cfg)
+        self._configs = [c for c in arm_configs if c.enabled]
+        self._handles: dict[str, "ArmHandle | SimArmHandle"] = {}
+        self._world = None  # lazily constructed if any sim arm/camera needs it
+
+    def _ensure_world(self) -> "MuJoCoWorld":
+        if self._world is not None:
+            return self._world
+        from .sim.builder import build_scene
+        from .sim.world import MuJoCoWorld
+
+        sim_arm_names = [c.sim_arm_name for c in self._configs
+                         if c.source == "sim" and c.sim_arm_name is not None]
+        mjcf_xml, arm_joint_map = build_scene(arms=sim_arm_names, cubes=0)
+        self._world = MuJoCoWorld(mjcf_xml, arm_joint_map=arm_joint_map)
+        self._world.start()
+        return self._world
 
     def connect_all(self) -> None:
-        # Make sure every arm has a follower-style calibration file before we
-        # try to instantiate `SO101Follower` for it.
         from .calibration_bootstrap import ensure_follower_calibrations
-        ensure_follower_calibrations([h.config for h in self._handles.values()])
-        for handle in self._handles.values():
-            handle.connect()
+        from .sim.arm import SimArmHandle
+
+        real_configs = [c for c in self._configs if c.source == "real"]
+        if real_configs:
+            ensure_follower_calibrations(real_configs)
+
+        for cfg in self._configs:
+            if cfg.source == "sim":
+                if not cfg.sim_arm_name:
+                    raise ValueError(
+                        f"arm {cfg.id!r} has source=sim but no sim_arm_name"
+                    )
+                world = self._ensure_world()
+                handle = SimArmHandle(cfg, world=world)
+                handle.connect()
+            else:
+                handle = ArmHandle(cfg)
+                handle.connect()
+            self._handles[cfg.id] = handle
 
     def disconnect_all(self) -> None:
         for handle in self._handles.values():
             handle.disconnect()
+        if self._world is not None:
+            self._world.stop()
+            self._world = None
 
-    def __getitem__(self, arm_id: str) -> ArmHandle:
+    def world(self) -> "MuJoCoWorld | None":
+        """Exposed so SimCamera and SimLeaderTeleop can share the same world."""
+        return self._world
+
+    def __getitem__(self, arm_id: str):
         if arm_id not in self._handles:
             raise KeyError(f"unknown arm id {arm_id!r}; known: {list(self._handles)}")
         return self._handles[arm_id]
