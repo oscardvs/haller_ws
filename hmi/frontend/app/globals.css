@@ -6,8 +6,14 @@
 
 /* =========================================================================
    HALLER HMI — design tokens
-   Industrial mission-control surface. Dark default. One accent (emerald)
-   for healthy/live, amber for warn, red for fault/E-STOP.
+   Industrial mission-control surface. Dark default. Brand colour is the
+   Bambu PLA dark green of the printed robot — exactly the same hex as the
+   docs site (`oklch(0.72 0.14 152)`), so the two products share a single
+   green identity. Status semantics are unchanged: green=live, amber=warn,
+   red=fault/E-STOP, blue=manual. The orange "action" accent from the docs
+   site is deliberately not used here — the operator already reads
+   amber/red as urgency, and introducing a fourth signal colour would only
+   blur that.
    ========================================================================= */
 
 @theme inline {
@@ -101,9 +107,10 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 
-  /* Status palette — same hex in both themes so semantics never shift */
-  --haller-live: oklch(0.72 0.17 152);          /* emerald-500 */
-  --haller-live-soft: oklch(0.72 0.17 152 / 0.18);
+  /* Status palette — same hex in both themes so semantics never shift.
+     --haller-live is the canonical Haller brand green (Bambu PLA dark). */
+  --haller-live: oklch(0.72 0.14 152);          /* Bambu green */
+  --haller-live-soft: oklch(0.72 0.14 152 / 0.18);
   --haller-warn: oklch(0.82 0.16 78);            /* amber-400 */
   --haller-fault: oklch(0.62 0.245 27);          /* red-500 */
   --haller-manual: oklch(0.66 0.16 245);         /* blue-500 */
@@ -115,38 +122,39 @@
 }
 
 .dark {
-  /* True industrial dark: not pure black, faint cool tint */
-  --background: oklch(0.155 0.005 250);
+  /* True industrial dark: not pure black, faint cool-green tint that shares
+     hue lineage with the brand green at imperceptibly-low chroma. */
+  --background: oklch(0.155 0.005 170);
   --foreground: oklch(0.96 0 0);
-  --card: oklch(0.195 0.005 250);
+  --card: oklch(0.195 0.005 170);
   --card-foreground: oklch(0.96 0 0);
-  --popover: oklch(0.205 0.005 250);
+  --popover: oklch(0.205 0.005 170);
   --popover-foreground: oklch(0.96 0 0);
   --primary: oklch(0.92 0 0);
   --primary-foreground: oklch(0.18 0 0);
-  --secondary: oklch(0.255 0.005 250);
+  --secondary: oklch(0.255 0.005 170);
   --secondary-foreground: oklch(0.96 0 0);
-  --muted: oklch(0.235 0.005 250);
+  --muted: oklch(0.235 0.005 170);
   --muted-foreground: oklch(0.65 0 0);
-  --accent: oklch(0.265 0.005 250);
+  --accent: oklch(0.265 0.005 170);
   --accent-foreground: oklch(0.96 0 0);
   --destructive: oklch(0.62 0.245 27);
   --border: oklch(1 0 0 / 8%);
   --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.72 0.17 152 / 0.55);
-  --chart-1: oklch(0.72 0.17 152);
+  --ring: oklch(0.72 0.14 152 / 0.55);
+  --chart-1: oklch(0.72 0.14 152);
   --chart-2: oklch(0.66 0.16 245);
   --chart-3: oklch(0.82 0.16 78);
   --chart-4: oklch(0.62 0.245 27);
   --chart-5: oklch(0.55 0 0);
-  --sidebar: oklch(0.18 0.005 250);
+  --sidebar: oklch(0.18 0.005 170);
   --sidebar-foreground: oklch(0.96 0 0);
-  --sidebar-primary: oklch(0.72 0.17 152);
+  --sidebar-primary: oklch(0.72 0.14 152);
   --sidebar-primary-foreground: oklch(0.155 0 0);
-  --sidebar-accent: oklch(0.255 0.005 250);
+  --sidebar-accent: oklch(0.255 0.005 170);
   --sidebar-accent-foreground: oklch(0.96 0 0);
   --sidebar-border: oklch(1 0 0 / 8%);
-  --sidebar-ring: oklch(0.72 0.17 152);
+  --sidebar-ring: oklch(0.72 0.14 152);
 
   --haller-rail: oklch(0.55 0 0);
   --haller-grid: oklch(1 0 0 / 0.035);
@@ -266,12 +274,12 @@
   border-radius: 3px !important;
   background: oklch(0.96 0 0) !important;
   border: 1px solid var(--haller-live) !important;
-  box-shadow: 0 0 0 2px oklch(0.155 0.005 250), 0 0 12px var(--haller-live-soft) !important;
+  box-shadow: 0 0 0 2px oklch(0.155 0.005 170), 0 0 12px var(--haller-live-soft) !important;
 }
 [data-slot="slider"][data-disabled] [data-slot="slider-range"] {
   background-color: oklch(0.55 0 0) !important;
 }
 [data-slot="slider"][data-disabled] [data-slot="slider-thumb"] {
   border-color: oklch(0.55 0 0) !important;
-  box-shadow: 0 0 0 2px oklch(0.155 0.005 250) !important;
+  box-shadow: 0 0 0 2px oklch(0.155 0.005 170) !important;
 }

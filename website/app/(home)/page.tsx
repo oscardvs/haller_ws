@@ -74,7 +74,8 @@ function Hero() {
       >
         <Link
           href="/docs"
-          className="group inline-flex h-11 items-center gap-2 rounded-md bg-fd-primary px-5 text-[13px] font-medium tracking-wide text-fd-primary-foreground shadow-[0_1px_0_0_oklch(0%_0_0_/_8%)] transition hover:translate-y-[-1px] hover:shadow-[0_4px_18px_-6px_oklch(63%_0.21_42_/_55%)]"
+          className="group inline-flex h-11 items-center gap-2 rounded-md px-5 text-[13px] font-medium tracking-wide shadow-[0_1px_0_0_rgba(0,0,0,0.08)] transition hover:translate-y-[-1px] hover:shadow-[0_4px_18px_-6px_var(--haller-action)]"
+          style={{ background: 'var(--haller-action)', color: 'var(--haller-action-fg)' }}
         >
           <span className="h-mono text-[10px] opacity-80">→</span>
           Read the documentation

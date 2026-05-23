@@ -4,8 +4,14 @@
 
 /* ────────────────────────────────────────────────────────────────────────────
    Haller — editorial / engineering-blueprint theme
-   Type: Fraunces (display) · IBM Plex Sans (body) · JetBrains Mono (labels)
-   Color: warm paper / deep ink with a single signal-orange accent
+   Type:   Fraunces (display) · IBM Plex Sans (body) · JetBrains Mono (labels)
+   Color:  warm paper / deep ink
+           · GREEN (Bambu PLA dark) = brand + state (wordmark, accents,
+             section pips, sidebar/TOC active, LIVE indicators)
+           · ORANGE (hi-vis sleeves) = action + event (primary CTA, hover
+             emphasis, REC / E-STOP)
+   The two colours never both apply to the same element. Green is identity,
+   orange is something happening.
    ──────────────────────────────────────────────────────────────────────────── */
 
 @theme inline {
@@ -30,8 +36,8 @@
 
   --color-fd-border: oklch(18% 0.02 60 / 14%);
 
-  /* signal orange — used sparingly, the one note that carries the brand */
-  --color-fd-primary: oklch(63% 0.21 42);
+  /* GREEN — Bambu PLA dark, brand colour, never an action */
+  --color-fd-primary: oklch(42% 0.10 153);
   --color-fd-primary-foreground: oklch(98% 0.01 82);
 
   --color-fd-secondary: oklch(92% 0.016 82);
@@ -40,11 +46,17 @@
   --color-fd-accent: oklch(90% 0.018 82);
   --color-fd-accent-foreground: oklch(18% 0.018 60);
 
-  --color-fd-ring: oklch(63% 0.21 42 / 60%);
+  --color-fd-ring: oklch(42% 0.10 153 / 60%);
   --color-fd-overlay: oklch(18% 0.018 60 / 28%);
 
-  /* paper-fiber selection — warm, not blue */
-  --selection-bg: oklch(63% 0.21 42 / 22%);
+  /* ORANGE — hi-vis action accent. Only used where the user is doing or
+     should do something: primary CTAs, REC, E-STOP, link hover emphasis. */
+  --haller-action: oklch(63% 0.18 42);
+  --haller-action-fg: oklch(98% 0.01 82);
+  --haller-action-soft: oklch(63% 0.18 42 / 22%);
+
+  /* paper-fiber selection — green-tinted (identity, not action) */
+  --selection-bg: oklch(42% 0.10 153 / 18%);
   --selection-fg: oklch(18% 0.018 60);
 
   /* hairline grids for backgrounds */
@@ -68,7 +80,8 @@
 
   --color-fd-border: oklch(92% 0.012 82 / 12%);
 
-  --color-fd-primary: oklch(72% 0.19 48);
+  /* GREEN brand lifted for dark surface */
+  --color-fd-primary: oklch(72% 0.14 152);
   --color-fd-primary-foreground: oklch(13% 0.01 70);
 
   --color-fd-secondary: oklch(17.5% 0.012 70);
@@ -77,10 +90,15 @@
   --color-fd-accent: oklch(20% 0.014 70);
   --color-fd-accent-foreground: oklch(92% 0.012 82);
 
-  --color-fd-ring: oklch(72% 0.19 48 / 55%);
+  --color-fd-ring: oklch(72% 0.14 152 / 55%);
   --color-fd-overlay: oklch(0% 0 0 / 40%);
 
-  --selection-bg: oklch(72% 0.19 48 / 28%);
+  /* ORANGE action lifted for dark surface */
+  --haller-action: oklch(74% 0.17 48);
+  --haller-action-fg: oklch(13% 0.01 70);
+  --haller-action-soft: oklch(74% 0.17 48 / 22%);
+
+  --selection-bg: oklch(72% 0.14 152 / 22%);
   --selection-fg: oklch(96% 0.012 82);
 
   --grid-line: oklch(92% 0.012 82 / 6%);

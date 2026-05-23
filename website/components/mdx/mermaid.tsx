@@ -24,18 +24,18 @@ const PALETTE = {
     mutedFg:   '#5e544a',
     card:      '#f0eadc',
     border:    '#d0c8b8',
-    primary:   '#d75721',
+    primary:   '#1c6845', /* Bambu PLA dark green — brand colour */
     primaryFg: '#fbf7ed',
   },
   dark: {
-    bg:        '#1a1612',
+    bg:        '#161311',
     fg:        '#e7e1d4',
-    muted:     '#221d17',
+    muted:     '#1f1c18',
     mutedFg:   '#a99e88',
-    card:      '#1f1a15',
+    card:      '#1c1815',
     border:    '#3a3127',
-    primary:   '#e57b3f',
-    primaryFg: '#1a1612',
+    primary:   '#3fb472', /* Bambu green lifted for dark surface */
+    primaryFg: '#101810',
   },
 } as const;
 
