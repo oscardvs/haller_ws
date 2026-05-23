@@ -100,12 +100,26 @@ class CameraHandle:
 
 
 class CameraManager:
-    """Lookup-by-id collection of CameraHandle instances."""
+    """Lookup-by-id collection of camera handles (real OpenCV or sim)."""
 
-    def __init__(self, camera_configs: list[CameraConfig]):
-        self._handles: dict[str, CameraHandle] = {
-            c.id: CameraHandle(c) for c in camera_configs
-        }
+    def __init__(self, camera_configs: list[CameraConfig], world=None):
+        from .sim.camera import SimCamera  # late import so non-sim setups don't need mujoco
+
+        self._handles: dict[str, "CameraHandle | SimCamera"] = {}
+        for c in camera_configs:
+            if c.source == "sim_camera":
+                if world is None:
+                    logger.warning(
+                        "camera %s: source=sim_camera but no MuJoCoWorld available; skipping",
+                        c.id,
+                    )
+                    continue
+                self._handles[c.id] = SimCamera(c, world=world)
+            else:
+                self._handles[c.id] = CameraHandle(c)
+
+    def keys(self):
+        return self._handles.keys()
 
     def connect_all(self) -> None:
         for h in self._handles.values():

@@ -36,7 +36,7 @@ VERSION = "0.1.0"
 # Globals — wired in lifespan
 cfg = load_config()
 arms = ArmManager(cfg.arms)
-cameras = CameraManager(cfg.cameras)
+cameras: CameraManager | None = None   # constructed in lifespan, after arms.connect_all()
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
@@ -104,9 +104,10 @@ class HumanTeleopCalibrateBody(BaseModel):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    global telemetry
+    global telemetry, cameras
     logger.info("haller-hmi backend starting (version %s)", VERSION)
     arms.connect_all()
+    cameras = CameraManager(cfg.cameras, world=arms.world())
     cameras.connect_all()
     ros.start()
     telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz,
