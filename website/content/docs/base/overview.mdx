@@ -139,7 +139,7 @@ It starts (in order):
 1. `robot_state_publisher` — broadcasts the URDF transforms.
 2. `motor_controller_node` (from `haller_motor_controller`) — opens `/dev/haller_can`, subscribes to `/cmd_vel`, publishes `/odom`.
 3. `sllidar_node` — opens `/dev/haller_lidar`, publishes `/scan`.
-4. `haller_vision` pipeline — IMX219 camera + detection + segmentation + traversability (skip with `enable_vision:=false`).
+4. `haller_vision` pipeline — IMX219 camera + detection + segmentation + traversability (skip with `enable_vision:=false`). Detailed walkthrough on the [Vision pipeline](/docs/base/vision) page.
 
 ### Launch flags
 
@@ -245,7 +245,6 @@ ROS-stack symptoms (`/scan` empty, `ros2 topic list` missing topics across proce
 
 ## What this page doesn't cover yet
 
-- **Vision pipeline internals** — `haller_vision` (camera, detection, segmentation, traversability) has its own pipeline launch and config. A dedicated page is TODO.
 - **CAN motor protocol details** — frame format, control modes (`0x9C`, `0xA2`, …), encoder math. The LK-TECH PDFs cover this; a derived cheatsheet is TODO.
 - **Tuning Nav2 for Haller's footprint** — costmap inflation, controller plugin choice, recovery behaviors. TODO.
 - **Multi-machine ROS** — running Nav2 on a beefier laptop while the Jetson handles only hardware nodes. Pointers, not full guide, TODO.
