@@ -21,8 +21,21 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   const MDX = page.data.body;
   const markdownUrl = getPageMarkdownUrl(page).url;
 
+  /* "§ HMI / Calibration" — section pip above the title.
+     Skips for the docs index where slugs is empty. */
+  const slugs = page.slugs;
+  const sectionLabel = formatSectionLabel(slugs);
+
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
+      {sectionLabel && (
+        <div className="mb-3 flex items-center gap-2">
+          <span className="h-mono text-[10.5px] tracking-[0.18em] uppercase text-fd-primary">
+            §
+          </span>
+          <span className="h-label">{sectionLabel}</span>
+        </div>
+      )}
       <DocsTitle>{page.data.title}</DocsTitle>
       <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
       <div className="flex flex-row gap-2 items-center border-b pb-6">
@@ -35,13 +48,28 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
       <DocsBody>
         <MDX
           components={getMDXComponents({
-            // this allows you to link to other pages with relative file paths
             a: createRelativeLink(source, page),
           })}
         />
       </DocsBody>
     </DocsPage>
   );
+}
+
+function formatSectionLabel(slugs: string[]): string | null {
+  /* Only render the label for nested pages — for top-level entries the H1
+     already shows the same word, so a "Architecture / Architecture" pair
+     would be noise. */
+  if (slugs.length < 2) return null;
+  const pretty = (s: string) =>
+    s
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .replace(/Hmi/g, 'HMI')
+      .replace(/Ros/g, 'ROS')
+      .replace(/\bSo101\b/gi, 'SO-101')
+      .replace(/\bBom\b/gi, 'BOM');
+  return pretty(slugs[0]);
 }
 
 export async function generateStaticParams() {

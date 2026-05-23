@@ -2,11 +2,372 @@
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
 
+/* ────────────────────────────────────────────────────────────────────────────
+   Haller — editorial / engineering-blueprint theme
+   Type: Fraunces (display) · IBM Plex Sans (body) · JetBrains Mono (labels)
+   Color: warm paper / deep ink with a single signal-orange accent
+   ──────────────────────────────────────────────────────────────────────────── */
+
+@theme inline {
+  --font-sans: var(--font-plex), 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono-jet), 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  --font-display: var(--font-fraunces), 'Fraunces', ui-serif, Georgia, serif;
+}
+
+:root {
+  /* paper-white surface, warm */
+  --color-fd-background: oklch(96.8% 0.012 82);
+  --color-fd-foreground: oklch(18% 0.018 60);
+
+  --color-fd-muted: oklch(94% 0.014 82);
+  --color-fd-muted-foreground: oklch(40% 0.018 60);
+
+  --color-fd-popover: oklch(98.5% 0.008 82);
+  --color-fd-popover-foreground: oklch(18% 0.018 60);
+
+  --color-fd-card: oklch(95.4% 0.014 82);
+  --color-fd-card-foreground: oklch(18% 0.018 60);
+
+  --color-fd-border: oklch(18% 0.02 60 / 14%);
+
+  /* signal orange — used sparingly, the one note that carries the brand */
+  --color-fd-primary: oklch(63% 0.21 42);
+  --color-fd-primary-foreground: oklch(98% 0.01 82);
+
+  --color-fd-secondary: oklch(92% 0.016 82);
+  --color-fd-secondary-foreground: oklch(18% 0.018 60);
+
+  --color-fd-accent: oklch(90% 0.018 82);
+  --color-fd-accent-foreground: oklch(18% 0.018 60);
+
+  --color-fd-ring: oklch(63% 0.21 42 / 60%);
+  --color-fd-overlay: oklch(18% 0.018 60 / 28%);
+
+  /* paper-fiber selection — warm, not blue */
+  --selection-bg: oklch(63% 0.21 42 / 22%);
+  --selection-fg: oklch(18% 0.018 60);
+
+  /* hairline grids for backgrounds */
+  --grid-line: oklch(18% 0.018 60 / 8%);
+  --grid-line-strong: oklch(18% 0.018 60 / 16%);
+}
+
+.dark {
+  /* deep ink, faintly warm — like dark oilcloth, not blue-grey */
+  --color-fd-background: oklch(13% 0.01 70);
+  --color-fd-foreground: oklch(92% 0.012 82);
+
+  --color-fd-muted: oklch(16.5% 0.012 70);
+  --color-fd-muted-foreground: oklch(68% 0.014 82 / 88%);
+
+  --color-fd-popover: oklch(15% 0.012 70);
+  --color-fd-popover-foreground: oklch(92% 0.012 82);
+
+  --color-fd-card: oklch(15.4% 0.012 70);
+  --color-fd-card-foreground: oklch(92% 0.012 82);
+
+  --color-fd-border: oklch(92% 0.012 82 / 12%);
+
+  --color-fd-primary: oklch(72% 0.19 48);
+  --color-fd-primary-foreground: oklch(13% 0.01 70);
+
+  --color-fd-secondary: oklch(17.5% 0.012 70);
+  --color-fd-secondary-foreground: oklch(92% 0.012 82);
+
+  --color-fd-accent: oklch(20% 0.014 70);
+  --color-fd-accent-foreground: oklch(92% 0.012 82);
+
+  --color-fd-ring: oklch(72% 0.19 48 / 55%);
+  --color-fd-overlay: oklch(0% 0 0 / 40%);
+
+  --selection-bg: oklch(72% 0.19 48 / 28%);
+  --selection-fg: oklch(96% 0.012 82);
+
+  --grid-line: oklch(92% 0.012 82 / 6%);
+  --grid-line-strong: oklch(92% 0.012 82 / 12%);
+}
+
+/* nudge sidebar contrast so the rail reads as a separate piece of paper */
+.dark #nd-sidebar {
+  --color-fd-muted: oklch(15.5% 0.012 70);
+  --color-fd-secondary: oklch(17% 0.012 70);
+  --color-fd-muted-foreground: oklch(72% 0.014 82);
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+
 html {
   scrollbar-gutter: stable;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* opt into Fraunces' soft + opsz axes; harmless for other fonts */
+  font-feature-settings: 'ss01', 'ss02', 'cv11';
 }
 
 html > body[data-scroll-locked] {
   margin-right: 0px !important;
   --removed-body-scroll-bar-size: 0px !important;
+}
+
+body {
+  font-family: var(--font-sans);
+  letter-spacing: -0.005em;
+}
+
+::selection {
+  background: var(--selection-bg);
+  color: var(--selection-fg);
+}
+
+/* slim, warm scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-fd-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-fd-border);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fd-muted-foreground);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* ── docs prose: serif display, mono labels, calmer rules ────────────────── */
+
+.prose :is(h1, h2, h3, h4) {
+  font-family: var(--font-display);
+  font-weight: 480;
+  letter-spacing: -0.02em;
+  font-variation-settings: 'opsz' 144, 'SOFT' 30;
+}
+.prose h1 {
+  font-size: 2.6rem;
+  line-height: 1.05;
+  font-variation-settings: 'opsz' 144, 'SOFT' 50;
+}
+.prose h2 {
+  font-size: 1.7rem;
+  line-height: 1.15;
+  margin-top: 2.2em;
+  padding-top: 0.4em;
+  border-top: 1px solid var(--color-fd-border);
+}
+.prose h3 {
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+.prose h2 a, .prose h3 a, .prose h4 a { font-weight: inherit; }
+
+.prose strong { font-weight: 600; }
+.prose em { font-style: italic; }
+.prose a { text-underline-offset: 3px; text-decoration-thickness: 1px; }
+
+/* inline code: subtle paper-tinted chip, primary used only on hover so
+   text-heavy pages don't read as a sea of orange */
+.prose :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  font-weight: 500;
+  padding: 0.08em 0.38em;
+  border-radius: 4px;
+  background: var(--color-fd-muted);
+  color: var(--color-fd-foreground);
+  border: 1px solid var(--color-fd-border);
+  transition: color .15s ease, border-color .15s ease;
+}
+.prose :not(pre) > code:hover {
+  color: var(--color-fd-primary);
+  border-color: color-mix(in oklab, var(--color-fd-primary) 40%, var(--color-fd-border));
+}
+.prose a:hover :not(pre) > code,
+.prose a :not(pre) > code {
+  color: inherit;
+}
+
+.prose pre {
+  border: 1px solid var(--color-fd-border);
+  border-radius: 6px;
+}
+
+/* tables: schematic look */
+.prose table {
+  font-size: 0.92em;
+}
+.prose thead {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.prose th { font-weight: 500; color: var(--color-fd-muted-foreground); }
+.prose tr { border-bottom: 1px solid var(--color-fd-border); }
+
+/* the title header on each docs page */
+article > h1:first-of-type {
+  font-family: var(--font-display);
+  font-variation-settings: 'opsz' 144, 'SOFT' 50;
+  letter-spacing: -0.025em;
+}
+
+/* Card grid (Fumadocs <Cards>) gets a more editorial treatment */
+[data-card] {
+  border-radius: 6px;
+  border-color: var(--color-fd-border);
+  background: linear-gradient(
+    to bottom,
+    color-mix(in oklab, var(--color-fd-card) 92%, transparent),
+    var(--color-fd-card)
+  );
+  transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+}
+[data-card]:hover {
+  border-color: color-mix(in oklab, var(--color-fd-primary) 60%, var(--color-fd-border));
+  transform: translateY(-1px);
+}
+
+/* Mermaid container: paper card with hairline border */
+.mermaid-frame {
+  border: 1px solid var(--color-fd-border);
+  border-radius: 6px;
+  padding: 1.25rem;
+  background:
+    radial-gradient(circle at 1px 1px, var(--grid-line) 1px, transparent 0) 0 0 / 16px 16px,
+    var(--color-fd-card);
+  position: relative;
+}
+.mermaid-frame::before,
+.mermaid-frame::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--color-fd-muted-foreground);
+  opacity: .55;
+}
+.mermaid-frame::before { top: 6px; left: 6px; border-right: 0; border-bottom: 0; }
+.mermaid-frame::after  { bottom: 6px; right: 6px; border-left: 0; border-top: 0; }
+
+/* ── reusable utility components for the home/editorial bits ─────────────── */
+
+.h-grid {
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+}
+
+.h-rule {
+  height: 1px;
+  background-image: linear-gradient(
+    to right,
+    var(--color-fd-border) 0,
+    var(--color-fd-border) 60%,
+    transparent 60%,
+    transparent 64%,
+    var(--color-fd-border) 64%,
+    var(--color-fd-border) 100%
+  );
+  background-size: 8px 1px;
+}
+
+.h-mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum', 'zero';
+  letter-spacing: 0.04em;
+}
+
+.h-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-fd-muted-foreground);
+}
+
+.h-display {
+  font-family: var(--font-display);
+  font-weight: 420;
+  letter-spacing: -0.035em;
+  font-variation-settings: 'opsz' 144, 'SOFT' 50;
+}
+
+/* pulsing status dot used in the meta bar */
+.h-status-dot {
+  position: relative;
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  background: var(--color-fd-primary);
+}
+.h-status-dot::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 99px;
+  border: 1px solid var(--color-fd-primary);
+  opacity: 0;
+  animation: h-pulse 2.4s ease-out infinite;
+}
+@keyframes h-pulse {
+  0%   { transform: scale(.6); opacity: .9; }
+  100% { transform: scale(1.8); opacity: 0;  }
+}
+
+/* corner registration mark — 4-armed crosshair */
+.h-cross {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  color: var(--color-fd-muted-foreground);
+  opacity: .55;
+}
+.h-cross::before,
+.h-cross::after {
+  content: '';
+  position: absolute;
+  background: currentColor;
+}
+.h-cross::before { top: 50%; left: 0; right: 0; height: 1px; transform: translateY(-.5px); }
+.h-cross::after  { left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-.5px); }
+
+/* one-shot entrance reveal for hero — staggered via inline delay */
+@keyframes h-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+.h-rise {
+  animation: h-rise .9s cubic-bezier(.2, .7, .2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .h-rise, .h-status-dot::after { animation: none; }
+}
+
+/* HMI nav wordmark — small refinement so brackets sit on the baseline */
+.h-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4ch;
+  font-family: var(--font-display);
+  font-weight: 460;
+  letter-spacing: -0.02em;
+  font-size: 1.1rem;
+  font-variation-settings: 'opsz' 144, 'SOFT' 100;
+}
+.h-wordmark .bracket {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 0.7em;
+  color: var(--color-fd-primary);
+  letter-spacing: 0;
 }
