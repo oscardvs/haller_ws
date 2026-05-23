@@ -171,6 +171,8 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
     """
     if not arms:
         raise ValueError("scene needs at least one arm")
+    if len(set(arms)) != len(arms):
+        raise ValueError(f"duplicate arm ids in {arms!r}")
 
     # Horizontal offsets so arms don't overlap. Single arm: centered. Two arms:
     # +/- 0.20 m on x.

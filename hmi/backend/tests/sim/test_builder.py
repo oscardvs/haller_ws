@@ -49,3 +49,8 @@ def test_build_scene_cubes_have_unique_names():
         if n and re.match(r"cube_\d+", n):
             names.append(n)
     assert sorted(names) == ["cube_0", "cube_1"]
+
+
+def test_duplicate_arm_ids_raises():
+    with pytest.raises(ValueError, match="duplicate arm ids"):
+        build_scene(arms=["left", "left"], cubes=0)
