@@ -1,0 +1,94 @@
+---
+title: Wi-Fi AP fallback
+description: Standalone story for the HallerRobot access point — what it is, how to start/stop it from the CLI, how to change SSID/password/interface, and how to debug it.
+---
+
+The Jetson can publish its own Wi-Fi network (`HallerRobot`, 10.42.0.1/24) instead of joining an existing one. This is the default mode at boot and the reason you can operate a freshly powered Haller in any environment without first finding it on someone's network.
+
+The full Jetson deployment story is on [Jetson deployment](/docs/deployment/jetson); this page covers the AP piece in isolation — when you want to debug it, change defaults, or trigger it manually outside the systemd flow.
+
+## How it works
+
+Two pieces:
+
+- [`scripts/setup_ap.sh`](https://github.com/oscardvs/haller_ws/blob/main/scripts/setup_ap.sh) — a `nmcli`-driven script that creates an NetworkManager hotspot connection profile and brings it up.
+- [`scripts/haller-ap.service`](https://github.com/oscardvs/haller_ws/blob/main/scripts/haller-ap.service) — a systemd oneshot that calls `setup_ap.sh start` on boot and `setup_ap.sh stop` on shutdown. Ordered to run before `haller-robot.service`.
+
+The script uses NetworkManager's `ipv4.method shared` mode, which gives the AP a DHCP/DNS server out of the box — that's how your laptop gets a `10.42.0.x` lease.
+
+## Defaults
+
+| Setting | Value |
+|---|---|
+| SSID | `HallerRobot` |
+| Password | `haller2024` |
+| Channel | 6 (2.4 GHz, `bg` band) |
+| Robot IP | `10.42.0.1/24` |
+| Wi-Fi interface | `wlP1p1s0` (Orin Nano dev kit default) |
+
+Change any of these by editing the `SSID`, `PASSWORD`, `CON_NAME`, or `WIFI_DEV` variables at the top of `setup_ap.sh`. After editing, `sudo systemctl restart haller-ap.service`.
+
+<Callout type="warn">
+`WIFI_DEV` is hardware-specific. The Orin Nano dev kit's onboard Wi-Fi enumerates as `wlP1p1s0` — different boards use `wlan0`, `wlp2s0`, etc. Find yours with `nmcli device | grep wifi`. The script silently fails to bring the AP up if this name is wrong.
+</Callout>
+
+## Manual start / stop
+
+The script accepts a single arg:
+
+```bash
+sudo ~/haller_ws/scripts/setup_ap.sh start    # bring up HallerRobot
+sudo ~/haller_ws/scripts/setup_ap.sh stop     # tear down + reconnect to last Wi-Fi
+```
+
+`stop` deletes the hotspot connection profile and triggers an `nmcli device connect` so the Jetson rejoins whatever Wi-Fi network it last knew. Use this when the Jetson is on your bench and you want to push updates over a real internet connection.
+
+Going through systemd (preferred when the service is installed):
+
+```bash
+sudo systemctl start  haller-ap.service       # equivalent to setup_ap.sh start
+sudo systemctl stop   haller-ap.service       # equivalent to setup_ap.sh stop
+sudo systemctl status haller-ap.service       # check current state
+```
+
+## Connecting from a laptop
+
+1. Wi-Fi → `HallerRobot` → password `haller2024`.
+2. The Jetson hands out a lease via DHCP; your laptop gets a `10.42.0.x` IP.
+3. The HMI is at `http://10.42.0.1:3000`. SSH is at `orin@10.42.0.1`.
+
+The Jetson has no upstream Wi-Fi while the AP is active — the dev kit only has one radio. If you need internet access from the Jetson, stop the AP first.
+
+## Connecting from a phone
+
+The same `HallerRobot` SSID works fine for a phone (Android/iOS). The HMI's responsive layout works in mobile browsers, but the dataset-collection and calibration flows assume a keyboard, so an operator phone is most useful for the dashboard's E-STOP + base joystick.
+
+## Debugging
+
+- **`nmcli con show --active`** — confirms `HallerAP` is the active connection on the Wi-Fi device.
+- **`journalctl -u haller-ap.service`** — full systemd log for the service, including the `nmcli` output from both start and stop.
+- **`iw dev $WIFI_DEV info`** — kernel-level view of the radio (channel, mode, ssid).
+- **`ip addr show $WIFI_DEV`** — should show `10.42.0.1/24` once the AP is up.
+- **Hotspot doesn't appear on laptops/phones.** Usually `WIFI_DEV` is wrong, or the radio is off (`rfkill list` to check).
+- **Hotspot appears but the laptop can't get a lease.** NetworkManager's `ipv4.method shared` failed to spawn a DHCP server. Restart the service; check `journalctl -u NetworkManager` for related errors.
+
+## Removing the AP entirely
+
+If you want to permanently switch the Jetson to client-only Wi-Fi:
+
+```bash
+sudo systemctl disable --now haller-ap.service
+sudo rm /etc/systemd/system/haller-ap.service
+sudo systemctl daemon-reload
+sudo ~/haller_ws/scripts/setup_ap.sh stop    # clears the connection profile too
+```
+
+The `haller-robot.service` doesn't depend on `haller-ap` — disabling the AP is safe.
+
+## Security notes
+
+`haller2024` is a default for getting started. Treat the AP as **trust-on-physical-access** — anyone in range can connect and reach the HMI on `:3000`, which exposes E-STOP-able actuators. Before deploying outside a controlled environment:
+
+- Change `PASSWORD` in `setup_ap.sh` to something unique.
+- Consider putting the HMI behind an auth layer (not currently shipped — see [HMI overview](/docs/hmi/overview) for what the surface looks like today).
+- If the robot lives on a real network long-term, prefer that to the AP — disable the AP service and let the Jetson join your trusted Wi-Fi.

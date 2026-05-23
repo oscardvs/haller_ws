@@ -11,6 +11,8 @@
     "---Operating the HMI---",
     "hmi",
     "---Data and policies---",
-    "data"
+    "data",
+    "---Deployment---",
+    "deployment"
   ]
 }

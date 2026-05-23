@@ -1,0 +1,172 @@
+---
+title: Jetson deployment
+description: From a freshly flashed Jetson Orin Nano to a self-starting Haller — clone, build, scripts/install.sh, and the three systemd services.
+---
+
+This is the orchestration page. It assumes the hardware is built ([build](/docs/hardware/build)) and walks through everything *software* between "Jetson boots into Ubuntu" and "Haller bringup + HMI come up on every power-on, on its own Wi-Fi network."
+
+You can also use this page as a checklist for re-imaging — every step is idempotent.
+
+## What the deployment does
+
+Three systemd services boot in sequence on the Jetson:
+
+| Service | What it does | When it runs |
+|---|---|---|
+| `haller-ap.service` | Brings up the `HallerRobot` Wi-Fi AP (10.42.0.1/24) so an operator laptop can connect to the robot anywhere, no infrastructure. | First, before the robot service. |
+| `haller-robot.service` | ROS 2 hardware stack — motors over CAN, RPLIDAR, robot state publisher. Wrapper script `scripts/haller_bringup.sh`. | After `haller-ap`. |
+| `haller-hmi.service` | The unified HMI (FastAPI on :8000, Next.js on :3000). | After `network-online` + `haller-ap`. |
+
+Once installed, all three start at boot — power on the robot, wait ~30 s, connect to `HallerRobot`, open `http://10.42.0.1:3000`, you're operating the robot.
+
+## Prerequisites
+
+- Jetson Orin Nano (8 GB) flashed with **JetPack 6** (Ubuntu 22.04 base, JetPack 6 ships ROS 2 Jazzy-compatible userspace).
+- User account `orin` (the unit files hard-code this — change them if your username differs).
+- Internet access for the initial clone + dependency install. After install, the AP fallback lets you work without infrastructure Wi-Fi.
+- All the physical USB devices plugged in: CANable2 adapter, RPLIDAR A1M8, both SO-101 bus adapters, any USB cameras.
+
+## 1. Clone the repo
+
+```bash
+sudo apt update
+sudo apt install -y git git-lfs
+
+git clone --recurse-submodules https://github.com/oscardvs/haller_ws.git ~/haller_ws
+cd ~/haller_ws
+```
+
+The `--recurse-submodules` is important — `src/sllidar_ros2/` is a git submodule (Slamtec's driver). If you forget, `git submodule update --init --recursive` fixes it.
+
+## 2. Build the ROS 2 stack
+
+Follow [Mobile base / Prerequisites](/docs/base/overview#prerequisites) for the ROS 2 Jazzy + Nav2 + slam_toolbox apt installs and `rosdep install`, then:
+
+```bash
+cd ~/haller_ws
+colcon build --symlink-install
+```
+
+## 3. Set up the arm software environment
+
+Per [LeRobot environment](/docs/setup/lerobot-environment), create the HMI venv at `~/venvs/haller-hmi/` (the path the HMI service expects). Skip this if the robot only carries the base.
+
+## 4. Run `scripts/install.sh`
+
+The provisioning script does four things, all idempotent:
+
+```bash
+cd ~/haller_ws
+sudo ./scripts/install.sh
+```
+
+What it does:
+
+1. **Installs udev rules** ([`scripts/99-haller-devices.rules`](https://github.com/oscardvs/haller_ws/blob/main/scripts/99-haller-devices.rules) → `/etc/udev/rules.d/`, reloads + triggers). This creates stable `/dev/haller_*` symlinks: `haller_can`, `haller_lidar`, `haller_arm_follower`, `haller_arm_leader`.
+2. **Enables `haller-ap.service`** so the Wi-Fi AP comes up at boot.
+3. **Enables `haller-robot.service`** so the ROS bringup launches at boot.
+4. **Adds `orin` to the `dialout` group** for serial-port access.
+
+It does **not** start the services — that happens at next boot, or you start them manually (step 6).
+
+It does **not** install the HMI service. The HMI service is currently a manual step (see step 5), partly because it depends on the venv from step 3, which `install.sh` doesn't manage.
+
+<Callout type="info">
+Re-running `scripts/install.sh` after edits to any of the unit files is safe and recommended — it overwrites the `/etc/systemd/system/` copies and reloads systemd.
+</Callout>
+
+## 5. Install the HMI service
+
+The HMI runs alongside the robot bringup. The unit file is `scripts/haller-hmi.service`; its `ExecStart` is `scripts/run_hmi.sh`, which launches both uvicorn (`:8000`) and the prebuilt Next.js server (`:3000`).
+
+First, build the frontend standalone bundle:
+
+```bash
+cd ~/haller_ws/hmi/frontend
+pnpm install
+pnpm build
+```
+
+Then install + enable the unit:
+
+```bash
+sudo cp ~/haller_ws/scripts/haller-hmi.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now haller-hmi.service
+```
+
+See [HMI overview / Production](/docs/hmi/overview#production-jetson-orin-nano) for what `run_hmi.sh` does at startup (copies `.next/static` and `public/` into the standalone tree before launching).
+
+## 6. Start everything (without rebooting)
+
+After `install.sh` + the HMI install, services are enabled but not running yet. Start them in order:
+
+```bash
+sudo systemctl start haller-ap.service
+sudo systemctl start haller-robot.service
+sudo systemctl start haller-hmi.service
+```
+
+Or just reboot — systemd brings them up in the right order on its own.
+
+```bash
+sudo reboot
+```
+
+## 7. Verify
+
+After reboot, from your laptop:
+
+1. **Wi-Fi.** Connect to `HallerRobot` with password `haller2024`. Your laptop should get a `10.42.0.x` lease from the Jetson.
+2. **HMI.** Browse to `http://10.42.0.1:3000`. The "live" badge should turn green within a few seconds; the base panel and arm card should populate.
+3. **ROS stack.** SSH to `orin@10.42.0.1`, then `ros2 topic list` — you should see `/cmd_vel`, `/odom`, `/scan`, `/tf`, `/joint_states`.
+4. **Services.** All three units should be `active (running)`:
+   ```bash
+   systemctl status haller-ap haller-robot haller-hmi
+   ```
+
+If any of those four fail, the [Troubleshooting](#troubleshooting) section below walks through what to check.
+
+## Updating the deployment
+
+After pulling new code or editing config:
+
+```bash
+cd ~/haller_ws
+git pull
+colcon build --symlink-install                # if ROS code changed
+(cd hmi/frontend && pnpm install && pnpm build)  # if frontend changed
+sudo systemctl restart haller-robot haller-hmi
+```
+
+For unit-file edits, re-run `sudo ./scripts/install.sh` (or `sudo cp` the file directly), then `sudo systemctl daemon-reload` before restarting.
+
+## Disabling autostart
+
+For benchwork or development on the Jetson where you want full manual control:
+
+```bash
+sudo systemctl disable --now haller-ap haller-robot haller-hmi
+```
+
+Re-enable when you're done:
+
+```bash
+sudo systemctl enable --now haller-ap haller-robot haller-hmi
+```
+
+## Troubleshooting
+
+- **`systemctl status haller-robot` → "Could not open port" or "device not found".** A required USB device isn't enumerated. `ls -l /dev/haller_can /dev/haller_lidar /dev/haller_arm_*` — any missing symlink points to an unplugged device or missing udev rule. Re-run `sudo ./scripts/install.sh` to (re)install the rules.
+- **`haller-ap.service` fails on the `nmcli` line.** The `WIFI_DEV` in [`scripts/setup_ap.sh`](https://github.com/oscardvs/haller_ws/blob/main/scripts/setup_ap.sh) is hard-coded to `wlP1p1s0` — the Orin Nano dev kit's default. On other hardware run `nmcli device` and edit that constant. See [Wi-Fi AP fallback](/docs/deployment/wifi-ap).
+- **HMI service immediately exits.** Tail the journal: `journalctl -u haller-hmi.service -e`. The two most common causes are (a) `~/venvs/haller-hmi/` doesn't exist (run the [LeRobot environment](/docs/setup/lerobot-environment) install), or (b) `hmi/frontend/.next/standalone/server.js` doesn't exist (run `pnpm build` in `hmi/frontend`).
+- **HMI loads but `/health` returns 503.** ROS bringup hasn't finished yet, or it failed. `systemctl status haller-robot.service` will tell you. Topics need to be present for the HMI base panel to function.
+- **Connected to `HallerRobot` but can't reach `10.42.0.1:3000`.** Confirm the AP came up: `nmcli con show --active` on the Jetson should list `HallerAP`. Confirm the HMI is bound to `0.0.0.0` (not `127.0.0.1`): `ss -tlnp | grep 3000`.
+
+## Related pages
+
+- [Mobile base (ROS 2)](/docs/base/overview) — what `haller-robot.service` actually launches.
+- [HMI overview](/docs/hmi/overview) — what `haller-hmi.service` actually launches.
+- [Wi-Fi AP fallback](/docs/deployment/wifi-ap) — the standalone story for the AP.
+- [LeRobot environment](/docs/setup/lerobot-environment) — the venv the HMI service expects.
+- [SO-101 arms](/docs/setup/so101-arm) — udev rules + dialout setup overlap with this page.
