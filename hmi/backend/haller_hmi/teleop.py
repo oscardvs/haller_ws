@@ -57,10 +57,13 @@ class TeleopSession:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._peer = None
+        self._peers: list = []
 
-    def attach_peer(self, peer: object) -> None:
-        self._peer = peer
+    def attach_peer(self, peer) -> None:
+        """Register a sibling teleop session — at start time, if any registered
+        peer reports running=True, this session refuses to start (HTTP 409 in
+        the route)."""
+        self._peers.append(peer)
 
     def status(self) -> dict:
         with self._lock:
@@ -68,8 +71,9 @@ class TeleopSession:
 
     def start(self, leader_id: str, follower_id: str, hz: float = 60.0) -> None:
         with self._lock:
-            if self._peer is not None and getattr(self._peer, "status", lambda: {})().get("running"):
-                raise RuntimeError("human teleop is running; stop it first")
+            for _peer in self._peers:
+                if getattr(_peer, "status", lambda: {})().get("running"):
+                    raise RuntimeError("human teleop is running; stop it first")
             if self._state.running:
                 raise RuntimeError("teleop already running; stop it first")
             if leader_id == follower_id:

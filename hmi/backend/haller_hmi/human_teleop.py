@@ -80,7 +80,7 @@ class HumanTeleopSession:
         # Per-arm last-frame timestamps (perf_counter), for tracking-loss.
         self._last_left_perf: float = 0.0
         self._last_right_perf: float = 0.0
-        self._peer = None
+        self._peers: list = []
 
     # ---- public API ------------------------------------------------------
 
@@ -92,10 +92,11 @@ class HumanTeleopSession:
     def running(self) -> bool:
         return self._state is not HumanState.IDLE
 
-    def attach_peer(self, peer: object) -> None:
-        """Register the sibling TeleopSession so we can refuse to start
-        concurrently. Both sessions call .status() on each other."""
-        self._peer = peer
+    def attach_peer(self, peer) -> None:
+        """Register a sibling teleop session — at start time, if any registered
+        peer reports running=True, this session refuses to start (HTTP 409 in
+        the route)."""
+        self._peers.append(peer)
 
     def set_swap(self, swap: bool) -> None:
         with self._lock:
@@ -141,8 +142,9 @@ class HumanTeleopSession:
 
     def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0) -> None:
         with self._lock:
-            if self._peer is not None and getattr(self._peer, "status", lambda: {})().get("running"):
-                raise RuntimeError("leader/follower teleop is running; stop it first")
+            for _peer in self._peers:
+                if getattr(_peer, "status", lambda: {})().get("running"):
+                    raise RuntimeError("leader/follower teleop is running; stop it first")
             if self.running:
                 raise RuntimeError("human teleop already running; stop it first")
             if left_arm == right_arm:

@@ -34,11 +34,14 @@ class SimLeaderTeleop:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._peer = None
+        self._peers: list = []
         self._source: LeaderSource | None = None
 
     def attach_peer(self, peer) -> None:
-        self._peer = peer
+        """Register a sibling teleop session — at start time, if any registered
+        peer reports running=True, this session refuses to start (HTTP 409 in
+        the route)."""
+        self._peers.append(peer)
 
     def status(self) -> dict:
         with self._lock:
@@ -55,9 +58,9 @@ class SimLeaderTeleop:
         with self._lock:
             if self._state.running:
                 raise RuntimeError("sim teleop already running")
-            if self._peer is not None and getattr(self._peer, "status",
-                                                  lambda: {})().get("running"):
-                raise RuntimeError("another teleop is already running")
+            for _peer in self._peers:
+                if getattr(_peer, "status", lambda: {})().get("running"):
+                    raise RuntimeError("another teleop is already running")
             follower = self._arms[follower_id]
             follower.guard.set(Mode.MANUAL)
             if not follower.torque_enabled:

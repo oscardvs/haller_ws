@@ -43,11 +43,13 @@ presets = PresetStore()
 teleop = TeleopSession(arms)
 human_teleop = HumanTeleopSession(arms)
 sim_teleop = SimLeaderTeleop(arms)
+# Bilateral session lock between every pair — any one running blocks the others.
 teleop.attach_peer(human_teleop)
-human_teleop.attach_peer(teleop)
 teleop.attach_peer(sim_teleop)
+human_teleop.attach_peer(teleop)
 human_teleop.attach_peer(sim_teleop)
 sim_teleop.attach_peer(teleop)
+sim_teleop.attach_peer(human_teleop)
 calibration = CalibrationManager()
 telemetry: TelemetryBroadcaster | None = None
 
