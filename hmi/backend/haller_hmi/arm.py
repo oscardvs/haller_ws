@@ -98,6 +98,21 @@ class ArmHandle:
             self.robot.bus.enable_torque()
             self.torque_enabled = True
 
+    def read_joints_deg(self) -> dict[str, float]:
+        """Latest joint positions in degrees, keyed by joint name (no `.pos` suffix).
+
+        Filters lerobot's observation dict to only `<joint>.pos` entries that
+        belong to a known joint, and strips the suffix so callers don't need to.
+        """
+        assert self.robot is not None
+        obs = self.robot.get_observation()
+        out: dict[str, float] = {}
+        for joint in self.joint_limits_deg:
+            key = f"{joint}.pos"
+            if key in obs:
+                out[joint] = float(obs[key])
+        return out
+
     def state_snapshot(self) -> dict:
         assert self.robot is not None
         obs = self.robot.get_observation()

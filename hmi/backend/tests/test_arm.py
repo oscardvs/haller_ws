@@ -80,3 +80,16 @@ def test_arm_manager_lookup_by_id(monkeypatch):
     assert mgr["right"].config.id == "right"
     with pytest.raises(KeyError):
         _ = mgr["left"]
+
+
+def test_read_joints_deg_strips_pos_suffix(monkeypatch):
+    handle = _make_handle(monkeypatch)
+    handle.robot.get_observation.return_value = {
+        "shoulder_pan.pos": 12.5,
+        "elbow_flex.pos": -30.0,
+        "gripper.pos": 0.0,
+        # lerobot also emits non-joint keys (e.g. ".vel"); read_joints_deg must ignore them
+        "shoulder_pan.vel": 999.0,
+    }
+    joints = handle.read_joints_deg()
+    assert joints == {"shoulder_pan": 12.5, "elbow_flex": -30.0, "gripper": 0.0}
