@@ -78,3 +78,22 @@ def test_disable_actuator_kp_zeros_gain():
             assert world.actuator_kp_for_joint(joint) > 0.0
     finally:
         world.stop()
+
+
+def test_start_after_stop_restarts_stepper():
+    world = MuJoCoWorld(TINY_XML, arm_joint_map=ARM_JOINT_MAP)
+    world.start()
+    time.sleep(0.05)
+    initial = world.tick_count()
+    assert initial > 0
+    world.stop()
+    assert not world.is_running()
+
+    world.start()
+    time.sleep(0.05)
+    after_restart = world.tick_count()
+    # Stepper should have ticked more since restart.
+    assert after_restart > initial, (
+        f"start-after-stop did not resume stepping: initial={initial} after={after_restart}"
+    )
+    world.stop()

@@ -87,7 +87,8 @@ class MuJoCoWorld:
         return self._thread is not None and self._thread.is_alive()
 
     def tick_count(self) -> int:
-        return self._tick_count
+        with self._lock:
+            return self._tick_count
 
     def pause(self) -> None:
         self._paused.set()
@@ -131,9 +132,10 @@ class MuJoCoWorld:
                 )
 
     def actuator_kp_for_joint(self, joint: str) -> float:
-        for arm in self._arms.values():
-            if joint in arm.actuator_id:
-                return float(self.model.actuator_gainprm[arm.actuator_id[joint], 0])
+        with self._lock:
+            for arm in self._arms.values():
+                if joint in arm.actuator_id:
+                    return float(self.model.actuator_gainprm[arm.actuator_id[joint], 0])
         raise KeyError(joint)
 
     # ---- stepper ----
