@@ -28,6 +28,7 @@ from .ros_bridge import RosBridge
 from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
+from .sim.teleop import SimLeaderTeleop
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,12 @@ ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
 human_teleop = HumanTeleopSession(arms)
+sim_teleop = SimLeaderTeleop(arms)
 teleop.attach_peer(human_teleop)
 human_teleop.attach_peer(teleop)
+teleop.attach_peer(sim_teleop)
+human_teleop.attach_peer(sim_teleop)
+sim_teleop.attach_peer(teleop)
 calibration = CalibrationManager()
 telemetry: TelemetryBroadcaster | None = None
 
@@ -100,6 +105,15 @@ class HumanTeleopCalibrateBody(BaseModel):
     right: HumanPinchCalibSide | None = None
 
 
+class SimTeleopStartBody(BaseModel):
+    follower: str
+    hz: float = 60.0
+    # Body of the leader source — one of:
+    #   {"source": "mouse", "arm_name": "left"}
+    #   {"source": "replay", "dataset_path": "/path/to/lerobot/dataset"}
+    leader: dict
+
+
 # ---- lifespan ------------------------------------------------------------
 
 @asynccontextmanager
@@ -119,6 +133,7 @@ async def _lifespan(app: FastAPI):
         await telemetry.stop()
     teleop.stop()
     human_teleop.stop()
+    sim_teleop.stop()
     cameras.disconnect_all()
     arms.disconnect_all()
     ros.stop()
@@ -380,6 +395,41 @@ async def post_human_teleop_calibrate(body: HumanTeleopCalibrateBody):
         right=body.right.model_dump() if body.right else None,
     )
     return {"ok": True}
+
+
+@app.post("/teleop/sim/start")
+def teleop_sim_start(body: SimTeleopStartBody):
+    leader_cfg = body.leader
+    src_kind = leader_cfg.get("source")
+    if src_kind == "mouse":
+        from .sim.sources import MouseDragSource
+        world = arms.world()
+        if world is None:
+            raise HTTPException(status_code=409, detail="sim world not active")
+        src = MouseDragSource(world=world, arm_name=leader_cfg["arm_name"])
+    elif src_kind == "replay":
+        from .sim.sources import DatasetReplaySource
+        src = DatasetReplaySource(dataset_path=leader_cfg["dataset_path"])
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown leader source {src_kind!r}")
+    try:
+        sim_teleop.start(follower_id=body.follower, source=src, hz=body.hz)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return sim_teleop.status()
+
+
+@app.post("/teleop/sim/stop")
+def teleop_sim_stop():
+    sim_teleop.stop()
+    return sim_teleop.status()
+
+
+@app.get("/teleop/sim/status")
+def teleop_sim_status():
+    return sim_teleop.status()
 
 
 @app.get("/calibration/status")
