@@ -1,0 +1,11 @@
+<mujocoinclude>
+  <!-- One 4 cm cube. The caller must wrap this in a <body name="..."> to namespace it. -->
+  <worldbody>
+    <body name="cube" pos="0.25 0 0.05">
+      <freejoint/>
+      <geom type="box" size="0.02 0.02 0.02" mass="0.05"
+            rgba="0.85 0.2 0.2 1"
+            friction="1 0.005 0.0001"/>
+    </body>
+  </worldbody>
+</mujocoinclude>

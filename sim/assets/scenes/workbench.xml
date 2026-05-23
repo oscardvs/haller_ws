@@ -1,0 +1,12 @@
+<mujocoinclude>
+  <!-- Flat workbench: a thin box at z=0 with a neutral grey surface. -->
+  <worldbody>
+    <geom name="workbench"
+          type="box"
+          size="0.4 0.4 0.01"
+          pos="0 0 -0.01"
+          rgba="0.35 0.35 0.35 1"
+          friction="1 0.005 0.0001"/>
+    <light name="overhead_light" pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+  </worldbody>
+</mujocoinclude>
