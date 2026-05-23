@@ -2,7 +2,11 @@
   "title": "Documentation",
   "pages": [
     "index",
-    "---Hardware setup---",
+    "---Hardware---",
+    "hardware",
+    "---Mobile base---",
+    "base",
+    "---Arm software setup---",
     "setup",
     "---Operating the HMI---",
     "hmi",

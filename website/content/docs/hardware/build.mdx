@@ -1,0 +1,85 @@
+---
+title: Build instructions
+description: Step-by-step assembly of a Haller robot — mechanical, electrical, cabling — from parts to first power-on.
+---
+
+<Callout type="warn">
+**Placeholder.** The full build guide is being authored from the actual assembly. The skeleton below is the intended structure; each section's content is TODO.
+</Callout>
+
+## 1. Mobile base
+
+### 1.1 Chassis assembly
+
+Mounting the LK-TECH MF5010 motors to the chassis plates, attaching wheels and caster, fastener torque specs, frame squareness.
+
+**TODO** — photos + CAD references + torque table.
+
+### 1.2 Drive electronics
+
+Wiring the two MF5010s to the CAN bus, terminator placement, battery connection, fuse sizing, e-stop wiring.
+
+**TODO** — wiring diagram + photo of completed harness.
+
+### 1.3 First power-on
+
+CAN bus bring-up (`sudo ip link set can0 up type can bitrate 1000000`), `can_test.py` sanity check, individual motor spin test.
+
+**TODO** — link to bench-test script + expected console output.
+
+## 2. Perception
+
+### 2.1 LiDAR mounting
+
+RPLIDAR A1M8 mount location (centerline, height above floor for clean 2D scan), USB cable routing.
+
+**TODO** — photo + height spec + a 2D scan capture.
+
+### 2.2 Cameras
+
+IMX219 CSI camera mount (front-facing perception), USB webcams for the arm wrist + base view.
+
+**TODO** — mount STL link + camera-to-arm geometry diagram.
+
+## 3. Compute
+
+### 3.1 Jetson mount
+
+Orin Nano dev kit mount, airflow, the wiring loom (USB hub upstream, power tail, fan).
+
+**TODO** — photo of the compute deck.
+
+### 3.2 First boot
+
+Flashing JetPack, expanding the rootfs, headless network setup.
+
+**TODO** — pointer to NVIDIA's JetPack flashing guide + the deltas we apply.
+
+## 4. Arms
+
+The two SO-101 arms are built from the [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) kit. Follow the upstream assembly guide for mechanical build, then come back to this site for:
+
+- Motor ID configuration → [SO-101 arms](/docs/setup/so101-arm#2-configure-motor-ids-and-baud-rate)
+- Calibration → [SO-101 arms](/docs/setup/so101-arm#3-calibrate-the-follower) or the [in-browser wizard](/docs/hmi/calibration-wizard)
+
+### 4.1 Mounting the arms on Haller
+
+Where each arm bolts to the chassis, cable strain relief, the workspace each arm can reach over the base footprint.
+
+**TODO** — CAD link + cable routing photo.
+
+## 5. Software bring-up
+
+Once the hardware is assembled and powered, software bring-up is documented separately:
+
+- **Repo + ROS deps + colcon build** → [Mobile base](/docs/base/overview)
+- **LeRobot environment for the arms** → [LeRobot environment](/docs/setup/lerobot-environment)
+- **Arm motor configuration and calibration** → [SO-101 arms](/docs/setup/so101-arm)
+- **Unified HMI** → [HMI overview](/docs/hmi/overview)
+
+## TODO checklist for this page
+
+- [ ] Replace every "TODO" with assembly photos + steps
+- [ ] Add a single "minimum viable Haller" path (just base + LiDAR + Jetson) for readers who want to skip the arms initially
+- [ ] Add a troubleshooting section (motor doesn't enumerate, LiDAR USB power, etc.)
+- [ ] Link a complete reference build video / time-lapse

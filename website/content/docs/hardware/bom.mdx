@@ -1,0 +1,56 @@
+---
+title: Bill of materials
+description: Every part — mechanical, electrical, compute — needed to build a Haller robot from scratch.
+---
+
+<Callout type="warn">
+**Placeholder.** The full BOM is being assembled from purchase records and CAD. The table below is a stub of the major subsystems; line items, suppliers, and prices are TODO.
+</Callout>
+
+## Compute
+
+| Item | Qty | Notes |
+|---|---|---|
+| NVIDIA Jetson Orin Nano (8 GB dev kit) | 1 | Main on-board compute. JetPack 6 / Ubuntu 22.04. |
+| microSD card (≥128 GB, A2/U3) | 1 | Or NVMe SSD via M.2 if you populate the dev-kit slot. |
+
+## Mobile base
+
+| Item | Qty | Notes |
+|---|---|---|
+| LK-TECH MF5010 BLDC motor (with built-in controller) | 2 | Drive motors. Speak CAN at 1 Mbps. See [MF5010 datasheet](https://github.com/oscardvs/haller_ws/blob/main/MF5010_Specs.pdf) + [CAN protocol manual](https://github.com/oscardvs/haller_ws/blob/main/LK-TECH%20motor%20control%20protocol(CAN)%20V2.35%20-%20%E5%89%AF%E6%9C%AC.pdf). |
+| CANable2 USB→CAN adapter (slcan firmware) | 1 | Becomes `/dev/haller_can` via udev. |
+| Drive wheels + hubs | 4 | 4-wheel differential drive. Two driven, two passive/caster — TODO. |
+| Chassis plates, motor mounts, fasteners | — | CAD link TODO. |
+| Battery pack (TODO: chemistry, voltage, capacity) | 1 | Powers motors + Jetson. |
+
+## Perception
+
+| Item | Qty | Notes |
+|---|---|---|
+| Slamtec RPLIDAR A1M8 (2D LiDAR) | 1 | Becomes `/dev/haller_lidar` via udev. |
+| IMX219 camera module (CSI) | 1+ | Front-facing perception camera, plugs into Jetson CSI. |
+| USB webcams (wrist + base RGB) | 2 | For SO-101 dataset collection — model TODO. |
+
+## Arms (SO-101)
+
+| Item | Qty | Notes |
+|---|---|---|
+| SO-ARM101 mechanical kit | 2 | Follower + leader. [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100). |
+| Feetech STS3215 servos (7.4 V or 12 V variant) | 12 | 6 per arm. Match the supply to the variant — see the [warning in the SO-101 page](/docs/setup/so101-arm#hardware-checklist). |
+| Feetech bus servo adapter board (Waveshare or equivalent) | 2 | One per arm. USB↔TTL half-duplex. |
+| Servo power supply | 1–2 | 7.4 V bench supply for 7.4 V STS3215, 12 V brick for 12 V STS3215. |
+
+## Networking + misc
+
+| Item | Qty | Notes |
+|---|---|---|
+| Wi-Fi USB dongle (if Jetson onboard radio not used) | 0–1 | For AP-fallback mode — see `scripts/setup_ap.sh`. |
+| USB hub (powered, ≥4 ports) | 1 | Aggregates CAN adapter + LiDAR + two arm bus adapters + cameras. |
+
+## TODO
+
+- Per-line supplier links, prices, and lead times.
+- Total cost.
+- CAD file links + which parts are 3D-printed vs. machined vs. COTS.
+- Photo of an assembled Haller next to the BOM table.

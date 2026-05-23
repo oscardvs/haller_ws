@@ -1,0 +1,247 @@
+---
+title: Mobile base (ROS 2)
+description: The four-wheel differential-drive base under ROS 2 Jazzy — packages, bring-up, topics, and the systemd service.
+---
+
+The mobile base is the four-wheeled platform that carries the two SO-101 arms. It runs on a Jetson Orin Nano under **ROS 2 Jazzy** (Ubuntu 24.04), driven by two LK-TECH MF5010 BLDC motors over CAN, with a Slamtec RPLIDAR A1M8 for 2D scanning.
+
+The base and the arms are operationally independent — the HMI subscribes to `/odom` and `/scan` and publishes `/cmd_vel`, all topics the ROS hardware stack exposes. You can bring the base up without the HMI, and you can run the HMI on a laptop pointed at an Orin running only the base.
+
+<Callout type="warn">
+The [`src/README.md`](https://github.com/oscardvs/haller_ws/blob/main/src/README.md) checked into the repo still references ROS 2 **Humble** + Gazebo Fortress. That's stale — Haller runs on **Jazzy** on Ubuntu 24.04. This page is the current reference.
+</Callout>
+
+## Hardware
+
+| Component | Spec |
+|---|---|
+| Drive motors | 2× LK-TECH MF5010 BLDC (built-in controller, CAN at 1 Mbps) |
+| CAN adapter | CANable2 USB → SLCAN, mapped to `/dev/haller_can` |
+| LiDAR | Slamtec RPLIDAR A1M8 (USB CP2102), mapped to `/dev/haller_lidar` |
+| Compute | NVIDIA Jetson Orin Nano (8 GB) |
+| Geometry | Wheel radius 0.05 m, wheel separation 0.34 m (see `motor_params.yaml`) |
+| Limits | 1.0 m/s linear, 2.0 rad/s angular (configurable) |
+
+LK-TECH protocol references live in the repo root: [`MF5010_Specs.pdf`](https://github.com/oscardvs/haller_ws/blob/main/MF5010_Specs.pdf) and [`LK-TECH motor control protocol (CAN) V2.35`](https://github.com/oscardvs/haller_ws/blob/main/LK-TECH%20motor%20control%20protocol(CAN)%20V2.35%20-%20%E5%89%AF%E6%9C%AC.pdf).
+
+## Package layout
+
+The colcon workspace under `src/` is split into three top-level groups:
+
+```
+src/
+├── haller_ros/
+│   ├── haller_common/
+│   │   ├── haller_controllers/        # ros2_control YAML (sim / fake-hw mode)
+│   │   ├── haller_description/        # URDF / Xacro robot model + display.launch.py
+│   │   ├── haller_hardware_interface/ # ros2_control hardware interface plugin
+│   │   ├── haller_motor_controller/   # direct-CAN motor controller node (real hw)
+│   │   ├── haller_msgs/               # custom message definitions
+│   │   ├── haller_utils/              # utility nodes (legacy web_teleop lives here)
+│   │   └── haller_vision/             # camera, detection, segmentation, traversability
+│   ├── haller_robot/
+│   │   └── haller_hardware/           # haller_bringup.launch.py — top-level real-hw launch
+│   └── haller_simulator/
+│       └── haller_gazebo/             # Gazebo simulation
+├── haller_navigation/                 # Nav2 + slam_toolbox launches and params
+├── haller_scanning/                   # mapping / scanning pipeline
+└── sllidar_ros2/                      # submodule — Slamtec LiDAR driver
+```
+
+Two control paths share the same launch file:
+
+- **Real hardware** (`use_sim:=false`, default): the `haller_motor_controller` node reads `/cmd_vel`, talks SLCAN over USB to both MF5010s, publishes `/odom` + `/joint_states`.
+- **Simulation / fake hardware** (`use_sim:=true`): `ros2_control_node` + the standard `diff_drive_controller` and `joint_state_broadcaster` — useful for laptop dev without the physical robot.
+
+## Prerequisites
+
+- Ubuntu 24.04 LTS.
+- ROS 2 Jazzy installed (`/opt/ros/jazzy/`).
+- Gazebo Harmonic (for simulation; skip for real-hardware-only).
+- For the Jetson: NVIDIA JetPack 6.
+
+Install the workspace dependencies once:
+
+```bash
+sudo apt update
+sudo apt install -y \
+    ros-jazzy-ros2-control \
+    ros-jazzy-ros2-controllers \
+    ros-jazzy-navigation2 \
+    ros-jazzy-nav2-bringup \
+    ros-jazzy-slam-toolbox \
+    ros-jazzy-robot-localization \
+    ros-jazzy-xacro \
+    ros-jazzy-joint-state-publisher-gui
+
+cd ~/haller_ws
+rosdep install --from-paths src --ignore-src -r -y
+```
+
+## Clone and build
+
+```bash
+# Clone with submodules — sllidar_ros2 is a git submodule
+git clone --recurse-submodules https://github.com/oscardvs/haller_ws.git
+cd haller_ws
+
+colcon build --symlink-install
+source install/setup.bash
+```
+
+The `--symlink-install` flag means Python edits are picked up without a rebuild — relaunch is enough.
+
+## Stable device names (udev)
+
+Both the CAN adapter and the LiDAR get fixed `/dev/haller_*` symlinks via [`scripts/99-haller-devices.rules`](https://github.com/oscardvs/haller_ws/blob/main/scripts/99-haller-devices.rules). Install once:
+
+```bash
+sudo cp scripts/99-haller-devices.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Verify the symlinks resolve:
+
+```bash
+ls -l /dev/haller_can /dev/haller_lidar
+# lrwxrwxrwx 1 root root 7 ... /dev/haller_can   -> ttyACM0
+# lrwxrwxrwx 1 root root 7 ... /dev/haller_lidar -> ttyUSB0
+```
+
+If a device doesn't appear, `lsusb` for the adapter (CANable2 `16d0:117e`, CP2102 `10c4:ea60`) and check `dmesg | tail` for enumeration messages.
+
+## Bring the CAN bus up
+
+The CANable2 adapter exposes a virtual `can0` interface that needs to be brought up at the right bitrate before the motor node can talk to anything:
+
+```bash
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set up can0
+```
+
+Sanity-check with `candump can0` in one terminal and a manual motor poke in another (see [`can_test.py`](https://github.com/oscardvs/haller_ws/blob/main/can_test.py) in the repo root for a bare LK-TECH ping).
+
+<Callout type="info">
+The systemd service handles this automatically on the Jetson — `scripts/haller_bringup.sh` brings `can0` up before launching the stack. Manual `ip link` is only needed for dev sessions outside the service.
+</Callout>
+
+## Bring up the real robot
+
+The top-level launch is in `haller_hardware`:
+
+```bash
+ros2 launch haller_hardware haller_bringup.launch.py
+```
+
+It starts (in order):
+
+1. `robot_state_publisher` — broadcasts the URDF transforms.
+2. `motor_controller_node` (from `haller_motor_controller`) — opens `/dev/haller_can`, subscribes to `/cmd_vel`, publishes `/odom`.
+3. `sllidar_node` — opens `/dev/haller_lidar`, publishes `/scan`.
+4. `haller_vision` pipeline — IMX219 camera + detection + segmentation + traversability (skip with `enable_vision:=false`).
+
+### Launch flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `use_sim` | `false` | `true` switches to ros2_control with fake-hardware actuators (no CAN). |
+| `enable_vision` | `true` | `false` skips the camera + perception pipeline (faster boot, less GPU load). |
+| `enable_detection` | `true` | Toggles object-detection node within the vision pipeline. |
+| `enable_segmentation` | `true` | Toggles semantic-segmentation node within the vision pipeline. |
+| `enable_web_teleop` | `false` | **Deprecated** — the legacy single-file `web_teleop.py`. Use the [HMI](/docs/hmi/overview) instead. |
+
+Common variant — debug-fast on the Jetson without the perception pipeline:
+
+```bash
+ros2 launch haller_hardware haller_bringup.launch.py enable_vision:=false
+```
+
+## Topics exposed
+
+This is the bus a downstream consumer (HMI, Nav2, a VLA policy) sees once the launch is up:
+
+| Topic | Direction | Notes |
+|---|---|---|
+| `/cmd_vel` | sub | `geometry_msgs/Twist` — linear.x / angular.z. 0.5 s timeout (motors stop if nothing arrives). |
+| `/odom` | pub | `nav_msgs/Odometry` — wheel-encoder fused, published at the 50 Hz control rate. |
+| `/joint_states` | pub | `sensor_msgs/JointState` — wheel joint positions / velocities. |
+| `/scan` | pub | `sensor_msgs/LaserScan` from RPLIDAR. |
+| `/tf`, `/tf_static` | pub | `odom`, `base_link`, sensor frames. |
+
+The HMI's base panel publishes `/cmd_vel` (via WS proxy through FastAPI) and subscribes to `/odom` + `/scan` for the dashboard's motion + lidar widgets.
+
+## Simulation
+
+```bash
+# Gazebo with the URDF + simulated LiDAR
+ros2 launch haller_gazebo haller_sim.launch.py
+
+# In another terminal, drive it via Nav2
+ros2 launch haller_navigation navigation.launch.py use_sim_time:=true
+```
+
+For dev without Gazebo (no graphics, no physics), use the fake-hardware path:
+
+```bash
+ros2 launch haller_hardware haller_bringup.launch.py use_sim:=true enable_vision:=false
+```
+
+This runs the full ROS graph with `ros2_control` fake actuators — useful for testing HMI ↔ ROS plumbing on a laptop.
+
+## Visualization
+
+```bash
+# RViz preset with robot model, scan, costmaps
+ros2 launch haller_description display.launch.py
+```
+
+For a headless Jetson, run RViz on a remote machine on the same ROS_DOMAIN_ID. Set both ends to the same domain:
+
+```bash
+export ROS_DOMAIN_ID=42   # match between Jetson and laptop
+```
+
+## Navigation (Nav2)
+
+```bash
+# SLAM (build a map of a new space)
+ros2 launch haller_navigation slam.launch.py
+
+# Localize + plan in a saved map
+ros2 launch haller_navigation navigation.launch.py
+```
+
+Params live in [`src/haller_navigation/config/`](https://github.com/oscardvs/haller_ws/tree/main/src/haller_navigation/config) (`nav2_params.yaml`, `slam_toolbox_params.yaml`). Maps go to `src/haller_navigation/maps/` (gitignored — saved per-environment).
+
+## Production: systemd on the Jetson
+
+On the Jetson the stack runs as the `haller-robot.service` systemd unit, which wraps [`scripts/haller_bringup.sh`](https://github.com/oscardvs/haller_ws/blob/main/scripts/haller_bringup.sh). The unit:
+
+- waits for both `/dev/haller_lidar` and `/dev/haller_can` to appear (up to 10 s of polling),
+- sources ROS + the install tree,
+- runs `ros2 launch haller_hardware haller_bringup.launch.py enable_vision:=false`,
+- restarts on failure.
+
+Install once:
+
+```bash
+sudo cp scripts/haller-robot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now haller-robot.service
+```
+
+Watch the logs:
+
+```bash
+journalctl -u haller-robot.service -f
+```
+
+The HMI service (`haller-hmi.service`) is independent and connects to whatever topics this stack exposes — see [HMI production](/docs/hmi/overview#production-jetson-orin-nano).
+
+## What this page doesn't cover yet
+
+- **Vision pipeline internals** — `haller_vision` (camera, detection, segmentation, traversability) has its own pipeline launch and config. A dedicated page is TODO.
+- **CAN motor protocol details** — frame format, control modes (`0x9C`, `0xA2`, …), encoder math. The LK-TECH PDFs cover this; a derived cheatsheet is TODO.
+- **Tuning Nav2 for Haller's footprint** — costmap inflation, controller plugin choice, recovery behaviors. TODO.
+- **Multi-machine ROS** — running Nav2 on a beefier laptop while the Jetson handles only hardware nodes. Pointers, not full guide, TODO.
