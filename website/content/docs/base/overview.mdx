@@ -239,6 +239,10 @@ journalctl -u haller-robot.service -f
 
 The HMI service (`haller-hmi.service`) is independent and connects to whatever topics this stack exposes — see [HMI production](/docs/hmi/overview#production-jetson-orin-nano).
 
+## Troubleshooting
+
+ROS-stack symptoms (`/scan` empty, `ros2 topic list` missing topics across processes, CAN bus already up, RViz can't see remote topics) are on the [Troubleshooting / ROS stack](/docs/troubleshooting#ros-stack) section.
+
 ## What this page doesn't cover yet
 
 - **Vision pipeline internals** — `haller_vision` (camera, detection, segmentation, traversability) has its own pipeline launch and config. A dedicated page is TODO.

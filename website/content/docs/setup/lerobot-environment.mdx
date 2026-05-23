@@ -131,3 +131,5 @@ Once the env is verified, move on to [Configure & calibrate the SO-101 arm](/doc
 - **`torch.cuda.is_available()` returns `False`.** Confirm the NVIDIA driver is installed (`nvidia-smi`). The env brings its own CUDA runtime libraries via `nvidia-*` pip wheels, so a system CUDA install is not required.
 - **`ImportError: undefined symbol: ncclDevCommDestroy` when importing torch.** The activate hooks above (`PYTHONNOUSERSITE=1`) must be in place. If you skipped step 3 you'll hit this every time.
 - **Forgetting to activate the env.** A naked `pip install` from a non-activated shell on this host will sometimes silently satisfy deps from `~/.local/`. Always `conda activate lerobot` first.
+
+For cross-cutting issues (calibration, HMI runtime, networking) see [Troubleshooting](/docs/troubleshooting).

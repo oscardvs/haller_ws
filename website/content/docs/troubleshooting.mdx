@@ -1,0 +1,264 @@
+---
+title: Troubleshooting
+description: When something breaks — symptoms, likely causes, and fixes — across install, hardware, HMI, teleop, networking, and the data/VLA path.
+---
+
+Organized by what you see, not by which subsystem owns it. If you have an error message, search this page for it first.
+
+The subsystem pages also each carry their own inline tips for context-specific issues — those are still the deeper reference; this page is the cross-cutting index.
+
+## Install and first-boot
+
+### `scripts/install.sh` doesn't create `/dev/haller_*` symlinks
+
+Either the rules file didn't install or the devices aren't plugged in. After re-running `sudo ./scripts/install.sh`:
+
+```bash
+ls /etc/udev/rules.d/99-haller-devices.rules    # should exist
+ls -l /dev/haller_can /dev/haller_lidar          # should be symlinks
+```
+
+If the rules file is present but the symlinks are missing, the device is unplugged or its USB IDs don't match (`lsusb` to find them, then edit [`scripts/99-haller-devices.rules`](https://github.com/oscardvs/haller_ws/blob/main/scripts/99-haller-devices.rules)).
+
+### `ImportError: undefined symbol: ncclDevCommDestroy` when importing torch
+
+The lerobot conda env's activate hooks aren't in place — `PYTHONNOUSERSITE=1` must be set so the env's own NCCL wheel isn't shadowed by an outdated `~/.local/...` copy. See [LeRobot environment, step 3](/docs/setup/lerobot-environment#3-isolate-the-env-from-ros-and-user-site-haller-specific).
+
+### `pip check` reports unrelated conflicts about kubernetes / google-genai / markitdown
+
+These come from `~/.local/` or `/usr/lib/python3.12/dist-packages/`, not the env. Harmless — `pip check` walks every Python install on the box.
+
+### `torch.cuda.is_available()` returns `False`
+
+Run `nvidia-smi`. If that fails, the NVIDIA driver isn't installed at the system level; the conda env brings its own CUDA *runtime* but expects a working host driver.
+
+### Forgetting to `conda activate lerobot`
+
+A naked `pip install` from a non-activated shell sometimes silently satisfies deps from `~/.local/`. Always activate first.
+
+## Hardware not detected
+
+### `Motor 'gripper' (model 'sts3215') was not found`
+
+The servo's V+ pin has no power. The board's logic is alive (USB-powered) but the servo bus isn't. Confirm the barrel-jack supply is connected and on, and that your supply voltage matches the servo variant (7.4 V supply for 7.4 V STS3215, 12 V for the 12 V variant). USB alone never powers the servos. Full hardware checklist: [SO-101 arms](/docs/setup/so101-arm#hardware-checklist).
+
+### `[RxPacketError] Input voltage error!`
+
+The servo sees voltage outside its safe range and is alarming. You're feeding the wrong supply for this servo's voltage variant. Power off, swap supply (e.g. drop from 12 V to 7.4 V for the 7.4 V variant), retry.
+
+### `lerobot-setup-motors` writes the same ID to multiple motors
+
+You had more than one motor on the bus during ID configuration. The script writes ID `n` to *every* motor it can see — chain all of them up and you'll overwrite earlier ones. Connect motors one at a time, gripper first, in reverse-id order. See [SO-101 arms, step 2](/docs/setup/so101-arm#2-configure-motor-ids-and-baud-rate).
+
+### CAN bus won't come up
+
+```bash
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set up can0
+# RTNETLINK answers: Device or resource busy
+```
+
+`can0` is already up — `sudo ip link set down can0` first, or just confirm with `ip -d link show can0`. If `can0` doesn't exist at all, the CANable2 adapter isn't enumerated as SLCAN — `dmesg | tail` will show what driver claimed it.
+
+### LiDAR enumerates but `/scan` is empty
+
+The RPLIDAR A1's motor needs USB-bus power; some hubs can't supply enough. Plug the LiDAR directly into the Jetson, or use a powered hub. `ros2 topic echo /scan --once` will hang silently if the motor isn't spinning.
+
+### A device is enumerated but the symlink is missing
+
+The udev rule's `idVendor` / `idProduct` / `serial` triple doesn't match. Find the actual identity:
+
+```bash
+udevadm info -a -n /dev/ttyACM0 | grep -E '{idVendor}|{idProduct}|{serial}' | head -3
+```
+
+Then update [`scripts/99-haller-devices.rules`](https://github.com/oscardvs/haller_ws/blob/main/scripts/99-haller-devices.rules) and re-run `sudo ./scripts/install.sh`.
+
+## HMI won't start
+
+### `systemctl status haller-hmi.service` says "exited code=1" immediately
+
+Tail the journal: `journalctl -u haller-hmi.service -e`. Two most common causes:
+
+- `~/venvs/haller-hmi/` doesn't exist — run [LeRobot environment](/docs/setup/lerobot-environment) install.
+- `hmi/frontend/.next/standalone/server.js` doesn't exist — `(cd hmi/frontend && pnpm install && pnpm build)`.
+
+### Backend startup fails with `No calibration for arm ... (calibration_id=...)`
+
+The arm has no calibration file in either `robots/so_follower/` or `teleoperators/*/`. The log includes the exact `lerobot-calibrate` command to run. Run it (or use the [in-browser wizard](/docs/hmi/calibration-wizard)), then restart `haller-hmi`.
+
+### Backend crashes at startup with `Could not open port`
+
+The USB symlink doesn't exist. `ls -l /dev/haller_arm_follower` — if missing, the udev rules aren't installed or the board isn't plugged in. See "A device is enumerated but the symlink is missing" above.
+
+### Port already in use (`:8000` or `:3000`)
+
+```bash
+sudo ss -tlnp 'sport = :8000'
+sudo ss -tlnp 'sport = :3000'
+```
+
+Usually a previous `run_hmi.sh` that didn't clean up. Kill the pid; `systemctl restart haller-hmi.service`.
+
+## HMI is up but broken
+
+### Frontend shows "disconnected" in the live badge
+
+Backend isn't reachable on `NEXT_PUBLIC_BACKEND_URL`. Confirm `curl http://localhost:8000/health` returns `{"status":"ok"}`. For remote-backend setups: `NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm dev`.
+
+### `POST /arm/{id}/goal` returns 409
+
+The arm is in `auto` mode. Click `manual` first; the joint sliders, Home, and preset replay are enabled only in manual.
+
+### `POST /arm/{id}/goal` returns 404 "unknown arm id"
+
+Either the arm id in the URL is wrong, or the arm is disabled in [`hmi/backend/config.yaml`](https://github.com/oscardvs/haller_ws/blob/main/hmi/backend/config.yaml).
+
+### Sliders are disabled and don't move
+
+Check the mode badge — only `manual` enables them. They're also disabled for any arm currently participating in teleop (leader/follower or human).
+
+### Joint sliders show 0° for everything
+
+Telemetry is connected but the backend's `state_snapshot` is failing — most likely the calibration file doesn't match the configured `calibration_id`. Check the backend log for the arm-telemetry warning.
+
+### `/health` returns 503
+
+ROS bringup hasn't finished yet, or it failed. `systemctl status haller-robot.service` will tell you. Topics need to be present for the HMI base panel to function.
+
+### Calibration banner stuck even after a successful calibration
+
+The HMI caches the `calibration/status` response on the dashboard. Either reload the page, or send `POST /calibration/{arm_id}/abort` — the next status poll picks up the on-disk change.
+
+## Calibration wizard
+
+### "Calibration was aborted (bus error or arm disconnected). Close and retry."
+
+A Feetech bus error during the sweep auto-aborts the session and disables the action buttons. Power-cycle the servo supply, confirm the arm still responds (`lerobot-find-port`), then start a fresh session.
+
+### Mode-change rejected with 409 while wizard is open
+
+The arm is locked while a calibration session is active. Finish or abort the session, then change modes.
+
+### "A calibration session is already in progress."
+
+Only one session at a time across the HMI. Either resume the existing one (the wizard re-attaches on page reload) or abort it via `POST /calibration/{arm_id}/abort`.
+
+### `POST /calibration/{arm_id}/finish_sweep` returns 422
+
+A joint never moved during the sweep. The response lists the offending joints — wiggle them and try again.
+
+## Teleop
+
+### Leader↔follower position is offset (especially `shoulder_lift`)
+
+The two arms were calibrated in different physical neutral poses. Re-run the [calibration wizard](/docs/hmi/calibration-wizard) on one arm while holding it in the same physical neutral pose as the other. Background: [SO-101 arms](/docs/setup/so101-arm#calibrating-two-arms-that-will-teleop-together).
+
+### `POST /teleop/start` returns 400 "leader and follower must be different arms"
+
+Pick different arms in the two dropdowns (or click `⇄` to swap).
+
+### `POST /teleop/start` (or `/teleop/human/start`) returns 409
+
+The other teleop mode is already running — they're mutually exclusive. Stop the current session first.
+
+### Human teleop: one arm moves, the other doesn't
+
+That side's hand tracking is lost (out of frame, occluded, or pose-quality below threshold). The HUD shows `tracking lost (left|right)`. Re-enter the frame.
+
+### Human teleop: both arms freeze suddenly mid-drive
+
+You released SPACE. By design — release SPACE → both arms freeze within ~16 ms. Press SPACE again to resume.
+
+### Human teleop: session drops to IDLE on its own
+
+The keypoint WebSocket disconnected for longer than the 5 s grace window — usually a tab close, a network blip, or the browser sleeping a backgrounded tab. Restart the session.
+
+## Networking and AP
+
+### `HallerRobot` SSID doesn't appear
+
+The `WIFI_DEV` in [`scripts/setup_ap.sh`](https://github.com/oscardvs/haller_ws/blob/main/scripts/setup_ap.sh) is hard-coded to `wlP1p1s0`. On other hardware run `nmcli device | grep wifi` and edit that constant. Restart with `sudo systemctl restart haller-ap.service`. Also check `rfkill list` — the radio may be soft-blocked.
+
+### Connected to `HallerRobot` but laptop gets no DHCP lease
+
+NetworkManager's `ipv4.method shared` failed to spawn a DHCP server. `journalctl -u NetworkManager` shows the error. Usually transient — restart `haller-ap.service`.
+
+### Connected but `10.42.0.1:3000` doesn't respond
+
+Confirm the AP profile is active: `nmcli con show --active` should list `HallerAP`. Confirm the HMI is bound to `0.0.0.0` (not `127.0.0.1`): `ss -tlnp | grep 3000` on the Jetson.
+
+### Need internet on the Jetson while debugging
+
+The Orin Nano dev kit has one radio. AP mode and client Wi-Fi are mutually exclusive. `sudo systemctl stop haller-ap.service` (or `setup_ap.sh stop` to also clear the connection profile) and the Jetson rejoins your last Wi-Fi network.
+
+## Dataset collection and cameras
+
+### Camera 503 on `/cameras/{id}/snapshot`
+
+Another process is holding the device. Common offenders: `cheese`, a previous `scripts/run_hmi.sh` that didn't shut down cleanly, the legacy `web_teleop.py`. Find it with `fuser /dev/video2` (or matching device path).
+
+### `scripts/record_dataset.sh` refuses to start ("device busy")
+
+The HMI is holding the arm bus or a camera. Stop it first: `Ctrl-C` the dev script, or `sudo systemctl stop haller-hmi.service`. The recording script prints the holding PID.
+
+### Recorded dataset has flat joint traces
+
+The leader wasn't being driven (you started recording without moving it), or the follower was stuck in `STOP` mode. Use `lerobot-visualize-dataset --episode-index=0` to verify the joint state/action arrays before training.
+
+### `lerobot-record` errors with an unknown observation key
+
+Your dataset's camera key names don't match what the policy expects. For replay-eval, use the `--rename` flag — see [RunPod inference / Observation-key mismatches](/docs/data/runpod-inference#observation-key-mismatches).
+
+## VLA and RunPod
+
+### `torch.cuda.OutOfMemoryError` during finetune
+
+Try in order: drop batch size (`BATCH_SIZE=2 scripts/runpod/finetune_pi05_lora.sh ...`); confirm `--policy.gradient_checkpointing=true` is set; move to a larger GPU (A100 40 GB).
+
+### π0.5 weights take forever to download
+
+First-run download is ~9 GB. Cache them on a RunPod Network Volume mounted at `/workspace`:
+
+```bash
+export HF_HOME=/workspace/hf_cache
+```
+
+so they only download once across pod sessions.
+
+### `hf auth login` doesn't persist between pod sessions
+
+Token isn't being baked into the pod. Either set it in the RunPod "Environment variables" UI as `HF_TOKEN=...`, or mount the network volume above and put the credentials there.
+
+### Replay-eval predicts wildly wrong actions on every frame
+
+Either (a) the observation keys are misnamed and the policy isn't seeing your images (check the error message for the expected key — see [RunPod inference / Observation-key mismatches](/docs/data/runpod-inference#observation-key-mismatches)), or (b) the policy genuinely doesn't understand your task without finetuning. (b) is expected for π0.5 out of the box.
+
+## ROS stack
+
+### `ros2 topic list` shows nothing under `haller-robot.service`
+
+The launch is up but topics aren't appearing across processes. Confirm `ROS_DOMAIN_ID` matches in every shell you're using (both the service and your debug shell). The HMI service runs with `ROS_DOMAIN_ID=0`; set the same in your shell.
+
+### `RViz` from a remote machine can't see the topics
+
+Same — `ROS_DOMAIN_ID` mismatch between Jetson and laptop. Also check the firewall on whichever side runs RViz (DDS uses UDP multicast on a wide port range; some corporate networks block it).
+
+### `use_sim:=true` and the robot still moves
+
+The simulation flag toggles to `ros2_control` with **fake** actuators — but the launch file still starts the motor controller node unless the flag is plumbed through. Use `enable_vision:=false use_sim:=true` for laptop-only dev, and double-check no real motors are powered.
+
+## Where to look when nothing else helps
+
+| Layer | First place to look |
+|---|---|
+| HMI service | `journalctl -u haller-hmi.service -e -f` |
+| ROS service | `journalctl -u haller-robot.service -e -f` |
+| AP service | `journalctl -u haller-ap.service -e -f` and `nmcli con show --active` |
+| HMI runtime | Browser DevTools → Network tab (REST failures) and Console (frontend errors) |
+| Arm bus | `lerobot-find-port`, then a `python scripts/test_so101_arm.py --port ... --id ...` smoke test |
+| Cameras | `curl -o /tmp/x.jpg http://localhost:8000/cameras/{id}/snapshot` |
+| CAN bus | `candump can0` in one terminal while pinging a motor in another |
+| ROS topics | `ros2 topic list`, `ros2 topic echo /<name> --once`, `ros2 doctor` |
+
+If the issue still isn't obvious, file it at [github.com/oscardvs/haller_ws/issues](https://github.com/oscardvs/haller_ws/issues) with the relevant `journalctl` excerpt, the symptom, and what you tried.

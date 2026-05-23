@@ -130,3 +130,7 @@ The backend exposes a stable REST surface plus one WebSocket. See [the unified-H
 | GET  | `/cameras/{id}/stream` | `multipart/x-mixed-replace` MJPEG (~15 Hz) |
 | POST | `/estop` | stop teleop, torque off all arms, zero `/cmd_vel`, abort any calibration |
 | WS | `/ws/telemetry` | ~20 Hz frames: base + arms state + teleop + alerts |
+
+## Troubleshooting
+
+Common HMI runtime issues (live badge red, 409 on goal, calibration banner stuck, joint sliders frozen) are listed on the [Troubleshooting](/docs/troubleshooting#hmi-is-up-but-broken) page.
