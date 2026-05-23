@@ -1,9 +1,9 @@
 ---
-title: Teleop
-description: Two teleop modes — leader↔follower mirroring between the two SO-101 arms, and vision-driven from a laptop webcam.
+title: Leader ↔ follower teleop
+description: 60 Hz leader/follower bridge between Haller's two physical SO-101 arms — back-drive one, the other mirrors.
 ---
 
-The HMI supports two teleop modes. They're mutually exclusive — only one runs at a time across the whole HMI.
+The HMI has **two** teleop modes — leader↔follower (this page) and [human-pose teleop](/docs/hmi/human-teleop) (drive both arms from your webcam). They're mutually exclusive — only one runs at a time across the whole HMI.
 
 ## Leader ↔ follower (60 Hz)
 
@@ -21,37 +21,22 @@ Turns the HMI into a leader/follower bridge between the two physical arms.
 
 E-STOP also stops teleop before disabling torque — so the follower can't jump to a stale queued goal when you next re-engage.
 
-### Midpoint mismatch
+## Midpoint mismatch
 
-If teleop tracking shows a per-joint offset (most visibly on `shoulder_lift`, which changes arm height), the two arms were calibrated in different physical neutral poses. Fix with the [calibration wizard](/docs/hmi/calibration-wizard): re-calibrate one arm while it holds the other arm's neutral pose.
+If teleop tracking shows a per-joint offset (most visibly on `shoulder_lift`, which changes arm height), the two arms were calibrated in different physical neutral poses. Fix with the [calibration wizard](/docs/hmi/calibration-wizard): re-calibrate one arm while it holds the other arm's neutral pose. Or see the [SO-101 arms](/docs/setup/so101-arm#calibrating-two-arms-that-will-teleop-together) guide for the underlying issue.
 
-## Vision-driven teleop
+## REST surface
 
-Drives both SO-101 arms from your laptop webcam — your shoulder and hand pose maps to the arms' joints.
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/teleop` | Current status: running flag, leader/follower ids, configured Hz. |
+| POST | `/teleop/start` | `{ leader, follower, hz? }` — starts the loop. 400 if leader == follower, 409 if any teleop is already running. |
+| POST | `/teleop/stop` | Stops the loop and restores both arms. |
 
-1. Open `/teleop/human` from the dashboard.
-2. Pick the two arms in **assign**.
-3. Click **open · capture**, hold your hand open, then **pinch · capture** with thumb and index touching. Repeat for the other side.
-4. Position yourself in front of the camera (both shoulders + both hands visible). The skeleton overlay appears on the feed.
-5. **Hold SPACE** to drive. The robots track your joint angles 1:1. Release SPACE to freeze instantly.
-6. **Stop** ends the session and restores both arms to MANUAL.
+See [HMI overview](/docs/hmi/overview#rest-endpoints) for the full endpoint table.
 
-### Safety and edge cases
+## See also
 
-- **Mutual exclusion.** Starting human teleop while leader/follower is running returns 409 (and vice versa).
-- **Tracking loss.** If one hand exits the frame, that arm freezes in place; the other arm continues. The HUD shows `tracking lost (side)`.
-- **Release SPACE.** Both arms freeze within ~16 ms.
-- **E-STOP** stops human teleop just like leader/follower, drops torque, and zeroes `/cmd_vel`.
-
-### Manual smoke tests
-
-1. Cold start with no camera → permission prompt → error state → no robot motion.
-2. Calibrate pinch → engage SPACE → wave one arm → the other stays in place.
-3. Mid-drive: hand exits frame → that arm freezes, other continues, chip turns amber.
-4. Mid-drive: release SPACE → both arms freeze within ~16 ms.
-5. Global E-STOP while driving → session stops, torque drops, E-STOP banner.
-6. Try to start leader/follower while human teleop is running → 409, no state change.
-
-### Design reference
-
-See the [human-pose teleop design spec](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/specs/2026-05-22-human-pose-teleop-design.md) for the full design.
+- [Human-pose teleop](/docs/hmi/human-teleop) — drive both arms bimanually from a laptop webcam (mutually exclusive with this mode).
+- [Calibration wizard](/docs/hmi/calibration-wizard) — fix midpoint mismatches without leaving the browser.
+- [Design spec](https://github.com/oscardvs/haller_ws/blob/main/docs/superpowers/specs/2026-05-22-haller-unified-hmi-design.md) — full HMI design including teleop frame schemas.
