@@ -5,6 +5,8 @@
     "---Hardware setup---",
     "setup",
     "---Operating the HMI---",
-    "hmi"
+    "hmi",
+    "---Data and policies---",
+    "data"
   ]
 }

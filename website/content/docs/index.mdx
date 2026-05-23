@@ -25,11 +25,14 @@ The SO-101 mechanical design comes from [TheRobotStudio/SO-ARM100](https://githu
   <Card title="Configure and calibrate an SO-101 arm" href="/docs/setup/so101-arm" />
   <Card title="Bring up the HMI" href="/docs/hmi/overview" />
   <Card title="Calibrate via the wizard" href="/docs/hmi/calibration-wizard" />
+  <Card title="Teleop (leader↔follower + webcam)" href="/docs/hmi/teleop" />
+  <Card title="Record a dataset" href="/docs/data/dataset-collection" />
+  <Card title="Inference + finetuning on RunPod" href="/docs/data/runpod-inference" />
 </Cards>
 
 ## Status
 
-The mobile base is operational under ROS 2. Both SO-101 arms run through the unified HMI (FastAPI + Next.js + shadcn/ui) on main. Per-arm controls (joint sliders, home, free-drive, pose presets), a leader↔follower teleop launcher at 60 Hz, an in-browser calibration wizard (homing + range-of-motion sweep + save with automatic backup), live MJPEG camera streams, and a dataset-recording panel are all live.
+The mobile base is operational under ROS 2. Both SO-101 arms run through the unified HMI (FastAPI + Next.js + shadcn/ui) on main. Per-arm controls (joint sliders, home, free-drive, pose presets), a leader↔follower teleop launcher at 60 Hz, an in-browser calibration wizard (homing + range-of-motion sweep + save with automatic backup), live MJPEG camera streams, a dataset-recording panel, and webcam-driven bimanual teleop (in-browser MediaPipe pose → joint angles with a SPACE dead-man) are all live. Cloud-GPU recipes for π0.5 / pi0 / GR00T smoke tests, replay evaluation, and LoRA finetuning ship in [`scripts/runpod/`](https://github.com/oscardvs/haller_ws/tree/main/scripts/runpod).
 
 ## License
 
