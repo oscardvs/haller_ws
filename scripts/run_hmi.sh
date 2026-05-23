@@ -1,9 +1,33 @@
 #!/usr/bin/env bash
 # scripts/run_hmi.sh — launches the unified HMI (backend + frontend) on this host.
-set -euo pipefail
+set -eo pipefail
 
 # Activate the backend env (sources ROS + venv + isolation hooks)
 source "$HOME/venvs/haller-hmi/bin/activate-haller-hmi"
+
+# --config <path>: select a non-default HMI config (e.g. one of the sim presets).
+# Exported as HALLER_HMI_CONFIG, which haller_hmi.config.load_config respects.
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --config)
+            shift
+            if [ -z "${1:-}" ]; then
+                echo "run_hmi.sh: --config requires a path" >&2
+                exit 2
+            fi
+            export HALLER_HMI_CONFIG="$1"
+            shift
+            ;;
+        *)
+            echo "run_hmi.sh: unknown arg $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ -n "${HALLER_HMI_CONFIG:-}" ]; then
+    echo "run_hmi.sh: using config $HALLER_HMI_CONFIG"
+fi
 
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
