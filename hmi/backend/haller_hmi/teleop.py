@@ -9,10 +9,7 @@ Before starting the loop:
   - the leader's torque is disabled (so the operator can back-drive it by hand)
   - the leader is put in Mode.STOP (refuses HMI-side manual writes)
   - the follower's torque is enabled and the follower is put in Mode.MANUAL
-    (so the loop's send_action calls go through unhindered)
-  - lerobot's mode-guard goes via ArmHandle.send_goal, but the teleop loop
-    bypasses ModeError by writing directly through ArmHandle.robot.send_action;
-    we still clamp manually for safety.
+    (so the loop's send_goal calls go through unhindered)
 
 On stop, both arms are restored to MANUAL with torque enabled.
 """
@@ -146,15 +143,14 @@ class TeleopSession:
         while not self._stop.is_set():
             tick_start = time.perf_counter()
             try:
-                obs = leader.robot.get_observation() if leader.robot else {}
-                # Clamp every joint to the follower's calibrated range and pack
-                # into lerobot's "<joint>.pos" action shape.
-                action = {}
-                for joint, (lo, hi) in follower.joint_limits_deg.items():
-                    raw = float(obs.get(f"{joint}.pos", 0.0))
-                    action[f"{joint}.pos"] = max(lo, min(hi, raw))
-                if follower.robot is not None:
-                    follower.robot.send_action(action)
+                # Go through the ArmHandle interface (works for real + sim arms).
+                leader_joints = leader.read_joints_deg()
+                # Restrict to joints the follower knows about — send_goal handles
+                # clamping against the follower's own limits.
+                goal = {j: leader_joints[j]
+                        for j in follower.joint_limits_deg
+                        if j in leader_joints}
+                follower.send_goal(goal)
                 with self._lock:
                     self._state.tick_count += 1
                     self._state.last_error = None

@@ -93,3 +93,48 @@ def test_read_joints_deg_strips_pos_suffix(monkeypatch):
     }
     joints = handle.read_joints_deg()
     assert joints == {"shoulder_pan": 12.5, "elbow_flex": -30.0, "gripper": 0.0}
+
+
+def test_teleop_loop_uses_read_joints_deg_and_send_goal(monkeypatch):
+    """The teleop tick must go through handle.read_joints_deg() + handle.send_goal(),
+    not reach into handle.robot directly. This is what makes SimArmHandle a drop-in."""
+    from unittest.mock import MagicMock
+    from haller_hmi.teleop import TeleopSession
+    from haller_hmi.config import ArmConfig
+    from haller_hmi.arm import ArmManager
+    import time
+
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
+    monkeypatch.setattr(
+        "haller_hmi.arm.ArmHandle._load_joint_limits",
+        lambda self: {"shoulder_pan": (-120.0, 120.0), "gripper": (0.0, 100.0)},
+    )
+    monkeypatch.setattr(
+        "haller_hmi.calibration_bootstrap.ensure_follower_calibrations",
+        lambda configs: None,
+    )
+
+    cfg_l = ArmConfig(id="left",  model="so101_follower", port="/dev/null", calibration_id="x")
+    cfg_r = ArmConfig(id="right", model="so101_follower", port="/dev/null", calibration_id="y")
+    mgr = ArmManager([cfg_l, cfg_r])
+    mgr.connect_all()
+
+    leader = mgr["left"]
+    follower = mgr["right"]
+
+    # Stub the two interface methods we expect the loop to call.
+    leader.read_joints_deg = MagicMock(return_value={"shoulder_pan": 42.0, "gripper": 50.0})
+    follower.send_goal = MagicMock(return_value={"shoulder_pan": 42.0, "gripper": 50.0})
+    # Also disable any auto-enable side-effects.
+    leader.disable_torque = MagicMock()
+    follower.enable_torque = MagicMock()
+
+    session = TeleopSession(mgr)
+    session.start(leader_id="left", follower_id="right", hz=120.0)
+    time.sleep(0.1)  # let a few ticks happen
+    session.stop()
+
+    assert leader.read_joints_deg.called, "loop must call leader.read_joints_deg()"
+    assert follower.send_goal.called, "loop must call follower.send_goal()"
+    last_call = follower.send_goal.call_args
+    assert last_call.args[0] == {"shoulder_pan": 42.0, "gripper": 50.0}
