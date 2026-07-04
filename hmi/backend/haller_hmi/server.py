@@ -28,6 +28,7 @@ from .ros_bridge import RosBridge
 from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
+from .recorder import DatasetRecorder
 from .sim.teleop import SimLeaderTeleop
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ sim_teleop.attach_peer(teleop)
 sim_teleop.attach_peer(human_teleop)
 calibration = CalibrationManager()
 telemetry: TelemetryBroadcaster | None = None
+recorder: DatasetRecorder | None = None  # constructed in lifespan, after telemetry.start()
 
 
 # ---- request schemas -----------------------------------------------------
@@ -116,11 +118,20 @@ class SimTeleopStartBody(BaseModel):
     leader: dict
 
 
+class RecordStartBody(BaseModel):
+    repo_id: str          # e.g. "oscardvs/haller_pick_cube"
+    task: str             # natural-language instruction logged with every frame
+
+
+class RecordStopBody(BaseModel):
+    save: bool = True     # False -> discard the episode buffer (bad take)
+
+
 # ---- lifespan ------------------------------------------------------------
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    global telemetry, cameras
+    global telemetry, cameras, recorder
     logger.info("haller-hmi backend starting (version %s)", VERSION)
     arms.connect_all()
     cameras = CameraManager(cfg.cameras, world=arms.world())
@@ -129,8 +140,13 @@ async def _lifespan(app: FastAPI):
     telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz,
                                      teleop=teleop, human_teleop=human_teleop, calibration=calibration)
     telemetry.start()
+    recorder = DatasetRecorder(telemetry=telemetry, human_teleop=human_teleop, cameras=cameras)
     yield
     logger.info("haller-hmi backend shutting down")
+    if recorder is not None:
+        if recorder.status()["recording"]:
+            await recorder.stop_episode(save=True)
+        recorder.close()
     if telemetry is not None:
         await telemetry.stop()
     teleop.stop()
@@ -432,6 +448,34 @@ def teleop_sim_stop():
 @app.get("/teleop/sim/status")
 def teleop_sim_status():
     return sim_teleop.status()
+
+
+# ---- dataset recording (HMI-integrated bimanual recorder, v0) -------------
+
+@app.get("/record/status")
+def get_record_status():
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    return recorder.status()
+
+
+@app.post("/record/start")
+async def post_record_start(body: RecordStartBody):
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    try:
+        await recorder.start_episode(repo_id=body.repo_id, task=body.task)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, **recorder.status()}
+
+
+@app.post("/record/stop")
+async def post_record_stop(body: RecordStopBody):
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    status = await recorder.stop_episode(save=body.save)
+    return {"ok": True, **status}
 
 
 @app.get("/calibration/status")

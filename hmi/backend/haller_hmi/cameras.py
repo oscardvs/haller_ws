@@ -77,6 +77,22 @@ class CameraHandle:
                     logger.exception("camera %s: disconnect failed", self.cfg.id)
                 self.camera = None
 
+    def latest_rgb(self, max_age_ms: int = 500):
+        """Latest captured frame as an HxWx3 uint8 **RGB** numpy array, or None.
+
+        Used by the dataset recorder — LeRobotDataset frames want raw RGB, not
+        the JPEG that `latest_jpeg` produces for the browser. `OpenCVCamera`
+        returns RGB by default, so no colour conversion is needed here.
+        """
+        if self.camera is None:
+            return None
+        with self._lock:
+            try:
+                return self.camera.read_latest(max_age_ms=max_age_ms)
+            except Exception as e:
+                logger.warning("camera %s: read_latest failed: %s", self.cfg.id, e)
+                return None
+
     def latest_jpeg(self, max_age_ms: int = 500) -> bytes | None:
         """Latest captured frame encoded as JPEG, or None if no fresh frame.
 

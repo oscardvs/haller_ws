@@ -1,120 +1,178 @@
 "use client";
 
 /**
- * RecordingPanel — UI for the CLI dataset-collection flow (Phase 1).
+ * RecordingPanel — HMI-integrated bimanual dataset recorder (v0).
  *
- * Recording itself runs out-of-process via scripts/record_dataset.sh because
- * lerobot-record wants exclusive control of the serial ports + cameras (the
- * HMI must be stopped while it runs). Instead of pretending the HMI can
- * launch it directly, this panel just *builds the shell command* from the
- * task + episode-count inputs and offers a Copy button.
+ * Drives the in-process recorder (POST /record/start|stop, GET /record/status),
+ * which logs both arms + cameras + base into a LeRobotDataset while you
+ * demonstrate via the human-pose teleop. This replaces the old CLI-command-copy
+ * flow: `lerobot-record` assumes a leader→follower pair and can't capture
+ * Haller's two-follower bimanual rig, so recording lives inside the HMI.
  *
- * Phase 2 (HMI-integrated recorder) will replace this with start/save/discard
- * buttons that drive recording from inside the HMI process; see
- * docs/setup/dataset-collection.md.
+ * Workflow: start human-pose teleop first, then Start recording and demonstrate
+ * with the dead-man held — the recorder logs the teleop's commanded joint
+ * targets as `action` and the measured joints as `observation.state`.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
-function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 60) || "task";
-}
+import { api, type RecordStatus } from "@/lib/api";
 
-function shellQuote(s: string): string {
-  // POSIX single-quote escape: 'foo'\''bar' for foo'bar.
-  return `'${s.replace(/'/g, `'\\''`)}'`;
+function slugify(s: string): string {
+  return (
+    s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "task"
+  );
 }
 
 export function RecordingPanel() {
   const [task, setTask] = useState("Pick the red cube and place it in the box");
-  const [episodes, setEpisodes] = useState(20);
+  const [hfUser, setHfUser] = useState("");
+  const [status, setStatus] = useState<RecordStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const slug = useMemo(() => slugify(task), [task]);
-  const command = useMemo(
-    () => `scripts/record_dataset.sh ${shellQuote(task)} ${episodes}`,
-    [task, episodes],
-  );
+  const repoId = `${hfUser || "local"}/haller_${slugify(task)}`;
+  const recording = status?.recording ?? false;
+
+  // Poll status while mounted so the live frame count updates during a take.
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        setStatus(await api.recordStatus());
+      } catch {
+        /* backend not ready / recorder unavailable — keep last known status */
+      }
+    };
+    tick();
+    pollRef.current = setInterval(tick, 1000);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  async function start() {
+    setBusy(true);
+    try {
+      setStatus(await api.recordStart(repoId, task));
+      toast.success(`recording → ${repoId}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stop(save: boolean) {
+    setBusy(true);
+    try {
+      const s = await api.recordStop(save);
+      setStatus(s);
+      if (save) toast.success(`saved ${s.episode_frames} frames`);
+      else toast("take discarded");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <Card className="overflow-hidden p-0">
       <div className="flex items-center justify-between gap-2 px-3 h-9 border-b border-border bg-card">
         <div className="flex items-center gap-2">
           <span className="label-micro text-muted-foreground">Recording</span>
-          <Badge variant="secondary">CLI · phase 1</Badge>
+          <Badge variant={recording ? "default" : "secondary"}>
+            {recording ? "● rec" : "HMI · v0"}
+          </Badge>
         </div>
         <span className="font-mono text-[10px] text-muted-foreground">
-          dataset: <span className="text-foreground">…/so101_{slug}</span>
+          {recording && status ? (
+            <>
+              frames: <span className="text-foreground">{status.episode_frames}</span>
+            </>
+          ) : (
+            <>
+              dataset: <span className="text-foreground">{repoId}</span>
+            </>
+          )}
         </span>
       </div>
 
       <CardContent className="p-3 space-y-3">
         <div className="text-[11px] text-muted-foreground">
-          Recording owns the serial ports + cameras, so the HMI must be stopped
-          while it runs. Fill in the task + episode count, copy the command,
-          stop the HMI in your other terminal, then run it.
+          Records both arms + cameras + base into a LeRobotDataset from inside the
+          HMI. Start human-pose teleop first, then Start recording and demonstrate
+          with the dead-man held.
         </div>
 
         <div className="grid grid-cols-12 gap-2">
-          <label className="col-span-9 flex flex-col gap-1">
+          <label className="col-span-8 flex flex-col gap-1">
             <span className="label-tracked text-muted-foreground">Task</span>
             <Input
               value={task}
               onChange={(e) => setTask(e.target.value)}
+              disabled={recording}
               placeholder="What should the policy learn?"
               className="font-mono text-[12px] h-7"
             />
           </label>
-          <label className="col-span-3 flex flex-col gap-1">
-            <span className="label-tracked text-muted-foreground">Episodes</span>
+          <label className="col-span-4 flex flex-col gap-1">
+            <span className="label-tracked text-muted-foreground">HF user</span>
             <Input
-              type="number"
-              min={1}
-              max={500}
-              value={episodes}
-              onChange={(e) => {
-                const n = Number(e.target.value);
-                if (Number.isFinite(n)) setEpisodes(Math.max(1, Math.min(500, Math.round(n))));
-              }}
+              value={hfUser}
+              onChange={(e) => setHfUser(e.target.value)}
+              disabled={recording}
+              placeholder="osrdvs"
               className="font-mono text-[12px] h-7"
             />
           </label>
         </div>
 
         <div className="rounded-sm border border-border bg-muted/30 p-2 font-mono text-[11px] break-all">
-          {command}
+          {repoId}
         </div>
 
+        {status?.last_error && (
+          <div className="text-[11px] text-red-500 break-all">
+            recorder error: {status.last_error}
+          </div>
+        )}
+
         <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            className="h-7 px-3 label-micro"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(command);
-                toast.success("command copied to clipboard");
-              } catch {
-                toast.error("clipboard access denied — select and copy manually");
-              }
-            }}
-          >
-            copy command
-          </Button>
-          <a
-            href="https://github.com/oscardvs/haller_ws/blob/main/docs/setup/dataset-collection.md"
-            target="_blank"
-            rel="noreferrer"
-            className="label-micro text-muted-foreground hover:text-foreground"
-          >
-            docs/setup/dataset-collection.md
-          </a>
+          {!recording ? (
+            <Button
+              size="sm"
+              className="h-7 px-3 label-micro"
+              disabled={busy}
+              onClick={start}
+            >
+              start recording
+            </Button>
+          ) : (
+            <>
+              <Button
+                size="sm"
+                className="h-7 px-3 label-micro"
+                disabled={busy}
+                onClick={() => stop(true)}
+              >
+                stop &amp; save
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-7 px-3 label-micro"
+                disabled={busy}
+                onClick={() => stop(false)}
+              >
+                discard
+              </Button>
+            </>
+          )}
         </div>
       </CardContent>
     </Card>

@@ -105,6 +105,11 @@ export const api = {
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/swap", { swap }),
   humanTeleopCalibrate: (body: { left?: PinchCalibSide; right?: PinchCalibSide }) =>
     postJson<{ ok: true }>("/teleop/human/calibrate", body),
+  recordStatus: () => getJson<RecordStatus>("/record/status"),
+  recordStart: (repoId: string, task: string) =>
+    postJson<{ ok: true } & RecordStatus>("/record/start", { repo_id: repoId, task }),
+  recordStop: (save: boolean) =>
+    postJson<{ ok: true } & RecordStatus>("/record/stop", { save }),
   estop: () => postJson<{ ok: true }>("/estop", {}),
 };
 
@@ -136,4 +141,13 @@ export type HumanTeleopStatus = {
   };
   frame_age_ms?: number;
   goal_deg?: { left?: Record<string, number>; right?: Record<string, number> };
+};
+
+export type RecordStatus = {
+  recording: boolean;
+  repo_id: string | null;
+  task: string | null;
+  episode_frames: number;
+  started_at: number | null;
+  last_error: string | null;
 };
