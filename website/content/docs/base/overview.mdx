@@ -1,9 +1,9 @@
 ---
 title: Mobile base (ROS 2)
-description: The four-wheel differential-drive base under ROS 2 Jazzy — packages, bring-up, topics, and the systemd service.
+description: The three-wheel differential-drive base under ROS 2 Jazzy — packages, bring-up, topics, and the systemd service.
 ---
 
-The mobile base is the four-wheeled platform that carries the two SO-101 arms. It runs on a Jetson Orin Nano under **ROS 2 Jazzy** (Ubuntu 24.04), driven by two LK-TECH MF5010 BLDC motors over CAN, with a Slamtec RPLIDAR A1M8 for 2D scanning.
+The mobile base is the three-wheeled differential-drive platform (two driven front wheels + a rear caster) that carries the two SO-101 arms. It runs on a Jetson Orin Nano under **ROS 2 Jazzy** (Ubuntu 24.04), driven by two LK-TECH MF5010 BLDC motors over CAN, with a Slamtec RPLIDAR A1M8 for 2D scanning.
 
 The base and the arms are operationally independent — the HMI subscribes to `/odom` and `/scan` and publishes `/cmd_vel`, all topics the ROS hardware stack exposes. You can bring the base up without the HMI, and you can run the HMI on a laptop pointed at an Orin running only the base.
 

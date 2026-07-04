@@ -3,7 +3,7 @@
          type="haller_hardware_interface::HallerHardwareInterface"
          base_class_type="hardware_interface::SystemInterface">
     <description>
-      Hardware interface for the Haller 4-wheel mobile robot platform.
+      Hardware interface for the Haller 3-wheel (2 driven front wheels + rear caster) differential-drive mobile robot platform.
       Communicates with motor controllers via serial connection.
     </description>
   </class>

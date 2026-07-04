@@ -1,11 +1,11 @@
 # Haller Robot Workspace
 
-A ROS2 workspace for the Haller mobile robot platform - a 4-wheeled differential drive robot equipped with camera modules and Slamtech 2D LiDAR, running on NVIDIA Jetson Orin Nano.
+A ROS2 workspace for the Haller mobile robot platform - a 3-wheeled differential-drive robot (2 driven front wheels + rear caster) equipped with camera modules and Slamtech 2D LiDAR, running on NVIDIA Jetson Orin Nano.
 
 ## Hardware Specifications
 
 - **Compute**: NVIDIA Jetson Orin Nano
-- **Drive**: 4-wheel differential drive
+- **Drive**: differential drive — 2 driven front wheels + rear caster (3 wheels total)
 - **Sensors**:
   - Slamtech 2D LiDAR (RPLIDAR)
   - Camera modules

@@ -3,14 +3,14 @@ title: Overview
 description: What Haller is, what's in this repo, and where to start.
 ---
 
-Haller is an open-source mobile-manipulation robot: a four-wheeled differential-drive base that carries **two SO-101 arms** for bimanual manipulation. The repo (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, the unified web HMI, and the documentation you're reading.
+Haller is an open-source mobile-manipulation robot: a three-wheeled differential-drive base (two driven front wheels + a rear caster) that carries **two SO-101 arms** for bimanual manipulation. The repo (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, the unified web HMI, and the documentation you're reading.
 
 ## Hardware overview
 
 | Subsystem        | Components                                                              |
 | ---------------- | ----------------------------------------------------------------------- |
 | Compute          | NVIDIA Jetson Orin Nano                                                 |
-| Mobile base      | 4-wheel differential drive, LK-TECH MF5010 BLDC motors over CAN          |
+| Mobile base      | Differential drive — 2 driven front wheels + rear caster, LK-TECH MF5010 BLDC motors over CAN |
 | Perception       | Slamtec RPLIDAR A1M8 (2D LiDAR), camera modules                          |
 | Arms             | 2× SO-ARM101 ("SO-101") follower arms with Feetech STS3215 servos        |
 | Servo bus        | Feetech bus servo adapter (USB ↔ TTL half-duplex daisy-chain)           |

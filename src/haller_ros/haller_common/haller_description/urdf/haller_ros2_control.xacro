@@ -53,25 +53,8 @@
         <state_interface name="velocity"/>
       </joint>
 
-      <!-- Rear Left Wheel -->
-      <joint name="rear_left_wheel_joint">
-        <command_interface name="velocity">
-          <param name="min">-10</param>
-          <param name="max">10</param>
-        </command_interface>
-        <state_interface name="position"/>
-        <state_interface name="velocity"/>
-      </joint>
-
-      <!-- Rear Right Wheel -->
-      <joint name="rear_right_wheel_joint">
-        <command_interface name="velocity">
-          <param name="min">-10</param>
-          <param name="max">10</param>
-        </command_interface>
-        <state_interface name="position"/>
-        <state_interface name="velocity"/>
-      </joint>
+      <!-- No rear wheel joints: the rear is a passive caster (see haller_wheels.xacro),
+           not an actuated wheel. Differential drive = 2 driven front wheels. -->
 
     </ros2_control>
 

@@ -11,7 +11,7 @@ import { CameraTile } from "./CameraTile";
 const SEND_HZ = 10;
 
 /**
- * BasePanel — supervisory drive console for the 4-wheeled base.
+ * BasePanel — supervisory drive console for the 3-wheeled differential-drive base (2 driven front wheels + rear caster).
  *
  *  Left:  virtual joystick on a crosshair pad (mouse + WASD).
  *  Right: speed governor, kill button, live odometry mini-readout.

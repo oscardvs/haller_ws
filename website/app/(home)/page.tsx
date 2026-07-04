@@ -60,7 +60,7 @@ function Hero() {
         className="h-rise mt-8 max-w-2xl text-pretty text-[1.05rem] leading-[1.55] text-fd-muted-foreground sm:text-[1.12rem]"
         style={{ animationDelay: '160ms' }}
       >
-        Haller is a four-wheel differential-drive base carrying two SO-101 arms.
+        Haller is a three-wheel differential-drive base (two driven front wheels + a rear caster) carrying two SO-101 arms.
         ROS&nbsp;2 for the base, LeRobot for the arms, a unified FastAPI&nbsp;+&nbsp;Next.js HMI
         that ties it all together —{' '}
         <span className="italic text-fd-foreground">build it, calibrate it in the browser,

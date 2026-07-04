@@ -1,6 +1,6 @@
 # Haller
 
-Haller is an open-source mobile-manipulation robot: a four-wheeled differential-drive base that carries **two SO-101 arms** for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, scripts for deployment, and documentation for reproducing the build.
+Haller is an open-source mobile-manipulation robot: a three-wheeled differential-drive base (two driven front wheels + a rear caster) that carries **two SO-101 arms** for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, scripts for deployment, and documentation for reproducing the build.
 
 > **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms running through the unified HMI (FastAPI + Next.js + shadcn) on main. Per-arm controls (joint sliders, home, free-drive, pose presets), a leader↔follower teleop launcher at 60 Hz, and an in-browser calibration wizard (homing + range-of-motion sweep + save, with automatic backup) are live. Live MJPEG camera streams in the HMI and a CLI-driven dataset collection pipeline are now wired — see [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md). Next: HMI-integrated recorder. Three MuJoCo sim presets (solo, bimanual, leader+follower) drop into the same HMI surface; see [`docs/setup/sim.md`](./docs/setup/sim.md).
 
@@ -9,7 +9,7 @@ Haller is an open-source mobile-manipulation robot: a four-wheeled differential-
 | Subsystem        | Components                                                              |
 | ---------------- | ----------------------------------------------------------------------- |
 | Compute          | NVIDIA Jetson Orin Nano                                                 |
-| Mobile base      | 4-wheel differential drive, LK-TECH MF5010 BLDC motors over CAN          |
+| Mobile base      | Differential drive — 2 driven front wheels + rear caster, LK-TECH MF5010 BLDC motors over CAN |
 | Perception       | Slamtec RPLIDAR A1M8 (2D LiDAR), camera modules                          |
 | Arms             | 2× SO-ARM101 ("SO-101") follower arms with Feetech STS3215 servos        |
 | Servo bus        | Feetech bus servo adapter board (USB ↔ TTL half-duplex daisy-chain)      |
