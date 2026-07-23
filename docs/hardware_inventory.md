@@ -46,7 +46,7 @@ Drive layout: **differential drive, 2 driven front wheels + 1 rear caster**
 |---|---|---|---|
 | LK-TECH / MyActuator **MF5010** BLDC | 2 | One per driven front wheel. 16 V rated winding. Variant **10T vs 35T not recorded** — differs 4× in current, 3.5× in speed | ⚠️ |
 | Motor controller **MCF302CB** | ? | Referenced via `docs/LK-demo-MCF302CB-CAN.zip`. Quantity, input voltage range, and whether one board drives both motors all unrecorded | ❓ |
-| Gearbox / reduction | ? | See note below | ❓ |
+| Gearbox / reduction | 0 | **None — direct drive.** Motor shaft ↔ wheel 1:1 | ✅ |
 | Driven wheels | 2 | Radius 0.05 m (⌀100 mm), track width 0.34 m | ✅ |
 | Rear caster | 1 | Passive | ✅ |
 
@@ -59,16 +59,24 @@ Drive layout: **differential drive, 2 driven front wheels + 1 rear caster**
 | Max speed | 3050 rpm | 870 rpm |
 | Speed constant | 150 rpm/V | 27.5 rpm/V |
 
-### Note: is there a reduction stage?
+### Drive is direct (no reduction)
 
-The controller config caps linear velocity at 1.0 m/s. With a 0.05 m wheel
-radius that is 20 rad/s ≈ **191 rpm at the wheel**. The MF5010 is rated
-2400 rpm (10T). Either there is a gearbox, or the motors run direct-drive at
-under 10% of rated speed — which would mean poor torque utilisation and
-significant heating at low RPM.
+Confirmed: the motors drive the wheels **1:1, no gearbox**. Consequences:
 
-The MF series is generally the gearbox-less line (as opposed to RMD-X). **This
-needs confirming physically**, because the whole torque budget depends on it.
+- **Speed.** The 1.0 m/s velocity cap with a 0.05 m wheel is 20 rad/s ≈
+  **191 rpm** at the motor — about 8% of the 2400 rpm rating. Plenty of speed
+  headroom; the robot is nowhere near the motor's top end.
+- **Torque = wheel torque, 1:1.** No multiplication. Force per wheel is
+  τ / r = 0.26 / 0.05 ≈ **5.2 N rated**, ~8 N at peak torque (0.4 N·m).
+- **Current is torque-driven, not speed-driven** (I ≈ τ / Kt, Kt = 0.05 N·m/A
+  for the 10T). Running slow does not lower current. Under sustained load
+  (heavy robot, ramp) each motor can sit near its **rated 5 A continuously**;
+  max torque draws ~8 A. The 20 A main fuse and wiring already cover this.
+
+Open sub-item: **total robot mass is not recorded**, so grade/acceleration
+capability isn't yet quantified. As a reference point, on a ~15 kg robot two
+wheels give ~0.7 m/s² acceleration and ~4° grade at rated torque. Confirm this
+is adequate for the intended environment.
 
 ---
 
@@ -126,10 +134,11 @@ Ordered roughly by how much they block progress.
 1. **MF5010 winding: 10T or 35T?** Sets the entire current and fuse budget.
 2. **MCF302CB input voltage range?** Determines whether it can sit on the raw
    25.2 V pack rail, or needs its own converter.
-3. **Is there a gearbox?** The 191 rpm vs 2400 rpm gap has to be explained.
-4. **How do motors physically connect** — USB-CAN adapter, or Jetson CAN pins
+3. **How do motors physically connect** — USB-CAN adapter, or Jetson CAN pins
    with a transceiver? Record the part.
-5. **Resolve the `/dev/ttyUSB0` collision** between LiDAR and motor interface.
+4. **Resolve the `/dev/ttyUSB0` collision** between LiDAR and motor interface.
+5. **Record total robot mass** — needed to quantify direct-drive grade and
+   acceleration capability (§ Actuation).
 6. Is there an IMU? `robot_localization` implies one.
 7. Which Hilti charger is available?
 8. Main power wiring gauge — must handle ~12.5 A peak.
