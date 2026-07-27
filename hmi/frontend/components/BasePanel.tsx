@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
-import { api } from "@/lib/api";
+import { api, cameraStreamUrl, type CameraInfo } from "@/lib/api";
 import { useTelemetry } from "@/lib/telemetry";
 import { CameraTile } from "./CameraTile";
 
@@ -27,6 +27,22 @@ export function BasePanel() {
   const pad = useRef<HTMLDivElement>(null);
   const [knob, setKnob] = useState({ x: 0, y: 0 });
   const [active, setActive] = useState(false);
+  const [baseCam, setBaseCam] = useState<CameraInfo | null>(null);
+
+  // Find the forward-facing base camera (config.yaml: role: base).
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .cameras()
+      .then((r) => {
+        if (cancelled) return;
+        setBaseCam(r.cameras.find((c) => c.role === "base") ?? null);
+      })
+      .catch(() => setBaseCam(null));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Send at fixed rate while non-zero, then one final zero
   useEffect(() => {
@@ -136,7 +152,15 @@ export function BasePanel() {
       </div>
 
       <CardContent className="p-3 space-y-3">
-        <CameraTile id="base_front" role="base" />
+        <CameraTile
+          id={baseCam?.id ?? "base_front"}
+          role="base"
+          streamUrl={baseCam?.active ? cameraStreamUrl(baseCam.id) : undefined}
+          active={baseCam?.active}
+          width={baseCam?.width}
+          height={baseCam?.height}
+          fps={baseCam?.fps}
+        />
 
         <div className="grid grid-cols-12 gap-3 items-stretch">
           {/* JOYSTICK PAD */}
