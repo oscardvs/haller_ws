@@ -35,8 +35,12 @@ cameras:
   - id: base_front
     role: base
     source: opencv
-    # Laptop integrated webcam for now — swap to the real base-mounted cam when plugged in.
-    index_or_path: /dev/video0
+    # RealSense D455 RGB node, tower-mounted, looking at the bimanual workspace.
+    # The D455 exposes plain UVC nodes, so no librealsense is needed for RGB:
+    #   /dev/video0 = Z16 depth, /dev/video2 = infrared, /dev/video4 = YUYV colour.
+    # Node numbering can shift across reboots — re-check with:
+    #   udevadm info -q property -n /dev/videoN | grep ID_V4L
+    index_or_path: /dev/video4
     width: 640
     height: 480
     fps: 30
