@@ -1,98 +1,285 @@
 ---
 title: Bill of materials
-description: Parts list for a Haller — compute, mobile base, perception, arms, networking, tools.
+description: Parts list for a Haller — compute, mobile base, arms, perception, power, teleop — with what's confirmed, what's still to buy, and what we deliberately skip.
 ---
 
 <Callout type="warn">
-**Still partial.** Suppliers, prices, and total cost are TODO — they need to be reconciled against actual purchase records. The line items below are accurate and complete enough to source a build; specific SKUs and CAD links are the remaining gap.
+**Prices are estimates.** EUR, ex-shipping, mid-2026 European availability. They're good enough to budget from, not to reconcile accounts against. Lines marked ❌ are the only things not yet on hand.
 </Callout>
+
+Status key: ✅ on hand · ❌ to buy · ⏸️ deliberately deferred
+
+Related: [`power_system.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/power_system.md) derives the battery chain in depth; [`hardware_inventory.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/hardware_inventory.md) tracks per-part provenance.
 
 ## Compute
 
-| Item | Qty | Notes |
-|---|---|---|
-| NVIDIA Jetson Orin Nano (8 GB dev kit) | 1 | Main on-board compute. JetPack 6 / Ubuntu 22.04. The 8 GB variant is required — vision pipeline (YOLOv8n + SegFormer-B0 in TensorRT FP16) won't fit in 4 GB. |
-| microSD card (≥128 GB, A2/U3) | 1 | Or NVMe SSD via M.2 if you populate the dev-kit slot. |
-| USB-C power supply (≥45 W) | 1 | For bench bring-up before the on-board battery is wired in. |
-| 5 V cooling fan | 0–1 | Dev-kit ships with one; recommended on if running vision continuously. |
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| NVIDIA Jetson Orin Nano (8 GB dev kit) | 1 | ✅ | Main on-board compute. 8 GB variant required — the vision pipeline (YOLOv8n + SegFormer-B0, TensorRT FP16) won't fit in 4 GB. DC jack is **5.5 × 2.5 mm**, 9–20 V. |
+| **NVMe SSD 512 GB** (M.2, dev-kit slot) | 1 | ✅ | Boot media. |
+| USB-C power supply (≥45 W) | 1 | ✅ | Bench bring-up before the battery is in the loop. |
 
-## Mobile base
+## Arms (SO-101, bimanual)
 
-### Drive
+Both arms are **followers**. There is no leader arm — teleoperation is
+[human-pose teleop](/docs/hmi/human-teleop) from a webcam, which costs nothing
+and is already shipped.
 
-| Item | Qty | Notes |
-|---|---|---|
-| LK-TECH MF5010 BLDC motor (with built-in controller) | 2 | Drive motors. Speak CAN at 1 Mbps. See [MF5010 datasheet](https://github.com/oscardvs/haller_ws/blob/main/MF5010_Specs.pdf) + [CAN protocol manual](https://github.com/oscardvs/haller_ws/blob/main/LK-TECH%20motor%20control%20protocol(CAN)%20V2.35%20-%20%E5%89%AF%E6%9C%AC.pdf). |
-| Drive wheels (~100 mm diameter) | 2 | Wheel radius 0.05 m, matching `motor_params.yaml`. Hub geometry must match the MF5010 output. |
-| Passive / caster wheels | 2 | Front + rear, freely castering. |
-| CANable2 USB→CAN adapter (slcan firmware) | 1 | Becomes `/dev/haller_can` via udev. USB vendor:product `16d0:117e`. |
-| CAN termination resistor (120 Ω) | 1 | Across the bus far end. Some MF5010s ship with one built-in — check the datasheet. |
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| SO-ARM101 mechanical kit (FDM-printed + fasteners + bearings) | 2 | ✅ | Two followers, not follower + leader. Source: [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100). |
+| Feetech **STS3215, 7.4 V, 19 kg·cm**, 360° magnetic encoder | 12 | ✅ | 6 per arm, €17.83 each. Operating range 6.0–7.4 V. Feeding these 12 V destroys all twelve. See [the arm power rail](#arm-power-rail-74-v). |
+| Waveshare Serial Bus Servo Driver Board | 2 | ✅ | One per arm, USB ↔ TTL half-duplex. `1a86:55d3`. Jumpers on **B** (USB control path). Barrel jack is **DC5521 = 5.5 × 2.1 mm** — *different from the Jetson's 2.5 mm*. |
+| 3-pin TTL daisy-chain cables | 10–12 | ✅ | 5 per arm to chain motors 1–6, plus the upstream link. |
+| Soft fin-ray gripper fingers (TPU 95A) | 2 sets | ✅ | Printed from the [XLeRobot hardware repo](https://github.com/Vector-Wangel/XLeRobot/tree/main/hardware). |
+| Spare STS3215, 7.4 V | 1 | ❌ €18 | `shoulder_lift` carries the most load and is the one that fails. |
 
-### Chassis + power
+<Callout type="warn">
+**These are the 19 kg·cm / 7.4 V servos, not the 30 kg·cm / 12 V ones.** Torque is roughly a third lower than the 12 V variant most SO-101 build logs assume. Gravity sag is more visible and payload is lower. Keep anything bolted to the wrist under ~40 g, and expect `shoulder_lift` to work hard at full extension.
+</Callout>
 
-| Item | Qty | Notes |
-|---|---|---|
-| Chassis plates + motor mounts + fasteners | — | CAD link TODO. Material can be 3 mm aluminium, laser-cut plywood, or 3D-printed for prototypes. |
-| Wheel-separation: 0.34 m (center-to-center) | — | Matches `wheel_separation: 0.34` in `haller_motor_controller/config/motor_params.yaml`. Change one, change the other. |
-| Battery pack (LiFePO4 12.8 V, 8–10 Ah recommended) | 1 | Powers the MF5010s. Capacity sizing depends on runtime target; ~5 Ah gives a working hour of light driving. |
-| Battery main fuse (5–10 A) | 1 | Inline on the positive lead. Sizing matches your motors' stall current. |
-| Hard E-stop switch (NC, ≥5 A rating) | 1 | Inline on the motor power feed. Independent of the HMI's software E-STOP. |
-| 12 V → 5 V buck converter (≥3 A) | 1 | Feeds the Jetson off the same pack. |
+## Stand
+
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| XLeRobot tower + arm base plate | 1 | ✅ | Reused from the [XLeRobot](https://xlerobot.readthedocs.io/) design. The IKEA RÅSKOG cart, mecanum base, and head gimbal from that BOM are **not** used. |
+| Arm mounting plates | 2 | ✅ | Part of the XLeRobot base plate. |
 
 ## Perception
 
-| Item | Qty | Notes |
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Intel RealSense **D455** | 1 | ✅ | Third-person workspace camera on the tower. 87° × 58° FOV covers the whole bimanual workspace from a fixed mount. Build librealsense with `-DFORCE_RSUSB_BACKEND=ON` to avoid kernel-module patching on JetPack. |
+| D455 **fixed** mount | 1 | ✅ | Print `Gimbal_Pitch_Holder` from the XLeRobot hardware repo and bolt it rigid — see [why no gimbal](#deliberately-not-buying). |
+| Wrist / egocentric USB camera module, **MJPEG** 640×480@30, ~30×30 mm | 2 | ❌ €55 | One per gripper. **MJPEG support is mandatory** — see [the USB bandwidth trap](#usb-topology). ELP or Arducam UVC modules. Keep under 40 g. |
+| Slamtec RPLIDAR A1M8 | 1 | ✅ | `/dev/haller_lidar`. `10c4:ea60`. Base subsystem. |
+| IMX219 CSI camera | 1 | ✅ | `/dev/video0`, base navigation. Not yet intrinsically calibrated. |
+
+## Mobile base
+
+Not yet integrated — the arms currently sit on a static stand. Listed for completeness.
+
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| LK-TECH MF5010 BLDC (integrated controller) | 2 | ✅ | Direct drive, no gearbox. CAN @ 1 Mbps. **Winding variant 10T vs 35T still unrecorded** — sets the whole current budget. |
+| Drive wheels, ⌀100 mm | 2 | ✅ | Wheel radius 0.05 m, track 0.34 m — matches `motor_params.yaml`. |
+| Passive rear caster | 1 | ✅ | 3-wheel differential drive: 2 driven front + 1 rear caster. |
+| **CANable V2 USB-CAN FD adapter** | 1 | ✅ | → `/dev/haller_can`. Resolves the long-standing "is there a CAN adapter?" inventory gap — the hardware interface being a serial stub was a software state, not a missing part. |
+| 22 AWG PTFE twisted pair, 10 m | 1 | ✅ | CAN bus wiring. |
+| CAN termination resistor, 120 Ω | 1 | ❓ | Check whether the MF5010s ship with one built in before fitting a second. |
+| Swivel casters, 3 inch | 4 | ✅ | Only 1 is needed for the 3-wheel layout; spares. |
+
+## Power
+
+Battery is the **Hilti B 22-195 Nuron** (6S3P, 21.6 V nominal, 9.0 Ah, 194.4 Wh),
+measured at 24.3 V near full with **no tool handshake required**. Design window
+is 20.4–25.2 V. Full derivation in [`power_system.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/power_system.md).
+
+Two independent rails, because servo current spikes must not sag the Jetson:
+
+```
+                                   ┌─ 10 A fuse ─[adj. buck → 7.4 V]─┬─ TVS 8.0 V ─┬─ 6 A ─ Waveshare R ─ arm R bus
+Hilti B+ ─┬─ XT60 ─ 15 A main ─────┤                                  │             └─ 6 A ─ Waveshare L ─ arm L bus
+          │         fuse           │                                  └─ E-STOP (NC)
+          │                        └─ 5 A fuse ──[24→12 V buck 5 A]───┬─ Jetson (5.5×2.5 mm)
+          │                                                            └─ powered USB hub (12 V in)
+Hilti B− ─┴────────────── common ground, 14 AWG ─────────────────────────────────────────────────
+                          white + blue Nuron data wires: individually insulated, unconnected
+```
+
+### Load budget
+
+| Rail | Load | Current | Power |
+|---|---|---|---|
+| 7.4 V | Arm right (6× STS3215) | ~5 A | 37 W |
+| 7.4 V | Arm left (6× STS3215) | ~5 A | 37 W |
+| 12 V | Jetson Orin Nano | 3.75 A | 45 W |
+| 12 V | USB hub + wrist cams | ~0.8 A | 10 W |
+| **Pack input** | at 21.6 V, 90% efficiency | **~6.1 A** | **~130 W** |
+
+15 A main fuse covers this with headroom. Runtime at a realistic ~60 W average:
+**~3 h**. Raise the main fuse to 20 A when the base motors join the pack.
+
+### Arm power rail (7.4 V)
+
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Adjustable buck, **8–40 V in**, 1.25–15 V out, ≥10 A, CC+CV | 1 | ❌ €18 | Set to 7.4 V. The CC limit doubles as a bus current limiter. 300 W class. |
+| **TVS diode, 8.0 V standoff** (SMBJ8.0A / P6KE8.2A) | 1 | ❌ €2 | **The most important €2 in this build** — see below. |
+| Inline fuse holders + fuses (15 A main, 10 A arm rail fast-blow, 2× 6 A branch, 5 A Jetson) | 1 set | ❌ €12 | |
+| **LA36M E-stop, 22 mm mushroom, 1NC** | 1 | ✅ | AC/DC 12–24 V. Drives the relay coil, **not** the arm current — see [the E-STOP wiring](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md#6-e-stop). |
+| 12 V 1-channel relay module (low-level trigger) | 3 | ✅ | The E-stop contactor. Contacts carry the 7.4 V rail; the button only breaks the ~70 mA coil supply, which makes the arrangement failsafe. |
+| Wago-style lever connectors, 2/3/5 port | 90 | ✅ | Star-ground node and rail distribution. |
+| DC barrel pigtails, 18 AWG / 7 A | ~6 | ⚠️ | **5.5 × 2.1 confirmed** (Waveshare). A second lot lists 2.1 in the title and 2.5 in the variant — *measure before plugging anything into the Jetson*. |
+| Heat-shrink kit, 328 pc | 1 | ✅ | |
+| **14 AWG silicone wire** | 2 m | ❌ €10 | The only gauge not on hand. Main run + 7.4 V trunk + ground return. The assorted hook-up wire is 20–22 AWG, signal only. |
+| XT60 pigtail for the Hilti harness | 1 | ❌ €3 | Makes the Hilti pack and the 6S LiPo interchangeable. |
+
+<Callout type="error">
+**Crowbar the 7.4 V rail.** The gap between safe (7.4 V) and destructive (12 V) is
+4.6 V and it is set by a trimpot on a €18 module. A knocked pot costs you twelve
+servos. Four mitigations, all of them:
+
+1. Set the output and **verify with a multimeter into a dummy load** before any servo is connected.
+2. **Lock the trimpot** — nail varnish or thread-lock over the screw.
+3. Fit the **8.0 V TVS across the rail, downstream of the 10 A fuse**. If the output rises, the TVS conducts hard and blows the fuse before the servos see it.
+4. Set the converter's **CC limit to ~10 A** so a bus fault current-limits instead of running away.
+</Callout>
+
+<Callout type="warn">
+**Voltage drop matters far more at 7.4 V than at 12 V.** The servo floor is 6.0 V,
+so you have 1.4 V of headroom for the whole chain. Use **14 AWG** for the 7.4 V run,
+keep it under 0.5 m, and mount the converter near the arms.
+
+**DC5521 barrel jacks are rated ~5 A** — exactly where each arm sits at peak. They
+warm up. For a permanent build, solder power directly to the Waveshare board's DC
+input pads rather than relying on the barrel.
+</Callout>
+
+### Jetson rail (12 V)
+
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Sealed automotive buck, **15–40 V in**, 12 V ≥5 A, synchronous | 1 | ❌ €15 | Verify the *input range*, not the "24V" in the product title — many specify an 18–20 V minimum, which sits at the pack's operating floor. |
+| LM2596 module | 1 | ✅ | On hand. **Not for the Jetson** (~2 A real, non-synchronous). Fine for bench aux under 1.5 A. |
+
+### Harness
+
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Hilti sliding battery connector | 1 | ✅ | 6 wires: 2× B+, 2× B−, white + blue data. **Bond each power pair** — a single contact halves the interface's current rating. |
+| **6S LiPo 5200 mAh 80C, XT60** + 6S 40 A BMS | 1 | ✅ | Alternate pack. Same 20.4–25.2 V envelope as the Hilti, so the converter design is pack-agnostic. The Hilti stays primary: 194 Wh vs 115 Wh, integrated BMS, charger on hand. |
+| Main disconnect switch ≥30 A | 1 | ❌ €7 | |
+| TVS + bulk electrolytic for the **motor** rail | 1 | ⏸️ | BLDC regen protection. Arm servos don't regen — defer until the base is integrated. |
+
+### Monitoring
+
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Digital battery capacity indicator, 8–100 V DC | 1 | ✅ | Two wires across the pack. Works on either battery. |
+| 2–6S LiPo cell voltage monitor / alarm | 1 | ✅ | Needs balance taps — **works only with the LiPo**. The Hilti pack exposes no cell taps. |
+| Seeed XIAO nRF52840 **Sense** | 2 | ✅ | Onboard 6-axis IMU (closes the `robot_localization` IMU gap) *and* an ADC for the `BatteryState` publisher via a 100 k/15 k divider. |
+
+## USB topology
+
+Eight devices eventually. The Orin Nano dev kit has 4× Type-A (the USB-C is
+occupied by device-mode SSH).
+
+| Jetson port | Device | Why |
 |---|---|---|
-| Slamtec RPLIDAR A1M8 (2D LiDAR) | 1 | Becomes `/dev/haller_lidar` via udev. USB vendor:product `10c4:ea60` (CP2102 bridge). |
-| IMX219 camera module (CSI, e.g. Raspberry Pi Cam v2) | 1 | Front-facing perception camera into the Jetson CSI slot. See [Vision pipeline / Hardware setup](/docs/base/vision#hardware-setup). |
-| USB webcam (wrist) | 1 per arm | For SO-101 dataset collection. Recent UVC-class webcams at 640×480 @ 30 fps work; Logitech C920/C925 are well-tested. |
-| USB webcam (base / overhead) | 1 | Same as wrist; sees the workbench in third-person. |
+| Type-A #1 | **RealSense D455 — alone, never behind a hub** | RealSense fails intermittently on hubs. Non-negotiable. |
+| Type-A #2 | Wrist cam right | Bandwidth isolation |
+| Type-A #3 | Wrist cam left | Bandwidth isolation |
+| Type-A #4 | Powered hub → arm R board, arm L board, LiDAR, CAN adapter | Serial devices, negligible bandwidth |
 
-## Arms (SO-101)
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Powered USB 3.0 hub, 4–7 port, **12 V DC input** | 1 | ❌ €25 | The DC jack lets it run off the 12 V rail instead of a wall wart. |
+| Shielded USB cables ≤1.5 m + 5× ferrite clamps | — | ❌ €20 | |
 
-| Item | Qty | Notes |
-|---|---|---|
-| SO-ARM100 mechanical kit (FDM-printed + fasteners + bearings) | 2 | Follower + leader. Source: [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100), or buy a prebuilt kit (e.g. WowRobo, Robotis). |
-| Feetech STS3215 servos (12 V variant, 1/345 gear ratio) | 12 | 6 per arm. Both Haller arms use the **same** STS3215 — a deliberate [symmetric-hardware choice](/docs/setup/so101-arm#5-bring-up-the-leader), not the mixed-gear-ratio leader from the upstream docs. Voltage variant: match the supply — see the [warning in the hardware checklist](/docs/setup/so101-arm#hardware-checklist). |
-| Feetech bus servo adapter (Waveshare or equivalent) | 2 | One per arm. USB ↔ TTL half-duplex. Vendor:product `1a86:55d3` on the units used in Haller; udev rules also key on the unit's USB serial number. |
-| Servo power supply | 1–2 | 7.4 V bench supply (5 A) for 7.4 V STS3215, **or** 12 V / 5 A brick for 12 V STS3215. Don't mix variants on the same bus. |
-| 3-pin TTL cables (servo daisy-chain) | 10–12 | 5 cables per arm to chain motors 1–6 + the upstream link to the adapter board. |
-| Arm mounting plate (attaches arm to chassis) | 2 | CAD link TODO. |
+<Callout type="warn">
+**The bandwidth trap.** Two 640×480@30 cameras in raw YUYV need ~147 Mbps *each*;
+USB 2.0 delivers ~280 Mbps practical. Put both on one root and you get
+`VIDIOC_STREAMON: No space left on device`. Buy cameras with **MJPEG** and force
+MJPEG in the capture config — roughly 10× less bandwidth.
 
-## Networking + cabling
+**`wrist_roll` is calibrated as continuous.** A USB cable routed through it will
+wind up and snap. Clamp the range in software or leave a generous service loop
+with strain relief at the wrist.
 
-| Item | Qty | Notes |
-|---|---|---|
-| Powered USB hub (≥7 ports, ≥2 A per port) | 1 | Aggregates: CAN adapter + LiDAR + 2× arm bus adapters + 2–3 webcams. Underpowered hubs cause intermittent device drops — buy with margin. |
-| USB cables (A→B or A→C as needed) | 6–8 | One per peripheral. Short (≤1 m) keeps EMC clean. |
-| Wi-Fi (Jetson onboard, or USB dongle) | — | Used in [AP fallback mode](/docs/deployment/wifi-ap). Dev kit's onboard radio works as-is. |
+**Don't run USB alongside servo power** for long parallel stretches. The bus is a
+half-duplex 1 Mbaud line sitting next to a switching converter.
+</Callout>
 
-## Tools you'll need
+## Teleoperation and data collection
 
-- Soldering iron + flux + solder (battery harness, fuse holder, E-stop pigtails)
-- M2.5 / M3 hex keys (SO-ARM100 fasteners are mostly M2.5 / M3)
-- Screwdrivers including JIS Phillips (some servo horns)
-- Bench DC supply (≥30 V / ≥5 A) for first power-on before the battery is in the loop
-- Multimeter for continuity + voltage checks on the harness
-- USB OTG/data cable for first JetPack flash from another computer
-- Wire strippers, crimper, heat-shrink, zip ties
+**€0.** [Human-pose teleop](/docs/hmi/human-teleop) is shipped on `main`: in-browser
+MediaPipe Pose + Hands → WebSocket → joint-angle retargeting → 60 Hz bimanual
+control, with a SPACE dead-man and per-side pinch-to-gripper calibration. The
+[HMI dataset recorder](/docs/data/dataset-collection) consumes that session
+directly, so the chain from webcam to `LeRobotDataset` is already wired.
 
-## Cost ballpark (rough)
+| Item | Qty | Status | Notes |
+|---|---|---|---|
+| Laptop webcam | 1 | ✅ | The operator-facing camera. Any UVC webcam works. |
+| Leader arms | 0 | ⏸️ | Not needed. Would cost ~€300 and only buys precision the human-pose path may already deliver — evaluate the shipped path against a real task first. |
+| Meta Quest headset | 0 | ⏸️ | Fallback if human-pose tracking quality proves inadequate. Borrowable rather than purchased. Prior art: [SO-101-VR-Control](https://github.com/kabilankb/SO-101-VR-Control) (browser WebXR, no app install, single-arm) and [lerobot_teleoperator_so101_vuer](https://github.com/Oasis-Uniandes/lerobot_teleoperator_so101_vuer). |
+| Gamepad | 0 | ⏸️ | XLeRobot ships [Xbox / Joy-Con / keyboard teleop](https://xlerobot.readthedocs.io/en/latest/software/getting_started/XLeRobot_teleop.html) for real hardware. Backup input if webcam tracking degrades on a specific task. |
 
-A working build comes in around the following — exact figures depend a lot on whether you buy the SO-101 kits prebuilt or print them yourself, and on regional availability:
+## Deliberately not buying
 
-| Subsystem | Rough cost |
+| Item | Why |
 |---|---|
-| Jetson Orin Nano dev kit + SSD/SD | $500 |
-| Mobile base (motors + CAN + wheels + chassis + battery + harness) | $700–900 |
-| Perception (LiDAR + CSI cam + 2× USB webcams) | $250 |
-| Two SO-101 arms (kits + 12 servos + 2 bus adapters + 2 PSUs) | $800–1200 |
-| **Total** | **~$2300–2900** |
+| **Head gimbal servos** (2× STS3215) + 3rd bus adapter | XLeRobot needs a pan/tilt head because it drives around a house. Our arms are on a fixed stand and the D455's 87° FOV already covers the workspace. An actuated head adds 2 DOF to the action space and a time-varying camera extrinsic. Every SO-101/ALOHA dataset that works uses a rigid third-person camera. Saves ~€45 and one USB device. |
+| **Stepper motor for the camera** | There is no stepper in the XLeRobot design — the head is two STS3215 bus servos. Moot given the above. |
+| IKEA RÅSKOG cart / mecanum base | Only the tower and arm base plate are reused; Haller has its own 3-wheel differential base. |
+| Leader arms | See teleoperation above. |
 
-## TODO
+## What's left to buy
 
-- Per-line supplier links + part numbers + lead times.
-- CAD files for chassis plates, motor mounts, arm mounting plates.
-- Photo of an assembled Haller alongside this BOM.
-- Battery sizing guide vs. runtime / drive distance.
-- A "minimum viable Haller" variant (single arm, no LiDAR) for a cheaper first build.
+Revised after auditing purchase records — the E-stop, relays, connectors,
+heat-shrink, CAN adapter, boot SSD, and battery monitors were all already
+bought.
+
+| Item | ~€ | Blocking? |
+|---|---|---|
+| Adjustable buck 8–40 V → 7.4 V, ≥10 A, CC+CV | 18 | **Yes** |
+| Sealed buck 15–40 V → 12 V, ≥5 A | 15 | **Yes** |
+| TVS 8.0 V (SMBJ8.0A) | 2 | **Yes** |
+| Fuse holders + ATO fuses (15/10/6/6/5 A) | 12 | **Yes** |
+| 14 AWG silicone wire, 2 m | 10 | **Yes** |
+| XT60 pigtail + main disconnect | 10 | **Yes** |
+| **Blocking subtotal** | **~67** | |
+| Wrist camera modules (MJPEG) ×2 | 55 | For multi-cam datasets |
+| Powered USB hub, 12 V input | 25 | For multi-cam datasets |
+| USB cables + ferrites | 20 | For multi-cam datasets |
+| Spare STS3215 7.4 V | 18 | Insurance |
+| **Total** | **~185** | |
+
+<Callout type="info">
+**You can start recording before the cameras arrive.** The D455 alone, rigidly
+mounted on the tower, is a complete single-camera observation. That path needs
+none of the €118 below the blocking line — see
+[dataset collection](/docs/data/dataset-collection).
+</Callout>
+
+## Cost ballpark (whole build, as configured)
+
+| Subsystem | ~€ |
+|---|---|
+| Jetson Orin Nano dev kit + storage | 500 |
+| Two SO-101 follower arms (kits + 12 servos + 2 bus adapters) | 700 |
+| Perception (D455 + LiDAR + CSI cam + 2 wrist cams) | 550 |
+| Mobile base (2× MF5010 + CAN + wheels + chassis) | 700 |
+| Power chain (Hilti pack + converters + harness + fusing) | 200 |
+| Tower + printed parts + fasteners | 80 |
+| **Total** | **~2 730** |
+
+## Tools
+
+- ✅ USB soldering iron kit (battery harness, fuse holders, E-stop pigtails)
+- ✅ Bolt assortment M2–M4, brass heat-set inserts M2–M6, heat-shrink kit
+- **Multimeter** — mandatory, not optional, for the 7.4 V rail
+- Bench DC supply (≥30 V / ≥5 A) for first power-on before the battery is in the loop
+- M2.5 / M3 hex keys, JIS Phillips (some servo horns)
+- Wire strippers, ferrule crimper, zip ties
+- USB data cable for JetPack flashing
+
+## Wiring
+
+Point-to-point wiring, fusing, grounding, E-STOP, and the bring-up procedure
+live in [`docs/wiring.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md).
+
+## Open items
+
+- Measure the second lot of DC barrel pigtails — 5.5 × 2.1 or 2.5? The Jetson needs 2.5.
+- Confirm the Waveshare board passes barrel voltage straight through to the servo bus rather than regulating it.
+- MF5010 winding variant — 10T or 35T? Sets the base current budget.
+- MCF302CB controller input voltage range.
+- The `/dev/ttyUSB0` collision between the LiDAR and the motor interface — resolve with udev symlinks.
+- Total robot mass — needed to quantify direct-drive grade and acceleration.
+- CAD links for chassis plates and motor mounts.
+- Camera intrinsic calibration (D455 + IMX219).
+
+*Resolved by the purchase-record audit:* USB-CAN adapter exists (CANable V2) ·
+boot media is a 512 GB NVMe · an IMU exists (XIAO nRF52840 Sense).
