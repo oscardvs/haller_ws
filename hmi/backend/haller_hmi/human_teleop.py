@@ -394,12 +394,19 @@ class HumanTeleopSession:
                 steps_right = self._smooth_step(
                     self._committed_right, target_right, right.joint_limits_deg, alpha,
                 )
-                self._committed_left = {j: s.committed for j, s in steps_left.items()}
-                self._committed_right = {j: s.committed for j, s in steps_right.items()}
-                # Rebinding a dict is atomic in CPython, so status() always sees
-                # a whole tick's worth of steps — never a half-updated dict.
-                self._steps_left = steps_left
-                self._steps_right = steps_right
+                committed_left = {j: s.committed for j, s in steps_left.items()}
+                committed_right = {j: s.committed for j, s in steps_right.items()}
+                # Rebinding a single dict is atomic in CPython, but that does not
+                # make this four-way update atomic — a reader in status() could
+                # otherwise interleave and see committed_* from this tick paired
+                # with steps_* from the previous one. Hold the lock across all
+                # four assignments together so status() always sees one tick's
+                # worth, consistently.
+                with self._lock:
+                    self._committed_left = committed_left
+                    self._committed_right = committed_right
+                    self._steps_left = steps_left
+                    self._steps_right = steps_right
                 if driving:
                     # Gate per-side: don't write to an arm whose tracking is lost.
                     now_perf = time.perf_counter()
