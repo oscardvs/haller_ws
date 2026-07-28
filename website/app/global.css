@@ -273,6 +273,12 @@ article > h1:first-of-type {
 .mermaid-frame::before { top: 6px; left: 6px; border-right: 0; border-bottom: 0; }
 .mermaid-frame::after  { bottom: 6px; right: 6px; border-left: 0; border-top: 0; }
 
+/* Sankey ribbons ship with an inline `mix-blend-mode: multiply`, which collapses
+   them to near-black on a dark surface. Screen is the dark-mode dual — overlaps
+   still separate, they just brighten instead of darkening. `!important` is
+   required because mermaid sets the blend mode inline. */
+.dark .mermaid-frame .link { mix-blend-mode: screen !important; }
+
 /* ── reusable utility components for the home/editorial bits ─────────────── */
 
 .h-grid {

@@ -84,38 +84,78 @@ is 20.4–25.2 V. Full derivation in [`power_system.md`](https://github.com/osca
 Two independent converter rails, because servo current spikes must not sag the
 Jetson (Phase B adds a third: the motors sit on the raw pack rail):
 
-```
-Hilti B+
-  └─ disconnect ≥30 A
-       └─ 15 A main fuse
-            ├─ 10 A ─ [adj. buck 8-40 V → 7.4 V, 10 A, CC+CV]
-            │           └─ 10 A fast-blow ─ TVS 8.0 V crowbar ─ E-STOP relay
-            │                └─ WAGO "7V4" node
-            │                     ├─ 6 A ─ Waveshare R ─ arm R bus
-            │                     └─ 6 A ─ Waveshare L ─ arm L bus
-            └─  5 A ─ [sealed buck 15-40 V → 12 V, 10 A]
-                          ├─ Jetson Orin Nano (5.5 × 2.5 mm barrel)
-                          └─ powered USB hub (12 V DC in)
+```mermaid
+flowchart TB
+    classDef pack fill:#a371f722,stroke:#a371f7,color:inherit
+    classDef prot fill:#f8512922,stroke:#f85129,color:inherit
+    classDef conv fill:#1f6feb22,stroke:#1f6feb,color:inherit
+    classDef load fill:#3fb95022,stroke:#3fb950,color:inherit
 
-Hilti B− ─ star ground (single WAGO node), 14 AWG ─ all converter and board returns
-Nuron data wires (white + blue) ─ individually insulated, not connected
+    Pack[("Hilti B 22-195 Nuron<br/>21.6 V nom · 24.3 V full<br/>window 20.4–25.2 V")]:::pack
+    Disc[["disconnect ≥30 A"]]:::prot
+    Main[["15 A main fuse"]]:::prot
+
+    Pack --> Disc --> Main
+
+    Main -->|"10 A"| B74["adj. buck<br/>8–40 V → 7.4 V<br/>10 A · CC+CV"]:::conv
+    Main -->|"5 A"| B12["sealed buck<br/>15–40 V → 12 V<br/>10 A"]:::conv
+
+    subgraph Rail74["7.4 V rail — servos only"]
+        direction TB
+        FF[["10 A fast-blow"]]:::prot
+        TVS[/"TVS 8.0 V<br/>crowbar"/]:::prot
+        Relay[["E-STOP relay contacts"]]:::prot
+        Node(["WAGO 7V4 node"]):::conv
+        WsR["Waveshare driver R"]:::conv
+        WsL["Waveshare driver L"]:::conv
+        ArmR["arm R bus<br/>6× STS3215 · ~5 A"]:::load
+        ArmL["arm L bus<br/>6× STS3215 · ~5 A"]:::load
+
+        FF -.->|"shunt to B−"| TVS
+        FF --> Relay --> Node
+        Node -->|"6 A"| WsR --> ArmR
+        Node -->|"6 A"| WsL --> ArmL
+    end
+
+    subgraph Rail12["12 V rail — compute"]
+        direction TB
+        Jet["Jetson Orin Nano<br/>5.5 × 2.5 mm barrel · 3.75 A"]:::load
+        Hub["powered USB hub<br/>12 V DC in · ~1 A"]:::load
+    end
+
+    B74 --> FF
+    B12 --> Jet
+    B12 --> Hub
 ```
+
+Two things the diagram doesn't draw: **B−** goes to a single star-ground WAGO
+node in 14 AWG, and every converter and board return lands there — not on each
+other. The Nuron **data wires (white + blue) are individually insulated and left
+unconnected**; no tool handshake is needed to draw current.
 
 The fast-blow fuse goes **between the buck and the TVS tap**, not after it — the
 crowbar only works if the TVS's fault current has to pass through the fuse to
-clear it.
+clear it. That's why the shunt in the diagram hangs off the downstream side.
 
 ### Load budget
 
-| Rail | Load | Current | Power |
-|---|---|---|---|
-| 7.4 V | Arm right (6× STS3215) | ~5 A | 37 W |
-| 7.4 V | Arm left (6× STS3215) | ~5 A | 37 W |
-| 12 V | Jetson Orin Nano | 3.75 A | 45 W |
-| 12 V | USB hub + wrist cams | ~1 A | 12 W |
-| **Pack input** | at 21.6 V, 90% efficiency | **~6.7 A** | **~146 W** |
+Watts, at peak, with converter efficiency taken at 90%:
 
-The 15 A main fuse covers this with wide headroom. Runtime at a realistic ~60 W
+```mermaid
+sankey-beta
+
+Hilti pack 21.6 V (~6.7 A),7.4 V buck,83
+Hilti pack 21.6 V (~6.7 A),12 V buck,63
+7.4 V buck,Arm right - 6x STS3215 (~5 A),37
+7.4 V buck,Arm left - 6x STS3215 (~5 A),37
+7.4 V buck,Converter loss,9
+12 V buck,Jetson Orin Nano (3.75 A),45
+12 V buck,USB hub + wrist cams (~1 A),12
+12 V buck,Converter loss,6
+```
+
+**~146 W at the pack, ~131 W of it useful.** The 15 A main fuse covers this with
+wide headroom. Runtime at a realistic ~60 W
 average: **~3 h**. When the base motors join the pack the peak goes to ~19 A, so
 the main becomes **25 A** and the motors get their own **20 A** branch — a motor
 fault then clears locally instead of dropping the arms and the Jetson with it.
@@ -195,12 +235,31 @@ converter's *input* still bounds that branch.
 Eight devices eventually. The Orin Nano dev kit has 4× Type-A (the USB-C is
 occupied by device-mode SSH).
 
-| Jetson port | Device | Why |
-|---|---|---|
-| Type-A #1 | **RealSense D455 — alone, never behind a hub** | RealSense fails intermittently on hubs. Non-negotiable. |
-| Type-A #2 | Wrist cam right | Bandwidth isolation |
-| Type-A #3 | Wrist cam left | Bandwidth isolation |
-| Type-A #4 | Powered hub → arm R board, arm L board, LiDAR, CAN adapter | Serial devices, negligible bandwidth |
+```mermaid
+flowchart LR
+    classDef host fill:#a371f722,stroke:#a371f7,color:inherit
+    classDef iso fill:#3fb95022,stroke:#3fb950,color:inherit
+    classDef hub fill:#1f6feb22,stroke:#1f6feb,color:inherit
+    classDef ser fill:#f8512922,stroke:#f85129,color:inherit
+
+    Jetson[("Jetson Orin Nano dev kit<br/>4× Type-A<br/>Type-C = device-mode SSH")]:::host
+
+    Jetson ==>|"Type-A 1"| D455["RealSense D455<br/>alone — never behind a hub"]:::iso
+    Jetson -->|"Type-A 2"| WR["Wrist cam right<br/>MJPEG 640×480@30"]:::iso
+    Jetson -->|"Type-A 3"| WL["Wrist cam left<br/>MJPEG 640×480@30"]:::iso
+    Jetson -->|"Type-A 4"| Hub["Powered USB 3.0 hub<br/>12 V DC in"]:::hub
+
+    Hub --> BR["Waveshare arm R · 1a86:55d3"]:::ser
+    Hub --> BL["Waveshare arm L · 1a86:55d3"]:::ser
+    Hub --> Lidar["RPLIDAR A1M8 · 10c4:ea60<br/>/dev/haller_lidar"]:::ser
+    Hub --> Can["CANable V2<br/>/dev/haller_can"]:::ser
+
+    CSI["IMX219 · /dev/video0"]:::iso -.->|"CSI ribbon — not USB"| Jetson
+```
+
+The three camera ports are about **bandwidth isolation**; the hub branch is
+serial devices with negligible bandwidth. The D455 on its own root is
+non-negotiable — it fails intermittently behind a hub.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
@@ -279,15 +338,19 @@ none of the €118 below the blocking line — see
 
 ## Cost ballpark (whole build, as configured)
 
-| Subsystem | ~€ |
-|---|---|
-| Jetson Orin Nano dev kit + storage | 500 |
-| Two SO-101 follower arms (kits + 12 servos + 2 bus adapters) | 700 |
-| Perception (D455 + LiDAR + CSI cam + 2 wrist cams) | 550 |
-| Mobile base (2× MF5010 + CAN + wheels + chassis) | 700 |
-| Power chain (Hilti pack + converters + harness + fusing) | 200 |
-| Tower + printed parts + fasteners | 80 |
-| **Total** | **~2 730** |
+```mermaid
+pie showData
+    title Whole build — ~€2 730
+    "Two SO-101 follower arms · kits + 12 servos + 2 bus adapters" : 700
+    "Mobile base · 2× MF5010 + CAN + wheels + chassis" : 700
+    "Perception · D455 + LiDAR + CSI cam + 2 wrist cams" : 550
+    "Jetson Orin Nano dev kit + storage" : 500
+    "Power chain · Hilti pack + converters + harness + fusing" : 200
+    "Tower + printed parts + fasteners" : 80
+```
+
+Arms and base are half the build between them, and the base isn't integrated
+yet — the ~€2 030 already standing is what does the manipulation work.
 
 ## Tools
 

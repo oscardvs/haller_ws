@@ -106,6 +106,29 @@ export function Mermaid({ chart }: { chart: string }) {
             noteBkgColor: t.muted,
             noteBorderColor: t.border,
             noteTextColor: t.fg,
+
+            /* Pie slices: fixed hexes shared by both themes, picked dark
+               enough that white in-slice text reads on every one. Chrome
+               (legend, title, gaps) still follows the theme. */
+            pie1: '#1f6feb',
+            pie2: '#2f9e4f',
+            pie3: '#8957e5',
+            pie4: '#c2410c',
+            pie5: '#a16207',
+            pie6: '#57606a',
+            pie7: '#0f766e',
+            pie8: '#9f1239',
+            pieOpacity: '1',
+            pieStrokeColor: t.bg,
+            pieStrokeWidth: '2px',
+            pieOuterStrokeColor: t.border,
+            pieOuterStrokeWidth: '1px',
+            pieSectionTextColor: '#ffffff',
+            pieSectionTextSize: '12px',
+            pieLegendTextColor: t.fg,
+            pieLegendTextSize: '13px',
+            pieTitleTextColor: t.fg,
+            pieTitleTextSize: '15px',
           },
         });
 
