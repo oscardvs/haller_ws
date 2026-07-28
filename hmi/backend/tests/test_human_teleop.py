@@ -493,3 +493,185 @@ def test_status_goal_deg_shape_is_unchanged_by_the_joints_block():
             assert isinstance(value, float)
     finally:
         sess.stop()
+
+
+# ---- mouth-open dead-man clutch: session wiring -----------------------
+#
+# This file has no shared "started session" fixture; every test above builds
+# its own mgr/session and stops it in a `finally`. The mouth-clutch tests
+# follow the same pattern rather than introducing a new one.
+
+from haller_hmi.safety import MOUTH_HOLD_MS
+
+
+def _mouth_frame(jaw, *, ts_ms=0):
+    """A minimal mouth-mode keypoint frame carrying no side data."""
+    return {
+        "type": "keypoints", "ts_ms": ts_ms,
+        "clutch_source": "mouth", "dead_man": False,
+        "jaw_open": jaw, "left": None, "right": None,
+    }
+
+
+def test_spacebar_mode_ignores_jaw_open():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.ingest_frame({
+            "type": "keypoints", "ts_ms": 0,
+            "clutch_source": "spacebar", "dead_man": False,
+            "jaw_open": 0.99, "left": None, "right": None,
+        })
+        st = sess.status()
+        assert st["state"] != "driving"
+        assert st["clutch"]["source"] == "spacebar"
+        assert st["clutch"]["reason"] == "spacebar_mode"
+    finally:
+        sess.stop()
+
+
+def test_mouth_mode_ignores_dead_man_boolean():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.ingest_frame({
+            "type": "keypoints", "ts_ms": 0,
+            "clutch_source": "mouth", "dead_man": True,
+            "jaw_open": 0.01, "left": None, "right": None,
+        })
+        assert sess.status()["state"] != "driving"
+    finally:
+        sess.stop()
+
+
+def test_mouth_uncalibrated_never_engages():
+    # No calibration set at all.
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_mouth_frame(0.99))
+        st = sess.status()
+        assert st["state"] != "driving"
+        assert st["clutch"]["reason"] == "uncalibrated"
+    finally:
+        sess.stop()
+
+
+def test_mouth_invalid_calibration_never_engages():
+    # Separation 0.05 — below MOUTH_MIN_SEPARATION.
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.50, "open_min": 0.55})
+        sess.ingest_frame(_mouth_frame(0.99))
+        st = sess.status()
+        assert st["state"] != "driving"
+        assert st["clutch"]["reason"] == "uncalibrated"
+    finally:
+        sess.stop()
+
+
+def test_mouth_engages_after_sustained_hold(monkeypatch):
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["clutch"]["reason"] == "holding"
+        assert sess.status()["state"] != "driving"
+
+        clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["clutch"]["engaged"] is True
+        assert sess.status()["clutch"]["reason"] == "engaged"
+    finally:
+        sess.stop()
+
+
+def test_mouth_decimated_nulls_within_budget_do_not_disengage(monkeypatch):
+    """Normal operation is NOT a fault: face runs every 3rd frame, so two
+    frames in three legitimately carry jaw_open=None."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        sess.ingest_frame(_mouth_frame(0.95))
+        clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["clutch"]["engaged"] is True
+
+        # Two null frames, 33ms apart — well inside the 250ms budget.
+        clock["t"] += 0.033
+        sess.ingest_frame(_mouth_frame(None))
+        clock["t"] += 0.033
+        sess.ingest_frame(_mouth_frame(None))
+        assert sess.status()["clutch"]["engaged"] is True
+        assert sess.status()["clutch"]["stale"] is False
+    finally:
+        sess.stop()
+
+
+def test_mouth_stale_face_disengages(monkeypatch):
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        sess.ingest_frame(_mouth_frame(0.95))
+        clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["clutch"]["engaged"] is True
+
+        # 300ms with no real sample — past the 250ms budget.
+        clock["t"] += 0.300
+        sess.ingest_frame(_mouth_frame(None))
+        st = sess.status()
+        assert st["clutch"]["engaged"] is False
+        assert st["clutch"]["stale"] is True
+        assert st["clutch"]["reason"] == "stale"
+        assert st["state"] != "driving"
+    finally:
+        sess.stop()
+
+
+def test_switching_source_while_driving_forces_disengage(monkeypatch):
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        sess.ingest_frame(_mouth_frame(0.95))
+        clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["state"] == "driving"
+
+        # Authority must never hand over mid-motion, even though the spacebar
+        # frame arrives with dead_man=True.
+        sess.ingest_frame({
+            "type": "keypoints", "ts_ms": 0,
+            "clutch_source": "spacebar", "dead_man": True,
+            "jaw_open": None, "left": None, "right": None,
+        })
+        assert sess.status()["state"] != "driving"
+    finally:
+        sess.stop()

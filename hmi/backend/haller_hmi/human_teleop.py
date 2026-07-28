@@ -22,7 +22,12 @@ import time
 from dataclasses import dataclass
 
 from .arm import ArmManager
-from .safety import Mode
+from .safety import (
+    Mode,
+    MouthClutchCalib,
+    mouth_clutch_thresholds,
+    mouth_clutch_decision,
+)
 from . import retarget
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,7 @@ class HumanTeleopSession:
         hz_override: float | None = None,
         frame_age_ms_loss: float = 300.0,
         ws_disconnect_grace_s: float = 5.0,
+        face_stale_ms: float = 250.0,
     ):
         self._arms = arms
         self._lock = threading.Lock()
@@ -96,6 +102,16 @@ class HumanTeleopSession:
         self._last_left_perf: float = 0.0
         self._last_right_perf: float = 0.0
         self._peers: list = []
+        # Mouth-clutch state. _last_face_perf mirrors the per-side staleness
+        # pattern above: 0.0 means "no sample has ever arrived", which reads
+        # as stale and therefore disengaged.
+        self._face_stale_ms = face_stale_ms
+        self._clutch_source: str = "spacebar"
+        self._mouth_calib: MouthClutchCalib | None = None
+        self._jaw_open: float | None = None
+        self._last_face_perf: float = 0.0
+        self._jaw_above_since_perf: float | None = None
+        self._clutch_reason: str = "spacebar_mode"
 
     # ---- public API ------------------------------------------------------
 
@@ -125,12 +141,75 @@ class HumanTeleopSession:
             if right is not None:
                 self._pinch_calib_right = dict(right)
 
+    def set_mouth_calib(self, calib: dict | None) -> None:
+        """Store per-operator jaw-open calibration. None clears it."""
+        with self._lock:
+            self._mouth_calib = (
+                MouthClutchCalib(talk_max=float(calib["talk_max"]),
+                                 open_min=float(calib["open_min"]))
+                if calib else None
+            )
+
+    def mouth_calib_is_valid(self) -> bool:
+        """True when a calibration is set AND yields safe thresholds."""
+        with self._lock:
+            return (self._mouth_calib is not None
+                    and mouth_clutch_thresholds(self._mouth_calib) is not None)
+
+    def _mouth_engaged(self, now_perf: float) -> bool:
+        """Evaluate the mouth clutch. Caller holds the lock.
+
+        Owns only the stateful parts — the clock reads and the hold timer.
+        The actual engage/release policy is safety.mouth_clutch_decision.
+        """
+        th = (mouth_clutch_thresholds(self._mouth_calib)
+              if self._mouth_calib else None)
+        if th is None:
+            self._jaw_above_since_perf = None
+            self._clutch_reason = "uncalibrated"
+            return False
+
+        t_engage, _t_release = th
+        stale = (
+            self._last_face_perf == 0.0
+            or (now_perf - self._last_face_perf) * 1000.0 > self._face_stale_ms
+        )
+
+        if self._jaw_open is not None and not stale and self._jaw_open >= t_engage:
+            if self._jaw_above_since_perf is None:
+                self._jaw_above_since_perf = now_perf
+            held_ms = (now_perf - self._jaw_above_since_perf) * 1000.0
+        else:
+            self._jaw_above_since_perf = None
+            held_ms = 0.0
+
+        engaged = mouth_clutch_decision(
+            self._jaw_open, th, held_ms, stale, self._dead_man,
+        )
+
+        if stale:
+            self._clutch_reason = "stale"
+        elif engaged:
+            self._clutch_reason = "engaged"
+        elif self._jaw_above_since_perf is not None:
+            self._clutch_reason = "holding"
+        else:
+            self._clutch_reason = "below_threshold"
+        return engaged
+
     def status(self) -> dict:
         with self._lock:
             cfg = self._cfg
             now = time.perf_counter()
             left_age = (now - self._last_left_perf) * 1000.0 if self._last_left_perf else None
             right_age = (now - self._last_right_perf) * 1000.0 if self._last_right_perf else None
+            th = (mouth_clutch_thresholds(self._mouth_calib)
+                  if self._mouth_calib else None)
+            face_stale = (
+                self._clutch_source == "mouth"
+                and (self._last_face_perf == 0.0
+                     or (now - self._last_face_perf) * 1000.0 > self._face_stale_ms)
+            )
             return {
                 "running": self.running,
                 "state": self._state.value,
@@ -158,6 +237,15 @@ class HumanTeleopSession:
                 "joints": {
                     "left":  self._steps_as_dict(self._steps_left),
                     "right": self._steps_as_dict(self._steps_right),
+                },
+                "clutch": {
+                    "source": self._clutch_source,
+                    "jaw_open": self._jaw_open,
+                    "t_engage": th[0] if th else None,
+                    "t_release": th[1] if th else None,
+                    "engaged": self._dead_man,
+                    "stale": face_stale,
+                    "reason": self._clutch_reason,
                 },
             }
 
@@ -195,6 +283,13 @@ class HumanTeleopSession:
             self._target_right = None
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
+            # Same reasoning as the per-side timestamps: a stale jaw sample
+            # from the previous session must not let a fresh one engage.
+            self._clutch_source = "spacebar"
+            self._jaw_open = None
+            self._last_face_perf = 0.0
+            self._jaw_above_since_perf = None
+            self._clutch_reason = "spacebar_mode"
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
             self._dead_man = False
@@ -245,7 +340,43 @@ class HumanTeleopSession:
         with self._lock:
             if not self.running:
                 return
-            self._dead_man = bool(frame.get("dead_man", False))
+            prev_source = self._clutch_source
+            self._clutch_source = str(frame.get("clutch_source", "spacebar"))
+            # A source "switch" only means something once a session has
+            # actually produced a frame before — the very first frame ever
+            # seen trivially differs from the "spacebar" default but there is
+            # no prior authority to hand over, so it must not force a disengage
+            # (that would wipe the mouth-clutch hold timer on frame 1 of every
+            # mouth-mode session before it has a chance to accumulate).
+            source_changed = (
+                self._clutch_source != prev_source
+                and self._state is not HumanState.ARMED
+            )
+            now_perf_clutch = time.perf_counter()
+            if self._clutch_source == "mouth":
+                jaw = frame.get("jaw_open")
+                if jaw is not None:
+                    self._jaw_open = float(jaw)
+                    self._last_face_perf = now_perf_clutch
+                engaged = self._mouth_engaged(now_perf_clutch)
+            else:
+                engaged = bool(frame.get("dead_man", False))
+                self._clutch_reason = "spacebar_mode"
+                self._jaw_above_since_perf = None
+            if source_changed:
+                # Authority never hands over mid-motion. Whatever the new
+                # source is asserting on its very first frame, disengage once
+                # and make the operator re-assert deliberately.
+                engaged = False
+                self._jaw_above_since_perf = None
+            self._dead_man = engaged
+
+            mc = frame.get("mouth_calib")
+            if mc:
+                self._mouth_calib = MouthClutchCalib(
+                    talk_max=float(mc["talk_max"]), open_min=float(mc["open_min"]),
+                )
+
             calib = frame.get("pinch_calib") or {}
             if "left" in calib:
                 self._pinch_calib_left = calib["left"]
