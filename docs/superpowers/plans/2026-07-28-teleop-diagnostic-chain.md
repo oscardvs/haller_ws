@@ -350,8 +350,12 @@ def test_reason_reports_clamped_against_a_real_sim_joint_limit(sim_arms):
     sess = HumanTeleopSession(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
-        # Arm swung hard to one side: retarget drives shoulder_pan to ~90 deg.
-        frame = _kp_frame(dead_man=True, elbow=[0.3, 1.4, 0.0], wrist=[0.6, 1.4, 0.0])
+        # The arm must be swung PAST the real limit, which for the vendored
+        # SO-101 MJCF is shoulder_pan = +/-110.008 deg (`range="-1.92 1.92"`
+        # radians, so_arm100.xml:35). A pose in the shoulder's XY plane
+        # retargets to exactly 90 deg and would never clamp — the arm has to
+        # swing behind the shoulder. This pose retargets to ~123.7 deg.
+        frame = _kp_frame(dead_man=True, elbow=[0.3, 1.4, -0.2], wrist=[0.6, 1.4, -0.4])
 
         def _clamped() -> bool:
             sess.ingest_frame(frame)
