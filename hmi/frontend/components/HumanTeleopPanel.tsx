@@ -63,6 +63,9 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   const [liveDistance, setLiveDistance] = useState<{ left: number | null; right: number | null }>({
     left: null, right: null,
   });
+  const [liveConf, setLiveConf] = useState<{ left: number | null; right: number | null }>({
+    left: null, right: null,
+  });
 
   // Persist calib on change.
   useEffect(() => {
@@ -153,6 +156,15 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         setLiveDistance(ld);
       }
 
+      // Functional update with an identity bail-out: returning `prev` unchanged
+      // makes React skip the re-render, so this needs no effect dependency.
+      // Do NOT add `liveConf` to the effect's dep array — that would tear down
+      // and recreate the requestAnimationFrame loop on every confidence change.
+      const lc = { left: fused.left?.confidence ?? null, right: fused.right?.confidence ?? null };
+      setLiveConf((prev) =>
+        prev.left === lc.left && prev.right === lc.right ? prev : lc,
+      );
+
       const frame: KeypointFrame = {
         type: "keypoints",
         ts_ms: Math.floor(performance.now()),
@@ -232,11 +244,11 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         </Card>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <PinchCalibrationStep
-            side="left" liveDistance={liveDistance.left} value={calib.left}
+            side="left" liveDistance={liveDistance.left} confidence={liveConf.left} value={calib.left}
             onChange={(next) => setCalib({ ...calib, left: next })}
           />
           <PinchCalibrationStep
-            side="right" liveDistance={liveDistance.right} value={calib.right}
+            side="right" liveDistance={liveDistance.right} confidence={liveConf.right} value={calib.right}
             onChange={(next) => setCalib({ ...calib, right: next })}
           />
         </div>

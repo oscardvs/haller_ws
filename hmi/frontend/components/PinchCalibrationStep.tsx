@@ -21,11 +21,15 @@ export type PinchCalib = {
 
 export function PinchCalibrationStep({
   liveDistance,
+  confidence,
   side,
   value,
   onChange,
 }: {
   liveDistance: number | null;
+  /** MediaPipe tracking confidence for this side, [0,1]. Display only —
+   *  a low value does not reduce authority. */
+  confidence?: number | null;
   side: PinchSide;
   value: PinchCalib;
   onChange: (next: PinchCalib) => void;
@@ -51,6 +55,16 @@ export function PinchCalibrationStep({
         <div className="flex justify-between">
           <span className="text-muted-foreground">live</span>
           <span>{liveDistance === null ? "—" : liveDistance.toFixed(3) + " m"}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-muted-foreground">conf</span>
+          <span className={
+            confidence !== null && confidence !== undefined && confidence < 0.5
+              ? "tabular-nums text-[var(--instrument-warn,oklch(75%_0.16_70))]"
+              : "tabular-nums"
+          }>
+            {confidence === null || confidence === undefined ? "—" : confidence.toFixed(2)}
+          </span>
         </div>
         <div className="flex gap-2">
           <Button size="sm" variant="outline" className="h-7 flex-1" onClick={captureOpen}>
