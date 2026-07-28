@@ -152,9 +152,13 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         rightPinch01: pinch01For(ld.right, calib.right),
       }));
 
-      if (ld.left !== liveDistance.left || ld.right !== liveDistance.right) {
-        setLiveDistance(ld);
-      }
+      // Functional update with an identity bail-out: returning `prev` unchanged
+      // makes React skip the re-render, so this needs no effect dependency.
+      // Do NOT add `liveDistance` to the effect's dep array — that would tear
+      // down and recreate the requestAnimationFrame loop on every frame.
+      setLiveDistance((prev) =>
+        prev.left === ld.left && prev.right === ld.right ? prev : ld,
+      );
 
       // Functional update with an identity bail-out: returning `prev` unchanged
       // makes React skip the re-render, so this needs no effect dependency.
