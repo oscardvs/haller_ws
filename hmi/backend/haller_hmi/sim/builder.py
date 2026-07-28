@@ -280,13 +280,19 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
         f'xyaxes="{camera_xyaxes((0, 0, 1.0), (0, 0, 0))}" fovy="60"/>'
     )
     # Three-quarter view from the front-right: the arms reach toward -Y, so a
-    # camera off the -Y side sees the whole linkage in profile. Framed to hold
-    # the 0.8 m workbench plus headroom at fovy=45.
-    _tq_pos: Vec3 = (0.6, -0.7, 0.45)
+    # camera off the -Y side sees the whole linkage in profile.
+    #
+    # Framing is set by the *worst* case, not the resting pose. Bases sit at
+    # x = +/-0.20 and the arm reaches ~0.35 m, so a fully-extended pair spans
+    # about +/-0.55 m — wider than the 0.8 m workbench. At this distance
+    # (~1.25 m) fovy=50 gives ~1.55 m of horizontal coverage, which keeps both
+    # arms in frame at full extension instead of clipping them exactly when
+    # you most need to see where they are.
+    _tq_pos: Vec3 = (0.75, -0.9, 0.55)
     _tq_target: Vec3 = (0.0, 0.0, 0.12)
     parts.append(
         f'<camera name="threequarter" pos="{" ".join(str(c) for c in _tq_pos)}" '
-        f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="45"/>'
+        f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="50"/>'
     )
     parts.append("</worldbody>")
 
