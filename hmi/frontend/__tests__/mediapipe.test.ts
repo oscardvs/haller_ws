@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fuseLandmarkResults, buildOverlaySides, type SideFrame } from "../lib/mediapipe";
+import { extractJawOpen, FACE_EVERY_N } from "@/lib/mediapipe";
 
 const sample_pose_left_shoulder = { x: 0.5, y: 0.4, z: 0.0, visibility: 0.95 };
 const sample_pose_left_elbow    = { x: 0.5, y: 0.5, z: 0.0, visibility: 0.93 };
@@ -115,5 +116,40 @@ describe("buildOverlaySides", () => {
     );
     expect(out.left!.lost).toBe(true);
     expect(out.left!.pinch01).toBeCloseTo(0.12);
+  });
+});
+
+describe("extractJawOpen", () => {
+  it("returns the jawOpen score from the blendshape categories", () => {
+    const result = {
+      faceBlendshapes: [{
+        categories: [
+          { categoryName: "eyeBlinkLeft", score: 0.02 },
+          { categoryName: "jawOpen", score: 0.73 },
+          { categoryName: "mouthSmile", score: 0.11 },
+        ],
+      }],
+    };
+    expect(extractJawOpen(result as never)).toBeCloseTo(0.73);
+  });
+
+  it("returns null when no face was detected", () => {
+    expect(extractJawOpen(null)).toBeNull();
+    expect(extractJawOpen(undefined)).toBeNull();
+    expect(extractJawOpen({ faceBlendshapes: [] } as never)).toBeNull();
+  });
+
+  it("returns null when jawOpen is absent from the categories", () => {
+    const result = {
+      faceBlendshapes: [{ categories: [{ categoryName: "mouthSmile", score: 0.4 }] }],
+    };
+    expect(extractJawOpen(result as never)).toBeNull();
+  });
+
+  it("decimates to every third tick", () => {
+    // The panel runs face inference when tick % FACE_EVERY_N === 0.
+    expect(FACE_EVERY_N).toBe(3);
+    const ran = [0, 1, 2, 3, 4, 5, 6].map((t) => t % FACE_EVERY_N === 0);
+    expect(ran).toEqual([true, false, false, true, false, false, true]);
   });
 });
