@@ -28,6 +28,11 @@ from the same MediaPipe inference pass on the same frame, so GPU starvation
 cannot degrade one and not the other — the asymmetry pointed at hand-detection
 dropout on one side, not throughput.
 
+The cause was mundane and will recur: the operator did not keep that hand
+raised the whole time. Lowering a hand mid-session is ordinary operator
+behaviour, not an edge case — which makes how the system responds to it worth
+getting right.
+
 `lib/mediapipe.ts:110` is why a dropout is total rather than partial:
 
 ```js
@@ -287,7 +292,9 @@ silently defeats the fail-safe.
 
 `buildSide` (`lib/mediapipe.ts:110`) returns `null` for an entire side when that
 side's hand label is absent, discarding good pose data with it. A partially
-tracked side becomes a fully frozen arm. Degrading instead — driving
+tracked side becomes a fully frozen arm. As §2 records, the trigger is simply
+an operator lowering a hand — so this fires in normal use, not just under
+tracking faults. Degrading instead — driving
 `shoulder_pan` / `shoulder_lift` / `elbow_flex` from pose alone and holding only
 the hand-derived joints — would make one-sided dropout far less disruptive.
 Deliberately out of scope; recorded so it is not lost.
