@@ -191,7 +191,10 @@ def test_reason_reports_clamped_against_a_real_sim_joint_limit(sim_arms):
             f"status={sess.status()['joints']['left'].get('shoulder_pan')}"
         )
         entry = sess.status()["joints"]["left"]["shoulder_pan"]
-        assert lo <= entry["committed"] <= hi
+        # The pose drives shoulder_pan positive, past the upper limit — assert
+        # it clamped to that specific limit, not merely "somewhere in range"
+        # (which would also pass if clamped to the wrong limit entirely).
+        assert entry["committed"] == pytest.approx(hi)
         assert entry["target"] is not None
     finally:
         sess.stop()
