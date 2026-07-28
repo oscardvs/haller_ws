@@ -1,11 +1,9 @@
 // hmi/frontend/app/layout.tsx
 import type { Metadata } from "next";
-import Link from "next/link";
 import { Geist, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
-import { EStopButton } from "@/components/EStopButton";
-import { TelemetryBar } from "@/components/TelemetryBar";
+import { ThemeProvider } from "@/components/ThemeProvider";
 
 const geistSans = JetBrains_Mono({
   variable: "--font-sans-default",
@@ -28,64 +26,30 @@ export const metadata: Metadata = {
   description: "Unified supervisory-control surface for the Haller robot",
 };
 
-function Wordmark() {
-  return (
-    <Link
-      href="/"
-      className="group inline-flex items-center gap-2 select-none"
-      aria-label="Haller HMI — dashboard"
-    >
-      {/* Status dot — visual identity anchor. Pulses with the live ring. */}
-      <span className="relative inline-flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--haller-live)] opacity-70 animate-haller-ping" />
-        <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--haller-live)]" />
-      </span>
-      <span className="font-mono text-[13px] font-semibold tracking-[0.32em] uppercase text-foreground">
-        Haller
-      </span>
-      <span className="font-mono text-[10px] tracking-[0.32em] uppercase text-muted-foreground border-l border-border pl-2">
-        HMI&nbsp;·&nbsp;v0.1
-      </span>
-    </Link>
-  );
-}
-
-function NavLink({ href, label }: { href: string; label: string }) {
-  return (
-    <Link
-      href={href}
-      className="label-micro text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded-sm hover:bg-muted/50"
-    >
-      {label}
-    </Link>
-  );
-}
-
+/**
+ * The root layout owns the document and nothing else.
+ *
+ * It used to also render the wordmark, nav and E-STOP for every route. The
+ * cockpit at `/` is a fixed-viewport surface that draws its own header, rail
+ * and command bar, so a second app-level header would either stack on top of
+ * it or push it past 100vh. The remaining deep-link routes (`/base`,
+ * `/arm/[id]`, `/settings`, `/teleop/human`) render <DeepLinkChrome /> for
+ * themselves instead — same wordmark, same rail, same always-present E-STOP.
+ */
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
+    // suppressHydrationWarning: next-themes stamps the theme class onto <html>
+    // before paint, so the server-rendered markup deliberately disagrees.
+    <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSansBody.variable} ${geistSans.variable} ${jetbrainsMono.variable} antialiased bg-background text-foreground min-h-screen`}
+        className={`${geistSansBody.variable} ${geistSans.variable} ${jetbrainsMono.variable} antialiased bg-background text-foreground`}
       >
-        {/* Top app rail: wordmark + nav + persistent E-STOP.
-            Sticky so it's always anchored — operator never loses E-STOP. */}
-        <header className="sticky top-0 z-40 border-b border-border bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
-          <div className="flex items-center justify-between px-3 h-11">
-            <div className="flex items-center gap-6">
-              <Wordmark />
-              <nav className="flex items-center gap-1">
-                <NavLink href="/" label="Overview" />
-                <NavLink href="/base" label="Base" />
-                <NavLink href="/settings" label="Settings" />
-              </nav>
-            </div>
-            <EStopButton />
-          </div>
-          {/* Persistent telemetry rail under header — visible on every page. */}
-          <TelemetryBar />
-        </header>
-        {children}
-        <Toaster richColors closeButton theme="dark" position="bottom-right" />
+        <ThemeProvider>
+          {children}
+          {/* offset clears the 34px command bar, so a toast never lands on the
+              Teleop/Record controls it is reporting on. */}
+          <Toaster richColors closeButton position="bottom-right" offset={44} />
+        </ThemeProvider>
       </body>
     </html>
   );

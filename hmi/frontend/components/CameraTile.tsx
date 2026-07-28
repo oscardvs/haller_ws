@@ -23,6 +23,7 @@ export function CameraTile({
   width,
   height,
   fps,
+  collapsed,
 }: {
   id: string;
   role: "wrist" | "base";
@@ -31,10 +32,40 @@ export function CameraTile({
   width?: number;
   height?: number;
   fps?: number;
+  /** Label strip only — no 16:9 body. Used when the viewport is too short to
+   *  afford a picture, where the joint stack is the thing worth the pixels.
+   *  The strip stays so the slot is still visibly *there*. */
+  collapsed?: boolean;
 }) {
   const live = Boolean(streamUrl) && active !== false;
   const resolution =
     width && height && fps ? `${width}×${height} · ${fps} fps` : "— × — · — fps";
+
+  if (collapsed) {
+    return (
+      <div
+        className="flex shrink-0 items-center gap-2 overflow-hidden rounded-sm border border-border bg-card/60 px-2 py-1"
+        data-camera-id={id}
+        data-collapsed
+      >
+        <span className="inline-flex shrink-0 items-center gap-1.5 label-micro text-foreground/90">
+          <span
+            className="inline-block h-1 w-1 rounded-full"
+            style={{
+              backgroundColor: live ? "var(--haller-live)" : "var(--haller-warn)",
+            }}
+          />
+          {role}
+        </span>
+        <span className="truncate font-mono text-[10px] tracking-[0.08em] text-muted-foreground">
+          {id}
+        </span>
+        <span className="ml-auto shrink-0 label-micro text-muted-foreground">
+          {live ? "live" : "no feed"}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div

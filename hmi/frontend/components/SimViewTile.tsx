@@ -19,14 +19,24 @@ import { useEffect, useState } from "react";
 import { api, cameraStreamUrl, type CameraInfo } from "@/lib/api";
 
 /** Prefer the three-quarter view — the overhead camera flattens away exactly
- *  the joints (shoulder_lift, elbow_flex) you want to watch while teleoping. */
-function pickSimCamera(cameras: CameraInfo[]): CameraInfo | null {
+ *  the joints (shoulder_lift, elbow_flex) you want to watch while teleoping.
+ *  Exported because the cockpit renders its own in-flow tile from the same
+ *  choice: there must be one answer to "which sim camera do we show". */
+export function pickSimCamera(cameras: CameraInfo[]): CameraInfo | null {
   const sim = cameras.filter((c) => c.source === "sim_camera");
   if (sim.length === 0) return null;
   return sim.find((c) => c.id.includes("threequarter")) ?? sim[0];
 }
 
-export function SimViewTile() {
+export function SimViewTile({
+  placement = "pinned",
+}: {
+  /** `pinned` floats over the deep-link teleop page, which has no room
+   *  reserved for it. `inline` is the cockpit, whose teleop tab gives the tile
+   *  a column of its own — which is also what finally retires the overlap
+   *  hazard noted below, since an in-flow tile cannot cover anything. */
+  placement?: "pinned" | "inline";
+} = {}) {
   const [cam, setCam] = useState<CameraInfo | null>(null);
   const [collapsed, setCollapsed] = useState(false);
 
@@ -43,10 +53,15 @@ export function SimViewTile() {
   const live = cam.active !== false;
 
   return (
-    // Bottom-left, lifted clear of the dead-man state badge that sits at the
-    // very bottom of the teleop panel — that badge must never be covered.
+    // Pinned: bottom-left, lifted clear of the dead-man state badge that sits
+    // at the very bottom of the teleop panel — that badge must never be
+    // covered, and neither must the mouth-clutch card beside it.
     <div
-      className="fixed bottom-16 left-4 z-40 w-[260px] rounded-sm border border-border bg-background/95 shadow-lg backdrop-blur-sm"
+      className={
+        placement === "pinned"
+          ? "fixed bottom-16 left-4 z-40 w-[260px] rounded-sm border border-border bg-background/95 shadow-lg backdrop-blur-sm"
+          : "flex w-full flex-col overflow-hidden rounded-lg border border-border bg-card"
+      }
       data-sim-view={cam.id}
     >
       <div className="flex items-center justify-between gap-2 border-b border-border px-2 py-1">

@@ -17,13 +17,18 @@ const ORDER: Mode[] = ["auto", "manual", "stop"];
 export function ModeToggle({
   armId,
   mode,
+  showPill = true,
 }: {
   armId: string;
   mode: Mode;
+  /** The cockpit's arm-card header is 34px and already colours the segmented
+   *  control by mode, so the pill there is a second copy of the same fact in
+   *  space the joint stack wants. Deep-link pages keep it. */
+  showPill?: boolean;
 }) {
   return (
     <div className="inline-flex items-center gap-2">
-      <ModePill mode={mode} />
+      {showPill && <ModePill mode={mode} />}
       <div
         role="group"
         aria-label="Arm mode"

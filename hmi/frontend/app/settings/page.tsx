@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import { DeepLinkChrome } from "@/components/DeepLinkChrome";
 import { CalibrationStatusCard } from "@/components/CalibrationStatusCard";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
 import {
@@ -49,7 +50,9 @@ export default function SettingsPage() {
   const canStart = allManual && !someSession;
 
   return (
-    <main className="p-3 space-y-3">
+    <>
+      <DeepLinkChrome label="Settings" />
+      <main className="p-3 space-y-3">
       <div className="flex items-center gap-3 px-1">
         <span className="label-tracked text-muted-foreground">Settings</span>
         <span className="h-px flex-1 bg-border" />
@@ -150,7 +153,8 @@ export default function SettingsPage() {
           }}
         />
       )}
-    </main>
+      </main>
+    </>
   );
 }
 

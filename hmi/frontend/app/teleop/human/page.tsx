@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
+import { DeepLinkChrome } from "@/components/DeepLinkChrome";
 import { HumanTeleopPanel } from "@/components/HumanTeleopPanel";
 import { SimViewTile } from "@/components/SimViewTile";
 
@@ -18,13 +19,18 @@ export default function HumanTeleopPage() {
 
   if (err) {
     return (
-      <main className="p-4 font-mono text-sm text-destructive">
-        config load failed: {err}
-      </main>
+      <>
+        <DeepLinkChrome label="Human teleop" />
+        <main className="p-4 font-mono text-sm text-destructive">
+          config load failed: {err}
+        </main>
+      </>
     );
   }
 
   return (
+    <>
+    <DeepLinkChrome label="Human teleop" />
     <main className="p-4 space-y-3">
       <header className="flex items-baseline justify-between">
         <div>
@@ -45,5 +51,6 @@ export default function HumanTeleopPage() {
           nothing unless the running config has a sim camera. */}
       <SimViewTile />
     </main>
+    </>
   );
 }
