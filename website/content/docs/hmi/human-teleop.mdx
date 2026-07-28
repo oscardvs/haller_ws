@@ -117,7 +117,7 @@ The face model runs on every third tracking tick (roughly one real sample per 10
 | No face detected | Stale at 250 ms → disengage |
 | Score below `t_release` | Immediate disengage |
 | Mouth mode with no valid calibration | `start` refused (400); the clutch can never engage |
-| A frame asserting the other source | Forced disengage; authority never hands over |
+| A frame asserting the other source | Forced disengage; authority never hands over; `reason: "source_mismatch"` |
 | WS disconnect | Existing 5 s grace window, then auto-stop |
 | Backend restart | The clutch defaults to released |
 
@@ -131,6 +131,8 @@ A hardcoded threshold cannot work — jaw geometry and speaking style vary too m
 | `open` | Start the window, hold a deliberate wide open, stop it. | The **minimum** value you sustained. |
 
 Both are windows, not instants. Clicking once at some arbitrary moment during speech almost certainly misses the peak of your own speech envelope, which would place `t_engage` *below* the loudest thing your jaw actually does.
+
+**Start each window already mid-gesture, not before it** — already speaking when you click `talk`, already holding the wide open when you click `open`. The window folds a running extreme from your very first sample, so clicking `open` on a closed mouth and opening *afterward* records that ramp-up as part of the minimum — typically ~0.05, which fails the separation check below with no visible cause. The card states this directly; it bears repeating here because it's the first thing an operator hits.
 
 The backend derives both thresholds from those two raw numbers, at 60% and 30% of the calibrated gap. It refuses to produce thresholds at all when `open_min - talk_max` is under **0.25** — if your speech range overlaps your deliberate open there is no safe threshold to pick, so mouth mode declines to arm and says why. The card shows a `too close` warning at capture time, and `POST /teleop/human/start` returns **400** for the same reason, independently.
 
@@ -154,6 +156,7 @@ The clutch chip next to the camera feed prints the backend's reason whenever som
 | `stale` | No real face sample inside the 250 ms budget. |
 | `uncalibrated` | No calibration, or one whose separation is under 0.25. |
 | `spacebar_mode` | The spacebar holds authority; `jaw_open` is ignored entirely. |
+| `source_mismatch` | A frame asserted the *other* source than the one this session started with. Force-disengaged; printed rather than silent, because the operator did something (or the browser sent something) unexpected. |
 
 ## Diagnostic readouts
 

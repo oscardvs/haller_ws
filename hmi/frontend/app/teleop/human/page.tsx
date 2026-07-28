@@ -30,7 +30,7 @@ export default function HumanTeleopPage() {
         <div>
           <h1 className="text-lg font-mono">Human Teleop</h1>
           <p className="text-[12px] text-muted-foreground">
-            bimanual · monocular RGB · hold <kbd>SPACE</kbd> to drive
+            bimanual · monocular RGB · SPACE or mouth-open to drive
           </p>
         </div>
       </header>
