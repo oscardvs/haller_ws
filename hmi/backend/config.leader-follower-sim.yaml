@@ -35,6 +35,13 @@ ros:
 telemetry:
   hz: 20
 cameras:
+  - id: threequarter_sim
+    role: base
+    source: sim_camera
+    mjcf_camera: threequarter
+    width: 640
+    height: 480
+    fps: 15
   - id: overhead_sim
     role: base
     source: sim_camera

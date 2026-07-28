@@ -35,7 +35,10 @@ export type ArmGoal = Record<string, number>;
 export type CameraInfo = {
   id: string;
   role: "wrist" | "base";
-  source: "placeholder" | "opencv" | "mjpeg" | "webrtc";
+  // "sim_camera" is what the backend reports for a MuJoCo-rendered view
+  // (config.*-sim.yaml). It was missing from this union while the backend had
+  // been returning it all along.
+  source: "placeholder" | "opencv" | "mjpeg" | "webrtc" | "sim_camera";
   arm_id?: string | null;
   active: boolean;
   width: number;

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
 import { HumanTeleopPanel } from "@/components/HumanTeleopPanel";
+import { SimViewTile } from "@/components/SimViewTile";
 
 export default function HumanTeleopPage() {
   const [armIds, setArmIds] = useState<string[]>([]);
@@ -40,6 +41,9 @@ export default function HumanTeleopPage() {
           human teleop needs ≥2 enabled arms in <code>hmi/backend/config.yaml</code>
         </div>
       )}
+      {/* Pinned overlay, so you can watch the robot while driving it. Renders
+          nothing unless the running config has a sim camera. */}
+      <SimViewTile />
     </main>
   );
 }

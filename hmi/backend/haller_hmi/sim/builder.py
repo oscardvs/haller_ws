@@ -14,6 +14,7 @@ here reflects the actual MJCF names so that prefixed lookups succeed.
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -160,6 +161,43 @@ def _load_arm_subtree(prefix: str, x_offset: float) -> _ArmSubtree:
     )
 
 
+Vec3 = tuple[float, float, float]
+
+
+def _normalise(v: Vec3) -> Vec3:
+    n = math.sqrt(sum(c * c for c in v))
+    if n < 1e-9:
+        raise ValueError(f"cannot normalise degenerate vector {v!r}")
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def _cross(a: Vec3, b: Vec3) -> Vec3:
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def camera_xyaxes(pos: Vec3, target: Vec3) -> str:
+    """MJCF `xyaxes` for a camera at `pos` aimed at `target`.
+
+    A MuJoCo camera looks along its local -Z, with +X right and +Y up in the
+    rendered image; `xyaxes` declares those first two axes and MuJoCo implies
+    the third. Deriving them here keeps a viewpoint readable as (where it is,
+    what it looks at) instead of six magic numbers that nobody can adjust
+    later without re-deriving the basis by hand.
+    """
+    # +Z points from the target back toward the camera (opposite the view ray).
+    z = _normalise((pos[0] - target[0], pos[1] - target[1], pos[2] - target[2]))
+    # World up, unless we're looking straight down it — then the cross product
+    # collapses and any perpendicular hint will do.
+    up: Vec3 = (0.0, 0.0, 1.0)
+    if abs(_cross(up, z)[0]) + abs(_cross(up, z)[1]) + abs(_cross(up, z)[2]) < 1e-6:
+        up = (0.0, 1.0, 0.0)
+    x = _normalise(_cross(up, z))
+    y = _cross(z, x)
+    return "  ".join(" ".join(f"{c:.6g}" for c in axis) for axis in (x, y))
+
+
 def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]:
     """Compose a scene MJCF.
 
@@ -234,10 +272,21 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
     for s in subtrees:
         parts.append(s.worldbody_inner)
     parts.extend(cube_chunks)
-    # Overhead camera looking straight down at the workbench.
+    # Overhead camera looking straight down at the workbench. Good for reading
+    # shoulder_pan; nearly useless for shoulder_lift / elbow_flex, which is why
+    # the three-quarter view below exists alongside it.
     parts.append(
-        '<camera name="overhead" pos="0 0 1.0" '
-        'xyaxes="1 0 0  0 1 0" fovy="60"/>'
+        f'<camera name="overhead" pos="0 0 1.0" '
+        f'xyaxes="{camera_xyaxes((0, 0, 1.0), (0, 0, 0))}" fovy="60"/>'
+    )
+    # Three-quarter view from the front-right: the arms reach toward -Y, so a
+    # camera off the -Y side sees the whole linkage in profile. Framed to hold
+    # the 0.8 m workbench plus headroom at fovy=45.
+    _tq_pos: Vec3 = (0.6, -0.7, 0.45)
+    _tq_target: Vec3 = (0.0, 0.0, 0.12)
+    parts.append(
+        f'<camera name="threequarter" pos="{" ".join(str(c) for c in _tq_pos)}" '
+        f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="45"/>'
     )
     parts.append("</worldbody>")
 

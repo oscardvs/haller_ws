@@ -23,6 +23,16 @@ ros:
 telemetry:
   hz: 20
 cameras:
+  # Listed first, so the BASE tab (which shows the first role: base camera)
+  # gets the view you can actually judge an arm pose from. The overhead cam
+  # reads shoulder_pan well but flattens shoulder_lift and elbow_flex away.
+  - id: threequarter_sim
+    role: base
+    source: sim_camera
+    mjcf_camera: threequarter
+    width: 640
+    height: 480
+    fps: 15
   - id: overhead_sim
     role: base
     source: sim_camera
