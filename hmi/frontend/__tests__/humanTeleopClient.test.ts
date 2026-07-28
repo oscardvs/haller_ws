@@ -51,7 +51,8 @@ describe("HumanTeleopClient", () => {
     c.connect();
     await new Promise(r => setTimeout(r, 5));
     c.queueFrame({
-      type: "keypoints", ts_ms: 1, dead_man: false,
+      type: "keypoints", ts_ms: 1, clutch_source: "spacebar",
+      dead_man: false, jaw_open: null,
       left: null, right: null,
     });
     c.tick();

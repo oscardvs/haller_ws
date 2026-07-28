@@ -5,8 +5,13 @@
  *   - The camera stream and the MediaPipeRunner lifecycle.
  *   - The render loop that runs detection + WS publish at ~30 Hz.
  *   - The dead-man key state.
- *   - The pinch calibration state (persisted in localStorage).
+ *   - Which source holds clutch authority (spacebar or mouth).
+ *   - The pinch and mouth calibration state (persisted in localStorage).
  *   - Start/stop/swap session calls.
+ *
+ * It decides nothing about safety. `dead_man` is the raw spacebar key state
+ * and `jaw_open` is the raw blendshape score; the backend applies both the
+ * threshold and the hold timer.
  */
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -18,15 +23,16 @@ import { api, type HumanTeleopStatus, type JointDiag, type JointReason } from "@
 import { BACKEND_URL } from "@/lib/config";
 import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
-  MediaPipeRunner, fuseLandmarkResults, buildOverlaySides,
+  MediaPipeRunner, fuseLandmarkResults, buildOverlaySides, extractJawOpen, FACE_EVERY_N,
   type KeypointFrame, type SideFrame,
 } from "@/lib/mediapipe";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 
 import { CameraOverlay, type CameraOverlayHandle } from "./CameraOverlay";
 import { ScopeBar } from "./ScopeBar";
-import { DeadManIndicator } from "./DeadManIndicator";
+import { DeadManIndicator, type ClutchSource } from "./DeadManIndicator";
 import { PinchCalibrationStep, type PinchCalib } from "./PinchCalibrationStep";
+import { MouthClutchCalibration, mouthCalibReady, type MouthCalib } from "./MouthClutchCalibration";
 
 const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/human/in`;
 
@@ -36,6 +42,7 @@ const JOINTS = [
 ] as const;
 
 const CALIB_LS_KEY = "haller.humanTeleop.pinchCalib.v1";
+const MOUTH_LS_KEY = "haller.humanTeleop.mouthCalib";
 
 export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   const status = useTelemetry((s) => s.lastFrame?.human_teleop);
@@ -67,12 +74,30 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
     left: null, right: null,
   });
 
+  const [clutchSource, setClutchSource] = useState<ClutchSource>("spacebar");
+  const [mouthCalib, setMouthCalib] = useState<MouthCalib>(() => {
+    if (typeof window === "undefined") return defaultMouthCalib();
+    try {
+      const raw = localStorage.getItem(MOUTH_LS_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch { /* ignore */ }
+    return defaultMouthCalib();
+  });
+  const [liveJaw, setLiveJaw] = useState<number | null>(null);
+  const faceTickRef = useRef(0);
+
   // Persist calib on change.
   useEffect(() => {
     if (typeof window !== "undefined") {
       localStorage.setItem(CALIB_LS_KEY, JSON.stringify(calib));
     }
   }, [calib]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(MOUTH_LS_KEY, JSON.stringify(mouthCalib));
+    }
+  }, [mouthCalib]);
 
   // Bind dead-man key.
   useEffect(() => {
@@ -141,7 +166,18 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
       // Cap to ~30 Hz; MediaPipe will internally throttle if GPU saturates.
       if (t - last_t < 33) return;
       last_t = t;
-      const { hands, pose } = runner.detect(video, t);
+      // Decimate the face model: one tracking tick in FACE_EVERY_N runs it.
+      // The counter advances per *processed* tick — it lives below the 30 Hz
+      // cap above on purpose, so a browser painting at 120 Hz still gets a
+      // jaw sample every ~100 ms rather than every ~25 ms.
+      const runFace = faceTickRef.current === 0;
+      faceTickRef.current = (faceTickRef.current + 1) % FACE_EVERY_N;
+      const { hands, pose, face } = runner.detect(video, t, { face: runFace });
+      // Only carries a value on ticks that actually ran the model. Skipped
+      // ticks send null and the backend keeps using its last sample until the
+      // staleness budget expires — which is why that budget (250 ms) has to
+      // sit above the ~100 ms decimation gap.
+      const jaw = runFace ? extractJawOpen(face) : null;
       const fused = fuseLandmarkResults(pose, hands);
       const ld = liveThumbIndex(fused);
 
@@ -169,10 +205,23 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         prev.left === lc.left && prev.right === lc.right ? prev : lc,
       );
 
+      // Same identity bail-out as liveDistance/liveConf above, and the same
+      // rule: do NOT add `liveJaw` to the effect's dep array, or the loop is
+      // torn down and rebuilt on every face tick. Only face ticks publish —
+      // the null of a skipped tick is for the backend, not for the readout,
+      // which would otherwise flicker to "—" twice per real sample.
+      if (runFace) setLiveJaw((prev) => (prev === jaw ? prev : jaw));
+
       const frame: KeypointFrame = {
         type: "keypoints",
         ts_ms: Math.floor(performance.now()),
+        clutch_source: clutchSource,
+        // Stays the RAW spacebar key state whichever source has authority.
         dead_man: deadManRef.current,
+        jaw_open: jaw,
+        mouth_calib: mouthCalibReady(mouthCalib)
+          ? { talk_max: mouthCalib.talk_max!, open_min: mouthCalib.open_min! }
+          : undefined,
         pinch_calib: {
           left:  calib.left.min_m !== null && calib.left.max_m !== null
             ? { min_m: calib.left.min_m, max_m: calib.left.max_m } : undefined,
@@ -186,7 +235,11 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [calib]);
+    // `clutchSource` and `mouthCalib` belong here for the same reason `calib`
+    // does: the frame literal closes over them, and they change on an operator
+    // action — not per frame. Rebuilding the loop on a source toggle is fine;
+    // rebuilding it on a jaw sample would not be.
+  }, [calib, clutchSource, mouthCalib]);
 
   const running = status?.running ?? false;
   const state = status?.state ?? "idle";
@@ -198,8 +251,21 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         ? { min_m: calib.left.min_m, max_m: calib.left.max_m } : undefined;
       const cr = calib.right.min_m !== null && calib.right.max_m !== null
         ? { min_m: calib.right.min_m, max_m: calib.right.max_m } : undefined;
-      if (cl || cr) await api.humanTeleopCalibrate({ left: cl, right: cr });
-      await api.humanTeleopStart({ left_arm: leftArm, right_arm: rightArm, swap });
+      // The backend refuses a mouth-mode start without an adequate separation
+      // (400). Check here too so the operator gets the reason, not an HTTP code.
+      if (clutchSource === "mouth" && !mouthCalibReady(mouthCalib)) {
+        toast.error("mouth clutch needs talk + open captures at least 0.25 apart");
+        return;
+      }
+      const mouth = mouthCalibReady(mouthCalib)
+        ? { talk_max: mouthCalib.talk_max!, open_min: mouthCalib.open_min! }
+        : undefined;
+      if (cl || cr || mouth) {
+        await api.humanTeleopCalibrate({ left: cl, right: cr, mouth });
+      }
+      await api.humanTeleopStart({
+        left_arm: leftArm, right_arm: rightArm, swap, clutch_source: clutchSource,
+      });
       toast.success(`human teleop started`);
     } catch (e) {
       toast.error(`start failed: ${(e as Error).message}`);
@@ -214,6 +280,8 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
           <DeadManIndicator
             held={state === "driving"}
             trackingLost={!!status?.tracking?.left?.lost || !!status?.tracking?.right?.lost}
+            source={clutchSource}
+            reason={status?.clutch?.reason}
           />
           <div className="flex items-center gap-2 font-mono text-[12px]">
             <Badge variant={running ? "default" : "secondary"}>{state}</Badge>
@@ -245,6 +313,14 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
                   onClick={() => { setSwap(!swap); api.humanTeleopSwap(!swap).catch(() => null); }}>
             mirror: {swap ? "off" : "on"}
           </Button>
+          {/* Authority never changes mid-session: the backend forces one
+              disengage on a source switch, and an operator who is mid-reach
+              should not be able to trigger that from the page. */}
+          <Button size="sm" variant="outline" className="h-7"
+                  disabled={running}
+                  onClick={() => setClutchSource(clutchSource === "mouth" ? "spacebar" : "mouth")}>
+            clutch: {clutchSource}
+          </Button>
         </Card>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <PinchCalibrationStep
@@ -255,6 +331,13 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
             side="right" liveDistance={liveDistance.right} confidence={liveConf.right} value={calib.right}
             onChange={(next) => setCalib({ ...calib, right: next })}
           />
+          {clutchSource === "mouth" ? (
+            <MouthClutchCalibration
+              liveJawOpen={liveJaw}
+              value={mouthCalib}
+              onChange={setMouthCalib}
+            />
+          ) : null}
         </div>
       </div>
       <div className="space-y-2">
@@ -345,6 +428,10 @@ function defaultCalib(): { left: PinchCalib; right: PinchCalib } {
     left:  { min_m: null, max_m: null },
     right: { min_m: null, max_m: null },
   };
+}
+
+function defaultMouthCalib(): MouthCalib {
+  return { talk_max: null, open_min: null };
 }
 
 function isInput(t: EventTarget | null): boolean {

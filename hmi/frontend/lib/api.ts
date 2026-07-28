@@ -100,14 +100,18 @@ export const api = {
     postJson<{ ok: true } & TeleopStatus>("/teleop/stop", {}),
   humanTeleopStatus: () =>
     getJson<HumanTeleopStatus>("/teleop/human"),
-  humanTeleopStart: (body: { left_arm: string; right_arm: string; swap: boolean; hz?: number }) =>
-    postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/start", body),
+  humanTeleopStart: (body: {
+    left_arm: string; right_arm: string; swap: boolean;
+    hz?: number; clutch_source?: "spacebar" | "mouth";
+  }) => postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/start", body),
   humanTeleopStop: () =>
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/stop", {}),
   humanTeleopSwap: (swap: boolean) =>
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/swap", { swap }),
-  humanTeleopCalibrate: (body: { left?: PinchCalibSide; right?: PinchCalibSide }) =>
-    postJson<{ ok: true }>("/teleop/human/calibrate", body),
+  humanTeleopCalibrate: (body: {
+    left?: PinchCalibSide; right?: PinchCalibSide;
+    mouth?: { talk_max: number; open_min: number };
+  }) => postJson<{ ok: true }>("/teleop/human/calibrate", body),
   recordStatus: () => getJson<RecordStatus>("/record/status"),
   recordStart: (repoId: string, task: string) =>
     postJson<{ ok: true } & RecordStatus>("/record/start", { repo_id: repoId, task }),
@@ -131,6 +135,12 @@ export type HumanTeleopState = "idle" | "armed" | "tracking" | "driving";
 export type PinchCalibSide = { min_m: number; max_m: number };
 
 export type JointReason = "ok" | "rate_capped" | "clamped" | "held";
+
+/** Why the clutch is in the state it reports. Mirrors the backend vocabulary
+ *  in haller_hmi/human_teleop.py exactly — same six strings, no others. */
+export type ClutchReason =
+  | "engaged" | "below_threshold" | "holding" | "stale"
+  | "uncalibrated" | "spacebar_mode";
 
 export type JointDiag = {
   /** What the retargeter asked for, in degrees. null when the joint is held. */
@@ -156,6 +166,16 @@ export type HumanTeleopStatus = {
   joints?: {
     left?:  Record<string, JointDiag>;
     right?: Record<string, JointDiag>;
+  };
+  /** Optional because a backend older than the mouth clutch omits it. */
+  clutch?: {
+    source: "spacebar" | "mouth";
+    jaw_open: number | null;
+    t_engage: number | null;
+    t_release: number | null;
+    engaged: boolean;
+    stale: boolean;
+    reason: ClutchReason;
   };
 };
 
