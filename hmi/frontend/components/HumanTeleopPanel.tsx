@@ -16,7 +16,7 @@ import { toast } from "sonner";
 
 import { api, type HumanTeleopStatus } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
-import { useTelemetry } from "@/lib/telemetry";
+import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
   MediaPipeRunner, fuseLandmarkResults, buildOverlaySides,
   type KeypointFrame, type SideFrame,
@@ -39,6 +39,7 @@ const CALIB_LS_KEY = "haller.humanTeleop.pinchCalib.v1";
 
 export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   const status = useTelemetry((s) => s.lastFrame?.human_teleop);
+  const armsState = useTelemetry((s) => s.lastFrame?.arms);
 
   const [leftArm, setLeftArm] = useState(armIds[0] ?? "");
   const [rightArm, setRightArm] = useState(armIds[1] ?? armIds[0] ?? "");
@@ -241,16 +242,22 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         </div>
       </div>
       <div className="space-y-2">
-        <ArmScopePanel label={`arm: ${leftArm}`} goal={status?.goal_deg?.left} />
-        <ArmScopePanel label={`arm: ${rightArm}`} goal={status?.goal_deg?.right} />
+        <ArmScopePanel label={`arm: ${leftArm}`} goal={status?.goal_deg?.left}
+                       limits={limitsFor(armsState, leftArm)} />
+        <ArmScopePanel label={`arm: ${rightArm}`} goal={status?.goal_deg?.right}
+                       limits={limitsFor(armsState, rightArm)} />
       </div>
     </div>
   );
 }
 
 function ArmScopePanel({
-  label, goal,
-}: { label: string; goal?: Record<string, number> }) {
+  label, goal, limits,
+}: {
+  label: string;
+  goal?: Record<string, number>;
+  limits?: Record<string, { min: number; max: number }>;
+}) {
   return (
     <Card className="p-3">
       <div className="flex justify-between text-[12px] font-mono mb-2">
@@ -258,13 +265,13 @@ function ArmScopePanel({
       </div>
       <div className="space-y-1">
         {JOINTS.map((j) => (
-          // All joints reported in degrees by the backend (gripper is scaled
-          // from [0,1] to its calibrated degree range inside the commit loop).
+          // Real calibrated limits when the arm is reporting; the +/-90 default
+          // is only a placeholder for an arm that hasn't sent telemetry yet.
           <ScopeBar
             key={j}
             label={j}
-            min={-90}
-            max={90}
+            min={limits?.[j]?.min ?? -90}
+            max={limits?.[j]?.max ?? 90}
             commanded={goal?.[j] ?? 0}
           />
         ))}
@@ -325,4 +332,17 @@ function pinch01For(distance: number | null, calib: PinchCalib): number {
   const span = calib.max_m - calib.min_m;
   if (span <= 0) return 0.5;
   return Math.max(0, Math.min(1, (distance - calib.min_m) / span));
+}
+
+/** Per-joint {min,max} in degrees for one arm, straight from calibration via
+ *  telemetry. Returns undefined when that arm isn't reporting yet, in which
+ *  case ScopeBar falls back to its own default range. */
+function limitsFor(
+  armsState: Record<string, ArmState> | undefined, armId: string,
+): Record<string, { min: number; max: number }> | undefined {
+  const joints = armsState?.[armId]?.joints;
+  if (!joints) return undefined;
+  return Object.fromEntries(
+    Object.entries(joints).map(([j, s]) => [j, { min: s.min, max: s.max }]),
+  );
 }
