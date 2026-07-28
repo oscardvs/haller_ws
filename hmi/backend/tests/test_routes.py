@@ -322,3 +322,69 @@ def test_ws_human_teleop_in_accepts_frame_and_forwards_to_session(app_with_mocks
     # `human_teleop.ingest_frame` must have been called once.
     import haller_hmi.server as srv_mod
     srv_mod.human_teleop.ingest_frame.assert_called()
+
+
+def test_start_refuses_mouth_mode_without_calibration(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    # The fixture's human_teleop is a MagicMock, not a real HumanTeleopSession,
+    # so it has no notion of "no calibration set" on its own — we tell it what
+    # a session with no mouth calib set would report. The real computation
+    # (self._mouth_calib is None -> invalid) is exercised for real in
+    # test_human_teleop.py; this test only checks that the route consults it.
+    srv_mod.human_teleop.mouth_calib_is_valid.return_value = False
+    r = app_with_mocks.post("/teleop/human/start", json={
+        "left_arm": "left", "right_arm": "right", "clutch_source": "mouth",
+    })
+    assert r.status_code == 400
+    assert "calib" in r.json()["detail"].lower()
+
+
+def test_start_refuses_mouth_mode_with_overlapping_calibration(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    r_calib = app_with_mocks.post(
+        "/teleop/human/calibrate",
+        json={"mouth": {"talk_max": 0.50, "open_min": 0.55}},
+    )
+    assert r_calib.status_code == 200
+    srv_mod.human_teleop.set_mouth_calib.assert_called_once_with(
+        {"talk_max": 0.50, "open_min": 0.55}
+    )
+    # Separation here (0.05) is below the 0.25 safety margin, so a real
+    # session's mouth_calib_is_valid() would return False (see
+    # test_human_teleop.py for that math); tell the mock the same, then
+    # check that /start honours it.
+    srv_mod.human_teleop.mouth_calib_is_valid.return_value = False
+    r = app_with_mocks.post("/teleop/human/start", json={
+        "left_arm": "left", "right_arm": "right", "clutch_source": "mouth",
+    })
+    assert r.status_code == 400
+
+
+def test_start_accepts_mouth_mode_with_valid_calibration(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    app_with_mocks.post(
+        "/teleop/human/calibrate",
+        json={"mouth": {"talk_max": 0.10, "open_min": 0.90}},
+    )
+    srv_mod.human_teleop.mouth_calib_is_valid.return_value = True
+    r = app_with_mocks.post("/teleop/human/start", json={
+        "left_arm": "left", "right_arm": "right", "clutch_source": "mouth",
+    })
+    # The fixture's ArmManager only knows arm "right" — "left" is unknown, so
+    # a PASSED mouth-calibration gate surfaces as 404 (unknown arm), not 200.
+    # Do NOT "fix" this to 200: 404 here proves the gate let the request
+    # through to arm resolution, which is what this test is checking.
+    assert r.status_code == 404
+
+
+def test_start_spacebar_mode_needs_no_mouth_calibration(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    r = app_with_mocks.post("/teleop/human/start", json={
+        "left_arm": "left", "right_arm": "right",
+    })
+    # Same reasoning as above: 404 (unknown arm) proves the request passed
+    # the mouth-calibration gate. clutch_source defaults to "spacebar" here,
+    # so the assertion below additionally proves it did so without even
+    # consulting mouth_calib_is_valid. Do NOT "fix" the 404 into a 200.
+    assert r.status_code == 404
+    srv_mod.human_teleop.mouth_calib_is_valid.assert_not_called()

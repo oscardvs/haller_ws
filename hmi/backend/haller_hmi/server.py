@@ -93,6 +93,7 @@ class HumanTeleopStartBody(BaseModel):
     right_arm: str
     swap: bool = False
     hz: float = 60.0
+    clutch_source: str = "spacebar"
 
 
 class HumanTeleopSwapBody(BaseModel):
@@ -104,9 +105,15 @@ class HumanPinchCalibSide(BaseModel):
     max_m: float
 
 
+class HumanMouthCalib(BaseModel):
+    talk_max: float
+    open_min: float
+
+
 class HumanTeleopCalibrateBody(BaseModel):
     left: HumanPinchCalibSide | None = None
     right: HumanPinchCalibSide | None = None
+    mouth: HumanMouthCalib | None = None
 
 
 class SimTeleopStartBody(BaseModel):
@@ -380,6 +387,12 @@ async def get_human_teleop():
 
 @app.post("/teleop/human/start")
 async def post_human_teleop_start(body: HumanTeleopStartBody):
+    if body.clutch_source == "mouth" and not human_teleop.mouth_calib_is_valid():
+        raise HTTPException(
+            status_code=400,
+            detail=("mouth clutch has no valid calibration: capture talk/open "
+                    "and ensure their separation is at least 0.25"),
+        )
     _arm_or_404(body.left_arm)
     _arm_or_404(body.right_arm)
     try:
@@ -412,6 +425,8 @@ async def post_human_teleop_calibrate(body: HumanTeleopCalibrateBody):
         left=body.left.model_dump() if body.left else None,
         right=body.right.model_dump() if body.right else None,
     )
+    if body.mouth is not None:
+        human_teleop.set_mouth_calib(body.mouth.model_dump())
     return {"ok": True}
 
 
