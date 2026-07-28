@@ -8,7 +8,7 @@ Human-pose teleop turns a laptop webcam into a bimanual leader for the two SO-10
 This mode is **mutually exclusive** with [leader↔follower teleop](/docs/hmi/teleop) — only one teleop kind runs at a time across the whole HMI.
 
 <Callout type="info">
-**Status (2026-05-23).** Shipped on `main`. Open palm + pinch calibration, SPACE dead-man, per-side tracking-loss handling, WS disconnect grace, mutual exclusion, and end-to-end smoke tests are all working. One known follow-up: the skeleton overlay on the camera feed currently renders blank in some browsers — fix tracked separately.
+**Status (2026-05-23).** Shipped on `main`. Open palm + pinch calibration, SPACE dead-man, per-side tracking-loss handling, WS disconnect grace, mutual exclusion, and end-to-end smoke tests are all working.
 </Callout>
 
 ## How to drive
@@ -20,7 +20,7 @@ This mode is **mutually exclusive** with [leader↔follower teleop](/docs/hmi/te
    - Touch thumb and index together (full pinch), click **pinch · capture**.
    - Repeat for the other hand.
    These two distances per side become the gripper-aperture mapping: open = max gripper, pinch = closed.
-4. **Frame yourself** so both shoulders and both hands are visible. The HUD shows live tracking per side; the skeleton overlay (when working) draws on the feed.
+4. **Frame yourself** so both shoulders and both hands are visible. The HUD shows live tracking per side; the skeleton overlay draws on the feed.
 5. **Hold SPACE.** Goals start flowing to the arms; both flip to a `TELEOP · HUMAN` state. Move your arms; the SO-101s track 1:1.
 6. **Release SPACE.** Both arms freeze in place within one control tick (~16 ms).
 7. **Stop** ends the session entirely and restores both arms to MANUAL.
@@ -78,6 +78,23 @@ any   ── (stop / E-STOP)──▶  IDLE
 - **DRIVING** — SPACE is down. Goals flow to both arms.
 
 Releasing SPACE drops you back to TRACKING within one control tick. The arms freeze; the next press resumes from the current pose.
+
+## Diagnostic readouts
+
+Each joint's scope bar (the side panel next to the camera feed) carries two live values, not just the final commanded angle:
+
+- **Ghost tick** — a thin marker showing what the retargeter *asked for* (`target`), separate from the solid fill showing what was actually *committed*. It only appears once the two diverge by more than 0.5°; most of the time target and committed coincide and there's nothing extra to see.
+- **Reason badge** — appears beside the bar whenever a joint isn't tracking cleanly:
+
+| Badge | Meaning |
+|---|---|
+| `CLAMPED` | The joint hit a calibrated limit. |
+| `RATE-CAP` | The 4°/tick slew-rate cap is active — the commanded value is catching up to the target, not stuck. |
+| `HELD` | Nothing is being commanded for this joint at all — either that side has no tracking yet, or its confidence has dropped below the 0.4 floor (see below) and it has stopped driving entirely. |
+
+A joint with no badge is tracking normally — commanding exactly what the retargeter asked for.
+
+Each side's pinch-calibration card also shows a `conf` readout — MediaPipe's tracking confidence for that hand, `[0,1]`. It turns amber below `0.5`, a warning ahead of the hard `0.4` cutoff below which that side stops driving entirely (every joint on it reports `HELD` until confidence recovers).
 
 ## Safety and edge cases
 
