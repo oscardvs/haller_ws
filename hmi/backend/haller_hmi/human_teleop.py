@@ -166,26 +166,39 @@ class HumanTeleopSession:
             return (self._mouth_calib is not None
                     and mouth_clutch_thresholds(self._mouth_calib) is not None)
 
-    def _reset_clutch_state(self, source: ClutchSource) -> None:
-        """Clear every clutch transient and arm `source`. Caller holds the lock.
+    def _reset_clutch_state(self, source: ClutchSource | None) -> None:
+        """Clear every clutch transient. Caller holds the lock.
 
-        Called from both ends of the lifecycle. At start(), for the same
-        reason as the per-side timestamps: a stale jaw sample from the previous
-        session must not let a fresh one engage. At stop(), because nothing is
-        being asked for any more — an ended session that still advertises
+        Called from both ends of the lifecycle. At start(), `source` is the
+        newly selected authority: a stale jaw sample from the previous session
+        must not let a fresh one engage. At stop(), `source` is None — nothing
+        is being asked for any more, so `engaged`/`reason`/the hold timer all
+        have to clear (an ended session that still advertises
         `{"engaged": true, "reason": "engaged"}` beside `"state": "idle"` is
-        telling the operator the arms are live when they are not.
+        telling the operator the arms are live when they are not) — but
+        `_clutch_source` itself is deliberately left alone.
+
+        That last part is a considered choice, not an oversight: a session
+        that ran in mouth mode and then stopped must keep reporting "mouth" in
+        this diagnostic block, not silently revert to the default. Rewriting
+        it to "spacebar" here made the block self-contradictory — a stopped
+        mouth session claiming the spacebar was armed, which it never was.
+        `start()` is the only place authority is actually chosen, and it
+        always passes a concrete `source` here.
 
         The initial reason is honest about why a fresh mouth session cannot
         engage yet: `_last_face_perf == 0.0` means no face has ever been seen,
         which is exactly what status() reports live as `stale`.
         """
-        self._clutch_source = source
+        if source is not None:
+            self._clutch_source = source
         self._jaw_open = None
         self._last_face_perf = 0.0
         self._jaw_above_since_perf = None
         self._dead_man = False
-        self._clutch_reason = "spacebar_mode" if source == "spacebar" else "stale"
+        self._clutch_reason = (
+            "spacebar_mode" if self._clutch_source == "spacebar" else "stale"
+        )
 
     def _face_is_stale(self, now: float) -> bool:
         """True when the newest real jaw sample is older than the budget.
@@ -394,7 +407,7 @@ class HumanTeleopSession:
             # live reason, and no clutch may still advertise authority.
             self._steps_left = self._held_steps(self._committed_left)
             self._steps_right = self._held_steps(self._committed_right)
-            self._reset_clutch_state("spacebar")
+            self._reset_clutch_state(None)
         logger.info("human teleop stopped")
 
     def ingest_frame(self, frame: dict) -> None:
@@ -426,13 +439,16 @@ class HumanTeleopSession:
                 # Authority never hands over mid-motion. A frame speaking for
                 # the source that does NOT hold authority disengages and wipes
                 # the hold timer, so the operator has to re-assert through the
-                # armed source deliberately.
+                # armed source deliberately. The mismatch itself is the fault
+                # here — not "closed mouth" (below_threshold) and not "SPACE
+                # holds authority" (spacebar_mode), both of which the frontend
+                # treats as non-blocking resting states and prints nothing
+                # for. Overriding whichever reason the branch above just set
+                # is what makes this visible on the operator's chip instead
+                # of silent.
                 engaged = False
                 self._jaw_above_since_perf = None
-                if self._clutch_source == "mouth":
-                    # Do not leave the previous frame's "engaged" standing
-                    # beside engaged=False for a tick.
-                    self._clutch_reason = "below_threshold"
+                self._clutch_reason = "source_mismatch"
             self._dead_man = engaged
 
             # Frame-carried calibration follows the same rule as the clutch

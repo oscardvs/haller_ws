@@ -772,6 +772,44 @@ def _spacebar_frame(dead_man: bool):
     }
 
 
+def test_source_mismatch_reports_a_reason_the_frontend_prints():
+    """A wrong-source frame must not report `below_threshold` or
+    `spacebar_mode` — both are on the frontend's NON_BLOCKING list
+    (DeadManIndicator.tsx), so either one leaves the operator's chip printing
+    nothing while the clutch silently force-disengaged. `source_mismatch` is
+    the only reason string this branch may set.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        # A spacebar-labelled frame reaches a session armed for mouth.
+        sess.ingest_frame(_spacebar_frame(True))
+        st = sess.status()
+        assert st["clutch"]["engaged"] is False
+        assert st["clutch"]["reason"] == "source_mismatch"
+    finally:
+        sess.stop()
+
+
+def test_source_mismatch_reports_the_reason_in_the_other_direction():
+    """The mirror image: a mouth-labelled frame reaching a spacebar session
+    must also report `source_mismatch`, not `spacebar_mode` (which the
+    unguarded else-branch would otherwise leave standing)."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_mouth_frame(0.99))
+        st = sess.status()
+        assert st["clutch"]["engaged"] is False
+        assert st["clutch"]["reason"] == "source_mismatch"
+    finally:
+        sess.stop()
+
+
 def test_the_browser_cannot_hand_authority_to_the_other_source(monkeypatch):
     """The session's authority is what start() was told, for its whole life.
 
@@ -802,6 +840,7 @@ def test_the_browser_cannot_hand_authority_to_the_other_source(monkeypatch):
             st = sess.status()
             assert st["state"] != "driving", f"spacebar frame {i} took the arms"
             assert st["clutch"]["engaged"] is False
+            assert st["clutch"]["reason"] == "source_mismatch"
             # And the session still reports the source it was started with.
             assert st["clutch"]["source"] == "mouth"
     finally:
@@ -828,6 +867,7 @@ def test_a_spacebar_session_ignores_mouth_frames_entirely(monkeypatch):
             sess.ingest_frame(frame)
             st = sess.status()
             assert st["state"] != "driving"
+            assert st["clutch"]["reason"] == "source_mismatch"
             assert st["clutch"]["source"] == "spacebar"
         assert sess.mouth_calib_is_valid() is False
     finally:
@@ -841,3 +881,31 @@ def test_start_rejects_an_unknown_clutch_source():
         sess.start(left_arm="left", right_arm="right", swap=False,
                    clutch_source="eyebrow")
     assert sess.state is HumanState.IDLE
+
+
+def test_stopped_session_still_reports_the_source_it_ran_with():
+    """`clutch.source` must not lie once a session ends.
+
+    A session that ran in mouth mode and then stopped used to reset
+    `_clutch_source` back to "spacebar" — so the diagnostic block claimed the
+    spacebar held authority for a session that never armed it. The source is
+    fixed for a session's whole life (spec 1); stopping it doesn't erase which
+    life it was.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
+    sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+    sess.ingest_frame(_mouth_frame(0.99))
+    sess.stop()
+
+    st = sess.status()
+    assert st["clutch"]["source"] == "mouth"
+    assert st["clutch"]["engaged"] is False
+    # And a fresh spacebar session afterwards still gets a clean slate.
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        assert sess.status()["clutch"]["source"] == "spacebar"
+    finally:
+        sess.stop()

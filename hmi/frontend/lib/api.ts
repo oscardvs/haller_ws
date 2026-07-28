@@ -137,10 +137,10 @@ export type PinchCalibSide = { min_m: number; max_m: number };
 export type JointReason = "ok" | "rate_capped" | "clamped" | "held";
 
 /** Why the clutch is in the state it reports. Mirrors the backend vocabulary
- *  in haller_hmi/human_teleop.py exactly — same six strings, no others. */
+ *  in haller_hmi/human_teleop.py exactly — same seven strings, no others. */
 export type ClutchReason =
   | "engaged" | "below_threshold" | "holding" | "stale"
-  | "uncalibrated" | "spacebar_mode";
+  | "uncalibrated" | "spacebar_mode" | "source_mismatch";
 
 export type JointDiag = {
   /** What the retargeter asked for, in degrees. null when the joint is held. */

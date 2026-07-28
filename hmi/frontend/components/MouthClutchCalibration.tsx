@@ -132,13 +132,13 @@ export function MouthClutchCalibration({
             {label("open", "capture")}
           </Button>
         </div>
-        {capturing !== null ? (
-          <div className="text-muted-foreground">
-            {capturing === "talk"
+        <div className="text-muted-foreground">
+          {capturing === null
+            ? "start already talking, or already open — not before. the window folds from your first sample, so opening after you click reads as closed"
+            : capturing === "talk"
               ? "speak normally — recording the loudest your jaw gets"
               : "hold a deliberate wide open — recording the least you sustain"}
-          </div>
-        ) : null}
+        </div>
         <div className="flex justify-between">
           <span className="text-muted-foreground">talk..open</span>
           <span className="tabular-nums">

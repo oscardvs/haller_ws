@@ -232,9 +232,16 @@ Every one resolves to disengaged:
 ```
 
 `reason` is one of `engaged`, `below_threshold`, `holding`, `stale`,
-`uncalibrated`, `spacebar_mode`. This follows the per-joint `reason` pattern
-from the diagnostic-chain work, and answers "why isn't it engaging" from the
-panel instead of from a terminal.
+`uncalibrated`, `spacebar_mode`, `source_mismatch`. This follows the per-joint
+`reason` pattern from the diagnostic-chain work, and answers "why isn't it
+engaging" from the panel instead of from a terminal.
+
+`source_mismatch` is set whenever a frame's `clutch_source` disagrees with the
+session's (§6.4's "source switched while DRIVING" row) — added after
+implementation surfaced that the force-disengage branch was otherwise
+reusing `below_threshold` or `spacebar_mode`, both of which the frontend
+treats as non-blocking resting states and prints nothing for. A wrong-source
+frame is not a resting state; it needed its own reason to be visible at all.
 
 ## 7. Files
 
