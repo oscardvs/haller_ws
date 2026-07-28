@@ -129,7 +129,9 @@ buildOverlaySides(
 
 **Real joint limits.** `ArmScopePanel` hardcodes `min={-90} max={90}` for every joint (`HumanTeleopPanel.tsx:265-266`). Actual limits come from calibration and differ per joint — the gripper especially. The bars are mis-scaled today, and a CLAMPED badge next to a bar showing the joint nowhere near its limit would actively mislead. Telemetry already carries real `min`/`max` per joint at `arms[id].joints[j]`.
 
-**Telemetry typing.** `HumanTeleopPanel.tsx:41-48` casts through `as unknown as` to read the `human_teleop` block, with a TODO to type it properly. Add `human_teleop?: HumanTeleopStatus` to `TelemetryFrame` in `lib/telemetry.ts` and drop the cast — adding fields behind an `unknown` cast would compound the existing debt.
+**Telemetry typing.** `HumanTeleopPanel.tsx:41-48` casts through `as unknown as` to read the `human_teleop` block, with a comment claiming `TelemetryFrame` doesn't type it. That comment is **stale** — `lib/telemetry.ts:52` already declares `human_teleop?: HumanTeleopStatus`. The fix is to delete the cast and the comment, not to add the type. Adding fields behind an unnecessary `unknown` cast would compound debt that no longer needs to exist.
+
+**Type ownership.** `OverlaySides` currently lives in `components/CameraOverlay.tsx`. Since `buildOverlaySides` belongs in `lib/mediapipe.ts`, leaving the type in the component would make `lib/` import from `components/` — the wrong dependency direction. The type moves to `lib/mediapipe.ts` (it is a data shape, not a rendering concern) and `CameraOverlay` imports it.
 
 ## 7. Testing
 
