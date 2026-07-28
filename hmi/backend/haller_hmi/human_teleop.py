@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 
 from .arm import ArmManager
-from .safety import Mode, clamp_joint_goal
+from .safety import Mode
 from . import retarget
 
 logger = logging.getLogger(__name__)
@@ -161,6 +161,22 @@ class HumanTeleopSession:
             self._started_at = time.time()
             self._state = HumanState.ARMED
             self._last_error = None
+            # Clear every per-session transient. Two of these are load-bearing:
+            #   _ws_disconnected_at_perf — set when the operator's tab closes,
+            #     which happens *before* stop(); leaving it set makes the next
+            #     session's first tick see an expired grace window and auto-stop.
+            #   _target_left/_target_right — the last retarget goal of the
+            #     previous session; leaving them set makes a freshly-ARMED
+            #     session drift toward where the operator's hands used to be,
+            #     before a single new frame has arrived.
+            self._ws_disconnected_at_perf = None
+            self._target_left = None
+            self._target_right = None
+            self._last_left_perf = 0.0
+            self._last_right_perf = 0.0
+            self._latest_frame_ts_ms = 0
+            self._latest_arrival_perf = 0.0
+            self._dead_man = False
             # Reset smoothing state to current observed positions where available.
             self._committed_left = self._observed_or_zero(left)
             self._committed_right = self._observed_or_zero(right)
@@ -246,14 +262,20 @@ class HumanTeleopSession:
 
     @staticmethod
     def _observed_or_zero(handle) -> dict[str, float]:
+        """Seed the smoothing state from where the arm currently is.
+
+        Goes through `read_joints_deg()` (the ArmHandle interface) rather than
+        the underlying lerobot robot, so sim arms seed correctly too. Falls back
+        to zero per joint if the read fails or omits a joint.
+        """
         try:
-            obs = handle.robot.get_observation() if handle.robot is not None else {}
+            observed = handle.read_joints_deg()
+            return {joint: float(observed.get(joint, 0.0))
+                    for joint in handle.joint_limits_deg}
         except Exception:
-            obs = {}
-        out: dict[str, float] = {}
-        for joint in handle.joint_limits_deg:
-            out[joint] = float(obs.get(f"{joint}.pos", 0.0))
-        return out
+            logger.warning("could not read start pose for arm %s; seeding at zero",
+                           getattr(handle.config, "id", "?"), exc_info=True)
+            return {joint: 0.0 for joint in handle.joint_limits_deg}
 
     def _smooth_step(
         self,
@@ -284,11 +306,15 @@ class HumanTeleopSession:
             out[joint] = max(lo, min(hi, new))
         return out
 
-    def _commit(self, handle, goal: dict[str, float]) -> None:
-        clamped = clamp_joint_goal(goal, handle.joint_limits_deg)
-        action = {f"{joint}.pos": float(value) for joint, value in clamped.items()}
-        if handle.robot is not None:
-            handle.robot.send_action(action)
+    @staticmethod
+    def _commit(handle, goal: dict[str, float]) -> None:
+        """Write one tick's goal through the ArmHandle interface.
+
+        `send_goal` does the joint-limit clamp and the mode-guard check itself,
+        and works against both `ArmHandle` and `SimArmHandle` — so the same loop
+        drives real arms and MuJoCo arms.
+        """
+        handle.send_goal({joint: float(value) for joint, value in goal.items()})
 
     def _loop(self) -> None:
         with self._lock:

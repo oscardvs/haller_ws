@@ -14,7 +14,16 @@ def _fake_arm_manager():
     mgr = MagicMock()
 
     def _mkarm(arm_id: str):
-        a = MagicMock()
+        # spec_set mirrors the public surface shared by ArmHandle and
+        # SimArmHandle. It deliberately omits `.robot` — the lerobot object only
+        # real arms carry — so a session that reaches past the handle interface
+        # blows up here instead of passing on mocks and then failing against sim
+        # arms. See tests/sim/test_human_teleop_sim.py.
+        a = MagicMock(spec_set=[
+            "config", "joint_limits_deg", "guard", "torque_enabled",
+            "connect", "disconnect", "send_goal", "home",
+            "enable_torque", "disable_torque", "read_joints_deg", "state_snapshot",
+        ])
         a.config = MagicMock(id=arm_id)
         a.joint_limits_deg = {
             "shoulder_pan":  (-90.0, 90.0),
@@ -26,7 +35,7 @@ def _fake_arm_manager():
         }
         a.guard = MagicMock(mode=Mode.MANUAL)
         a.torque_enabled = True
-        a.robot = MagicMock()
+        a.read_joints_deg.return_value = {j: 0.0 for j in a.joint_limits_deg}
         return a
 
     arms = {"left": _mkarm("left"), "right": _mkarm("right")}
@@ -197,9 +206,9 @@ def test_commit_loop_writes_to_arms_when_driving():
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
-        # The loop should call send_action on both arms within ~50 ms.
-        assert _wait_until(lambda: arms["left"].robot.send_action.called)
-        assert _wait_until(lambda: arms["right"].robot.send_action.called)
+        # The loop should call send_goal on both arms within ~50 ms.
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+        assert _wait_until(lambda: arms["right"].send_goal.called)
     finally:
         sess.stop()
 
@@ -211,8 +220,8 @@ def test_commit_loop_does_not_write_when_not_driving():
     try:
         sess.ingest_frame(_kp_frame(dead_man=False))
         _time.sleep(0.05)
-        assert not arms["left"].robot.send_action.called
-        assert not arms["right"].robot.send_action.called
+        assert not arms["left"].send_goal.called
+        assert not arms["right"].send_goal.called
     finally:
         sess.stop()
 
@@ -229,11 +238,67 @@ def test_commit_loop_clamps_to_arm_joint_limits():
         frame["left"]["pose"]["elbow"] = [0.3, 1.4, 0.0]
         frame["left"]["pose"]["wrist"] = [0.6, 1.4, 0.0]
         sess.ingest_frame(frame)
-        _wait_until(lambda: arms["left"].robot.send_action.called)
-        sent_actions = [c.args[0] for c in arms["left"].robot.send_action.call_args_list]
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+        sent_goals = [c.args[0] for c in arms["left"].send_goal.call_args_list]
         # Every commanded shoulder_pan must be inside [-5, 5].
-        for action in sent_actions:
-            assert -5.0 <= action["shoulder_pan.pos"] <= 5.0
+        for goal in sent_goals:
+            assert -5.0 <= goal["shoulder_pan"] <= 5.0
+    finally:
+        sess.stop()
+
+
+def test_restart_after_ws_disconnect_does_not_immediately_auto_stop():
+    """The WS-disconnect grace timer is per-session state.
+
+    Closing the browser tab fires notify_ws_disconnected() while the session is
+    still running, so the timestamp is set at the moment the operator stops.
+    If start() doesn't clear it, the *next* session sees an already-expired
+    grace window on its first tick and auto-stops — i.e. human teleop works
+    exactly once per backend process.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0, ws_disconnect_grace_s=0.05)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.ingest_frame(_kp_frame(dead_man=True))
+    sess.notify_ws_disconnected()   # browser tab closed, session still running
+    sess.stop()
+
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        # Well past the (tiny) grace window — the fresh session must survive.
+        _time.sleep(0.2)
+        assert sess.running, "second session auto-stopped on a stale grace timer"
+        assert sess.state is HumanState.ARMED
+    finally:
+        sess.stop()
+
+
+def test_restart_does_not_inherit_previous_session_targets():
+    """A new session must not carry the last session's retarget goals.
+
+    Otherwise pressing Start makes the arms drift toward wherever the operator's
+    hands were when they last stopped, before a single new frame has arrived.
+    """
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    # A pose well away from neutral, so a leaked target would be obvious.
+    frame = _kp_frame(dead_man=True)
+    frame["left"]["pose"]["elbow"] = [0.3, 1.4, 0.0]
+    frame["left"]["pose"]["wrist"] = [0.6, 1.4, 0.0]
+    sess.ingest_frame(frame)
+    assert _wait_until(lambda: arms["left"].send_goal.called)
+    sess.stop()
+
+    arms["left"].send_goal.reset_mock()
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        assert sess.target_goals()["left"] is None
+        assert sess.target_goals()["right"] is None
+        assert sess.status()["tracking"]["left"]["age_ms"] is None
+        # ARMED with no frames yet: nothing may be commanded.
+        _time.sleep(0.05)
+        assert not arms["left"].send_goal.called
     finally:
         sess.stop()
 
@@ -247,7 +312,7 @@ def test_per_arm_tracking_loss_freezes_only_that_side():
         # Drive a frame where only the left side has fresh keypoints.
         frame = _kp_frame(dead_man=True)
         sess.ingest_frame(frame)
-        _wait_until(lambda: arms["left"].robot.send_action.called)
+        assert _wait_until(lambda: arms["left"].send_goal.called)
         # Now stop the right side from being updated; the left keeps ticking.
         frame_left_only = _kp_frame(dead_man=True)
         frame_left_only["right"] = None
