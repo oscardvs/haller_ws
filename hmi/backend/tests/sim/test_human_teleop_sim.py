@@ -163,3 +163,56 @@ def test_start_seeds_committed_goals_from_observed_sim_pose(sim_arms):
         ), f"seeded from {seeded['shoulder_pan']}, arm was at {observed['shoulder_pan']}"
     finally:
         sess.stop()
+
+
+def test_reason_reports_clamped_against_a_real_sim_joint_limit(sim_arms):
+    """Drive a real MuJoCo arm past a real calibrated limit and check the
+    reason. Mock-arm tests cannot catch a wrong limit source; this can."""
+    mgr, handles, _world = sim_arms
+    lo, hi = handles["left"].joint_limits_deg["shoulder_pan"]
+
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        # The arm must be swung PAST the real limit, which for the vendored
+        # SO-101 MJCF is shoulder_pan = +/-110.008 deg (`range="-1.92 1.92"`
+        # radians, so_arm100.xml:35). A pose in the shoulder's XY plane
+        # retargets to exactly 90 deg and would never clamp — the arm has to
+        # swing behind the shoulder. This pose retargets to ~123.7 deg.
+        frame = _kp_frame(dead_man=True, elbow=[0.3, 1.4, -0.2], wrist=[0.6, 1.4, -0.4])
+
+        def _clamped() -> bool:
+            sess.ingest_frame(frame)
+            entry = sess.status()["joints"]["left"].get("shoulder_pan", {})
+            return entry.get("reason") == "clamped"
+
+        assert _wait_until(_clamped), (
+            f"shoulder_pan never reported clamped; limits were ({lo}, {hi}), "
+            f"status={sess.status()['joints']['left'].get('shoulder_pan')}"
+        )
+        entry = sess.status()["joints"]["left"]["shoulder_pan"]
+        assert lo <= entry["committed"] <= hi
+        assert entry["target"] is not None
+    finally:
+        sess.stop()
+
+
+def test_reason_is_ok_for_a_joint_tracking_freely(sim_arms):
+    mgr, _handles, _world = sim_arms
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        # Neutral pose: nothing should clamp.
+        frame = _kp_frame(dead_man=True, elbow=[0.0, 1.4, 0.3], wrist=[0.0, 1.4, 0.6])
+
+        def _settled() -> bool:
+            sess.ingest_frame(frame)
+            reasons = {j: e["reason"] for j, e in sess.status()["joints"]["left"].items()}
+            return reasons.get("shoulder_pan") == "ok"
+
+        assert _wait_until(_settled), (
+            f"shoulder_pan never settled to ok; "
+            f"status={sess.status()['joints']['left']}"
+        )
+    finally:
+        sess.stop()

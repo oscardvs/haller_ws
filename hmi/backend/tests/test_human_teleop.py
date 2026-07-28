@@ -429,3 +429,67 @@ def test_cannot_start_human_teleop_while_leader_follower_is_running(monkeypatch)
     sess.attach_peer(lf)  # share the "is anyone teleoping?" check
     with pytest.raises(RuntimeError):
         sess.start(left_arm="left", right_arm="right", swap=False)
+
+
+def test_status_joints_block_mirrors_goal_deg_keys():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        st = sess.status()
+        assert set(st["joints"]["left"]) == set(st["goal_deg"]["left"])
+        for entry in st["joints"]["left"].values():
+            assert set(entry) == {"target", "committed", "reason"}
+    finally:
+        sess.stop()
+
+
+def test_status_joints_are_held_before_any_frame_arrives():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        st = sess.status()
+        for side in ("left", "right"):
+            for entry in st["joints"][side].values():
+                assert entry["reason"] == "held"
+                assert entry["target"] is None
+    finally:
+        sess.stop()
+
+
+def test_status_joints_revert_to_held_after_stop():
+    """After stop() nothing is being asked for, so no joint may still advertise
+    a live reason. A retained CLAMPED badge from an ended session would tell the
+    operator the arm is at a limit it is no longer being driven into."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.ingest_frame(_kp_frame(dead_man=True))
+    _time.sleep(0.05)
+    sess.stop()
+
+    st = sess.status()
+    for side in ("left", "right"):
+        for joint, entry in st["joints"][side].items():
+            assert entry["reason"] == "held", f"{side}.{joint} kept a live reason after stop"
+            assert entry["target"] is None
+    # The committed values themselves are still retained, matching goal_deg.
+    assert st["joints"]["left"].keys() == st["goal_deg"]["left"].keys()
+
+
+def test_status_goal_deg_shape_is_unchanged_by_the_joints_block():
+    """goal_deg is DatasetRecorder's `action` column. It must stay a plain
+    joint -> float mapping."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        _time.sleep(0.05)
+        goal = sess.status()["goal_deg"]["left"]
+        assert goal, "goal_deg must not be empty while driving"
+        for value in goal.values():
+            assert isinstance(value, float)
+    finally:
+        sess.stop()

@@ -153,6 +153,12 @@ class HumanTeleopSession:
                     "left":  dict(self._committed_left),
                     "right": dict(self._committed_right),
                 },
+                # Additive diagnostic block. `goal_deg` above is the recorder's
+                # `action` column and must keep its plain joint -> float shape.
+                "joints": {
+                    "left":  self._steps_as_dict(self._steps_left),
+                    "right": self._steps_as_dict(self._steps_right),
+                },
             }
 
     def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0) -> None:
@@ -227,6 +233,11 @@ class HumanTeleopSession:
             self._state = HumanState.IDLE
             self._cfg = None
             self._started_at = None
+            # Nothing is being asked for any more. Keep the committed values —
+            # goal_deg retains them too — but no joint may still advertise a
+            # live reason.
+            self._steps_left = self._held_steps(self._committed_left)
+            self._steps_right = self._held_steps(self._committed_right)
         logger.info("human teleop stopped")
 
     def ingest_frame(self, frame: dict) -> None:
@@ -300,6 +311,17 @@ class HumanTeleopSession:
         is being held at its seeded position, nothing has been asked for."""
         return {joint: JointStep(target=None, committed=value, reason="held")
                 for joint, value in committed.items()}
+
+    @staticmethod
+    def _steps_as_dict(steps: dict[str, JointStep]) -> dict[str, dict]:
+        return {
+            joint: {
+                "target": step.target,
+                "committed": step.committed,
+                "reason": step.reason,
+            }
+            for joint, step in steps.items()
+        }
 
     def _smooth_step(
         self,
