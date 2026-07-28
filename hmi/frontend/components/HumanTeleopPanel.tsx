@@ -14,7 +14,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
-import { api, type HumanTeleopStatus } from "@/lib/api";
+import { api, type HumanTeleopStatus, type JointDiag } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
@@ -243,20 +243,28 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
       </div>
       <div className="space-y-2">
         <ArmScopePanel label={`arm: ${leftArm}`} goal={status?.goal_deg?.left}
-                       limits={limitsFor(armsState, leftArm)} />
+                       limits={limitsFor(armsState, leftArm)}
+                       diag={status?.joints?.left} />
         <ArmScopePanel label={`arm: ${rightArm}`} goal={status?.goal_deg?.right}
-                       limits={limitsFor(armsState, rightArm)} />
+                       limits={limitsFor(armsState, rightArm)}
+                       diag={status?.joints?.right} />
       </div>
     </div>
   );
 }
 
+const REASON_LABEL: Record<string, string> = {
+  clamped: "CLAMPED",
+  rate_capped: "RATE-CAP",
+};
+
 function ArmScopePanel({
-  label, goal, limits,
+  label, goal, limits, diag,
 }: {
   label: string;
   goal?: Record<string, number>;
   limits?: Record<string, { min: number; max: number }>;
+  diag?: Record<string, JointDiag>;
 }) {
   return (
     <Card className="p-3">
@@ -264,17 +272,28 @@ function ArmScopePanel({
         <span>{label}</span>
       </div>
       <div className="space-y-1">
-        {JOINTS.map((j) => (
-          // Real calibrated limits when the arm is reporting; the +/-90 default
-          // is only a placeholder for an arm that hasn't sent telemetry yet.
-          <ScopeBar
-            key={j}
-            label={j}
-            min={limits?.[j]?.min ?? -90}
-            max={limits?.[j]?.max ?? 90}
-            commanded={goal?.[j] ?? 0}
-          />
-        ))}
+        {JOINTS.map((j) => {
+          const d = diag?.[j];
+          const badge = d ? REASON_LABEL[d.reason] : undefined;
+          return (
+            <div key={j} className="flex items-center gap-2">
+              <div className="flex-1">
+                <ScopeBar
+                  label={j}
+                  min={limits?.[j]?.min ?? -90}
+                  max={limits?.[j]?.max ?? 90}
+                  commanded={goal?.[j] ?? 0}
+                  intended={d?.target ?? undefined}
+                />
+              </div>
+              <span
+                className="w-16 text-right font-mono text-[10px] text-[var(--instrument-warn,oklch(75%_0.16_70))]"
+              >
+                {badge ?? ""}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </Card>
   );

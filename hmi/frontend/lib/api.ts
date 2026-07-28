@@ -127,6 +127,15 @@ export type HumanTeleopState = "idle" | "armed" | "tracking" | "driving";
 
 export type PinchCalibSide = { min_m: number; max_m: number };
 
+export type JointReason = "ok" | "rate_capped" | "clamped" | "held";
+
+export type JointDiag = {
+  /** What the retargeter asked for, in degrees. null when the joint is held. */
+  target: number | null;
+  committed: number;
+  reason: JointReason;
+};
+
 export type HumanTeleopStatus = {
   running: boolean;
   state: HumanTeleopState;
@@ -141,6 +150,10 @@ export type HumanTeleopStatus = {
   };
   frame_age_ms?: number;
   goal_deg?: { left?: Record<string, number>; right?: Record<string, number> };
+  joints?: {
+    left?:  Record<string, JointDiag>;
+    right?: Record<string, JointDiag>;
+  };
 };
 
 export type RecordStatus = {
