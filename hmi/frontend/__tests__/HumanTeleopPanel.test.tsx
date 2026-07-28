@@ -112,6 +112,17 @@ async function bootPanel() {
   await waitFor(() => expect(hoisted.runners.length).toBe(1));
 }
 
+/** Boot, then hand authority to the mouth before any frame is driven. The
+ *  face model is gated on the source, so the decimation assertions only mean
+ *  anything in mouth mode. Toggling before the first frame leaves the tick
+ *  counter untouched at 0, so the 0/3/6 phase is the same one a mouth-mode
+ *  session sees from its first tracking tick. */
+async function bootMouthMode() {
+  await bootPanel();
+  fireEvent.click(screen.getByRole("button", { name: /clutch: spacebar/i }));
+  expect(hoisted.detectCalls).toHaveLength(0);
+}
+
 /** Fire one animation frame at `t` ms. */
 function frameAt(t: number) {
   act(() => { rafCb?.(t); });
@@ -133,7 +144,7 @@ function telemetry(human: Partial<HumanTeleopStatus>) {
 
 describe("HumanTeleopPanel face decimation", () => {
   it("runs the face model on one tracking tick in three and nulls jaw_open on the rest", async () => {
-    await bootPanel();
+    await bootMouthMode();
     // 100 ms apart so every callback clears the loop's ~30 Hz (33 ms) cap.
     for (let i = 0; i < 10; i++) frameAt(100 + i * 100);
 
@@ -152,7 +163,7 @@ describe("HumanTeleopPanel face decimation", () => {
   });
 
   it("counts processed ticks, not raw animation frames", async () => {
-    await bootPanel();
+    await bootMouthMode();
     frameAt(100);                       // processed — face tick 0
     frameAt(110);                       // dropped by the 30 Hz cap
     frameAt(120);                       // dropped by the 30 Hz cap
@@ -162,6 +173,33 @@ describe("HumanTeleopPanel face decimation", () => {
     // callback the second processed tick would have landed on a face tick.
     expect(hoisted.detectCalls.map((c) => c.face)).toEqual([true, false]);
     expect(hoisted.queued.map((f) => f.jaw_open)).toEqual([hoisted.jaw, null]);
+  });
+
+  it("never runs the face model while the spacebar holds authority", async () => {
+    await bootPanel();
+    for (let i = 0; i < 7; i++) frameAt(100 + i * 100);
+
+    // FaceLandmarker is a third model competing with Hand and Pose for the
+    // GPU, and the backend discards jaw_open outright unless the source is
+    // "mouth". Spacebar sessions must not pay for it at all.
+    expect(hoisted.detectCalls).toHaveLength(7);
+    expect(hoisted.detectCalls.some((c) => c.face)).toBe(false);
+    expect(hoisted.queued.map((f) => f.jaw_open)).toEqual(Array(7).fill(null));
+  });
+
+  it("picks up the face model at the counter's current phase on a mid-session switch", async () => {
+    await bootPanel();
+    frameAt(100);                       // spacebar — counter 0 -> 1
+    frameAt(200);                       // spacebar — counter 1 -> 2
+    expect(hoisted.detectCalls.some((c) => c.face)).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /clutch:/i }));
+    frameAt(300);                       // mouth, counter at 2 -> 0: no face yet
+    frameAt(400);                       // mouth, counter at 0: face runs
+    expect(hoisted.detectCalls.map((c) => c.face)).toEqual([
+      false, false, false, true,
+    ]);
+    expect(hoisted.queued.at(-1)!.jaw_open).toBe(hoisted.jaw);
   });
 });
 

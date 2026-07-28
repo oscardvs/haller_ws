@@ -166,11 +166,19 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
       // Cap to ~30 Hz; MediaPipe will internally throttle if GPU saturates.
       if (t - last_t < 33) return;
       last_t = t;
-      // Decimate the face model: one tracking tick in FACE_EVERY_N runs it.
-      // The counter advances per *processed* tick — it lives below the 30 Hz
-      // cap above on purpose, so a browser painting at 120 Hz still gets a
-      // jaw sample every ~100 ms rather than every ~25 ms.
-      const runFace = faceTickRef.current === 0;
+      // Decimate the face model: one tracking tick in FACE_EVERY_N runs it,
+      // and only when the mouth actually holds authority. In spacebar mode the
+      // backend discards jaw_open outright, so running FaceLandmarker there is
+      // a third model competing with Hand and Pose for the same GPU inside the
+      // same 33 ms budget, for no consumer — and tracking-loss is judged on a
+      // 300 ms budget, so that headroom is not free.
+      //
+      // The counter advances unconditionally so a mid-session switch into
+      // mouth mode picks up cleanly at whatever phase it is on. It also sits
+      // below the 30 Hz cap on purpose: it counts *processed* ticks, so a
+      // browser painting at 120 Hz still samples the jaw every ~100 ms rather
+      // than every ~25 ms.
+      const runFace = clutchSource === "mouth" && faceTickRef.current === 0;
       faceTickRef.current = (faceTickRef.current + 1) % FACE_EVERY_N;
       const { hands, pose, face } = runner.detect(video, t, { face: runFace });
       // Only carries a value on ticks that actually ran the model. Skipped
