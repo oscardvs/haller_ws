@@ -17,7 +17,10 @@ export type TabId =
  *  to be rewritten in the same commit. */
 export const TABS: readonly { id: TabId; label: string }[] = [
   { id: "operate", label: "Operate" },
+  { id: "human", label: "Human teleop" },
+  { id: "calibrate", label: "Calibrate" },
   { id: "cameras", label: "Cameras" },
+  { id: "dataset", label: "Dataset" },
   { id: "settings", label: "Settings" },
 ];
 
@@ -26,24 +29,35 @@ export const TABS: readonly { id: TabId; label: string }[] = [
  *  popovers over a control surface is how you click the wrong thing. */
 export type PopId = "teleop" | "rec" | "alerts" | `pose-${string}` | null;
 
+/** Re-exported so cockpit code has one import for its shell vocabulary; the
+ *  definition lives in lib/ because HumanTeleopPanel needs it too. */
+export { isEditableTarget } from "@/lib/keys";
+
 /**
- * True when a key event came from somewhere the operator is typing.
+ * Whether the human-teleop panel stays mounted.
  *
- * This is the fix for a live bug: BasePanel bound WASD to `window` with no
- * target check while RecordingPanel put a task-description input on the same
- * page, so typing "a red cube" drove the base sideways. `select` is in the
- * list because a focused <select> consumes letter keys for type-ahead — the
- * arm-assignment dropdowns on the teleop tab are exactly that.
+ * The one place tab switching cannot be plain mount/unmount. That panel owns
+ * the webcam, three MediaPipe models and the ~30 Hz publish loop that IS the
+ * teleop input, so unmounting it while the backend still believes a session is
+ * live would stop the robot receiving poses with nothing on screen to say so.
+ *
+ *   - `opened` latches on first visit, so the webcam is never opened before
+ *     the operator asks for it. This is someone's face, not a status LED.
+ *   - `sessionRunning` keeps it alive off-tab. It reads from the retained last
+ *     telemetry frame, so it stays true through a link blip rather than
+ *     tearing down teleop because the websocket hiccuped.
+ *   - With nothing running, leaving the tab releases the camera.
  */
-export function isEditableTarget(t: EventTarget | null): boolean {
-  if (!(t instanceof HTMLElement)) return false;
-  const tag = t.tagName;
-  return (
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    tag === "SELECT" ||
-    t.isContentEditable
-  );
+export function shouldKeepTeleopMounted({
+  opened,
+  onTeleopTab,
+  sessionRunning,
+}: {
+  opened: boolean;
+  onTeleopTab: boolean;
+  sessionRunning: boolean;
+}): boolean {
+  return opened && (onTeleopTab || sessionRunning);
 }
 
 /** Breakpoints the design calls out by number, named once here.

@@ -12,7 +12,7 @@ import { useEffect, useState, type RefObject } from "react";
 
 import { useTelemetry } from "@/lib/telemetry";
 import { useRecorder } from "@/lib/recorder";
-import { slugify, type TabId } from "./lib";
+import { slugify, type TabId, type Viewport } from "./lib";
 
 export function CommandBar({
   tab,
@@ -23,6 +23,7 @@ export function CommandBar({
   recRef,
   census,
   version,
+  viewport,
 }: {
   tab: TabId;
   pop: string | null;
@@ -32,6 +33,7 @@ export function CommandBar({
   recRef: RefObject<HTMLButtonElement | null>;
   census: string;
   version: string;
+  viewport: Viewport;
 }) {
   const link = useTelemetry((s) => s.link);
   const teleopRunning = useTelemetry((s) => s.lastFrame?.teleop?.running ?? false);
@@ -107,7 +109,7 @@ export function CommandBar({
       <span aria-hidden className="h-3.5 w-px shrink-0 bg-border" />
 
       <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">
-        {hintFor(tab, link)}
+        {hintFor(tab, link, viewport)}
       </span>
 
       <span className="ml-auto flex shrink-0 items-center gap-3 font-mono text-[10px] whitespace-nowrap text-muted-foreground">
@@ -122,7 +124,11 @@ export function CommandBar({
 /** What the operator most needs to know on this tab, right now. Link trouble
  *  outranks every per-tab hint: with the socket down the readouts are frozen
  *  and every command will fail, which changes the meaning of the whole screen. */
-function hintFor(tab: TabId, link: "live" | "reconnecting" | "disconnected"): string {
+function hintFor(
+  tab: TabId,
+  link: "live" | "reconnecting" | "disconnected",
+  viewport: Viewport,
+): string {
   if (link === "disconnected") {
     return "link down — readouts frozen, commands will fail until the websocket reconnects";
   }
@@ -131,6 +137,14 @@ function hintFor(tab: TabId, link: "live" | "reconnecting" | "disconnected"): st
   }
   switch (tab) {
     case "operate":
+      // The layout drops things at these sizes; saying which beats leaving the
+      // operator to wonder where the second arm went.
+      if (viewport.short) {
+        return "short viewport — wrist tiles are collapsed to their label strip";
+      }
+      if (viewport.compact) {
+        return "narrow layout — one arm at a time, pick it above the card";
+      }
       return "drag joints to command · wasd or arrows drive the base";
     case "human":
       return "hold SPACE (or open MOUTH) to close the dead-man — this tab only";

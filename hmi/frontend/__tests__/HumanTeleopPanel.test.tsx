@@ -120,7 +120,7 @@ async function bootPanel() {
  *  session sees from its first tracking tick. */
 async function bootMouthMode() {
   await bootPanel();
-  fireEvent.click(screen.getByRole("button", { name: /clutch: spacebar/i }));
+  fireEvent.click(screen.getByRole("button", { name: /clutch · spacebar/i }));
   expect(hoisted.detectCalls).toHaveLength(0);
 }
 
@@ -194,7 +194,7 @@ describe("HumanTeleopPanel face decimation", () => {
     frameAt(200);                       // spacebar — counter 1 -> 2
     expect(hoisted.detectCalls.some((c) => c.face)).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: /clutch:/i }));
+    fireEvent.click(screen.getByRole("button", { name: /clutch ·/i }));
     frameAt(300);                       // mouth, counter at 2 -> 0: no face yet
     frameAt(400);                       // mouth, counter at 0: face runs
     expect(hoisted.detectCalls.map((c) => c.face)).toEqual([
@@ -207,11 +207,11 @@ describe("HumanTeleopPanel face decimation", () => {
 describe("HumanTeleopPanel clutch source", () => {
   it("cannot change authority while a session is running", async () => {
     await bootPanel();
-    const toggle = screen.getByRole("button", { name: /clutch:/i });
+    const toggle = screen.getByRole("button", { name: /clutch ·/i });
     expect(toggle).toBeEnabled();
 
     telemetry({ running: true, state: "tracking" });
-    expect(screen.getByRole("button", { name: /clutch:/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /clutch ·/i })).toBeDisabled();
   });
 
   it("publishes the newly selected source on the very next frame", async () => {
@@ -219,7 +219,7 @@ describe("HumanTeleopPanel clutch source", () => {
     frameAt(100);
     expect(hoisted.queued.at(-1)!.clutch_source).toBe("spacebar");
 
-    fireEvent.click(screen.getByRole("button", { name: /clutch:/i }));
+    fireEvent.click(screen.getByRole("button", { name: /clutch ·/i }));
     frameAt(200);
     // The frame literal closes over `clutchSource`, so the loop has to be
     // rebuilt on a source change or every subsequent frame lies about who
@@ -229,8 +229,8 @@ describe("HumanTeleopPanel clutch source", () => {
 
   it("refuses to start in mouth mode without an adequate calibration", async () => {
     await bootPanel();
-    fireEvent.click(screen.getByRole("button", { name: /clutch:/i }));
-    expect(screen.getByRole("button", { name: /clutch: mouth/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /clutch ·/i }));
+    expect(screen.getByRole("button", { name: /clutch · mouth/i })).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /^start$/i }));

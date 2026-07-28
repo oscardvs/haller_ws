@@ -19,8 +19,17 @@ export type CameraOverlayHandle = {
 const INSTRUMENT_LINE = "oklch(80% 0.18 142)";
 const AMBER = "oklch(75% 0.16 70)";
 
-export const CameraOverlay = forwardRef<CameraOverlayHandle, { aspectRatio?: string }>(
-  function CameraOverlay({ aspectRatio = "16/9" }, ref) {
+export const CameraOverlay = forwardRef<
+  CameraOverlayHandle,
+  {
+    aspectRatio?: string;
+    /** Fill the parent instead of holding an aspect ratio. The cockpit gives
+     *  this a grid row of a fixed-height page, where a 16:9 box would either
+     *  overflow it or leave a band of dead space. */
+    fill?: boolean;
+  }
+>(
+  function CameraOverlay({ aspectRatio = "16/9", fill = false }, ref) {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -78,7 +87,10 @@ export const CameraOverlay = forwardRef<CameraOverlayHandle, { aspectRatio?: str
     }));
 
     return (
-      <div className="relative w-full" style={{ aspectRatio }}>
+      <div
+        className={fill ? "relative h-full w-full" : "relative w-full"}
+        style={fill ? undefined : { aspectRatio }}
+      >
         <video
           ref={videoRef}
           autoPlay muted playsInline

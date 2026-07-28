@@ -12,15 +12,22 @@
  * It decides nothing about safety. `dead_man` is the raw spacebar key state
  * and `jaw_open` is the raw blendshape score; the backend applies both the
  * threshold and the hold timer.
+ *
+ * In the cockpit this panel stays MOUNTED (hidden) while a session is running
+ * and the operator looks at another tab, because unmounting it would stop the
+ * ~30 Hz publish loop that *is* the teleop input while the backend still
+ * believed a session was live. The `active` prop is how it knows it is not the
+ * visible tab: the dead-man key is bound only while active, and releases the
+ * moment it stops being — the robot must not be drivable from a screen the
+ * operator is not looking at.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
 import { api, type HumanTeleopStatus, type JointDiag, type JointReason } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
+import { isEditableTarget } from "@/lib/keys";
 import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
   MediaPipeRunner, fuseLandmarkResults, buildOverlaySides, extractJawOpen, FACE_EVERY_N,
@@ -46,7 +53,21 @@ const JOINTS = [
 const CALIB_LS_KEY = "haller.humanTeleop.pinchCalib.v1";
 const MOUTH_LS_KEY = "haller.humanTeleop.mouthCalib.v1";
 
-export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
+export function HumanTeleopPanel({
+  armIds,
+  active = true,
+  fill = false,
+  simTile,
+}: {
+  armIds: string[];
+  /** False when this panel is mounted but not the visible tab. */
+  active?: boolean;
+  /** Fill a fixed-height container (the cockpit) rather than sizing to content. */
+  fill?: boolean;
+  /** Sim picture-in-picture, supplied by the caller so the panel does not have
+   *  to know whether it is pinned over a page or in a column of a grid. */
+  simTile?: ReactNode;
+}) {
   const status = useTelemetry((s) => s.lastFrame?.human_teleop);
   const armsState = useTelemetry((s) => s.lastFrame?.arms);
 
@@ -102,26 +123,46 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   }, [mouthCalib]);
 
-  // Bind dead-man key.
+  // Bind dead-man key — only while this panel is the visible surface.
+  //
+  // The cleanup releases the dead-man rather than merely unbinding. Without
+  // that, switching tabs mid-drive would leave `deadManRef` latched true and
+  // the publish loop would keep sending an engaged clutch for a screen nobody
+  // is watching. Releasing is the fail-safe direction: the operator stops
+  // driving, exactly as if they had let go of the key.
   useEffect(() => {
+    if (!active) {
+      deadManRef.current = false;
+      return;
+    }
     const onDown = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !isInput(e.target)) {
+      if (e.code === "Space" && !isEditableTarget(e.target)) {
+        // Stops the page scrolling and stops a focused button re-firing.
         e.preventDefault();
         deadManRef.current = true;
       }
     };
+    // Not gated on the target, and not on `active` either by the time it runs:
+    // a key that went down must always be able to come up.
     const onUp = (e: KeyboardEvent) => {
       if (e.code === "Space") {
         deadManRef.current = false;
       }
     };
+    // Alt-tabbing away never delivers keyup.
+    const onBlur = () => {
+      deadManRef.current = false;
+    };
     window.addEventListener("keydown", onDown);
     window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", onBlur);
     return () => {
+      deadManRef.current = false;
       window.removeEventListener("keydown", onDown);
       window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", onBlur);
     };
-  }, []);
+  }, [active]);
 
   // One-shot: open camera + load models.
   useEffect(() => {
@@ -147,8 +188,22 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         // queued until both exist.
         clientRef.current = new HumanTeleopClient(WS_URL);
         clientRef.current.connect();
-        runnerRef.current = new MediaPipeRunner();
-        await runnerRef.current.load();
+        // Publish the runner only once load() has RESOLVED.
+        //
+        // Assigning runnerRef before awaiting meant a failed load — offline,
+        // a blocked model CDN, no GPU delegate — left a runner whose detect()
+        // throws on every one of the ~30 frames a second the loop asks for,
+        // forever, behind a toast that fires once. The tick loop already has
+        // the right behaviour for "no runner" (it idles), so the fix is to let
+        // it see none. This matters more now that the panel can stay mounted
+        // while hidden.
+        const runner = new MediaPipeRunner();
+        await runner.load();
+        if (cancelled) {
+          runner.close();
+          return;
+        }
+        runnerRef.current = runner;
       } catch (e) {
         toast.error(`camera/MediaPipe init failed: ${(e as Error).message}`);
       }
@@ -310,87 +365,150 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   };
 
+  const trackingLost =
+    !!status?.tracking?.left?.lost || !!status?.tracking?.right?.lost;
+  const age = (ms: number | null | undefined) =>
+    typeof ms === "number" ? `${Math.round(ms)} ms` : "—";
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-3">
-      <div className="space-y-2">
-        <CameraOverlay ref={overlayRef} aspectRatio="16/9" />
-        <div className="flex items-center justify-between">
+    <div
+      className={
+        "grid gap-2 " +
+        (fill
+          ? "min-h-0 grid-cols-[minmax(0,1fr)_300px] overflow-hidden"
+          : "grid-cols-1 lg:grid-cols-[1fr_320px]")
+      }
+    >
+      <div
+        className={
+          "grid gap-2 " +
+          (fill ? "min-h-0 grid-rows-[minmax(120px,1fr)_auto_auto]" : "grid-rows-none")
+        }
+      >
+        <div className="relative min-h-0 overflow-hidden rounded-lg bg-[var(--haller-inset)] shadow-[0_0_0_1px_var(--border)]">
+          <CameraOverlay ref={overlayRef} aspectRatio="16/9" fill={fill} />
+          {/* Per-side tracking age, over the picture where the operator is
+              already looking. `lost` outranks the number — a stale side is not
+              driving its arm, whatever its last age said. */}
+          <div className="pointer-events-none absolute top-2 left-2.5 flex items-center gap-1.5">
+            {(["left", "right"] as const).map((side) => (
+              <span
+                key={side}
+                className="inline-flex h-5.5 items-center gap-1.5 rounded-sm border border-border bg-card px-2 font-mono text-[10px]"
+              >
+                <span
+                  aria-hidden
+                  className="h-1.5 w-1.5 rounded-full"
+                  style={{
+                    backgroundColor: status?.tracking?.[side]?.lost
+                      ? "var(--haller-warn)"
+                      : "var(--haller-live)",
+                  }}
+                />
+                {side} {age(status?.tracking?.[side]?.age_ms)}
+              </span>
+            ))}
+          </div>
+          <span className="pointer-events-none absolute right-2.5 bottom-2 font-mono text-[10px] text-muted-foreground">
+            frame age {running ? age(status?.frame_age_ms) : "—"}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 rounded-lg bg-card px-2.5 py-2 shadow-[0_0_0_1px_var(--border)]">
           <DeadManIndicator
             held={state === "driving"}
-            trackingLost={!!status?.tracking?.left?.lost || !!status?.tracking?.right?.lost}
+            trackingLost={trackingLost}
             source={clutchSource}
             reason={status?.clutch?.reason}
           />
-          <div className="flex items-center gap-2 font-mono text-[12px]">
-            <Badge variant={running ? "default" : "secondary"}>{state}</Badge>
-            {running ? (
-              <Button size="sm" variant="destructive"
-                      className="h-7 px-3"
-                      onClick={() => api.humanTeleopStop().catch(() => null)}>
-                stop
-              </Button>
-            ) : (
-              <Button size="sm" className="h-7 px-3" onClick={handleStart}
-                      disabled={!leftArm || !rightArm || leftArm === rightArm}>
-                start
-              </Button>
-            )}
-          </div>
-        </div>
-        <Card className="p-3 flex flex-wrap items-center gap-2 font-mono text-[12px]">
-          <span className="text-muted-foreground">assign</span>
+          <span
+            className="inline-flex h-6.5 items-center rounded-full px-2.5 label-micro tracking-[0.14em]"
+            style={{
+              background:
+                state === "driving" ? "var(--haller-live-soft)" : "var(--secondary)",
+              color:
+                state === "driving" ? "var(--haller-live)" : "var(--muted-foreground)",
+            }}
+          >
+            {state}
+          </span>
+          <span aria-hidden className="h-px flex-1 bg-border" />
+          <span className="label-micro text-muted-foreground">assign</span>
           <NativeSelect ariaLabel="left arm" value={leftArm} onChange={setLeftArm}
                         options={armIds.map((id) => ({ value: id, label: id }))} />
-          <Button size="sm" variant="outline" className="h-7"
+          <Button size="sm" variant="outline" className="h-6.5" title="swap arms"
                   onClick={() => { const t = leftArm; setLeftArm(rightArm); setRightArm(t); }}>
             ⇄
           </Button>
           <NativeSelect ariaLabel="right arm" value={rightArm} onChange={setRightArm}
                         options={armIds.filter((id) => id !== leftArm).map((id) => ({ value: id, label: id }))} />
-          <Button size="sm" variant="outline" className="h-7"
+          <Button size="sm" variant="outline" className="h-6.5 label-micro"
                   onClick={() => { setSwap(!swap); api.humanTeleopSwap(!swap).catch(() => null); }}>
-            mirror: {swap ? "off" : "on"}
+            mirror · {swap ? "off" : "on"}
           </Button>
           {/* Authority never changes mid-session: the backend forces one
               disengage on a source switch, and an operator who is mid-reach
               should not be able to trigger that from the page. */}
-          <Button size="sm" variant="outline" className="h-7"
+          <Button size="sm" variant="outline" className="h-6.5 label-micro"
                   disabled={running}
+                  title={running
+                    ? "authority cannot change mid-session"
+                    : "switch clutch authority"}
                   onClick={() => setClutchSource(clutchSource === "mouth" ? "spacebar" : "mouth")}>
-            clutch: {clutchSource}
+            clutch · {clutchSource}
           </Button>
-        </Card>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <PinchCalibrationStep
-            side="left" liveDistance={liveDistance.left} confidence={liveConf.left} value={calib.left}
-            onChange={(next) => setCalib({ ...calib, left: next })}
-          />
-          <PinchCalibrationStep
-            side="right" liveDistance={liveDistance.right} confidence={liveConf.right} value={calib.right}
-            onChange={(next) => setCalib({ ...calib, right: next })}
-          />
-          {/* Forced into column 2 at >=sm. As the grid's third child it would
-              otherwise land row 2 / column 1 — bottom-left — which is exactly
-              where the pinned sim tile sits (fixed bottom-16 left-4 z-40), and
-              it would cover the capture buttons and the "too close" warning in
-              precisely the sim configs used to verify this end to end. The
-              tile belongs to other work; the collision is avoided from here. */}
-          {clutchSource === "mouth" ? (
-            <div className="sm:col-start-2">
+          {running ? (
+            <Button size="sm" variant="destructive" className="h-6.5 px-3.5 label-micro"
+                    onClick={() => api.humanTeleopStop().catch(() => null)}>
+              stop
+            </Button>
+          ) : (
+            <Button size="sm" className="h-6.5 px-3.5 label-micro" onClick={handleStart}
+                    disabled={!leftArm || !rightArm || leftArm === rightArm}>
+              start
+            </Button>
+          )}
+        </div>
+
+        <div className="flex items-stretch gap-2">
+          {simTile ? <div className="w-[232px] shrink-0">{simTile}</div> : null}
+          <div
+            className={
+              "grid min-w-0 flex-1 gap-2 " +
+              (clutchSource === "mouth" ? "grid-cols-3" : "grid-cols-2")
+            }
+          >
+            <PinchCalibrationStep
+              side="left" liveDistance={liveDistance.left} confidence={liveConf.left} value={calib.left}
+              onChange={(next) => setCalib({ ...calib, left: next })}
+            />
+            <PinchCalibrationStep
+              side="right" liveDistance={liveDistance.right} confidence={liveConf.right} value={calib.right}
+              onChange={(next) => setCalib({ ...calib, right: next })}
+            />
+            {/* The mouth card is a third column of this row rather than a
+                wrapped third child. As a wrapped child it landed bottom-left,
+                which is exactly where the PINNED sim tile sits on the deep-link
+                page (fixed bottom-16 left-4 z-40) — covering the capture
+                buttons and the "too close" warning. Here the sim tile is a
+                sibling to the left when it is inline, and still pinned
+                elsewhere when it is not, so neither can reach this card. */}
+            {clutchSource === "mouth" ? (
               <MouthClutchCalibration
                 liveJawOpen={liveJaw}
                 value={mouthCalib}
                 onChange={setMouthCalib}
               />
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
       </div>
-      <div className="space-y-2">
-        <ArmScopePanel label={`arm: ${leftArm}`} goal={status?.goal_deg?.left}
+
+      <div className={"flex flex-col gap-2 " + (fill ? "min-h-0 overflow-y-auto" : "")}>
+        <ArmScopePanel label={leftArm} goal={status?.goal_deg?.left}
                        limits={limitsFor(armsState, leftArm)}
                        diag={status?.joints?.left} />
-        <ArmScopePanel label={`arm: ${rightArm}`} goal={status?.goal_deg?.right}
+        <ArmScopePanel label={rightArm} goal={status?.goal_deg?.right}
                        limits={limitsFor(armsState, rightArm)}
                        diag={status?.joints?.right} />
       </div>
@@ -417,9 +535,16 @@ function ArmScopePanel({
   diag?: Record<string, JointDiag>;
 }) {
   return (
-    <Card className="p-3">
-      <div className="flex justify-between text-[12px] font-mono mb-2">
-        <span>{label}</span>
+    <div className="flex flex-1 flex-col gap-1.5 rounded-lg bg-card p-2.5 shadow-[0_0_0_1px_var(--border)]">
+      <div className="flex items-center gap-2">
+        <span className="label-micro text-muted-foreground">scope</span>
+        <span className="font-mono text-[11px] font-semibold tracking-[0.1em] uppercase">
+          {label}
+        </span>
+        <span aria-hidden className="h-px flex-1 bg-border" />
+        <span className="font-mono text-[9px] text-muted-foreground">
+          asked → committed
+        </span>
       </div>
       <div className="space-y-1">
         {JOINTS.map((j) => {
@@ -436,16 +561,14 @@ function ArmScopePanel({
                   intended={d?.target ?? undefined}
                 />
               </div>
-              <span
-                className="w-16 text-right font-mono text-[10px] text-[var(--instrument-warn,oklch(75%_0.16_70))]"
-              >
+              <span className="w-14 text-right font-mono text-[10px] text-[var(--haller-warn)]">
                 {badge ?? ""}
               </span>
             </div>
           );
         })}
       </div>
-    </Card>
+    </div>
   );
 }
 
@@ -462,7 +585,7 @@ function NativeSelect({
       aria-label={ariaLabel}
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="h-7 rounded-sm border border-border bg-background px-2 font-mono text-[12px]"
+      className="h-6.5 rounded-sm border border-input bg-background px-2 font-mono text-[10px]"
     >
       {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
@@ -498,11 +621,6 @@ function parseMouthCalib(raw: string | null): MouthCalib | null {
   } catch {
     return null;
   }
-}
-
-function isInput(t: EventTarget | null): boolean {
-  return t instanceof HTMLElement &&
-    (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
 }
 
 function liveThumbIndex(

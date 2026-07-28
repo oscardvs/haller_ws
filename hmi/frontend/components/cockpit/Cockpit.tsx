@@ -26,9 +26,14 @@ import { AlertsPopover } from "./AlertsPopover";
 import { TeleopPopover } from "./TeleopPopover";
 import { RecordPopover } from "./RecordPopover";
 import { OperateTab } from "./OperateTab";
+import { HumanTab } from "./HumanTab";
+import { CalibrateTab } from "./CalibrateTab";
 import { CamerasTab } from "./CamerasTab";
+import { DatasetTab } from "./DatasetTab";
 import { SettingsTab } from "./SettingsTab";
-import { useViewport, type PopId, type TabId } from "./lib";
+import {
+  shouldKeepTeleopMounted, useViewport, type PopId, type TabId,
+} from "./lib";
 
 type ConfigBody = Awaited<ReturnType<typeof api.config>>;
 
@@ -42,6 +47,12 @@ export function Cockpit() {
 
   const startTelemetry = useTelemetry((s) => s.start);
   const startPolling = useRecorder((s) => s.startPolling);
+  const humanRunning = useTelemetry(
+    (s) => s.lastFrame?.human_teleop?.running ?? false,
+  );
+  // Latched on first visit so the webcam is not opened before the operator
+  // asks for it — this is someone's face, not a status LED.
+  const [humanOpened, setHumanOpened] = useState(false);
 
   const teleopRef = useRef<HTMLButtonElement>(null);
   const recRef = useRef<HTMLButtonElement>(null);
@@ -92,6 +103,7 @@ export function Cockpit() {
 
   const closePop = useCallback(() => setPop(null), []);
   const goTab = useCallback((t: TabId) => {
+    if (t === "human") setHumanOpened(true);
     setTab(t);
     // A popover anchored to the command bar has no meaning once the surface
     // behind it changed.
@@ -101,6 +113,14 @@ export function Cockpit() {
   const armIds = cfg?.arms.map((a) => a.id) ?? [];
   const cams = cameras ?? [];
   const booting = cfg === null && bootError === null;
+
+  // The teleop panel outlives its tab whenever a session is running — see
+  // shouldKeepTeleopMounted() for why this is not plain mount/unmount.
+  const keepHuman = shouldKeepTeleopMounted({
+    opened: humanOpened,
+    onTeleopTab: tab === "human",
+    sessionRunning: humanRunning,
+  });
 
   return (
     <div
@@ -115,25 +135,53 @@ export function Cockpit() {
         alertsRef={alertsRef}
       />
 
-      {booting ? (
-        <BootState />
-      ) : bootError ? (
-        <BootError message={bootError} />
-      ) : cfg ? (
-        <>
-          {tab === "operate" && (
-            <OperateTab
-              armIds={armIds}
-              cameras={cams}
-              viewport={viewport}
-              pop={pop}
-              setPop={setPop}
-            />
-          )}
-          {tab === "cameras" && <CamerasTab cameras={cams} />}
-          {tab === "settings" && <SettingsTab cfg={cfg} cameras={cams} />}
-        </>
-      ) : null}
+      <div className="relative min-h-0 overflow-hidden">
+        {booting ? (
+          <BootState />
+        ) : bootError ? (
+          <BootError message={bootError} />
+        ) : cfg ? (
+          <>
+            {/* Rendered from a fixed position in the tree whether or not it is
+                the visible tab, so React never reconciles it away. Hidden with
+                opacity rather than display:none — a display:none <video> is a
+                browser's invitation to stop decoding the MediaStream, and the
+                whole point of keeping this mounted is that the frames keep
+                coming. `inert` keeps it out of the tab order while hidden. */}
+            {keepHuman && (
+              <div
+                className={
+                  tab === "human"
+                    ? "absolute inset-0 grid"
+                    : "pointer-events-none absolute inset-0 -z-10 grid opacity-0"
+                }
+                aria-hidden={tab !== "human"}
+                inert={tab !== "human"}
+              >
+                <HumanTab armIds={armIds} active={tab === "human"} />
+              </div>
+            )}
+
+            {tab !== "human" && (
+              <div className="absolute inset-0 grid">
+                {tab === "operate" && (
+                  <OperateTab
+                    armIds={armIds}
+                    cameras={cams}
+                    viewport={viewport}
+                    pop={pop}
+                    setPop={setPop}
+                  />
+                )}
+                {tab === "calibrate" && <CalibrateTab armIds={armIds} />}
+                {tab === "cameras" && <CamerasTab cameras={cams} />}
+                {tab === "dataset" && <DatasetTab cameras={cams} />}
+                {tab === "settings" && <SettingsTab cfg={cfg} cameras={cams} />}
+              </div>
+            )}
+          </>
+        ) : null}
+      </div>
 
       <CommandBar
         tab={tab}
@@ -144,6 +192,7 @@ export function Cockpit() {
         recRef={recRef}
         census={census(armIds.length, cams)}
         version={cfg?.version ?? "—"}
+        viewport={viewport}
       />
 
       {pop === "alerts" && (

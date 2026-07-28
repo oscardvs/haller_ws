@@ -9,8 +9,11 @@
  * quietly omits it makes the operator wonder whether they misremembered.
  */
 import { cameraStreamUrl, type CameraInfo } from "@/lib/api";
+import { gridPlan } from "./cameraGrid";
 
 export function CamerasTab({ cameras }: { cameras: CameraInfo[] }) {
+  const plan = gridPlan(cameras);
+
   if (cameras.length === 0) {
     return (
       <div className="flex min-h-0 items-center justify-center p-2">
@@ -22,14 +25,15 @@ export function CamerasTab({ cameras }: { cameras: CameraInfo[] }) {
   }
 
   return (
-    <div className="grid min-h-0 auto-rows-[minmax(0,1fr)] grid-cols-3 gap-2 overflow-y-auto p-2">
+    <div
+      className="grid min-h-0 auto-rows-[minmax(0,1fr)] gap-2 overflow-y-auto p-2"
+      style={{ gridTemplateColumns: `repeat(${plan.columns}, minmax(0,1fr))` }}
+    >
       {cameras.map((c) => (
         <div
           key={c.id}
-          className={
-            "flex min-h-0 flex-col overflow-hidden rounded-lg bg-[var(--haller-inset)] shadow-[0_0_0_1px_var(--border)] " +
-            (c.role === "base" ? "col-span-2" : "col-span-1")
-          }
+          className="flex min-h-0 flex-col overflow-hidden rounded-lg bg-[var(--haller-inset)] shadow-[0_0_0_1px_var(--border)]"
+          style={{ gridColumn: `span ${plan.span(c)}` }}
           data-camera-id={c.id}
         >
           <div className="flex h-7.5 shrink-0 items-center gap-2 border-b border-border bg-[var(--haller-chrome)] px-2.5">
