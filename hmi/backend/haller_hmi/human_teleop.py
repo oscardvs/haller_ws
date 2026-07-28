@@ -187,6 +187,21 @@ class HumanTeleopSession:
         self._dead_man = False
         self._clutch_reason = "spacebar_mode" if source == "spacebar" else "stale"
 
+    def _face_is_stale(self, now: float) -> bool:
+        """True when the newest real jaw sample is older than the budget.
+
+        Caller holds the lock — same contract as `_mouth_engaged`.
+        `_last_face_perf == 0.0` means no sample has ever arrived, which reads
+        as stale and therefore disengaged, exactly as `_last_left_perf` /
+        `_last_right_perf` already work.
+
+        Deliberately source-agnostic: `status()` adds its own
+        `source == "mouth"` guard at the call site, because a spacebar session
+        has no face budget to be outside of.
+        """
+        return (self._last_face_perf == 0.0
+                or (now - self._last_face_perf) * 1000.0 > self._face_stale_ms)
+
     def _mouth_engaged(self, now_perf: float) -> bool:
         """Evaluate the mouth clutch. Caller holds the lock.
 
@@ -201,10 +216,7 @@ class HumanTeleopSession:
             return False
 
         t_engage, _t_release = th
-        stale = (
-            self._last_face_perf == 0.0
-            or (now_perf - self._last_face_perf) * 1000.0 > self._face_stale_ms
-        )
+        stale = self._face_is_stale(now_perf)
 
         if self._jaw_open is not None and not stale and self._jaw_open >= t_engage:
             if self._jaw_above_since_perf is None:
@@ -246,11 +258,8 @@ class HumanTeleopSession:
             right_age = (now - self._last_right_perf) * 1000.0 if self._last_right_perf else None
             th = (mouth_clutch_thresholds(self._mouth_calib)
                   if self._mouth_calib else None)
-            face_stale = (
-                self._clutch_source == "mouth"
-                and (self._last_face_perf == 0.0
-                     or (now - self._last_face_perf) * 1000.0 > self._face_stale_ms)
-            )
+            face_stale = (self._clutch_source == "mouth"
+                          and self._face_is_stale(now))
             return {
                 "running": self.running,
                 "state": self._state.value,
@@ -279,6 +288,18 @@ class HumanTeleopSession:
                     "left":  self._steps_as_dict(self._steps_left),
                     "right": self._steps_as_dict(self._steps_right),
                 },
+                # Two different clocks in one block, on purpose. `engaged`
+                # and `reason` are whatever the last ingested frame decided —
+                # they only move when a frame arrives. `stale` is recomputed
+                # here against the current time, so a face that stopped being
+                # seen reads as stale from a poll alone.
+                #
+                # That asymmetry is safe because it is not what catches a
+                # total frame stall: if frames stop entirely, the pre-existing
+                # 300 ms per-side tracking-loss gate in _loop stops writing to
+                # the arms regardless of what the clutch block still says. The
+                # face budget only ever judges the freshness of the jaw signal
+                # inside a stream of frames that is otherwise arriving.
                 "clutch": {
                     "source": self._clutch_source,
                     "jaw_open": self._jaw_open,
