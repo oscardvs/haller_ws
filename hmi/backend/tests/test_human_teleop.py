@@ -598,6 +598,56 @@ def test_mouth_engages_after_sustained_hold(monkeypatch):
         sess.stop()
 
 
+def test_mouth_hold_is_not_satisfied_by_a_face_dropout(monkeypatch):
+    """Losing the face must never ENGAGE the arms.
+
+    FACE_STALE_MS (250) sits deliberately above MOUTH_HOLD_MS (200), so there
+    is a ~50 ms window in which a wall-clock hold timer is satisfied purely by
+    extrapolation from one sample that nothing is confirming any more —
+    `_jaw_open` retains its last value across `jaw_open: null` frames by
+    design. Measured against the wall clock, a face dropout after a single
+    above-threshold sample therefore *starts* the arms, inverting the fail-safe
+    the whole design rests on (spec §6.1 "sustained continuously", §6.4 "every
+    fault resolves to disengaged").
+
+    The hold is measured between OBSERVATIONS instead, so a stream of nulls
+    accrues nothing.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        # ONE real above-threshold sample, then the face is lost: every later
+        # frame carries jaw_open=None.
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["clutch"]["engaged"] is False
+
+        # Walk right through the ~50 ms window between MOUTH_HOLD_MS and the
+        # staleness budget, where the wall-clock timer would fire.
+        for _ in range(7):          # 7 x 33 ms = 231 ms: past 200, under 250
+            clock["t"] += 0.033
+            sess.ingest_frame(_mouth_frame(None))
+            st = sess.status()
+            assert st["clutch"]["engaged"] is False, (
+                "a face dropout engaged the clutch from a single sample"
+            )
+            assert st["state"] != "driving"
+
+        # And the budget expiring still reports the fault as a fault.
+        clock["t"] += 0.033          # 264 ms since the only real sample
+        sess.ingest_frame(_mouth_frame(None))
+        st = sess.status()
+        assert st["clutch"]["stale"] is True
+        assert st["clutch"]["reason"] == "stale"
+        assert st["state"] != "driving"
+    finally:
+        sess.stop()
+
+
 def test_mouth_decimated_nulls_within_budget_do_not_disengage(monkeypatch):
     """Normal operation is NOT a fault: face runs every 3rd frame, so two
     frames in three legitimately carry jaw_open=None."""

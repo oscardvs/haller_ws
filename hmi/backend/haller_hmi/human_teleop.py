@@ -178,7 +178,17 @@ class HumanTeleopSession:
         if self._jaw_open is not None and not stale and self._jaw_open >= t_engage:
             if self._jaw_above_since_perf is None:
                 self._jaw_above_since_perf = now_perf
-            held_ms = (now_perf - self._jaw_above_since_perf) * 1000.0
+            # Measure the hold across OBSERVED samples, not the wall clock.
+            # `_jaw_open` deliberately survives `jaw_open: null` frames, and
+            # FACE_STALE_MS (250) is above MOUTH_HOLD_MS (200) — so a wall-clock
+            # timer lets one above-threshold sample followed by a face dropout
+            # satisfy the hold with nothing confirming it, making tracking loss
+            # ENGAGE the arms. `_jaw_above_since_perf` was set inside the same
+            # ingest that recorded a sample, so this is the span between the
+            # first and the most recent REAL observation: it reads 0 on the
+            # crossing frame, and engaging needs at least two real samples
+            # MOUTH_HOLD_MS apart.
+            held_ms = (self._last_face_perf - self._jaw_above_since_perf) * 1000.0
         else:
             self._jaw_above_since_perf = None
             held_ms = 0.0
