@@ -513,6 +513,62 @@ def _mouth_frame(jaw, *, ts_ms=0):
     }
 
 
+def test_mouth_calib_is_valid_on_a_real_session():
+    """The HTTP-400 start gate is exactly this predicate — and the route tests
+    mock it out, so nothing else asserts what a real session computes. Both
+    halves of that seam were "covered"; the seam itself was not."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    # Never calibrated at all.
+    assert sess.mouth_calib_is_valid() is False
+    # Separation 0.05 — speech overlaps the deliberate open, no safe threshold.
+    sess.set_mouth_calib({"talk_max": 0.50, "open_min": 0.55})
+    assert sess.mouth_calib_is_valid() is False
+    # Inverted captures are not valid either.
+    sess.set_mouth_calib({"talk_max": 0.90, "open_min": 0.10})
+    assert sess.mouth_calib_is_valid() is False
+    sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+    assert sess.mouth_calib_is_valid() is True
+    # Clearing it takes the gate back to refusing.
+    sess.set_mouth_calib(None)
+    assert sess.mouth_calib_is_valid() is False
+
+
+def test_mouth_releases_immediately_at_session_level(monkeypatch):
+    """Release must never be debounced.
+
+    test_safety.py guards that for the pure function, but the session is what
+    adds the hold timer and feeds `self._dead_man` in as the hysteresis input.
+    A regression there — a release that had to be sustained the way an engage
+    does — would leave the pure-function test green while the arms kept
+    driving after the operator closed their mouth.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
+    try:
+        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        sess.ingest_frame(_mouth_frame(0.95))
+        clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
+        sess.ingest_frame(_mouth_frame(0.95))
+        assert sess.status()["clutch"]["engaged"] is True
+        assert sess.status()["state"] == "driving"
+
+        # ONE sample below t_release (0.34 for this calibration), and NO clock
+        # advance at all: the very next frame must have dropped the arms.
+        sess.ingest_frame(_mouth_frame(0.20))
+        st = sess.status()
+        assert st["clutch"]["engaged"] is False
+        assert st["clutch"]["reason"] == "below_threshold"
+        assert st["state"] != "driving"
+    finally:
+        sess.stop()
+
+
 def test_spacebar_mode_ignores_jaw_open():
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
