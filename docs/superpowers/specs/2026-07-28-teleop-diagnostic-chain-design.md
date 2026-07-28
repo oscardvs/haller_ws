@@ -18,7 +18,7 @@ The deliverable is a page where the operator can see, live: what the camera sees
 
 ## 2. Non-goals
 
-- **Confidence gating.** Per-side confidence gets *displayed*, not acted on. Reduced authority for low-confidence detections is a real safety improvement but a separate decision; see §8.
+- **Graded confidence gating.** A hard binary floor already exists — `retarget.CONFIDENCE_FLOOR = 0.4` — below which a side stops driving entirely. What this design does not add is a *graded* gate that progressively reduces authority between a clean detection and that floor. That's a real safety improvement but a separate decision; see §8.
 - **Offline models.** The CDN dependency is real and unaddressed here; see §8.
 - **Scrubbing / history / rolling buffer.** Live display only. Most surprises in sim are reproducible — repeat the motion. Revisit only if live proves insufficient in practice.
 - **Dataset changes.** `goal_deg` is the recorder's `action` column and does not change; see §3.
@@ -145,7 +145,9 @@ buildOverlaySides(
 
 **CDN dependency (highest-value remaining robustness gap).** `mediapipe.ts:130-146` fetches the WASM bundle from jsdelivr and both `.task` models from `storage.googleapis.com` at page load. Human teleop cannot initialize without internet access. For a robot HMI this is a hard runtime dependency on the lab network, and it fails at the worst moment — when the operator opens the page. Vendoring the WASM bundle and models into `public/` is the fix and should be its own piece of work.
 
-**Confidence is measured but never acted on.** A 0.2-confidence half-occluded arm drives with exactly the same authority as a clean 0.95 detection. The only protections are the 300 ms tracking-loss window and the fixed 4°/tick rate cap, neither of which responds to detection *quality*. This design surfaces confidence to the operator, which is a prerequisite for tuning any future gate, but adds no gate. Worth revisiting before the live hardware run.
+**Confidence gating is binary, not graded.** A hard floor already exists — `retarget.CONFIDENCE_FLOOR = 0.4` — below which a side stops driving entirely: `compute_joint_goal` returns `None`, so that side's target goes `None`, every joint reports `held`, and no goal is written for it. Above 0.4, a 0.41-confidence half-occluded arm drives with exactly the same authority as a clean 0.95 detection — there is no graded reduction between the floor and a clean read. This design surfaces confidence to the operator, which is a prerequisite for tuning any future graded gate, but adds no graded gate. Worth revisiting before the live hardware run.
+
+One consequence of the binary cliff is worth flagging for a future session: because it's a hard on/off rather than a ramp, and `tracking.lost` stays `False` below it (the side is still receiving frames, just below the confidence floor), the side silently freezes with no `tracking lost` indication — the *only* visible signal is the `held` badge on every joint (§6.2 in the frontend design, `HumanTeleopPanel.tsx` `REASON_LABEL`). That badge existing and being legible is exactly why the below-floor case doesn't disappear into "looks like `ok`."
 
 **Stale pose shown while idle.** `goal_deg` — and therefore the new `joints` block — retains the previous session's committed values after `stop()`, so the scope bars show a pose the arm is no longer holding until the next `start()` reseeds from observed. Cosmetic, deliberately left alone: `goal_deg` is the recorder's `action` column (§3) and clearing it on stop risks a behaviour change in dataset recording for a purely visual gain.
 

@@ -14,7 +14,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
-import { api, type HumanTeleopStatus, type JointDiag } from "@/lib/api";
+import { api, type HumanTeleopStatus, type JointDiag, type JointReason } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
@@ -265,9 +265,14 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   );
 }
 
-const REASON_LABEL: Record<string, string> = {
+// Only reasons worth flagging get a label. `ok` is the silent default and
+// deliberately has none. Typed as Partial so the compiler — not a runtime
+// `badge ?? ""` fallback — is what proves "two of four reasons intentionally
+// have no label".
+const REASON_LABEL: Partial<Record<JointReason, string>> = {
   clamped: "CLAMPED",
   rate_capped: "RATE-CAP",
+  held: "HELD",
 };
 
 function ArmScopePanel({

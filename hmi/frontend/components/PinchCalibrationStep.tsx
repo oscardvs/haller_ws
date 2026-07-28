@@ -27,8 +27,13 @@ export function PinchCalibrationStep({
   onChange,
 }: {
   liveDistance: number | null;
-  /** MediaPipe tracking confidence for this side, [0,1]. Display only —
-   *  a low value does not reduce authority. */
+  /** MediaPipe tracking confidence for this side, [0,1]. This readout itself
+   *  is display-only — this component does not gate anything — but the
+   *  backend already does: `retarget.CONFIDENCE_FLOOR` is a hard floor at
+   *  0.4 below which that side stops driving entirely (target goes `None`,
+   *  every joint reports `held`). The amber warning below fires at < 0.5,
+   *  deliberately 0.1 above that cliff, so the operator sees amber before
+   *  the side cuts out rather than being surprised by it. */
   confidence?: number | null;
   side: PinchSide;
   value: PinchCalib;
