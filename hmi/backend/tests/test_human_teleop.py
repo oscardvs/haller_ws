@@ -342,6 +342,78 @@ def test_session_demotes_to_armed_on_ws_disconnect_window():
         sess.stop()
 
 
+def test_smooth_step_reports_ok_when_nothing_intervenes():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    limits = {"shoulder_pan": (-90.0, 90.0)}
+    # alpha=1.0 -> the filter passes `desired` straight through; small step so
+    # the 4 deg/tick cap does not bite and the value is far from the limits.
+    steps = sess._smooth_step({"shoulder_pan": 0.0}, {"shoulder_pan": 2.0}, limits, 1.0)
+    assert steps["shoulder_pan"].reason == "ok"
+    assert steps["shoulder_pan"].committed == pytest.approx(2.0)
+    assert steps["shoulder_pan"].target == pytest.approx(2.0)
+
+
+def test_smooth_step_reports_rate_capped():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    limits = {"shoulder_pan": (-90.0, 90.0)}
+    # Ask for a 50 deg jump with alpha=1.0; the 4 deg/tick cap must bite.
+    steps = sess._smooth_step({"shoulder_pan": 0.0}, {"shoulder_pan": 50.0}, limits, 1.0)
+    assert steps["shoulder_pan"].reason == "rate_capped"
+    assert steps["shoulder_pan"].committed == pytest.approx(4.0)
+    # target is what was ASKED for, not what was delivered.
+    assert steps["shoulder_pan"].target == pytest.approx(50.0)
+
+
+def test_smooth_step_reports_clamped_and_clamped_beats_rate_capped():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    limits = {"shoulder_pan": (-90.0, 5.0)}
+    # Sitting at 4 deg, asked for 50: the cap would allow 8, the limit allows 5.
+    # Both conditions fire; `clamped` must win.
+    steps = sess._smooth_step({"shoulder_pan": 4.0}, {"shoulder_pan": 50.0}, limits, 1.0)
+    assert steps["shoulder_pan"].reason == "clamped"
+    assert steps["shoulder_pan"].committed == pytest.approx(5.0)
+
+
+def test_smooth_step_reports_held_when_side_has_no_target():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    limits = {"shoulder_pan": (-90.0, 90.0), "elbow_flex": (-90.0, 90.0)}
+    steps = sess._smooth_step({"shoulder_pan": 12.0, "elbow_flex": 3.0}, None, limits, 1.0)
+    for joint in limits:
+        assert steps[joint].reason == "held"
+        assert steps[joint].target is None
+    assert steps["shoulder_pan"].committed == pytest.approx(12.0)
+
+
+def test_smooth_step_reports_held_for_a_joint_missing_from_the_target():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    limits = {"shoulder_pan": (-90.0, 90.0), "elbow_flex": (-90.0, 90.0)}
+    steps = sess._smooth_step(
+        {"shoulder_pan": 0.0, "elbow_flex": 7.0}, {"shoulder_pan": 2.0}, limits, 1.0,
+    )
+    assert steps["shoulder_pan"].reason == "ok"
+    assert steps["elbow_flex"].reason == "held"
+    assert steps["elbow_flex"].target is None
+    assert steps["elbow_flex"].committed == pytest.approx(7.0)
+
+
+def test_smooth_step_reports_gripper_target_in_degrees_not_unit_interval():
+    """retarget emits gripper in [0,1]; _smooth_step scales it onto the joint's
+    degree range. `target` must be reported post-scaling so it is comparable
+    with `committed`, which is always degrees."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    limits = {"gripper": (-30.0, 30.0)}
+    # 1.0 == fully open == the joint's max, 30 deg.
+    steps = sess._smooth_step({"gripper": 0.0}, {"gripper": 1.0}, limits, 1.0)
+    assert steps["gripper"].target == pytest.approx(30.0)
+    assert steps["gripper"].target > 1.0, "gripper target leaked as [0,1]"
+
+
 def test_cannot_start_human_teleop_while_leader_follower_is_running(monkeypatch):
     from haller_hmi.teleop import TeleopSession
     mgr, _ = _fake_arm_manager()

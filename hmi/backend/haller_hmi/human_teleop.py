@@ -43,6 +43,19 @@ class _SessionConfig:
     hz: float = 60.0
 
 
+@dataclass
+class JointStep:
+    """One joint's outcome for one tick of the commit loop.
+
+    `target` is what the retargeter asked for, in degrees (the gripper's
+    [0,1] output is already scaled onto its calibrated range). `committed`
+    is what was actually written. `reason` explains any difference.
+    """
+    target: float | None
+    committed: float
+    reason: str   # "ok" | "rate_capped" | "clamped" | "held"
+
+
 class HumanTeleopSession:
     """One global session. Mutually exclusive with leader/follower TeleopSession."""
 
@@ -71,6 +84,8 @@ class HumanTeleopSession:
         self._pinch_calib_right: dict = {"min_m": 0.02, "max_m": 0.18}
         self._committed_left: dict[str, float] = {}
         self._committed_right: dict[str, float] = {}
+        self._steps_left: dict[str, JointStep] = {}
+        self._steps_right: dict[str, JointStep] = {}
         self._hz_override = hz_override
         self._rate_cap_deg_per_tick = 4.0
         # T8: tracking-loss + WS disconnect grace
@@ -180,6 +195,8 @@ class HumanTeleopSession:
             # Reset smoothing state to current observed positions where available.
             self._committed_left = self._observed_or_zero(left)
             self._committed_right = self._observed_or_zero(right)
+            self._steps_left = self._held_steps(self._committed_left)
+            self._steps_right = self._held_steps(self._committed_right)
         self._stop_flag.clear()
         self._thread = threading.Thread(
             target=self._loop,
@@ -277,33 +294,49 @@ class HumanTeleopSession:
                            getattr(handle.config, "id", "?"), exc_info=True)
             return {joint: 0.0 for joint in handle.joint_limits_deg}
 
+    @staticmethod
+    def _held_steps(committed: dict[str, float]) -> dict[str, JointStep]:
+        """Seed the diagnostic block before any frame has arrived: everything
+        is being held at its seeded position, nothing has been asked for."""
+        return {joint: JointStep(target=None, committed=value, reason="held")
+                for joint, value in committed.items()}
+
     def _smooth_step(
         self,
         committed: dict[str, float],
         target: dict[str, float] | None,
         limits: dict[str, tuple[float, float]],
         alpha: float,
-    ) -> dict[str, float]:
-        if target is None:
-            return committed
-        out: dict[str, float] = {}
+    ) -> dict[str, JointStep]:
+        out: dict[str, JointStep] = {}
         for joint, lo_hi in limits.items():
             lo, hi = lo_hi
             cur = committed.get(joint, 0.0)
-            if joint not in target:
-                out[joint] = cur
+            if target is None or joint not in target:
+                out[joint] = JointStep(target=None, committed=cur, reason="held")
                 continue
             desired = float(target[joint])
             # Special-case gripper: retarget emits [0, 1] (0 = closed, 1 = open).
-            # Scale onto the gripper joint's calibrated degree range.
+            # Scale onto the gripper joint's calibrated degree range so that
+            # `target` and `committed` are always the same unit.
             if joint == "gripper":
                 desired = max(0.0, min(1.0, desired))
                 desired = lo + desired * (hi - lo)
-            # One-pole LPF then per-tick rate cap, then hard clamp to limits.
-            new = cur + alpha * (desired - cur)
+            # One-pole LPF, then per-tick rate cap, then hard clamp to limits.
+            # Each stage records whether it altered the value. Exact float
+            # equality is correct here: these clamps return their input
+            # bitwise unchanged when they don't bite.
+            lpf = cur + alpha * (desired - cur)
             cap = self._rate_cap_deg_per_tick
-            new = max(cur - cap, min(cur + cap, new))
-            out[joint] = max(lo, min(hi, new))
+            capped = max(cur - cap, min(cur + cap, lpf))
+            final = max(lo, min(hi, capped))
+            if final != capped:
+                reason = "clamped"        # a hard limit outranks a transient cap
+            elif capped != lpf:
+                reason = "rate_capped"
+            else:
+                reason = "ok"
+            out[joint] = JointStep(target=desired, committed=final, reason=reason)
         return out
 
     @staticmethod
@@ -333,12 +366,18 @@ class HumanTeleopSession:
                     target_left = self._target_left
                     target_right = self._target_right
                     driving = self._state is HumanState.DRIVING
-                self._committed_left = self._smooth_step(
+                steps_left = self._smooth_step(
                     self._committed_left, target_left, left.joint_limits_deg, alpha,
                 )
-                self._committed_right = self._smooth_step(
+                steps_right = self._smooth_step(
                     self._committed_right, target_right, right.joint_limits_deg, alpha,
                 )
+                self._committed_left = {j: s.committed for j, s in steps_left.items()}
+                self._committed_right = {j: s.committed for j, s in steps_right.items()}
+                # Rebinding a dict is atomic in CPython, so status() always sees
+                # a whole tick's worth of steps — never a half-updated dict.
+                self._steps_left = steps_left
+                self._steps_right = steps_right
                 if driving:
                     # Gate per-side: don't write to an arm whose tracking is lost.
                     now_perf = time.perf_counter()
