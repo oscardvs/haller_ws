@@ -6,7 +6,7 @@ const sample_pose_left_elbow    = { x: 0.5, y: 0.5, z: 0.0, visibility: 0.93 };
 const sample_pose_left_wrist    = { x: 0.5, y: 0.6, z: 0.0, visibility: 0.91 };
 
 const sample_hand_landmarks = Array.from({ length: 21 }, (_, i) => ({
-  x: i * 0.01, y: i * 0.01, z: 0.0,
+  x: i * 0.01, y: i * 0.01, z: 0.0, visibility: 0,
 }));
 
 describe("fuseLandmarkResults", () => {
@@ -31,7 +31,7 @@ describe("fuseLandmarkResults", () => {
       { worldLandmarks: [pose] },
       {
         worldLandmarks: [sample_hand_landmarks],
-        handednesses: [[{ categoryName: "Left", score: 0.95 }]],
+        handednesses: [[{ categoryName: "Left", score: 0.95, index: 0, displayName: "" }]],
       },
     );
     expect(out.left).not.toBeNull();
@@ -47,7 +47,7 @@ describe("fuseLandmarkResults", () => {
 });
 
 const norm_hand = Array.from({ length: 21 }, (_, i) => ({
-  x: 0.10 + i * 0.01, y: 0.20 + i * 0.01, z: 0.0,
+  x: 0.10 + i * 0.01, y: 0.20 + i * 0.01, z: 0.0, visibility: 0,
 }));
 
 function norm_pose() {
@@ -80,7 +80,7 @@ describe("buildOverlaySides", () => {
   it("builds the left side with pose as shoulder,elbow,wrist in order", () => {
     const out = buildOverlaySides(
       { landmarks: [norm_pose()] },
-      { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95 }]] },
+      { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95, index: 0, displayName: "" }]] },
       NO_OPTS,
     );
     expect(out.right).toBeNull();
@@ -90,7 +90,7 @@ describe("buildOverlaySides", () => {
   it("emits thumb_tip then index_tip as the first two hand entries", () => {
     const out = buildOverlaySides(
       { landmarks: [norm_pose()] },
-      { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95 }]] },
+      { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95, index: 0, displayName: "" }]] },
       NO_OPTS,
     );
     // CameraOverlay draws the pinch line between hand[0] and hand[1].
@@ -101,7 +101,7 @@ describe("buildOverlaySides", () => {
   it("passes the lost flag and pinch01 through per side", () => {
     const out = buildOverlaySides(
       { landmarks: [norm_pose()] },
-      { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95 }]] },
+      { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95, index: 0, displayName: "" }]] },
       { leftLost: true, rightLost: false, leftPinch01: 0.12, rightPinch01: 0.9 },
     );
     expect(out.left!.lost).toBe(true);
