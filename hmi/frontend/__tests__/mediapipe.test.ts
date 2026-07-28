@@ -87,7 +87,7 @@ describe("buildOverlaySides", () => {
     expect(out.left!.pose).toEqual([[0.50, 0.40], [0.55, 0.50], [0.60, 0.60]]);
   });
 
-  it("emits thumb_tip then index_tip as the first two hand entries", () => {
+  it("emits all six hand landmarks in the documented order, thumb_tip and index_tip first", () => {
     const out = buildOverlaySides(
       { landmarks: [norm_pose()] },
       { landmarks: [norm_hand], handednesses: [[{ categoryName: "Left", score: 0.95, index: 0, displayName: "" }]] },
@@ -96,6 +96,15 @@ describe("buildOverlaySides", () => {
     // CameraOverlay draws the pinch line between hand[0] and hand[1].
     expect(out.left!.hand[0]).toEqual([norm_hand[4].x, norm_hand[4].y]);   // THUMB_TIP
     expect(out.left!.hand[1]).toEqual([norm_hand[8].x, norm_hand[8].y]);   // INDEX_TIP
+    // Full order matters too: a later diagnostics task may rely on it positionally.
+    expect(out.left!.hand).toEqual([
+      [norm_hand[4].x,  norm_hand[4].y],   // thumb_tip
+      [norm_hand[8].x,  norm_hand[8].y],   // index_tip
+      [norm_hand[5].x,  norm_hand[5].y],   // index_mcp
+      [norm_hand[9].x,  norm_hand[9].y],   // middle_mcp
+      [norm_hand[17].x, norm_hand[17].y],  // pinky_mcp
+      [norm_hand[0].x,  norm_hand[0].y],   // wrist
+    ]);
   });
 
   it("passes the lost flag and pinch01 through per side", () => {
