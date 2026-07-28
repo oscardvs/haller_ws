@@ -69,13 +69,18 @@ describe("CalibrationWizard step 1 (homing)", () => {
   });
 
   it("clicking Capture neutral calls the backend and advances to step 2", async () => {
+    // Telemetry reports "homing" here, because that is what it reports before
+    // capture_neutral is called. It used to be mocked as "sweeping" from the
+    // first render, which only rendered step 1 at all because the bootstrap
+    // fetch happened to resolve after the phase-mirroring effect and overwrite
+    // it — the assertion passed on a race. The wizard now takes whichever of
+    // telemetry and its own optimistic advance is further along, so step 2
+    // here is driven by the click, which is what this test is about.
     (cal.captureNeutral as any).mockResolvedValue({ ok: true, state: "sweeping", homing_offsets: {} });
     (tele.useTelemetry as any).mockImplementation((sel: any) =>
       sel({ lastFrame: { arms: { right: { mode: "manual", torque: false, joints: {},
-        calibration: { state: "sweeping",
-                       ticks: { shoulder_pan: 2048 },
-                       min: { shoulder_pan: 2048 },
-                       max: { shoulder_pan: 2048 } } } } } }));
+        calibration: { state: "homing",
+                       ticks: { shoulder_pan: 2048 } } } } } }));
     render(<CalibrationWizard armId="right" onClose={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: /capture neutral/i }));
     await waitFor(() => expect(cal.captureNeutral).toHaveBeenCalledWith(expect.any(String), "right"));
