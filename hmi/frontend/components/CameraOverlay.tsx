@@ -8,11 +8,8 @@
  *     and calls drawOverlay() through the imperative handle.
  */
 import { forwardRef, useImperativeHandle, useRef } from "react";
-
-export type OverlaySides = {
-  left:  { lost: boolean; pose: [number, number][]; hand: [number, number][]; pinch01: number } | null;
-  right: { lost: boolean; pose: [number, number][]; hand: [number, number][]; pinch01: number } | null;
-};
+import type { OverlaySides } from "@/lib/mediapipe";
+export type { OverlaySides } from "@/lib/mediapipe";
 
 export type CameraOverlayHandle = {
   video: HTMLVideoElement | null;

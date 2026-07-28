@@ -58,6 +58,19 @@ export type KeypointFrame = {
   right: SideFrame | null;
 };
 
+export type OverlaySide = {
+  lost: boolean;
+  /** Image-normalized [x, y] in [0,1]. Drawn as a polyline: shoulder, elbow, wrist. */
+  pose: [number, number][];
+  /** Image-normalized [x, y]. ORDER MATTERS: [thumb_tip, index_tip, ...rest].
+   *  CameraOverlay draws the pinch line between entries 0 and 1. */
+  hand: [number, number][];
+  /** Pinch aperture in [0,1]; 0 = closed. Below 0.3 the pinch line is dashed. */
+  pinch01: number;
+};
+
+export type OverlaySides = { left: OverlaySide | null; right: OverlaySide | null };
+
 function _xyz(p: Landmark | NormalizedLandmark | undefined): Vec3 {
   if (!p) return [0, 0, 0];
   return [p.x, p.y, (p as Landmark).z ?? 0];
@@ -119,6 +132,69 @@ export function fuseLandmarkResults(
     right = buildSide(POSE_RIGHT_SHOULDER, POSE_RIGHT_ELBOW, POSE_RIGHT_WRIST, "Right");
   }
   return { left, right };
+}
+
+function _xy(p: NormalizedLandmark | undefined): [number, number] {
+  if (!p) return [0, 0];
+  return [p.x, p.y];
+}
+
+/**
+ * Build image-space overlay geometry from the SAME MediaPipe result that
+ * `fuseLandmarkResults` consumes — but from `.landmarks` (normalized to the
+ * image) rather than `.worldLandmarks` (metric).
+ *
+ * Kept separate from `fuseLandmarkResults` on purpose: that function builds
+ * the backend's KeypointFrame, this one builds a view. Same handedness
+ * pairing logic, so the overlay and the commanded motion can never disagree
+ * about which hand is which.
+ */
+export function buildOverlaySides(
+  pose:  Pick<PoseLandmarkerResult, "landmarks">,
+  hands: Pick<HandLandmarkerResult, "landmarks" | "handednesses">,
+  opts: {
+    leftLost: boolean; rightLost: boolean;
+    leftPinch01: number; rightPinch01: number;
+  },
+): OverlaySides {
+  const poseLm = pose.landmarks?.[0];
+
+  const handByLabel: Record<"Left" | "Right", NormalizedLandmark[] | null> = {
+    Left: null, Right: null,
+  };
+  hands.landmarks?.forEach((lm, i) => {
+    const label = hands.handednesses?.[i]?.[0]?.categoryName as "Left" | "Right" | undefined;
+    if (label === "Left" || label === "Right") handByLabel[label] = lm;
+  });
+
+  const buildSide = (
+    sIdx: number, eIdx: number, wIdx: number,
+    handLabel: "Left" | "Right", lost: boolean, pinch01: number,
+  ): OverlaySide | null => {
+    const handLm = handByLabel[handLabel];
+    if (!poseLm || !handLm) return null;
+    return {
+      lost,
+      pose: [_xy(poseLm[sIdx]), _xy(poseLm[eIdx]), _xy(poseLm[wIdx])],
+      // ORDER MATTERS: CameraOverlay draws the pinch line between [0] and [1].
+      hand: [
+        _xy(handLm[HAND_THUMB_TIP]),
+        _xy(handLm[HAND_INDEX_TIP]),
+        _xy(handLm[HAND_INDEX_MCP]),
+        _xy(handLm[HAND_MIDDLE_MCP]),
+        _xy(handLm[HAND_PINKY_MCP]),
+        _xy(handLm[HAND_WRIST]),
+      ],
+      pinch01,
+    };
+  };
+
+  return {
+    left: buildSide(POSE_LEFT_SHOULDER, POSE_LEFT_ELBOW, POSE_LEFT_WRIST,
+                    "Left", opts.leftLost, opts.leftPinch01),
+    right: buildSide(POSE_RIGHT_SHOULDER, POSE_RIGHT_ELBOW, POSE_RIGHT_WRIST,
+                     "Right", opts.rightLost, opts.rightPinch01),
+  };
 }
 
 /** Stateful runner: loads the WASM bundle once, then runs inference per frame. */
