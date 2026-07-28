@@ -15,13 +15,16 @@ export type ClutchSource = "spacebar" | "mouth";
  *  are never printed as a blocker:
  *    - "below_threshold" — a closed mouth. The resting state, not a fault.
  *    - "spacebar_mode"   — not a fault either; the prompt already says SPACE.
- *    - "engaged"         — contradicts the branch it would be rendered in.
- *      The backend can report {engaged: false, reason: "engaged"} for exactly
- *      one frame after a mid-session source switch: the mouth policy sets the
- *      reason, then the forced-disengage branch clears `engaged` without
- *      revisiting it. "DRIVE — open MOUTH (engaged)" would read as a bug.
+ *
+ *  "engaged" is deliberately NOT on this list. It used to be, to mask a
+ *  backend bug where the forced-disengage branch cleared `engaged` without
+ *  revisiting the reason the mouth policy had just set — so the chip could
+ *  read "DRIVE — open MOUTH (engaged)" for one frame. That branch now sets
+ *  its own reason, and masking the combination permanently would suppress a
+ *  real signal: a disengaged clutch still reporting reason "engaged" means
+ *  the clutch block and the state machine disagree, which is worth seeing.
  */
-const NON_BLOCKING: readonly string[] = ["below_threshold", "spacebar_mode", "engaged"];
+const NON_BLOCKING: readonly string[] = ["below_threshold", "spacebar_mode"];
 
 export function DeadManIndicator({
   held, trackingLost, source = "spacebar", reason,

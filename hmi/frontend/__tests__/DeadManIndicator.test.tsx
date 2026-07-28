@@ -41,18 +41,18 @@ describe("DeadManIndicator", () => {
     expect(screen.queryByText(/below_threshold/i)).not.toBeInTheDocument();
   });
 
-  it("never contradicts itself when the backend reports reason=engaged while disengaged", () => {
-    // A mid-session source switch makes the backend emit
-    // {engaged: false, reason: "engaged"} for exactly one frame: the mouth
-    // policy sets the reason, then the forced-disengage branch clears
-    // `engaged` without revisiting it. The chip must not claim to be driving
-    // and must not print "(engaged)" underneath "DRIVE".
+  it("surfaces rather than hides a disengaged clutch still reporting reason=engaged", () => {
+    // The backend no longer emits {engaged: false, reason: "engaged"} — the
+    // forced-disengage branch sets its own reason now. "engaged" was on the
+    // non-blocking list purely to hide that bug; with the bug fixed, this
+    // combination means the clutch block and the state machine disagree, and
+    // silently swallowing it would hide a real fault from the operator.
     render(
       <DeadManIndicator held={false} trackingLost={false} source="mouth"
                         reason="engaged" />,
     );
     expect(screen.queryByText(/DRIVING/i)).not.toBeInTheDocument();
     expect(screen.getByText(/open MOUTH/i)).toBeInTheDocument();
-    expect(screen.queryByText(/\(engaged\)/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/\(engaged\)/i)).toBeInTheDocument();
   });
 });
