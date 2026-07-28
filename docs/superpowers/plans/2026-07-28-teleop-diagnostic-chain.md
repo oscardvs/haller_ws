@@ -976,13 +976,13 @@ telemetry at arms[id].joints[j].{min,max}."
 
 **Files:**
 - Modify: `hmi/frontend/lib/api.ts:129-144` (`HumanTeleopStatus`), `hmi/frontend/components/HumanTeleopPanel.tsx` (`ArmScopePanel`)
-- Test: `hmi/frontend/__tests__/ScopeBar.test.tsx`
+- Test: none added. See the note below — the ghost-tick behaviour is already covered.
 
 **Interfaces:**
 - Consumes: `status().joints` from Task 2; `limits` prop from Task 5.
 - Produces: `JointDiag` type exported from `lib/api.ts`; `HumanTeleopStatus.joints`.
 
-**Note:** `ScopeBar` already accepts `intended` and renders a ghost tick when it diverges from `commanded` by more than 0.5° (`ScopeBar.tsx:37-45`). That code is currently unreachable — no caller passes `intended`. This task supplies the data; `ScopeBar` itself needs no change.
+**Note:** `ScopeBar` already accepts `intended` and renders a ghost tick when it diverges from `commanded` by more than 0.5° (`ScopeBar.tsx:37-45`), and `__tests__/ScopeBar.test.tsx:15-25` **already covers that behaviour in both directions** (absent when equal, present after a rerender with a diverged value). An earlier draft of this plan wrongly claimed the ghost tick had no caller and no coverage, and added two characterisation tests here; those would have duplicated the existing test verbatim, so they are removed. This task supplies the data only — `ScopeBar` and its tests both need no change.
 
 - [ ] **Step 1: Add the types**
 
@@ -1008,36 +1008,7 @@ And add to `HumanTeleopStatus`, after `goal_deg`:
   };
 ```
 
-- [ ] **Step 2: Write the failing test**
-
-Add to `hmi/frontend/__tests__/ScopeBar.test.tsx`:
-
-```tsx
-it("renders the ghost tick when intended diverges from commanded", () => {
-  const { container } = render(
-    <ScopeBar label="elbow_flex" min={-90} max={90} commanded={58.4} intended={62.1} />,
-  );
-  expect(container.querySelector("[data-ghost]")).not.toBeNull();
-});
-
-it("omits the ghost tick when intended matches commanded", () => {
-  const { container } = render(
-    <ScopeBar label="elbow_flex" min={-90} max={90} commanded={58.4} intended={58.4} />,
-  );
-  expect(container.querySelector("[data-ghost]")).toBeNull();
-});
-```
-
-- [ ] **Step 3: Run the test to verify it passes already**
-
-```bash
-cd hmi/frontend
-pnpm vitest run __tests__/ScopeBar.test.tsx
-```
-
-Expected: **PASS** — this is a characterisation test locking in behaviour that already exists but had no caller. If it fails, `ScopeBar` is not what this plan assumes; stop and re-read `ScopeBar.tsx` before continuing.
-
-- [ ] **Step 4: Render the badge and pass `intended`**
+- [ ] **Step 2: Render the badge and pass `intended`**
 
 Update `ArmScopePanel` in `HumanTeleopPanel.tsx` to take a `diag` prop and render both:
 
@@ -1095,7 +1066,7 @@ Import the type in `HumanTeleopPanel.tsx`:
 import { api, type HumanTeleopStatus, type JointDiag } from "@/lib/api";
 ```
 
-- [ ] **Step 5: Pass `diag` at the call sites**
+- [ ] **Step 3: Pass `diag` at the call sites**
 
 ```tsx
         <ArmScopePanel label={`arm: ${leftArm}`} goal={status?.goal_deg?.left}
@@ -1106,7 +1077,7 @@ import { api, type HumanTeleopStatus, type JointDiag } from "@/lib/api";
                        diag={status?.joints?.right} />
 ```
 
-- [ ] **Step 6: Typecheck and test**
+- [ ] **Step 4: Typecheck and test**
 
 ```bash
 cd hmi/frontend
@@ -1114,17 +1085,17 @@ pnpm tsc --noEmit
 pnpm vitest run
 ```
 
-Expected: no type errors; all tests PASS (39 total).
+Expected: no type errors; all tests PASS (37 total — this task adds none).
 
-- [ ] **Step 7: Verify end to end against the sim**
+- [ ] **Step 5: Verify end to end against the sim**
 
 With the sim backend running, drive an arm into a joint limit — swing one arm hard to the side while holding SPACE. Confirm: the ghost tick separates from the filled bar during fast motion, `RATE-CAP` appears during the fast part, and `CLAMPED` appears and stays once the joint reaches its limit.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /home/oscar-devos/haller_ws
-git add hmi/frontend/lib/api.ts hmi/frontend/components/HumanTeleopPanel.tsx hmi/frontend/__tests__/ScopeBar.test.tsx
+git add hmi/frontend/lib/api.ts hmi/frontend/components/HumanTeleopPanel.tsx
 git diff --cached --name-only
 git commit -m "feat(hmi): show retarget target and clamp/rate-cap reason per joint
 
@@ -1265,7 +1236,7 @@ pnpm tsc --noEmit
 pnpm vitest run
 ```
 
-Expected: no type errors; **39 passed**.
+Expected: no type errors; **37 passed**.
 
 - [ ] **Recorder regression**
 
