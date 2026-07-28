@@ -26,7 +26,7 @@ Phase A first; it is a strict subset of Phase B.
 | Loads | 2 arms, Jetson, cameras | + 2 MF5010 BLDC, LiDAR, CAN |
 | Rails | 7.4 V, 12 V | + raw pack rail |
 | Main fuse | 15 A | 25 A |
-| Peak pack current | ~6 A [C] | ~18 A [C] |
+| Peak pack current | ~6.7 A [C] | ~19 A [C] |
 | Regen risk | none | yes — needs TVS + bulk cap |
 
 Everything below is Phase A unless marked **[Phase B]**.
@@ -72,29 +72,29 @@ Verified against purchase records. These drive the design — nothing here needs
 ```
  HILTI B 22-195  (20.4 – 25.2 V)
  ├── B+ ×2 ──┐
- │           │  BOND THE PAIR                  ┌─────────────────────────────────┐
- │           ├──► XT60 (M) ──► 15 A ATO ──┬───►│ ADJ BUCK  8-40 V → 7.4 V  10 A  │
- │           │      main fuse             │    │ CC limit 10 A · pot LOCKED      │
- │           │                            │    └──────────────┬──────────────────┘
- │           │                            │                   │  7.4 V
- │           │                            │        TVS 8.0 V ─┤ (SMBJ8.0A, to GND)
- │           │                            │                   │
- │           │                            │            10 A fuse
- │           │                            │                   │
- │           │                            │       ┌───────────▼───────────┐
- │           │                            │       │ RELAY NO  (E-STOP)    │  ◄── §6
- │           │                            │       └───────────┬───────────┘
- │           │                            │                   │
- │           │                            │            WAGO 3-port node "7V4"
- │           │                            │              ├── 6 A ──► DC5521 ──► Waveshare R ──► arm R bus
- │           │                            │              └── 6 A ──► DC5521 ──► Waveshare L ──► arm L bus
- │           │                            │
- │           │                            └───► 5 A ATO ──► SEALED BUCK 15-40 V → 12 V 5 A
- │           │                                                       │  12 V
- │           │                                              WAGO 3-port node "12V"
- │           │                                                ├──► DC5525 ──► Jetson Orin Nano
- │           │                                                ├──► powered USB hub (DC in)
- │           │                                                └──► relay module VCC (via E-STOP NC) ── §6
+ │           │  BOND THE PAIR                            ┌─────────────────────────────────┐
+ │           ├──► XT60 ─► SW ─► 15 A ATO ──┬─► 10 A ATO ►│ ADJ BUCK  8-40 V → 7.4 V  10 A  │
+ │           │            ▲     main fuse  │             │ CC limit 10 A · pot LOCKED      │
+ │           │       disconnect            │             └──────────────┬──────────────────┘
+ │           │         ≥30 A               │                            │  7.4 V
+ │           │                             │                     10 A fuse (FAST BLOW)
+ │           │                             │                            │
+ │           │                             │                 TVS 8.0 V ─┤ (SMBJ8.0A, to GND)
+ │           │                             │                            │
+ │           │                             │                ┌───────────▼───────────┐
+ │           │                             │                │ RELAY NO  (E-STOP)    │  ◄── §6
+ │           │                             │                └───────────┬───────────┘
+ │           │                             │                            │
+ │           │                             │                 WAGO 3-port node "7V4"
+ │           │                             │                   ├── 6 A ──► DC5521 ──► Waveshare R ──► arm R bus
+ │           │                             │                   └── 6 A ──► DC5521 ──► Waveshare L ──► arm L bus
+ │           │                             │
+ │           │                             └───► 5 A ATO ──► SEALED BUCK 15-40 V → 12 V 10 A
+ │           │                                                        │  12 V
+ │           │                                               WAGO 3-port node "12V"
+ │           │                                                 ├──► DC5525 ──► Jetson Orin Nano
+ │           │                                                 ├──► powered USB hub (DC in)
+ │           │                                                 └──► relay module VCC (via E-STOP NC) ── §6
  │           │
  │           └──► capacity indicator (+)                                    ── §7
  │
@@ -106,6 +106,19 @@ Verified against purchase records. These drive the design — nothing here needs
  │
  └── white + blue (Nuron data) ── INDIVIDUALLY INSULATED, NOT CONNECTED
 ```
+
+Two details in that tree are load-bearing and easy to get backwards:
+
+- **The disconnect switch sits between the XT60 and the main fuse**, so the
+  fuse is still the first thing protecting the harness and the switch is the
+  first thing you can reach. It is an operational convenience for bench work,
+  **not a lockout** — pull the pack before touching the harness.
+- **The 10 A fast-blow fuse is upstream of the TVS tap, not downstream.** This
+  is the whole crowbar mechanism: over-voltage makes the TVS conduct, and that
+  fault current has to flow *through* the fuse to clear it. Put the TVS on the
+  buck side of the fuse and it clamps into the converter's current limit
+  instead, cooking itself while the servos stay connected to a rail that is too
+  high. Order matters more than placement neatness here.
 
 ### 2.2 Phase B — additions for the mobile base
 
@@ -151,7 +164,7 @@ only one of the two whose balance leads let the 2–6S monitor function at all.
 |---|---|---|---|
 | B+, immediately at the connector | 15 A (25 A in Phase B) | ATO blade | Everything. **Fit first.** |
 | 7.4 V buck input branch | 10 A | ATO blade | Arm converter + its wiring |
-| 7.4 V rail output, before the TVS | 10 A | **fast blow** | Blows when the TVS conducts — §5 |
+| 7.4 V rail, between the buck and the TVS tap | 10 A | **fast blow** | Blows when the TVS conducts — §5 |
 | Each arm branch | 6 A | ATO blade | One arm's fault doesn't take out the other |
 | 12 V buck input branch | 5 A | ATO blade | Jetson path |
 | Raw motor rail **[Phase B]** | 20 A | ATO blade | Motor drives |
@@ -189,6 +202,11 @@ the 6.0–7.4 V window with margin.
 > **The assorted hook-up wire is 20–22 AWG and is for signal only.** Do not use
 > it for the 7.4 V rail. 14 AWG silicone is the one wire gauge still to buy.
 
+**[Phase B]** the main run carries ~19 A rather than ~6.7 A. 14 AWG still covers
+that over ≤0.5 m — chassis-wiring ampacity is ~30 A and the drop is 0.10 V — but
+if the run ends up longer than planned, step the pack-to-fuse-to-buck trunk up
+to 12 AWG. Nothing downstream of the converters changes.
+
 ---
 
 ## 5. Over-voltage protection on the 7.4 V rail
@@ -220,7 +238,7 @@ Three independent layers, weakest-to-strongest:
 | Layer | Mechanism | Effect |
 |---|---|---|
 | L0 — software | HMI `/estop` route | Torque disabled over serial; arms hold briefly then sag |
-| L1 — dead-man | Release SPACE in human-pose teleop | Goals stop flowing within one 16 ms tick; arms freeze in place |
+| L1 — dead-man | Release the clutch in human-pose teleop — SPACE up, or mouth closed, whichever source is armed for the session | Goals stop flowing within one 16 ms tick; arms freeze in place |
 | L2 — hard | LA36M mushroom → relay → 7.4 V rail | Arm power cut; arms go limp |
 
 ### L2 wiring — failsafe, using the parts on hand
@@ -355,8 +373,9 @@ Rules:
 Do these in order. Do not skip ahead — each step protects the next.
 
 1. **Harness, no pack.** Build the whole tree with the pack physically removed.
-   Fit the 15 A main fuse at B+. Bond the B+ pair and the B− pair. Insulate the
-   white and blue Nuron wires individually.
+   Fit the disconnect switch and the 15 A main fuse at B+, in that order. Bond
+   the B+ pair and the B− pair. Insulate the white and blue Nuron wires
+   individually.
 2. **Continuity check.** Multimeter across every fuse, and B+ to B− looking for
    a short. Confirm the star ground reaches every intended point.
 3. **Polarity check.** Connect the pack. Measure at the XT60, then at each
@@ -408,7 +427,12 @@ Do these in order. Do not skip ahead — each step protects the next.
 - [ ] Record the actual insulation colours of the Hilti B+ / B− wires.
 - [ ] Confirm the relay module's DC contact rating from its datasheet — 10 A /
       30 VDC is assumed [E].
-- [ ] Buy 14 AWG silicone wire — the only gauge not on hand.
+- [ ] Buy the two converters — **8–40 V → 7.4 V, ≥10 A, CC+CV** for the arms and
+      **15–40 V → 12 V, ≥10 A synchronous** for the Jetson. Nothing in this
+      document can be brought up without them.
+- [ ] Buy the 8.0 V TVS, the fuse holders and ATO set, the ≥30 A disconnect, the
+      XT60 pigtail, and 14 AWG silicone wire — the only gauge not on hand. Full
+      costed list in [`hardware_inventory.md`](hardware_inventory.md).
 - [ ] **[Phase B]** MF5010 winding variant (10T vs 35T) and MCF302CB input range.
 - [ ] **[Phase B]** Resolve the `/dev/ttyUSB0` collision between the LiDAR and
       the motor interface with udev symlinks.

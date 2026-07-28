@@ -21,9 +21,15 @@ Related: [`power_system.md`](https://github.com/oscardvs/haller_ws/blob/main/doc
 
 ## Arms (SO-101, bimanual)
 
-Both arms are **followers**. There is no leader arm — teleoperation is
-[human-pose teleop](/docs/hmi/human-teleop) from a webcam, which costs nothing
-and is already shipped.
+The two arms are **mechanically identical** — 6× C001-spec (1/345) STS3215 each,
+rather than the stock leader gearbox mix of 3× C046 / 2× C044 / 1× C001. That
+was a deliberate choice: symmetric hardware means either arm can play either
+role, and swapping the end-effector flips it.
+
+Both are currently **driven as followers**, because teleoperation is
+[human-pose teleop](/docs/hmi/human-teleop) from a webcam — shipped, and free.
+The left arm also keeps its teleoperator calibration from the May leader-follower
+bring-up, so that mode is still available without buying anything.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
@@ -75,17 +81,29 @@ Battery is the **Hilti B 22-195 Nuron** (6S3P, 21.6 V nominal, 9.0 Ah, 194.4 Wh)
 measured at 24.3 V near full with **no tool handshake required**. Design window
 is 20.4–25.2 V. Full derivation in [`power_system.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/power_system.md).
 
-Two independent rails, because servo current spikes must not sag the Jetson:
+Two independent converter rails, because servo current spikes must not sag the
+Jetson (Phase B adds a third: the motors sit on the raw pack rail):
 
 ```
-                                   ┌─ 10 A fuse ─[adj. buck → 7.4 V]─┬─ TVS 8.0 V ─┬─ 6 A ─ Waveshare R ─ arm R bus
-Hilti B+ ─┬─ XT60 ─ 15 A main ─────┤                                  │             └─ 6 A ─ Waveshare L ─ arm L bus
-          │         fuse           │                                  └─ E-STOP (NC)
-          │                        └─ 5 A fuse ──[24→12 V buck 5 A]───┬─ Jetson (5.5×2.5 mm)
-          │                                                            └─ powered USB hub (12 V in)
-Hilti B− ─┴────────────── common ground, 14 AWG ─────────────────────────────────────────────────
-                          white + blue Nuron data wires: individually insulated, unconnected
+Hilti B+
+  └─ disconnect ≥30 A
+       └─ 15 A main fuse
+            ├─ 10 A ─ [adj. buck 8-40 V → 7.4 V, 10 A, CC+CV]
+            │           └─ 10 A fast-blow ─ TVS 8.0 V crowbar ─ E-STOP relay
+            │                └─ WAGO "7V4" node
+            │                     ├─ 6 A ─ Waveshare R ─ arm R bus
+            │                     └─ 6 A ─ Waveshare L ─ arm L bus
+            └─  5 A ─ [sealed buck 15-40 V → 12 V, 10 A]
+                          ├─ Jetson Orin Nano (5.5 × 2.5 mm barrel)
+                          └─ powered USB hub (12 V DC in)
+
+Hilti B− ─ star ground (single WAGO node), 14 AWG ─ all converter and board returns
+Nuron data wires (white + blue) ─ individually insulated, not connected
 ```
+
+The fast-blow fuse goes **between the buck and the TVS tap**, not after it — the
+crowbar only works if the TVS's fault current has to pass through the fuse to
+clear it.
 
 ### Load budget
 
@@ -94,11 +112,13 @@ Hilti B− ─┴────────────── common ground, 14 AW
 | 7.4 V | Arm right (6× STS3215) | ~5 A | 37 W |
 | 7.4 V | Arm left (6× STS3215) | ~5 A | 37 W |
 | 12 V | Jetson Orin Nano | 3.75 A | 45 W |
-| 12 V | USB hub + wrist cams | ~0.8 A | 10 W |
-| **Pack input** | at 21.6 V, 90% efficiency | **~6.1 A** | **~130 W** |
+| 12 V | USB hub + wrist cams | ~1 A | 12 W |
+| **Pack input** | at 21.6 V, 90% efficiency | **~6.7 A** | **~146 W** |
 
-15 A main fuse covers this with headroom. Runtime at a realistic ~60 W average:
-**~3 h**. Raise the main fuse to 20 A when the base motors join the pack.
+The 15 A main fuse covers this with wide headroom. Runtime at a realistic ~60 W
+average: **~3 h**. When the base motors join the pack the peak goes to ~19 A, so
+the main becomes **25 A** and the motors get their own **20 A** branch — a motor
+fault then clears locally instead of dropping the arms and the Jetson with it.
 
 ### Arm power rail (7.4 V)
 
@@ -106,7 +126,7 @@ Hilti B− ─┴────────────── common ground, 14 AW
 |---|---|---|---|
 | Adjustable buck, **8–40 V in**, 1.25–15 V out, ≥10 A, CC+CV | 1 | ❌ €18 | Set to 7.4 V. The CC limit doubles as a bus current limiter. 300 W class. |
 | **TVS diode, 8.0 V standoff** (SMBJ8.0A / P6KE8.2A) | 1 | ❌ €2 | **The most important €2 in this build** — see below. |
-| Inline fuse holders + fuses (15 A main, 10 A arm rail fast-blow, 2× 6 A branch, 5 A Jetson) | 1 set | ❌ €12 | |
+| Inline fuse holders + ATO fuses (15 A main, 10 A arm-buck input, 10 A **fast-blow** arm rail, 2× 6 A per arm, 5 A Jetson) | 1 set | ❌ €12 | The arm-rail fuse must be fast-blow — it is half of the crowbar. |
 | **LA36M E-stop, 22 mm mushroom, 1NC** | 1 | ✅ | AC/DC 12–24 V. Drives the relay coil, **not** the arm current — see [the E-STOP wiring](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md#6-e-stop). |
 | 12 V 1-channel relay module (low-level trigger) | 3 | ✅ | The E-stop contactor. Contacts carry the 7.4 V rail; the button only breaks the ~70 mA coil supply, which makes the arrangement failsafe. |
 | Wago-style lever connectors, 2/3/5 port | 90 | ✅ | Star-ground node and rail distribution. |
@@ -140,8 +160,17 @@ input pads rather than relying on the barrel.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
-| Sealed automotive buck, **15–40 V in**, 12 V ≥5 A, synchronous | 1 | ❌ €15 | Verify the *input range*, not the "24V" in the product title — many specify an 18–20 V minimum, which sits at the pack's operating floor. |
-| LM2596 module | 1 | ✅ | On hand. **Not for the Jetson** (~2 A real, non-synchronous). Fine for bench aux under 1.5 A. |
+| Sealed automotive buck, **15–40 V in**, 12 V **≥10 A**, synchronous | 1 | ❌ €18 | Verify the *input range*, not the "24V" in the product title — many specify an 18–20 V minimum, which sits at the pack's operating floor. |
+| LM2596 module | 5 | ✅ | On hand. **Not for the Jetson and not for the arms** (~2 A real, non-synchronous). Fine for bench aux under 1.5 A. |
+
+<Callout type="warn">
+**Don't buy the 5 A version of the 12 V converter.** The rail carries the Jetson
+at 3.75 A *plus* the powered hub at ~1 A plus the E-stop relay coil — about
+4.8 A. A 5 A part would sit at ~96% of rating continuously, which is a
+thermal-shutdown design rather than a margin. The 10 A class costs a few euro
+more. It doesn't enlarge the fault energy either: the 5 A fuse on the
+converter's *input* still bounds that branch.
+</Callout>
 
 ### Harness
 
@@ -150,7 +179,8 @@ input pads rather than relying on the barrel.
 | Hilti sliding battery connector | 1 | ✅ | 6 wires: 2× B+, 2× B−, white + blue data. **Bond each power pair** — a single contact halves the interface's current rating. |
 | **6S LiPo 5200 mAh 80C, XT60** + 6S 40 A BMS | 1 | ✅ | Alternate pack. Same 20.4–25.2 V envelope as the Hilti, so the converter design is pack-agnostic. The Hilti stays primary: 194 Wh vs 115 Wh, integrated BMS, charger on hand. |
 | Main disconnect switch ≥30 A | 1 | ❌ €7 | |
-| TVS + bulk electrolytic for the **motor** rail | 1 | ⏸️ | BLDC regen protection. Arm servos don't regen — defer until the base is integrated. |
+| TVS 30 V + 2200 µF bulk electrolytic for the **motor** rail | 1 | ⏸️ €10 | BLDC regen protection. Arm servos don't regen — defer until the base is integrated. |
+| ATO fuses, 25 A main + 20 A motor branch | 1 set | ⏸️ €2 | The Phase B uprate. Same holders. |
 
 ### Monitoring
 
@@ -195,14 +225,15 @@ half-duplex 1 Mbaud line sitting next to a switching converter.
 
 **€0.** [Human-pose teleop](/docs/hmi/human-teleop) is shipped on `main`: in-browser
 MediaPipe Pose + Hands → WebSocket → joint-angle retargeting → 60 Hz bimanual
-control, with a SPACE dead-man and per-side pinch-to-gripper calibration. The
+control, with a selectable SPACE or mouth-open dead-man and per-side
+pinch-to-gripper calibration. The
 [HMI dataset recorder](/docs/data/dataset-collection) consumes that session
 directly, so the chain from webcam to `LeRobotDataset` is already wired.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
 | Laptop webcam | 1 | ✅ | The operator-facing camera. Any UVC webcam works. |
-| Leader arms | 0 | ⏸️ | Not needed. Would cost ~€300 and only buys precision the human-pose path may already deliver — evaluate the shipped path against a real task first. |
+| A dedicated leader arm | 0 | ⏸️ | Nothing to buy: the two arms are symmetric, so either can be the leader, and the left one is still calibrated as one. A *purpose-built* leader with the stock gearbox mix (3× C046 / 2× C044 / 1× C001) would cost ~€300 and only buys teleop ergonomics — worth revisiting if long sessions produce fatigue-degraded demonstrations. |
 | Meta Quest headset | 0 | ⏸️ | Fallback if human-pose tracking quality proves inadequate. Borrowable rather than purchased. Prior art: [SO-101-VR-Control](https://github.com/kabilankb/SO-101-VR-Control) (browser WebXR, no app install, single-arm) and [lerobot_teleoperator_so101_vuer](https://github.com/Oasis-Uniandes/lerobot_teleoperator_so101_vuer). |
 | Gamepad | 0 | ⏸️ | XLeRobot ships [Xbox / Joy-Con / keyboard teleop](https://xlerobot.readthedocs.io/en/latest/software/getting_started/XLeRobot_teleop.html) for real hardware. Backup input if webcam tracking degrades on a specific task. |
 
@@ -224,17 +255,20 @@ bought.
 | Item | ~€ | Blocking? |
 |---|---|---|
 | Adjustable buck 8–40 V → 7.4 V, ≥10 A, CC+CV | 18 | **Yes** |
-| Sealed buck 15–40 V → 12 V, ≥5 A | 15 | **Yes** |
+| Sealed buck 15–40 V → 12 V, ≥10 A | 18 | **Yes** |
 | TVS 8.0 V (SMBJ8.0A) | 2 | **Yes** |
-| Fuse holders + ATO fuses (15/10/6/6/5 A) | 12 | **Yes** |
+| Fuse holders + ATO fuses (15/10/10/6/6/5 A) | 12 | **Yes** |
 | 14 AWG silicone wire, 2 m | 10 | **Yes** |
-| XT60 pigtail + main disconnect | 10 | **Yes** |
-| **Blocking subtotal** | **~67** | |
+| XT60 pigtail + main disconnect ≥30 A | 10 | **Yes** |
+| **Blocking subtotal** | **~70** | |
 | Wrist camera modules (MJPEG) ×2 | 55 | For multi-cam datasets |
 | Powered USB hub, 12 V input | 25 | For multi-cam datasets |
 | USB cables + ferrites | 20 | For multi-cam datasets |
 | Spare STS3215 7.4 V | 18 | Insurance |
-| **Total** | **~185** | |
+| **Total** | **~188** | |
+
+**[Phase B]** adds ~€12 when the base is integrated: the motor rail's TVS and
+bulk capacitor, plus the 25 A / 20 A ATO fuses.
 
 <Callout type="info">
 **You can start recording before the cameras arrive.** The D455 alone, rigidly

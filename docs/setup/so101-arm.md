@@ -4,9 +4,21 @@ This guide brings up the SO-101 arms on Haller. It assumes the [LeRobot environm
 
 Source: official LeRobot SO-101 docs — [huggingface.co/docs/lerobot/so101](https://huggingface.co/docs/lerobot/so101).
 
-Haller has **two** SO-101 arms:
-- A **follower** — six STS3215 motors, calibrated as `haller_follower`, USB symlink `/dev/haller_arm_follower`. Controlled by the HMI.
-- A **leader** — also six STS3215 motors (same gear ratio as the follower — deliberate symmetric-hardware choice, see "Leader bring-up" below), calibrated as `haller_leader`, USB symlink `/dev/haller_arm_leader`. Used for hand-driven teleop and demonstration data collection.
+Haller has **two** SO-101 arms, and they are mechanically **identical** — six
+C001-spec (1/345) STS3215 motors each, rather than the stock leader gearbox mix
+of 3× C046 / 2× C044 / 1× C001. Symmetric on purpose: either arm can be leader
+or follower, and swapping the end-effector flips the role.
+
+- **Right** — calibrated as `haller_follower`, USB symlink `/dev/haller_arm_follower`.
+- **Left** — calibrated as `haller_leader`, USB symlink `/dev/haller_arm_leader`.
+  That name records the role it was first built for (2026-05-22); the HMI now
+  also drives it as a follower, copying its teleoperator calibration into
+  `robots/so_follower/` on startup.
+
+**Both arms currently run as followers**, because teleoperation is the
+human-pose webcam path in the HMI. Leader-follower teleop still works and needs
+no new hardware — key off the udev symlinks rather than assuming which arm is
+physically which.
 
 Both bring-ups follow the same pattern (find port → configure motor IDs → daisy-chain → calibrate → smoke test). The instructions below describe the **follower** flow in detail; the leader-specific deltas are at the end.
 
@@ -17,10 +29,11 @@ Both bring-ups follow the same pattern (find port → configure motor IDs → da
 Before you start:
 
 - [ ] SO-101 arm mechanically assembled per the [TheRobotStudio assembly instructions](https://github.com/TheRobotStudio/SO-ARM100).
-- [ ] 6× Feetech STS3215 servos. Check the voltage variant on the servo label:
+- [ ] 6× Feetech STS3215 servos. **Haller's are the 7.4 V variant** — all twelve
+      of them. Check the label anyway if you are building your own:
   - **7.4 V variant** (operating range 6.0–7.4 V) — use a **7.4 V supply** (e.g. bench DC set to 7.0–7.4 V at ≥2 A).
   - **12 V variant** (operating range 4–14 V) — use the official SO-101 kit's **12 V / 5 A** brick.
-  - Wrong supply on the 7.4 V variant = "Input voltage error" + alarm LED at best, dead servos at worst.
+  - Wrong supply on the 7.4 V variant = "Input voltage error" + alarm LED at best, dead servos at worst. On the robot, the 7.4 V rail carries four independent layers of over-voltage protection for exactly this reason — see [`wiring.md`](../wiring.md).
 - [ ] Feetech bus servo adapter board (Waveshare or equivalent).
   - The two jumpers select the **control path**, not the power source:
     - `A` channel = UART control (Pi Zero, ESP32, Arduino, STM32).

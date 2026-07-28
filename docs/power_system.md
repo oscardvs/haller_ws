@@ -1,7 +1,14 @@
 # Haller Power System
 
-Power architecture for the Haller mobile robot, built around a Hilti B 22-195 Nuron
-battery pack.
+Power architecture for the Haller robot, built around a Hilti B 22-195 Nuron
+battery pack. This document derives the **battery envelope, the load budget and
+the converter requirements** — the why.
+
+Companion documents:
+- [`wiring.md`](wiring.md) — the point-to-point scheme: fusing, grounding,
+  E-STOP, bring-up. **Authoritative for the power tree** where the two overlap.
+- [`hardware_inventory.md`](hardware_inventory.md) — per-part status, open
+  questions, and what is still to buy.
 
 Each fact below is tagged by provenance:
 
@@ -104,21 +111,35 @@ Notes:
 
 ## 2. Load budget
 
-| Load | Qty | Voltage | Power | Provenance |
-|---|---|---|---|---|
-| Jetson Orin Nano devkit | 1 | 9–20 V | 45 W budget | [D] |
-| MF5010 BLDC motor | 2 | 16 V rated winding | 128 W max, 5.06 A rated | [D] |
-| RPLIDAR A1M8 | 1 | 5 V (USB) | ~2.5 W | [E] |
-| IMX219 camera | 1 | from Jetson CSI | negligible | — |
+The robot is built in two phases. **Phase A** is where it is now: both SO-101
+arms on a static tower, no mobile base. **Phase B** adds the base.
+
+| Load | Qty | Rail | Power | Phase | Provenance |
+|---|---|---|---|---|---|
+| SO-101 arm (6× Feetech STS3215) | 2 | 7.4 V | ~37 W each, ~5 A each | A | [D] |
+| Jetson Orin Nano devkit | 1 | 12 V | 45 W budget | A | [D] |
+| Powered USB hub + wrist cameras | 1 | 12 V | ~12 W | A | [E] |
+| MF5010 BLDC motor | 2 | raw pack | 128 W max, 5.06 A rated | B | [D] |
+| RPLIDAR A1M8 | 1 | 5 V (USB) | ~2.5 W | B | [E] |
+| IMX219 camera | 1 | from Jetson CSI | negligible | B | — |
 
 Drive is differential: **2 driven front wheels + rear caster**, so two motors.
 
-**Peak worst case [C]:** 2 × 128 W + 45 W ≈ **301 W**, which is ~12.5 A at 24 V.
-This is an absolute stall/max-power figure, not a driving figure — but it sets
-the fuse and wire gauge.
+**Phase A peak [C]:** 74 + 45 + 12 ≈ **131 W** of load. At ~90% converter
+efficiency that is ~146 W drawn from the pack — **~6.7 A at 21.6 V nominal**,
+~6.0 A at a full 24.3 V.
 
-**Runtime estimate [E]:** at a realistic ~80 W average draw, 194.4 Wh gives
-roughly 2.4 h. Not yet measured.
+**Phase B peak [C]:** the motors sit on the raw pack rail with no converter in
+between, so they add 2 × 128 W = 256 W ≈ 11.9 A. Total **~19 A at 21.6 V**,
+rising to ~20 A at the 20.4 V operating floor. This is an absolute
+stall/max-power figure, not a driving figure — but it sets the fuse and wire
+gauge.
+
+**Runtime estimate [E]:** at a realistic ~60 W average, 194.4 Wh gives roughly
+3 h. Not yet measured.
+
+The 7.4 V arm rail is derived here only as a load. Its converter, crowbar and
+fusing are specified in [`wiring.md`](wiring.md) §2 and §5.
 
 ### Jetson Orin Nano devkit [D]
 
@@ -164,19 +185,35 @@ the driver's range.
 
 ## 3. Power architecture
 
+Three rails. This is the summary; the point-to-point scheme, including the
+E-STOP, the star ground and the 7.4 V crowbar, is in
+[`wiring.md`](wiring.md) §2 — **that document is the authority where the two
+disagree.**
+
 ```
-                          ┌─── 20 A fuse ──── motor drivers (raw pack, 20.4–25.2 V)
-                          │
-Pack B+ ──┬───────────────┤
-          │               │
-          │               └─── 5 A fuse ──── [buck DC-DC] ── 12 V ── Jetson Orin Nano
-          │                                                            │
-Pack B− ──┴──────────────── common ground ──────────────────┘          └── USB ── RPLIDAR (5 V)
+                                     ┌─── 10 A ─── [adj. buck] ── 7.4 V ── E-STOP relay ── both arms
+                                     │
+Pack B+ ── DISCONNECT ── MAIN FUSE ──┼─── 5 A ──── [sealed buck] ── 12 V ─┬── Jetson Orin Nano
+                                     │                                    └── powered USB hub
+                                     │
+                                     └─── 20 A ─── motor drivers (raw pack, 20.4–25.2 V)  [Phase B]
+                                                     └── TVS 30 V + bulk cap (regen)
+
+Pack B− ─── star ground (single WAGO node) ─── all converter and board returns
 ```
 
-**Motors on the raw pack, Jetson behind the converter.** This keeps ~20 A of
-motor current out of the DC-DC entirely, and isolates the Jetson from the
-voltage sag when four motors start simultaneously.
+Disconnect ≥30 A. Main fuse **15 A in Phase A, 25 A in Phase B**. The arm rail's
+fast-blow fuse and TVS crowbar sit inside that first branch — see
+[`wiring.md`](wiring.md) §2.1 and §5, where the ordering matters.
+
+**Motors on the raw pack, everything else behind a converter.** This keeps
+~12 A of motor current out of the DC-DCs entirely, and isolates the Jetson from
+the voltage sag when both motors start at once.
+
+**Two separate converters, not one rail with a second stage.** The arms and the
+Jetson each get their own buck off the pack, because servo current spikes must
+not sag the compute rail — a Jetson that reboots mid-episode loses the recording
+as well as control.
 
 ### Why 12 V and not 19 V
 
@@ -192,7 +229,7 @@ Both are electrically valid. The tradeoff:
 **Decision: 12 V**, on three grounds:
 
 1. **Ceiling margin.** The Jetson's absolute max is 20 V. A 19 V setpoint leaves
-   1 V — any converter overshoot on a load transient (four motors cutting out
+   1 V — any converter overshoot on a load transient (both motors cutting out
    at once) reaches the limit, on a board with no input protection behind it.
 2. **Parts availability.** 12 V is the automotive rail. A sealed 24 V→12 V 10 A
    synchronous converter is inexpensive and its native 18–32 V input window is
@@ -212,11 +249,22 @@ the margin instead.
 
 | Requirement | Value | Rationale |
 |---|---|---|
-| Input range | 18–25.2 V minimum | Full pack envelope |
+| Input range | **15–40 V** | Must regulate at the 20.4 V floor and survive 25.2 V |
 | Absolute max input rating | **≥ 40 V** | Headroom over 25.2 V for regen spikes |
 | Output | 12 V | §3 |
-| Continuous output current | **≥ 5 A** | 3.75 A for 45 W, plus margin |
+| Continuous output current | **≥ 10 A** | See below — 5 A is not enough |
 | Topology | Synchronous buck | Efficiency and thermals |
+
+**Why ≥10 A and not ≥5 A.** The 12 V rail carries the Jetson at 3.75 A *plus*
+the powered USB hub at ~1 A plus the E-STOP relay coil, so the real load is
+~4.8 A. A 5 A part would run at ~96% of its rating continuously, which is a
+thermal-shutdown design, not a margin. The 10 A class of sealed automotive
+converter costs about the same, so take the headroom.
+
+This does **not** enlarge the fault energy on that branch: the 5 A ATO fuse on
+the converter's *input* bounds it to ~108 W at 21.6 V regardless of what the
+converter could deliver. The bigger part buys thermal margin, not more current
+into a fault.
 
 #### Selected part class
 
@@ -267,38 +315,57 @@ bring-up of the Jetson in 15 W mode with no peripherals attached (~1.3 A at
 A 194 Wh pack with low internal resistance will deliver hundreds of amps into a
 short. That is enough to weld tools and to vent cells.
 
-| Location | Rating | Protects |
-|---|---|---|
-| B+, at the connector | 20 A blade | Everything — **fit this first** |
-| DC-DC input branch | 5 A | Jetson path |
+The full fusing table — including the per-arm branches and the fast-blow fuse
+that pairs with the 7.4 V crowbar — is [`wiring.md`](wiring.md) §3. The pack-side
+fuses are:
 
-Main fuse sizing: two motors at 5.06 A rated ≈ 10 A continuous, ~12.5 A at peak
-power, plus the DC-DC branch. A 20 A fuse clears that with headroom while still
-protecting the wiring. (An earlier draft specified 30 A for a four-motor layout;
-the robot is two driven wheels plus a caster.)
+| Location | Phase A | Phase B | Protects |
+|---|---|---|---|
+| B+, at the connector | **15 A** blade | **25 A** blade | Everything — **fit this first** |
+| 7.4 V buck input branch | 10 A | 10 A | Arm converter and its wiring |
+| 12 V buck input branch | 5 A | 5 A | Jetson path |
+| Raw motor rail | — | 20 A | Motor drives |
+
+Main fuse sizing. **Phase A** peaks at ~6.7 A (§2); 15 A clears that with wide
+headroom and still protects 14 AWG wiring. **Phase B** adds two motors at
+5.06 A rated ≈ 10 A continuous and ~11.9 A at peak power, taking the total to
+~19 A — so the main goes to 25 A and the motors get their own 20 A branch, which
+means a motor fault clears locally instead of dropping the arms and the Jetson
+with it.
+
+(An earlier draft specified a single 20 A main for a motors-plus-Jetson robot,
+and before that 30 A for a four-motor layout. The robot is two driven wheels
+plus a caster, and it now also carries two arms.)
 
 Rules:
 
-- The main fuse is the **first** component after B+. Nothing gets wired
-  downstream until it is in place.
-- Never work on the harness with the pack connected. Physically remove it.
+- The main fuse is the **first** component after B+, behind only the disconnect
+  switch. Nothing gets wired downstream until it is in place.
+- Never work on the harness with the pack connected. Physically remove it — the
+  disconnect switch is a convenience, not a lockout.
 - Insulate the white/blue data wires individually.
-- Motor regen/back-EMF on deceleration can push the shared rail **above**
-  25.2 V. Fit bulk capacitance and a TVS diode across the rail, and ensure the
-  DC-DC's absolute max input has real margin over 25.2 V.
+- **[Phase B]** Motor regen/back-EMF on deceleration can push the raw rail
+  **above** 25.2 V. Fit bulk capacitance and a TVS diode across it, and ensure
+  the DC-DCs' absolute max input has real margin over 25.2 V. The arm servos do
+  not regen; these parts are not needed in Phase A.
 
 ---
 
 ## 5. Bring-up procedure
 
-1. Fit the 20 A fuse at B+. Bond the two B+ wires and the two B− wires.
+The full 11-step procedure, covering both arms, the E-STOP and the failsafe
+test, is [`wiring.md`](wiring.md) §10. The pack-side essentials are:
+
+1. Fit the main fuse at B+ (15 A Phase A, 25 A Phase B). Bond the two B+ wires
+   and the two B− wires.
 2. Insulate white and blue separately.
 3. Confirm polarity with a multimeter on DC before connecting any load.
-4. Bench-test the DC-DC **into a dummy load** (e.g. a 12 V car bulb) and confirm
-   the output holds 12 V across an input sweep from 25 V down to 19 V.
-5. Only then connect the Jetson.
-6. Bring up motors separately, with the Jetson on a bench supply, until motor
-   driver input range is confirmed (§2).
+4. Bench-test each DC-DC **into a dummy load** (e.g. a 12 V car bulb) and
+   confirm the output holds across an input sweep from 25 V down to 19 V.
+5. Only then connect the Jetson — and only then the arms, whose 7.4 V rail has
+   its own verification and pot-locking step.
+6. **[Phase B]** Bring up motors last and separately, with the Jetson on a bench
+   supply, until the motor driver's input range is confirmed (§2).
 
 ---
 
@@ -329,7 +396,9 @@ by logging actual resting voltage against LED count:
 ### Proposed monitor thresholds
 
 To be implemented as a voltage divider + ADC publishing
-`sensor_msgs/msg/BatteryState`, wired into `haller_hardware`:
+`sensor_msgs/msg/BatteryState`, wired into `haller_hardware`. The hardware for
+this is on hand and assigned: a XIAO nRF52840 Sense reading a 100 kΩ/15 kΩ
+divider — see [`wiring.md`](wiring.md) §7.
 
 | Level | Per cell | Pack | Behaviour |
 |---|---|---|---|
@@ -346,10 +415,16 @@ To be implemented as a voltage divider + ADC publishing
 ## 7. Open items
 
 - [ ] Record B+/B− wire insulation colours on the Hilti connector
-- [ ] Identify MF5010 winding variant (10T vs 35T) — §2
-- [ ] Confirm MCF302CB motor controller input voltage range — §2
-- [ ] Confirm driver enforces speed limit at 25.2 V rail vs 16 V motor rating
-- [ ] Source and fit the ≥ 5 A synchronous 12 V converter
+- [ ] Source and fit the **≥10 A synchronous 12 V converter** — §3
+- [ ] Source and fit the **≥10 A adjustable 7.4 V converter** for the arms —
+      [`wiring.md`](wiring.md) §2
 - [ ] Calibrate LED-to-voltage table against measured resting voltages
-- [ ] Implement `BatteryState` publisher in `haller_hardware`
+- [ ] Implement the `BatteryState` publisher on the XIAO — §6
 - [ ] Measure actual average current draw to replace the runtime estimate
+- [ ] **[Phase B]** Identify MF5010 winding variant (10T vs 35T) — §2
+- [ ] **[Phase B]** Confirm the motor controller's input voltage range — §2
+- [ ] **[Phase B]** Confirm the driver enforces a speed limit at a 25.2 V rail
+      against the 16 V motor rating
+
+Per-part status and the costed buy list live in
+[`hardware_inventory.md`](hardware_inventory.md).

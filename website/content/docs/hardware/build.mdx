@@ -16,13 +16,19 @@ The build path has four passes. Each pass ends at a verifiable state you can pow
 
 Skipping the [BOM](/docs/hardware/bom) is fine for now — parts can be ordered while you assemble in parallel — but every step below assumes that page's parts list is on the bench.
 
+<Callout type="info">
+**The reference robot is being built arms-first, not base-first.** Both SO-101s currently sit on a static tower with no mobile base attached — Passes 2–4 are done or in progress, Pass 1 is not. The order below is the one that makes sense for a builder starting from nothing; if you are following the reference build, start at Pass 2 and treat Pass 1 as later work.
+
+**Wiring is specified elsewhere.** This page covers assembly. The point-to-point power tree, fusing, grounding, E-STOP and the 11-step electrical bring-up live in [`wiring.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md) — follow that for anything carrying current, and treat it as authoritative wherever this page is briefer.
+</Callout>
+
 ## Pass 1 — Mobile base
 
 ### 1.1 Mount the motors
 
 Bolt each LK-TECH MF5010 to its motor mount, then bolt the motor mounts to the chassis plates. The two drive motors should sit symmetric about the chassis centerline at the documented wheel separation (`0.34 m` center-to-center — matches the URDF and `motor_params.yaml`; any deviation means odometry will drift).
 
-Caster wheels go front + rear, freely rotating.
+One passive caster goes at the rear, freely rotating — the layout is 3-wheel differential drive: **2 driven front wheels + 1 rear caster**, not four wheels.
 
 **Checkpoint.** Lift the chassis, give each wheel a spin by hand. No rubbing on the frame, free rotation, no axial play.
 
@@ -37,11 +43,13 @@ Both MF5010s share a single CAN bus.
 
 ### 1.3 Wire battery + E-stop
 
-Battery (+) → main fuse → **E-stop NC** → switched (+) → motor power input. Battery (–) → motor ground. Common ground between motor power, the 12 V → 5 V buck, and the Jetson.
+Battery (+) → disconnect switch → main fuse → 20 A motor branch → motor power input. Battery (–) → motor ground, landed on the **single star ground node** shared with both converters and the Jetson. The motors run on the raw pack rail (20.4–25.2 V); nothing steps down for them.
 
-The E-stop **must** be on the motor power feed, not just signal. The HMI's software E-STOP zeros `/cmd_vel` and drops arm torque, but the hard E-stop is what protects you if either rclpy or the HMI hangs.
+The 20 A branch fuse matters: it means a motor fault clears locally instead of opening the main and dropping the arms and the Jetson at the same time.
 
-**Checkpoint.** With the E-stop pressed: zero current draw on the battery. With it released: standby current only, no motor motion (no enable signal sent yet).
+**The E-stop does not sit in this path.** A 22 mm contact block breaking motor current under load pits and eventually welds, and it would also kill the Jetson's rail. Instead the button breaks a relay's ~70 mA coil supply and the relay contacts switch the load — failsafe by construction, because any break in the coil loop de-energises and opens the contact. Full scheme and rationale in [`wiring.md` §6](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md#6-e-stop). The HMI's software E-STOP zeros `/cmd_vel` and drops arm torque, but the hard E-stop is what protects you if either rclpy or the HMI hangs.
+
+**Checkpoint.** With the E-stop pressed: the switched rail reads 0 V and there is no motor motion. With it released: standby current only, no motion (no enable signal sent yet). Then pull the relay's coil wire and confirm the rail drops the same way — that is the check that actually verifies the failsafe.
 
 ### 1.4 First motor spin
 
@@ -75,7 +83,13 @@ Boot, finish first-run setup, expand the rootfs, set up Wi-Fi *for the initial i
 
 ### 2.3 Power from the buck converter
 
-Cut over from the bench USB-C supply to the on-board 12 V → 5 V buck converter. Voltage at the Jetson's input must stay in spec (5 V ± 5%) under load.
+Cut over from the bench USB-C supply to the on-board sealed buck that takes the pack's 20.4–25.2 V down to **12 V**, into the dev kit's barrel jack.
+
+The Orin Nano dev kit accepts **9–20 V** on a **5.5 × 2.5 mm** centre-positive barrel — it is not a 5 V board, and the pack must never reach it directly. Measure at the jack under load: 12 V, holding steady while the arms move. If it sags, the converter is undersized or the return path is too thin. See [`power_system.md` §3](https://github.com/oscardvs/haller_ws/blob/main/docs/power_system.md) for why 12 V rather than 19 V.
+
+<Callout type="warn">
+**Check the barrel plug before you plug it in.** The Waveshare servo boards use **5.5 × 2.1 mm**; the Jetson needs **2.5 mm**. A 2.1 plug will physically enter a 2.5 jack, fit loosely, and arc under load.
+</Callout>
 
 ## Pass 3 — Perception
 
@@ -98,7 +112,9 @@ See [Vision pipeline / Hardware setup](/docs/base/vision#hardware-setup) for the
 
 ### 3.3 USB webcams
 
-Plug the wrist + base webcams into the USB hub. Confirm they enumerate:
+Cameras do **not** go on the hub. The D455 gets its own root port — RealSense devices fail intermittently behind hubs — and each wrist camera gets its own root port too, because two 640×480@30 streams in raw YUYV need ~147 Mbps each against USB 2.0's ~280 Mbps practical ceiling. Buy wrist cameras with MJPEG and force MJPEG in the capture config. Only the kilobit-class serial devices (both arm boards, CAN, LiDAR) share the hub — see [`wiring.md` §8](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md#8-usb-and-data-tree).
+
+Confirm they enumerate:
 
 ```bash
 v4l2-ctl --list-devices
@@ -116,17 +132,23 @@ The Feetech STS3215 servos all ship with ID 1; you need 1–6 per arm. The [SO-1
 
 ### 4.2 Mount each arm
 
-Bolt each SO-101 base to its arm mounting plate, then bolt the plate to the chassis. Match the kinematic conventions you'll use in [`hmi/backend/config.yaml`](https://github.com/oscardvs/haller_ws/blob/main/hmi/backend/config.yaml) — the `id: right` / `id: left` naming should reflect which side of the chassis each arm physically sits.
+Bolt each SO-101 base to its arm mounting plate, then bolt the plate to the XLeRobot tower (or, once the base exists, to the chassis). Match the kinematic conventions you'll use in [`hmi/backend/config.yaml`](https://github.com/oscardvs/haller_ws/blob/main/hmi/backend/config.yaml) — the `id: right` / `id: left` naming should reflect which side of the chassis each arm physically sits.
 
 Cable strain relief: the Feetech daisy-chain runs from the bus adapter board (mounted near the Jetson) through the arm's base, up through each joint to the gripper. Plan slack at each joint so the cable doesn't bind through the joint's range of motion.
 
 ### 4.3 Power supplies
 
-Each arm needs its own servo power supply (don't share — the bus adapter only powers logic, not motors). Mount the supplies somewhere ventilated and route the barrel jacks to the bus adapter boards.
+The bus adapter only powers logic over USB — the servos need their own supply at the barrel jack. On Haller both arms are fed from **one adjustable buck set to 7.4 V**, distributed through a WAGO node with a **6 A fuse per arm** so one arm's fault doesn't take out the other. Mount the converter near the arms and keep the 7.4 V run short and in 14 AWG: the servo floor is 6.0 V, so the whole chain has only 1.4 V of headroom.
+
+<Callout type="error">
+**These are 7.4 V servos. 12 V destroys all twelve of them.** Before any servo is connected, set the converter into a dummy load, verify 7.4 V on a multimeter across an input sweep from 25 V down to 19 V, and **lock the trimpot**. Then fit the 8.0 V TVS crowbar behind its fast-blow fuse. The four-layer protection scheme and why each layer exists is in [`wiring.md` §5](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md#5-over-voltage-protection-on-the-74-v-rail).
+</Callout>
 
 ### 4.4 Calibrate
 
-Per [SO-101 arms / Calibrate the follower](/docs/setup/so101-arm#3-calibrate-the-follower) and [Bring up the leader](/docs/setup/so101-arm#5-bring-up-the-leader), then verify with the [HMI's calibration wizard](/docs/hmi/calibration-wizard).
+**Both Haller arms run as followers**, so run [Calibrate the follower](/docs/setup/so101-arm#3-calibrate-the-follower) twice, once per arm. Then verify with the [HMI's calibration wizard](/docs/hmi/calibration-wizard).
+
+The arms are mechanically symmetric, so either can instead be a leader — [Bring up the leader](/docs/setup/so101-arm#5-bring-up-the-leader) covers that, and the left arm already carries a teleoperator calibration from its original leader bring-up. Day to day it isn't used, because teleoperation is the [human-pose webcam path](/docs/hmi/human-teleop).
 
 **Pass 4 done** once you can teleop in the HMI: pick an arm card, switch to manual, drag the shoulder_pan slider, watch the joint move.
 
