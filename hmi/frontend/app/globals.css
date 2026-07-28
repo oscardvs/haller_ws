@@ -63,6 +63,14 @@
   --color-haller-rail: var(--haller-rail);
   --color-haller-grid: var(--haller-grid);
 
+  /* Cockpit chrome: the three surfaces the fixed-viewport shell needs beyond
+     card/popover. `chrome` is the header/command-bar bar stock, `inset` is a
+     recessed well (camera bays, sim tiles) that must read as *below* the page,
+     and `thumb` is the machined slider knob face. */
+  --color-haller-chrome: var(--haller-chrome);
+  --color-haller-inset: var(--haller-inset);
+  --color-haller-thumb: var(--haller-thumb);
+
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -107,15 +115,31 @@
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 
-  /* Status palette — same hex in both themes so semantics never shift.
-     --haller-live is the canonical Haller brand green (Bambu PLA dark). */
-  --haller-live: oklch(0.72 0.14 152);          /* Bambu green */
-  --haller-live-soft: oklch(0.72 0.14 152 / 0.18);
-  --haller-warn: oklch(0.82 0.16 78);            /* amber-400 */
-  --haller-fault: oklch(0.62 0.245 27);          /* red-500 */
-  --haller-manual: oklch(0.66 0.16 245);         /* blue-500 */
+  /* Status palette — SAME HUE in both themes, lightness re-cut per theme.
+     This replaces an earlier rule that pinned the same hex to both themes "so
+     semantics never shift". That rule was written when only the dark theme
+     shipped, and it does not survive a real light theme: these colours carry
+     9–11px uppercase text, and the dark-theme hex measures 2.34:1 (live) and
+     1.78:1 (warn) against the light card — illegible, not merely off-brand.
+     Hue is what carries the semantic (152 live / 70 warn / 27 fault / 255
+     manual) and hue is held fixed; only L and C move. Every value below is
+     >=4.5:1 against both --card and --background in its own theme.
+     The canonical Haller brand green — the Bambu PLA dark shared verbatim with
+     the docs site — remains the DARK-theme oklch(0.72 0.14 152); the light
+     value is its contrast-corrected sibling at the same hue, not a rebrand. */
+  --haller-live: oklch(0.53 0.15 152);           /* 4.87:1 on card */
+  --haller-live-soft: oklch(0.53 0.15 152 / 0.16);
+  --haller-warn: oklch(0.56 0.13 70);            /* 4.78:1 on card */
+  --haller-fault: oklch(0.58 0.235 27);          /* 4.83:1 on card */
+  --haller-manual: oklch(0.55 0.17 255);         /* 4.92:1 on card */
   --haller-rail: oklch(0.45 0 0);
-  --haller-grid: oklch(1 0 0 / 0.04);
+  /* Black-based, not white-based: a white 4% grid over a near-white page is
+     invisible. The dark theme's white-based grid is directly below. */
+  --haller-grid: oklch(0 0 0 / 0.045);
+
+  --haller-chrome: oklch(0.965 0 0);
+  --haller-inset: oklch(0.9 0 0);
+  --haller-thumb: oklch(0.99 0 0);
 
   --font-geist-sans: var(--font-sans-default, ui-sans-serif);
   --font-mono-display: var(--font-mono-default, ui-monospace);
@@ -156,8 +180,20 @@
   --sidebar-border: oklch(1 0 0 / 8%);
   --sidebar-ring: oklch(0.72 0.14 152);
 
+  /* Canonical brand green + the status hues at their dark-theme lightness.
+     These used to be inherited from :root; :root is now the light theme's
+     contrast-corrected cut, so the dark values are stated here. */
+  --haller-live: oklch(0.72 0.14 152);           /* Bambu green — 7.80:1 on card */
+  --haller-live-soft: oklch(0.72 0.14 152 / 0.18);
+  --haller-warn: oklch(0.82 0.16 78);            /* amber-400 — 10.27:1 */
+  --haller-fault: oklch(0.62 0.245 27);          /* red-500   — 4.45:1  */
+  --haller-manual: oklch(0.66 0.16 245);         /* blue-500  — 5.93:1  */
   --haller-rail: oklch(0.55 0 0);
   --haller-grid: oklch(1 0 0 / 0.035);
+
+  --haller-chrome: oklch(0.18 0.005 170);
+  --haller-inset: oklch(0.115 0.005 170);
+  --haller-thumb: oklch(0.96 0 0);
 }
 
 @layer base {
@@ -175,6 +211,13 @@
   html {
     @apply font-sans;
     font-feature-settings: "ss01", "cv11", "tnum";
+  }
+  /* One visible focus ring for the whole cockpit. Keyboard is a first-class
+     input here — the operator tabs to E-STOP — so this is deliberately loud
+     and must not be removed per-component. */
+  :where(button, a, select, input, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--haller-live);
+    outline-offset: 2px;
   }
   /* Tabular figures on every numeric readout in mono. */
   .font-mono,
@@ -201,14 +244,16 @@
     font-size: 11px;
     font-weight: 600;
   }
-  /* Subtle scan-line texture for camera tiles & dead surfaces */
+  /* Subtle scan-line texture for camera tiles & dead surfaces. Drawn from
+     --haller-grid so it inverts with the theme; a white-on-white scanline is
+     no texture at all. */
   .scanlines {
     background-image: repeating-linear-gradient(
       0deg,
       transparent 0px,
       transparent 2px,
-      rgba(255, 255, 255, 0.025) 2px,
-      rgba(255, 255, 255, 0.025) 3px
+      var(--haller-grid) 2px,
+      var(--haller-grid) 3px
     );
   }
   /* Faint cross-hair register marks (corners) */
@@ -248,18 +293,90 @@
   0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
   50%      { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
 }
+/* Recording blink — the one animation that is a *state*, not decoration. */
+@keyframes haller-rec {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
 .animate-haller-ping {
   animation: haller-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
 }
 .animate-haller-pulse {
   animation: haller-pulse 1.4s ease-out infinite;
 }
+.animate-haller-rec {
+  animation: haller-rec 1s ease-in-out infinite;
+}
+
+/* Motion is decoration here, never the only carrier of meaning: the live lamp
+   is also green, E-STOP-on-alert is also red-bordered, and the recording dot
+   also sits next to the word "rec". So all three can simply stop. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-haller-ping,
+  .animate-haller-pulse,
+  .animate-haller-rec {
+    animation: none;
+  }
+  /* The ping is a second element stacked under the solid lamp; with the
+     animation off it would sit there as a static halo. */
+  .animate-haller-ping {
+    display: none;
+  }
+}
+
+/* Native <input type="range">, painted to match the shadcn slider below.
+   Used for the base speed governor, where a full Slider component is more
+   machinery than a one-shot setting deserves. The fill is a gradient driven by
+   a --pct custom property the component sets. */
+.haller-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+.haller-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--haller-live) var(--pct, 0%),
+    var(--input) var(--pct, 0%)
+  );
+}
+.haller-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border-radius: 3px;
+  background: var(--haller-thumb);
+  border: 1px solid var(--haller-live);
+  box-shadow: 0 0 0 2px var(--card);
+}
+.haller-range::-moz-range-track {
+  height: 6px;
+  border-radius: 2px;
+  background: var(--input);
+}
+.haller-range::-moz-range-progress {
+  height: 6px;
+  border-radius: 2px;
+  background: var(--haller-live);
+}
+.haller-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--haller-thumb);
+  border: 1px solid var(--haller-live);
+  box-shadow: 0 0 0 2px var(--card);
+}
 
 /* Slider thumb: chunky-but-precise machined feel.
    We can't rewrap shadcn ui/slider safely (Task 9 generated it),
    so we re-paint via data-slot attributes shadcn already emits. */
 [data-slot="slider-track"] {
-  background-color: oklch(1 0 0 / 0.08) !important;
+  background-color: var(--input) !important;
   height: 6px !important;
   border-radius: 2px !important;
   overflow: visible !important;
@@ -268,18 +385,21 @@
   background-color: var(--haller-live) !important;
   border-radius: 2px !important;
 }
+/* The 2px ring is a *cut-out* of whatever surface the slider sits on, so it
+   has to be the surface token, not a baked dark hex — otherwise every thumb
+   in the light theme wears a dark collar. */
 [data-slot="slider-thumb"] {
   width: 14px !important;
   height: 14px !important;
   border-radius: 3px !important;
-  background: oklch(0.96 0 0) !important;
+  background: var(--haller-thumb) !important;
   border: 1px solid var(--haller-live) !important;
-  box-shadow: 0 0 0 2px oklch(0.155 0.005 170), 0 0 12px var(--haller-live-soft) !important;
+  box-shadow: 0 0 0 2px var(--card), 0 0 12px var(--haller-live-soft) !important;
 }
 [data-slot="slider"][data-disabled] [data-slot="slider-range"] {
-  background-color: oklch(0.55 0 0) !important;
+  background-color: var(--haller-rail) !important;
 }
 [data-slot="slider"][data-disabled] [data-slot="slider-thumb"] {
-  border-color: oklch(0.55 0 0) !important;
-  box-shadow: 0 0 0 2px oklch(0.155 0.005 170) !important;
+  border-color: var(--haller-rail) !important;
+  box-shadow: 0 0 0 2px var(--card) !important;
 }

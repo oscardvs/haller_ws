@@ -4,20 +4,39 @@ import { useEffect } from "react";
 import { useTelemetry } from "@/lib/telemetry";
 
 /**
- * Persistent telemetry rail beneath the app header.
+ * Persistent telemetry rail beneath the deep-link header.
  *
- *  - Two-tone connection lamp (emerald = live, red = disconnected).
+ *  - Three-state connection lamp (see LINK_STYLE / lib/telemetry.ts).
  *  - Tight monospaced columns: t | v | ω | x | y.
  *  - Each column has a uppercase, tracked micro-label so meaning is glanceable.
  *  - Renders even when no frame has arrived yet (em-dash placeholders),
  *    so the page layout never shifts on first telemetry packet.
+ *
+ * Numeric cells fall back to em-dashes whenever the link is not `live`. The
+ * last frame is still in the store and could be drawn — but drawing a frozen
+ * odometry reading in the live style tells the operator the robot is where it
+ * was when the link died, which is exactly the thing nobody can know.
  */
+export const LINK_STYLE: Record<
+  ReturnType<typeof useTelemetry.getState>["link"],
+  { label: string; colour: string; ping: boolean }
+> = {
+  live: { label: "Live", colour: "var(--haller-live)", ping: true },
+  reconnecting: { label: "Reconnecting", colour: "var(--haller-warn)", ping: false },
+  disconnected: { label: "Disconnected", colour: "var(--haller-fault)", ping: false },
+};
+
 export function TelemetryBar() {
-  const { connected, lastFrame, start } = useTelemetry();
+  const link = useTelemetry((s) => s.link);
+  const linkDetail = useTelemetry((s) => s.linkDetail);
+  const lastFrame = useTelemetry((s) => s.lastFrame);
+  const start = useTelemetry((s) => s.start);
   useEffect(() => {
     start();
   }, [start]);
 
+  const isLive = link === "live";
+  const style = LINK_STYLE[link];
   const t = lastFrame?.t;
   const v = lastFrame?.base.linear;
   const w = lastFrame?.base.angular;
@@ -26,9 +45,9 @@ export function TelemetryBar() {
   const alerts = lastFrame?.alerts ?? [];
 
   const fmt = (n: number | undefined, d = 2) =>
-    typeof n === "number" ? n.toFixed(d) : "—";
+    isLive && typeof n === "number" ? n.toFixed(d) : "—";
 
-  const time = typeof t === "number" ? new Date(t * 1000) : null;
+  const time = isLive && typeof t === "number" ? new Date(t * 1000) : null;
   const timeStr = time
     ? time.toLocaleTimeString([], { hour12: false }) +
       "." +
@@ -38,23 +57,24 @@ export function TelemetryBar() {
   return (
     <div className="flex items-stretch border-t border-border bg-card/40 text-foreground/90 font-mono text-[11px]">
       {/* Connection lamp */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-r border-border min-w-[140px]">
+      <div
+        className="flex items-center gap-2 px-3 py-1.5 border-r border-border min-w-[150px]"
+        title={linkDetail}
+      >
         <span className="relative inline-flex h-1.5 w-1.5">
-          {connected && (
-            <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--haller-live)] opacity-70 animate-haller-ping" />
+          {style.ping && (
+            <span
+              className="absolute inline-flex h-full w-full rounded-full opacity-70 animate-haller-ping"
+              style={{ backgroundColor: style.colour }}
+            />
           )}
           <span
-            className={`relative inline-flex h-1.5 w-1.5 rounded-full ${
-              connected ? "bg-[var(--haller-live)]" : "bg-[var(--haller-fault)]"
-            }`}
+            className="relative inline-flex h-1.5 w-1.5 rounded-full"
+            style={{ backgroundColor: style.colour }}
           />
         </span>
-        <span
-          className={`label-micro ${
-            connected ? "text-[var(--haller-live)]" : "text-[var(--haller-fault)]"
-          }`}
-        >
-          {connected ? "Live" : "Disconnected"}
+        <span className="label-micro" style={{ color: style.colour }}>
+          {style.label}
         </span>
       </div>
 
