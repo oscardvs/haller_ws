@@ -1,6 +1,29 @@
-import { describe, it, expect } from "vitest";
-import { fuseLandmarkResults, buildOverlaySides, type SideFrame } from "../lib/mediapipe";
-import { extractJawOpen, FACE_EVERY_N } from "@/lib/mediapipe";
+import { describe, it, expect, vi } from "vitest";
+import { fuseLandmarkResults, buildOverlaySides, extractJawOpen, FACE_EVERY_N, MediaPipeRunner, type SideFrame } from "@/lib/mediapipe";
+import { FaceLandmarker } from "@mediapipe/tasks-vision";
+
+// Real HandLandmarker/PoseLandmarker, a FaceLandmarker that always rejects its
+// GPU delegate — exactly the failure mode that took down the pre-existing
+// hand/pose spacebar path when the face model was loaded eagerly and
+// unguarded inside MediaPipeRunner.load(). See lib/mediapipe.ts's class doc.
+vi.mock("@mediapipe/tasks-vision", () => {
+  class FakeHandLandmarker {
+    detectForVideo() { return { worldLandmarks: [], landmarks: [], handednesses: [] }; }
+    close() { /* noop */ }
+  }
+  class FakePoseLandmarker {
+    detectForVideo() { return { worldLandmarks: [], landmarks: [] }; }
+    close() { /* noop */ }
+  }
+  return {
+    FilesetResolver: { forVisionTasks: vi.fn().mockResolvedValue({}) },
+    HandLandmarker: { createFromOptions: vi.fn().mockResolvedValue(new FakeHandLandmarker()) },
+    PoseLandmarker: { createFromOptions: vi.fn().mockResolvedValue(new FakePoseLandmarker()) },
+    FaceLandmarker: {
+      createFromOptions: vi.fn().mockRejectedValue(new Error("gpu delegate init failed")),
+    },
+  };
+});
 
 const sample_pose_left_shoulder = { x: 0.5, y: 0.4, z: 0.0, visibility: 0.95 };
 const sample_pose_left_elbow    = { x: 0.5, y: 0.5, z: 0.0, visibility: 0.93 };
@@ -150,5 +173,43 @@ describe("extractJawOpen", () => {
     // Task 6's panel tick math and the backend's 250ms staleness budget
     // both depend on this exact value — see lib/mediapipe.ts's doc comment.
     expect(FACE_EVERY_N).toBe(3);
+  });
+});
+
+describe("MediaPipeRunner: a failing face model must not take hand/pose down with it", () => {
+  it("load() resolves, and detect() stays usable, when the face model rejects", async () => {
+    const runner = new MediaPipeRunner();
+    // Regression guard: this used to be `Promise.all`-equivalent (three
+    // unconditional awaits including FaceLandmarker), so a GPU delegate
+    // failure on the face model rejected load() itself — which killed the
+    // keypoint WebSocket (created only after load() resolved) and, with it,
+    // hand/pose tracking that had already succeeded.
+    await expect(runner.load()).resolves.toBeUndefined();
+
+    const ok = await runner.loadFace();
+    expect(ok).toBe(false);
+
+    // detect() must not throw even when face:true is requested — it degrades
+    // to face: null, exactly like a decimated tick, rather than crashing the
+    // tracking loop.
+    const result = runner.detect({} as HTMLVideoElement, 0, { face: true });
+    expect(result.face).toBeNull();
+    expect(result.hands).toBeDefined();
+    expect(result.pose).toBeDefined();
+  });
+
+  it("loadFace() is idempotent after a failure — it does not retry every tick", async () => {
+    const createFromOptions = vi.mocked(FaceLandmarker.createFromOptions);
+    createFromOptions.mockClear();
+    const runner = new MediaPipeRunner();
+    await runner.load();
+    const first = await runner.loadFace();
+    const second = await runner.loadFace();
+    expect(first).toBe(false);
+    expect(second).toBe(false);
+    // The panel calls loadFace() on every face tick (~every 100ms) while
+    // mouth mode is selected; a real retry-every-call would hammer the GPU
+    // delegate constructor at that rate for a model that already failed.
+    expect(createFromOptions).toHaveBeenCalledTimes(1);
   });
 });

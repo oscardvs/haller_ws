@@ -84,6 +84,10 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   );
   const [liveJaw, setLiveJaw] = useState<number | null>(null);
   const faceTickRef = useRef(0);
+  // Latches true after the face model has failed to load once, so the
+  // "unavailable" toast fires exactly once instead of on every face tick
+  // (~every 100 ms) for the rest of the session.
+  const faceLoadWarnedRef = useRef(false);
 
   // Persist calib on change.
   useEffect(() => {
@@ -133,10 +137,18 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
         if (cancelled) return;
         overlay.video!.srcObject = stream;
         await overlay.video!.play();
-        runnerRef.current = new MediaPipeRunner();
-        await runnerRef.current.load();
+        // Connect the keypoint WS independently of — and before — model
+        // loading below. It used to run only after `runner.load()` resolved,
+        // so a rejection there (the face model failing to load: see
+        // MediaPipeRunner.load()'s doc comment) silently killed the whole
+        // frame pipeline, including the pre-existing hand/pose spacebar path
+        // that had already succeeded. The rAF tick loop bails while
+        // `!client`/`!runner`, so connecting early is safe — nothing is
+        // queued until both exist.
         clientRef.current = new HumanTeleopClient(WS_URL);
         clientRef.current.connect();
+        runnerRef.current = new MediaPipeRunner();
+        await runnerRef.current.load();
       } catch (e) {
         toast.error(`camera/MediaPipe init failed: ${(e as Error).message}`);
       }
@@ -179,6 +191,23 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
       // than every ~25 ms.
       const runFace = clutchSource === "mouth" && faceTickRef.current === 0;
       faceTickRef.current = (faceTickRef.current + 1) % FACE_EVERY_N;
+      if (runFace) {
+        // Lazy, on-demand load: the face model is only ever requested once
+        // mouth mode is actually selected, mirroring the decimation gate
+        // above — a spacebar session never asks MediaPipeRunner for it, at
+        // startup or ever. loadFace() is idempotent (safe to call on every
+        // face tick) and non-fatal: a rejection leaves `runner.detect()`
+        // returning `face: null` forever, which the backend reads as
+        // staleness and fails the mouth clutch closed rather than crashing
+        // tracking. Fire-and-forget — the toast is a side effect, not state,
+        // so there is nothing here for this render to wait on.
+        void runner.loadFace().then((ok) => {
+          if (!ok && !faceLoadWarnedRef.current) {
+            faceLoadWarnedRef.current = true;
+            toast.error("mouth clutch unavailable: face model failed to load");
+          }
+        });
+      }
       const { hands, pose, face } = runner.detect(video, t, { face: runFace });
       // Only carries a value on ticks that actually ran the model. Skipped
       // ticks send null and the backend keeps using its last sample until the

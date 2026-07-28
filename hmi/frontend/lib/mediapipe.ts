@@ -21,6 +21,11 @@ import {
   type FaceLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 
+// `WasmFileset` (the type `FilesetResolver.forVisionTasks` resolves to) is
+// declared but not exported by @mediapipe/tasks-vision's own types — derive
+// it rather than redeclaring its shape.
+type Vision = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>;
+
 // Indices into the 33-point Pose Landmarker output, per MediaPipe docs.
 const POSE_LEFT_SHOULDER = 11;
 const POSE_RIGHT_SHOULDER = 12;
@@ -220,17 +225,27 @@ export function buildOverlaySides(
   };
 }
 
-/** Stateful runner: loads the WASM bundle once, then runs inference per frame. */
+/** Stateful runner: loads the WASM bundle once, then runs inference per frame.
+ *
+ * Hand + Pose are the pre-existing spacebar-teleop path and load eagerly in
+ * `load()`; a failure there is fatal, as it always was. Face is a strictly
+ * additive third model for the mouth clutch, so it must never be able to take
+ * hand/pose down with it — it is loaded lazily, on the caller's request, via
+ * `loadFace()`, and a rejection there leaves `this.face === null` rather than
+ * rejecting anything the spacebar path depends on.
+ */
 export class MediaPipeRunner {
   private hand: HandLandmarker | null = null;
   private pose: PoseLandmarker | null = null;
   private face: FaceLandmarker | null = null;
+  private faceLoadAttempted = false;
+  private vision: Vision | null = null;
 
   async load(): Promise<void> {
-    const vision = await FilesetResolver.forVisionTasks(
+    this.vision = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm",
     );
-    this.hand = await HandLandmarker.createFromOptions(vision, {
+    this.hand = await HandLandmarker.createFromOptions(this.vision, {
       baseOptions: {
         modelAssetPath:
           "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
@@ -239,7 +254,7 @@ export class MediaPipeRunner {
       runningMode: "VIDEO",
       numHands: 2,
     });
-    this.pose = await PoseLandmarker.createFromOptions(vision, {
+    this.pose = await PoseLandmarker.createFromOptions(this.vision, {
       baseOptions: {
         modelAssetPath:
           "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
@@ -248,16 +263,50 @@ export class MediaPipeRunner {
       runningMode: "VIDEO",
       numPoses: 1,
     });
-    this.face = await FaceLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-        delegate: "GPU",
-      },
-      runningMode: "VIDEO",
-      numFaces: 1,
-      outputFaceBlendshapes: true,
-    });
+    // Face is NOT loaded here. It used to be, unconditionally and awaited
+    // like hand/pose above — which meant a GPU delegate failure on this
+    // strictly-optional third model rejected the whole `load()` and took the
+    // keypoint WebSocket down with it (it was only ever created afterward),
+    // breaking hand/pose tracking for spacebar sessions that never asked for
+    // a mouth clutch at all. See `loadFace()`.
+  }
+
+  /** Load the FaceLandmarker on demand — call this only once mouth mode is
+   *  actually selected, so a spacebar session never pays for a third model.
+   *
+   *  Idempotent: a second call after either a success or a failure resolves
+   *  immediately with the cached outcome and does not retry. Non-fatal by
+   *  design: a rejection here is swallowed, logged, and reported back as
+   *  `false` for the caller to surface (a toast) rather than thrown — the
+   *  mouth clutch simply stays unavailable. `detect()` already tolerates
+   *  `this.face === null`, returning `face: null` forever, which the backend
+   *  reads as staleness and fails the clutch closed. It must never throw and
+   *  never take hand/pose down with it.
+   */
+  async loadFace(): Promise<boolean> {
+    if (this.faceLoadAttempted) return this.face !== null;
+    this.faceLoadAttempted = true;
+    try {
+      const vision = this.vision ?? await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm",
+      );
+      this.vision = vision;
+      this.face = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+      });
+      return true;
+    } catch (e) {
+      this.face = null;
+      console.error("FaceLandmarker failed to load; mouth clutch unavailable", e);
+      return false;
+    }
   }
 
   detect(
@@ -271,7 +320,10 @@ export class MediaPipeRunner {
     const hands = this.hand.detectForVideo(video, timestamp_ms);
     const pose = this.pose.detectForVideo(video, timestamp_ms);
     // Face is decimated by the caller: running it every tick is a third
-    // model per frame on a GPU that is already the bottleneck here.
+    // model per frame on a GPU that is already the bottleneck here. Also
+    // tolerates `this.face` never having loaded (not yet requested, or
+    // requested and failed) — either way this returns null rather than
+    // throwing, exactly like a skipped decimation tick.
     const face = opts?.face && this.face
       ? this.face.detectForVideo(video, timestamp_ms)
       : null;

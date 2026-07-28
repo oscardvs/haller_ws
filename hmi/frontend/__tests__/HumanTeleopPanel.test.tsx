@@ -30,6 +30,7 @@ vi.mock("@/lib/mediapipe", async (importOriginal) => {
   class FakeRunner {
     constructor() { hoisted.runners.push(this); }
     async load() { /* no WASM in jsdom */ }
+    async loadFace() { return true; }
     detect(_video: unknown, t: number, opts?: { face?: boolean }) {
       hoisted.detectCalls.push({ t, face: !!opts?.face });
       return { hands: EMPTY_HANDS, pose: EMPTY_POSE, face: opts?.face ? FACE : null };
