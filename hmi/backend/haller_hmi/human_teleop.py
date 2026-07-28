@@ -20,7 +20,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from .arm import ArmManager
 from .safety import (
@@ -350,7 +350,8 @@ class HumanTeleopSession:
             self._target_right = None
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
-            self._reset_clutch_state(clutch_source)   # type: ignore[arg-type]
+            # The membership check above is what narrows the bare str.
+            self._reset_clutch_state(cast(ClutchSource, clutch_source))
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
             # Reset smoothing state to current observed positions where available.
