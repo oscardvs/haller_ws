@@ -18,12 +18,12 @@ import { api, type HumanTeleopStatus } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { useTelemetry } from "@/lib/telemetry";
 import {
-  MediaPipeRunner, fuseLandmarkResults,
+  MediaPipeRunner, fuseLandmarkResults, buildOverlaySides,
   type KeypointFrame, type SideFrame,
 } from "@/lib/mediapipe";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 
-import { CameraOverlay, type CameraOverlayHandle, type OverlaySides } from "./CameraOverlay";
+import { CameraOverlay, type CameraOverlayHandle } from "./CameraOverlay";
 import { ScopeBar } from "./ScopeBar";
 import { DeadManIndicator } from "./DeadManIndicator";
 import { PinchCalibrationStep, type PinchCalib } from "./PinchCalibrationStep";
@@ -38,15 +38,7 @@ const JOINTS = [
 const CALIB_LS_KEY = "haller.humanTeleop.pinchCalib.v1";
 
 export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
-  // NOTE: `TelemetryFrame` (in `lib/telemetry.ts`) does not (yet) type the
-  // `human_teleop` block that the backend now emits as part of T12. Cast
-  // through `unknown` here to avoid editing the shared telemetry types in
-  // this commit; a follow-up should add `human_teleop?: HumanTeleopStatus`
-  // to `TelemetryFrame`.
-  const status = useTelemetry(
-    (s) => (s.lastFrame as unknown as { human_teleop?: HumanTeleopStatus } | null)
-      ?.human_teleop,
-  );
+  const status = useTelemetry((s) => s.lastFrame?.human_teleop);
 
   const [leftArm, setLeftArm] = useState(armIds[0] ?? "");
   const [rightArm, setRightArm] = useState(armIds[1] ?? armIds[0] ?? "");
@@ -56,6 +48,8 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   const runnerRef = useRef<MediaPipeRunner | null>(null);
   const clientRef = useRef<HumanTeleopClient | null>(null);
   const deadManRef = useRef(false);
+  const statusRef = useRef<HumanTeleopStatus | undefined>(undefined);
+  useEffect(() => { statusRef.current = status; }, [status]);
 
   const [calib, setCalib] = useState<{ left: PinchCalib; right: PinchCalib }>(() => {
     if (typeof window === "undefined") return defaultCalib();
@@ -145,9 +139,15 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
       last_t = t;
       const { hands, pose } = runner.detect(video, t);
       const fused = fuseLandmarkResults(pose, hands);
-
-      overlay.draw(toOverlay(fused));
       const ld = liveThumbIndex(fused);
+
+      overlay.draw(buildOverlaySides(pose, hands, {
+        leftLost:  statusRef.current?.tracking?.left?.lost ?? false,
+        rightLost: statusRef.current?.tracking?.right?.lost ?? false,
+        leftPinch01:  pinch01For(ld.left, calib.left),
+        rightPinch01: pinch01For(ld.right, calib.right),
+      }));
+
       if (ld.left !== liveDistance.left || ld.right !== liveDistance.right) {
         setLiveDistance(ld);
       }
@@ -305,14 +305,6 @@ function isInput(t: EventTarget | null): boolean {
     (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
 }
 
-function toOverlay(_fused: { left: SideFrame | null; right: SideFrame | null }): OverlaySides {
-  // v1 simplification: the MediaPipe wrapper returns only worldLandmarks; for
-  // a meaningful image-space overlay we need normalized landmarks too. Wiring
-  // that in is tracked as a follow-up; v1 ships the page functional but with
-  // the overlay blank. See spec §11 (open question on overlay landmarks).
-  return { left: null, right: null };
-}
-
 function liveThumbIndex(
   fused: { left: SideFrame | null; right: SideFrame | null }
 ): { left: number | null; right: number | null } {
@@ -323,4 +315,14 @@ function liveThumbIndex(
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
   };
   return { left: dist(fused.left), right: dist(fused.right) };
+}
+
+/** Map a raw thumb-index distance onto [0,1] using the captured calibration.
+ *  Returns 0.5 (neutral) when that side isn't calibrated yet, so the overlay
+ *  still draws rather than showing a permanently-dashed pinch line. */
+function pinch01For(distance: number | null, calib: PinchCalib): number {
+  if (distance === null || calib.min_m === null || calib.max_m === null) return 0.5;
+  const span = calib.max_m - calib.min_m;
+  if (span <= 0) return 0.5;
+  return Math.max(0, Math.min(1, (distance - calib.min_m) / span));
 }
