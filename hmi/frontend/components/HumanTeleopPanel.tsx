@@ -32,7 +32,9 @@ import { CameraOverlay, type CameraOverlayHandle } from "./CameraOverlay";
 import { ScopeBar } from "./ScopeBar";
 import { DeadManIndicator, type ClutchSource } from "./DeadManIndicator";
 import { PinchCalibrationStep, type PinchCalib } from "./PinchCalibrationStep";
-import { MouthClutchCalibration, mouthCalibReady, type MouthCalib } from "./MouthClutchCalibration";
+import {
+  MouthClutchCalibration, mouthCalibReady, MOUTH_MIN_SEPARATION, type MouthCalib,
+} from "./MouthClutchCalibration";
 
 const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/human/in`;
 
@@ -42,7 +44,7 @@ const JOINTS = [
 ] as const;
 
 const CALIB_LS_KEY = "haller.humanTeleop.pinchCalib.v1";
-const MOUTH_LS_KEY = "haller.humanTeleop.mouthCalib";
+const MOUTH_LS_KEY = "haller.humanTeleop.mouthCalib.v1";
 
 export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   const status = useTelemetry((s) => s.lastFrame?.human_teleop);
@@ -75,14 +77,11 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
   });
 
   const [clutchSource, setClutchSource] = useState<ClutchSource>("spacebar");
-  const [mouthCalib, setMouthCalib] = useState<MouthCalib>(() => {
-    if (typeof window === "undefined") return defaultMouthCalib();
-    try {
-      const raw = localStorage.getItem(MOUTH_LS_KEY);
-      if (raw) return JSON.parse(raw);
-    } catch { /* ignore */ }
-    return defaultMouthCalib();
-  });
+  const [mouthCalib, setMouthCalib] = useState<MouthCalib>(
+    () => (typeof window === "undefined"
+      ? defaultMouthCalib()
+      : parseMouthCalib(localStorage.getItem(MOUTH_LS_KEY)) ?? defaultMouthCalib()),
+  );
   const [liveJaw, setLiveJaw] = useState<number | null>(null);
   const faceTickRef = useRef(0);
 
@@ -262,7 +261,9 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
       // The backend refuses a mouth-mode start without an adequate separation
       // (400). Check here too so the operator gets the reason, not an HTTP code.
       if (clutchSource === "mouth" && !mouthCalibReady(mouthCalib)) {
-        toast.error("mouth clutch needs talk + open captures at least 0.25 apart");
+        toast.error(
+          `mouth clutch needs talk + open captures at least ${MOUTH_MIN_SEPARATION} apart`,
+        );
         return;
       }
       const mouth = mouthCalibReady(mouthCalib)
@@ -339,12 +340,20 @@ export function HumanTeleopPanel({ armIds }: { armIds: string[] }) {
             side="right" liveDistance={liveDistance.right} confidence={liveConf.right} value={calib.right}
             onChange={(next) => setCalib({ ...calib, right: next })}
           />
+          {/* Forced into column 2 at >=sm. As the grid's third child it would
+              otherwise land row 2 / column 1 — bottom-left — which is exactly
+              where the pinned sim tile sits (fixed bottom-16 left-4 z-40), and
+              it would cover the capture buttons and the "too close" warning in
+              precisely the sim configs used to verify this end to end. The
+              tile belongs to other work; the collision is avoided from here. */}
           {clutchSource === "mouth" ? (
-            <MouthClutchCalibration
-              liveJawOpen={liveJaw}
-              value={mouthCalib}
-              onChange={setMouthCalib}
-            />
+            <div className="sm:col-start-2">
+              <MouthClutchCalibration
+                liveJawOpen={liveJaw}
+                value={mouthCalib}
+                onChange={setMouthCalib}
+              />
+            </div>
           ) : null}
         </div>
       </div>
@@ -440,6 +449,26 @@ function defaultCalib(): { left: PinchCalib; right: PinchCalib } {
 
 function defaultMouthCalib(): MouthCalib {
   return { talk_max: null, open_min: null };
+}
+
+/** Restore a persisted mouth calibration, or null if there isn't a usable one.
+ *  A bare `JSON.parse(raw) as MouthCalib` would hand MouthClutchCalibration
+ *  whatever shape happened to be under the key and blow up on
+ *  `value.talk_max.toFixed(2)` during render — a page that will not load, from
+ *  data the page itself never validated. Checking is cheap; the key is also
+ *  versioned, so a future shape change gets a new one instead of meeting this. */
+function parseMouthCalib(raw: string | null): MouthCalib | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { talk_max, open_min } = parsed as Record<string, unknown>;
+    const ok = (v: unknown) => v === null || (typeof v === "number" && Number.isFinite(v));
+    if (!ok(talk_max) || !ok(open_min)) return null;
+    return { talk_max: talk_max as number | null, open_min: open_min as number | null };
+  } catch {
+    return null;
+  }
 }
 
 function isInput(t: EventTarget | null): boolean {
