@@ -535,7 +535,8 @@ def test_spacebar_mode_ignores_jaw_open():
 def test_mouth_mode_ignores_dead_man_boolean():
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
         sess.ingest_frame({
@@ -552,7 +553,8 @@ def test_mouth_uncalibrated_never_engages():
     # No calibration set at all.
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.ingest_frame(_mouth_frame(0.99))
         st = sess.status()
@@ -566,7 +568,8 @@ def test_mouth_invalid_calibration_never_engages():
     # Separation 0.05 — below MOUTH_MIN_SEPARATION.
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.50, "open_min": 0.55})
         sess.ingest_frame(_mouth_frame(0.99))
@@ -580,7 +583,8 @@ def test_mouth_invalid_calibration_never_engages():
 def test_mouth_engages_after_sustained_hold(monkeypatch):
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
         clock = {"t": 1000.0}
@@ -615,7 +619,8 @@ def test_mouth_hold_is_not_satisfied_by_a_face_dropout(monkeypatch):
     """
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
         clock = {"t": 1000.0}
@@ -653,7 +658,8 @@ def test_mouth_decimated_nulls_within_budget_do_not_disengage(monkeypatch):
     frames in three legitimately carry jaw_open=None."""
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
         clock = {"t": 1000.0}
@@ -678,7 +684,8 @@ def test_mouth_decimated_nulls_within_budget_do_not_disengage(monkeypatch):
 def test_mouth_stale_face_disengages(monkeypatch):
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
         clock = {"t": 1000.0}
@@ -701,10 +708,26 @@ def test_mouth_stale_face_disengages(monkeypatch):
         sess.stop()
 
 
-def test_switching_source_while_driving_forces_disengage(monkeypatch):
+def _spacebar_frame(dead_man: bool):
+    return {
+        "type": "keypoints", "ts_ms": 0,
+        "clutch_source": "spacebar", "dead_man": dead_man,
+        "jaw_open": None, "left": None, "right": None,
+    }
+
+
+def test_the_browser_cannot_hand_authority_to_the_other_source(monkeypatch):
+    """The session's authority is what start() was told, for its whole life.
+
+    A frame does not get to reassign it. When authority lived in the frame,
+    a mouth session took exactly two spacebar frames to become a spacebar
+    session — the first disengaged, the second drove — which is spec 1's
+    "sole authority for that session" weakened to "authority for ~33 ms".
+    """
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right", swap=False,
+               clutch_source="mouth")
     try:
         sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
         clock = {"t": 1000.0}
@@ -715,13 +738,50 @@ def test_switching_source_while_driving_forces_disengage(monkeypatch):
         sess.ingest_frame(_mouth_frame(0.95))
         assert sess.status()["state"] == "driving"
 
-        # Authority must never hand over mid-motion, even though the spacebar
-        # frame arrives with dead_man=True.
-        sess.ingest_frame({
-            "type": "keypoints", "ts_ms": 0,
-            "clutch_source": "spacebar", "dead_man": True,
-            "jaw_open": None, "left": None, "right": None,
-        })
-        assert sess.status()["state"] != "driving"
+        # Authority must never hand over mid-motion, even though every one of
+        # these frames arrives with dead_man=True.
+        for i in range(5):
+            clock["t"] += 0.033
+            sess.ingest_frame(_spacebar_frame(True))
+            st = sess.status()
+            assert st["state"] != "driving", f"spacebar frame {i} took the arms"
+            assert st["clutch"]["engaged"] is False
+            # And the session still reports the source it was started with.
+            assert st["clutch"]["source"] == "mouth"
     finally:
         sess.stop()
+
+
+def test_a_spacebar_session_ignores_mouth_frames_entirely(monkeypatch):
+    """The mirror image: frame-carried mouth data cannot arm a spacebar
+    session, calibration included. Otherwise a session started under the
+    spacebar could be driven by a face it was never armed for."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        clock = {"t": 1000.0}
+        monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
+                            lambda: clock["t"])
+        for _ in range(5):
+            clock["t"] += 0.100
+            frame = _mouth_frame(0.99)
+            # Calibration riding on the frame must not arm the mouth clutch
+            # in a session that did not select it.
+            frame["mouth_calib"] = {"talk_max": 0.10, "open_min": 0.90}
+            sess.ingest_frame(frame)
+            st = sess.status()
+            assert st["state"] != "driving"
+            assert st["clutch"]["source"] == "spacebar"
+        assert sess.mouth_calib_is_valid() is False
+    finally:
+        sess.stop()
+
+
+def test_start_rejects_an_unknown_clutch_source():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    with pytest.raises(ValueError):
+        sess.start(left_arm="left", right_arm="right", swap=False,
+                   clutch_source="eyebrow")
+    assert sess.state is HumanState.IDLE

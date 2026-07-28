@@ -22,7 +22,7 @@ from .calibration import (
 )
 from .cameras import CameraManager
 from .config import load_config
-from .human_teleop import HumanTeleopSession
+from .human_teleop import ClutchSource, HumanTeleopSession
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
 from .safety import Mode, ModeError
@@ -93,7 +93,10 @@ class HumanTeleopStartBody(BaseModel):
     right_arm: str
     swap: bool = False
     hz: float = 60.0
-    clutch_source: str = "spacebar"
+    # Typed, not a bare str: the source selected here is the session's sole
+    # dead-man authority for its whole life, so an unrecognised value must be
+    # rejected at the door rather than silently falling through to spacebar.
+    clutch_source: ClutchSource = "spacebar"
 
 
 class HumanTeleopSwapBody(BaseModel):
@@ -398,7 +401,7 @@ async def post_human_teleop_start(body: HumanTeleopStartBody):
     try:
         human_teleop.start(
             left_arm=body.left_arm, right_arm=body.right_arm,
-            swap=body.swap, hz=body.hz,
+            swap=body.swap, hz=body.hz, clutch_source=body.clutch_source,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

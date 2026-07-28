@@ -20,6 +20,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from .arm import ArmManager
 from .safety import (
@@ -31,6 +32,12 @@ from .safety import (
 from . import retarget
 
 logger = logging.getLogger(__name__)
+
+
+#: Which source holds dead-man authority. Exactly these two strings, mirrored
+#: in TypeScript as `ClutchSource` — nothing else may reach the session.
+ClutchSource = Literal["spacebar", "mouth"]
+CLUTCH_SOURCES: tuple[str, ...] = ("spacebar", "mouth")
 
 
 class HumanState(str, enum.Enum):
@@ -106,7 +113,10 @@ class HumanTeleopSession:
         # pattern above: 0.0 means "no sample has ever arrived", which reads
         # as stale and therefore disengaged.
         self._face_stale_ms = face_stale_ms
-        self._clutch_source: str = "spacebar"
+        # Set once by start() and never by a frame: the operator selects the
+        # authority before the session exists, and the browser cannot hand it
+        # over afterwards (spec 1, 6.4).
+        self._clutch_source: ClutchSource = "spacebar"
         self._mouth_calib: MouthClutchCalib | None = None
         self._jaw_open: float | None = None
         self._last_face_perf: float = 0.0
@@ -155,6 +165,27 @@ class HumanTeleopSession:
         with self._lock:
             return (self._mouth_calib is not None
                     and mouth_clutch_thresholds(self._mouth_calib) is not None)
+
+    def _reset_clutch_state(self, source: ClutchSource) -> None:
+        """Clear every clutch transient and arm `source`. Caller holds the lock.
+
+        Called from both ends of the lifecycle. At start(), for the same
+        reason as the per-side timestamps: a stale jaw sample from the previous
+        session must not let a fresh one engage. At stop(), because nothing is
+        being asked for any more — an ended session that still advertises
+        `{"engaged": true, "reason": "engaged"}` beside `"state": "idle"` is
+        telling the operator the arms are live when they are not.
+
+        The initial reason is honest about why a fresh mouth session cannot
+        engage yet: `_last_face_perf == 0.0` means no face has ever been seen,
+        which is exactly what status() reports live as `stale`.
+        """
+        self._clutch_source = source
+        self._jaw_open = None
+        self._last_face_perf = 0.0
+        self._jaw_above_since_perf = None
+        self._dead_man = False
+        self._clutch_reason = "spacebar_mode" if source == "spacebar" else "stale"
 
     def _mouth_engaged(self, now_perf: float) -> bool:
         """Evaluate the mouth clutch. Caller holds the lock.
@@ -259,7 +290,8 @@ class HumanTeleopSession:
                 },
             }
 
-    def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0) -> None:
+    def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0,
+              clutch_source: str = "spacebar") -> None:
         with self._lock:
             for _peer in self._peers:
                 if getattr(_peer, "status", lambda: {})().get("running"):
@@ -268,6 +300,10 @@ class HumanTeleopSession:
                 raise RuntimeError("human teleop already running; stop it first")
             if left_arm == right_arm:
                 raise ValueError("left_arm and right_arm must be different")
+            if clutch_source not in CLUTCH_SOURCES:
+                raise ValueError(
+                    f"clutch_source must be one of {CLUTCH_SOURCES}, got {clutch_source!r}"
+                )
             left = self._arms[left_arm]
             right = self._arms[right_arm]
             for a in (left, right):
@@ -293,16 +329,9 @@ class HumanTeleopSession:
             self._target_right = None
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
-            # Same reasoning as the per-side timestamps: a stale jaw sample
-            # from the previous session must not let a fresh one engage.
-            self._clutch_source = "spacebar"
-            self._jaw_open = None
-            self._last_face_perf = 0.0
-            self._jaw_above_since_perf = None
-            self._clutch_reason = "spacebar_mode"
+            self._reset_clutch_state(clutch_source)   # type: ignore[arg-type]
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
-            self._dead_man = False
             # Reset smoothing state to current observed positions where available.
             self._committed_left = self._observed_or_zero(left)
             self._committed_right = self._observed_or_zero(right)
@@ -340,9 +369,10 @@ class HumanTeleopSession:
             self._started_at = None
             # Nothing is being asked for any more. Keep the committed values —
             # goal_deg retains them too — but no joint may still advertise a
-            # live reason.
+            # live reason, and no clutch may still advertise authority.
             self._steps_left = self._held_steps(self._committed_left)
             self._steps_right = self._held_steps(self._committed_right)
+            self._reset_clutch_state("spacebar")
         logger.info("human teleop stopped")
 
     def ingest_frame(self, frame: dict) -> None:
@@ -350,17 +380,14 @@ class HumanTeleopSession:
         with self._lock:
             if not self.running:
                 return
-            prev_source = self._clutch_source
-            self._clutch_source = str(frame.get("clutch_source", "spacebar"))
-            # A source "switch" only means something once a session has
-            # actually produced a frame before — the very first frame ever
-            # seen trivially differs from the "spacebar" default but there is
-            # no prior authority to hand over, so it must not force a disengage
-            # (that would wipe the mouth-clutch hold timer on frame 1 of every
-            # mouth-mode session before it has a chance to accumulate).
-            source_changed = (
-                self._clutch_source != prev_source
-                and self._state is not HumanState.ARMED
+            # The session's authority is whatever start() was told, full stop.
+            # The frame's own clutch_source is read only to detect a browser
+            # asserting through the *other* source; it can never reassign
+            # authority, or two frames (one to disengage, one to drive) would
+            # be enough to hand the arms to the spacebar mid-session.
+            frame_source = frame.get("clutch_source")
+            source_mismatch = (
+                frame_source is not None and str(frame_source) != self._clutch_source
             )
             now_perf_clutch = time.perf_counter()
             if self._clutch_source == "mouth":
@@ -373,16 +400,24 @@ class HumanTeleopSession:
                 engaged = bool(frame.get("dead_man", False))
                 self._clutch_reason = "spacebar_mode"
                 self._jaw_above_since_perf = None
-            if source_changed:
-                # Authority never hands over mid-motion. Whatever the new
-                # source is asserting on its very first frame, disengage once
-                # and make the operator re-assert deliberately.
+            if source_mismatch:
+                # Authority never hands over mid-motion. A frame speaking for
+                # the source that does NOT hold authority disengages and wipes
+                # the hold timer, so the operator has to re-assert through the
+                # armed source deliberately.
                 engaged = False
                 self._jaw_above_since_perf = None
+                if self._clutch_source == "mouth":
+                    # Do not leave the previous frame's "engaged" standing
+                    # beside engaged=False for a tick.
+                    self._clutch_reason = "below_threshold"
             self._dead_man = engaged
 
+            # Frame-carried calibration follows the same rule as the clutch
+            # itself: a spacebar session must not be able to arm the mouth
+            # clutch from frame data alone.
             mc = frame.get("mouth_calib")
-            if mc:
+            if mc and self._clutch_source == "mouth":
                 self._mouth_calib = MouthClutchCalib(
                     talk_max=float(mc["talk_max"]), open_min=float(mc["open_min"]),
                 )

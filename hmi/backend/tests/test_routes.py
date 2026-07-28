@@ -388,3 +388,26 @@ def test_start_spacebar_mode_needs_no_mouth_calibration(app_with_mocks):
     # consulting mouth_calib_is_valid. Do NOT "fix" the 404 into a 200.
     assert r.status_code == 404
     srv_mod.human_teleop.mouth_calib_is_valid.assert_not_called()
+
+
+def test_start_hands_the_clutch_source_to_the_session(app_with_mocks):
+    """The selected source is the session's authority for its whole life, so
+    /start must actually pass it on. It used to be read only for the 400 gate
+    and then dropped, leaving the session on its "spacebar" default and the
+    browser free to assert whichever source it liked, per frame."""
+    import haller_hmi.server as srv_mod
+    srv_mod.human_teleop.mouth_calib_is_valid.return_value = True
+    app_with_mocks.post("/teleop/human/start", json={
+        "left_arm": "right", "right_arm": "right", "clutch_source": "mouth",
+    })
+    kwargs = srv_mod.human_teleop.start.call_args.kwargs
+    assert kwargs["clutch_source"] == "mouth"
+
+
+def test_start_rejects_an_unknown_clutch_source(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    r = app_with_mocks.post("/teleop/human/start", json={
+        "left_arm": "right", "right_arm": "right", "clutch_source": "eyebrow",
+    })
+    assert r.status_code == 422
+    srv_mod.human_teleop.start.assert_not_called()
