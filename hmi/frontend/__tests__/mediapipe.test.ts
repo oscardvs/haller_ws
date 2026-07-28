@@ -146,10 +146,9 @@ describe("extractJawOpen", () => {
     expect(extractJawOpen(result as never)).toBeNull();
   });
 
-  it("decimates to every third tick", () => {
-    // The panel runs face inference when tick % FACE_EVERY_N === 0.
+  it("pins FACE_EVERY_N to 3", () => {
+    // Task 6's panel tick math and the backend's 250ms staleness budget
+    // both depend on this exact value — see lib/mediapipe.ts's doc comment.
     expect(FACE_EVERY_N).toBe(3);
-    const ran = [0, 1, 2, 3, 4, 5, 6].map((t) => t % FACE_EVERY_N === 0);
-    expect(ran).toEqual([true, false, false, true, false, false, true]);
   });
 });
