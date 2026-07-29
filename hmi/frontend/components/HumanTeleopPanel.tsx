@@ -25,12 +25,16 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
-import { api, type HumanTeleopStatus, type JointDiag, type JointReason } from "@/lib/api";
+import {
+  api,
+  type AcquireSide, type HumanTeleopStatus, type JointDiag, type JointReason,
+} from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { isEditableTarget } from "@/lib/keys";
 import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
-  MediaPipeRunner, fuseLandmarkResults, buildOverlaySides, extractJawOpen, FACE_EVERY_N,
+  MediaPipeRunner, fuseLandmarkResults, buildOverlaySides, buildGhostSides,
+  extractJawOpen, JawTraceRecorder, FACE_EVERY_N,
   type KeypointFrame, type SideFrame,
 } from "@/lib/mediapipe";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
@@ -51,7 +55,12 @@ const JOINTS = [
 ] as const;
 
 const CALIB_LS_KEY = "haller.humanTeleop.pinchCalib.v1";
-const MOUTH_LS_KEY = "haller.humanTeleop.mouthCalib.v1";
+// v2: the v1 payload was {talk_max, open_min} — instantaneous peaks. The
+// clutch now reasons about sustained levels, and a peak reinterpreted as one
+// would place the engage threshold far above where the operator can hold. The
+// key is versioned precisely so a stale shape is dropped rather than misread;
+// v1 owners recalibrate, which takes ten seconds and is the point.
+const MOUTH_LS_KEY = "haller.humanTeleop.mouthCalib.v2";
 
 export function HumanTeleopPanel({
   armIds,
@@ -104,6 +113,10 @@ export function HumanTeleopPanel({
       : parseMouthCalib(localStorage.getItem(MOUTH_LS_KEY)) ?? defaultMouthCalib()),
   );
   const [liveJaw, setLiveJaw] = useState<number | null>(null);
+  // Fed straight from the render loop rather than from `liveJaw`, whose
+  // identity bail-out drops a repeated sample. A calibration trace is analysed
+  // as a windowed minimum, where the dropped sample is the one that mattered.
+  const jawRecorderRef = useRef<JawTraceRecorder>(new JawTraceRecorder());
   const faceTickRef = useRef(0);
   // Latches true after the face model has failed to load once, so the
   // "unavailable" toast fires exactly once instead of on every face tick
@@ -269,15 +282,34 @@ export function HumanTeleopPanel({
       // staleness budget expires — which is why that budget (250 ms) has to
       // sit above the ~100 ms decimation gap.
       const jaw = runFace ? extractJawOpen(face) : null;
+      if (runFace) jawRecorderRef.current.push(t, jaw);
       const fused = fuseLandmarkResults(pose, hands);
       const ld = liveThumbIndex(fused);
 
-      overlay.draw(buildOverlaySides(pose, hands, {
-        leftLost:  statusRef.current?.tracking?.left?.lost ?? false,
-        rightLost: statusRef.current?.tracking?.right?.lost ?? false,
-        leftPinch01:  pinch01For(ld.left, calib.left),
-        rightPinch01: pinch01For(ld.right, calib.right),
-      }));
+      // The robot's current pose, drawn on the operator's own shoulders to
+      // stand on top of. Gated on `running` because `acquire` keeps reporting
+      // the last session's committed pose after it ends, and a ghost of an arm
+      // nobody is about to drive is just a wrong instruction.
+      const acq = statusRef.current?.running ? statusRef.current?.acquire : undefined;
+      overlay.draw(
+        buildOverlaySides(pose, hands, {
+          leftLost:  statusRef.current?.tracking?.left?.lost ?? false,
+          rightLost: statusRef.current?.tracking?.right?.lost ?? false,
+          leftPinch01:  pinch01For(ld.left, calib.left),
+          rightPinch01: pinch01For(ld.right, calib.right),
+        }),
+        acq
+          ? buildGhostSides(
+              pose,
+              { left: acq.left.ghost, right: acq.right.ghost },
+              {
+                aspect: overlay.aspect(),
+                leftMatched: acq.left.matched,
+                rightMatched: acq.right.matched,
+              },
+            )
+          : undefined,
+      );
 
       // Functional update with an identity bail-out: returning `prev` unchanged
       // makes React skip the re-render, so this needs no effect dependency.
@@ -311,7 +343,10 @@ export function HumanTeleopPanel({
         dead_man: deadManRef.current,
         jaw_open: jaw,
         mouth_calib: mouthCalibReady(mouthCalib)
-          ? { talk_max: mouthCalib.talk_max!, open_min: mouthCalib.open_min! }
+          ? {
+              talk_hold: mouthCalib.talk_hold!, open_hold: mouthCalib.open_hold!,
+              talk_peak: mouthCalib.talk_peak,
+            }
           : undefined,
         pinch_calib: {
           left:  calib.left.min_m !== null && calib.left.max_m !== null
@@ -351,7 +386,10 @@ export function HumanTeleopPanel({
         return;
       }
       const mouth = mouthCalibReady(mouthCalib)
-        ? { talk_max: mouthCalib.talk_max!, open_min: mouthCalib.open_min! }
+        ? {
+            talk_hold: mouthCalib.talk_hold!, open_hold: mouthCalib.open_hold!,
+            talk_peak: mouthCalib.talk_peak,
+          }
         : undefined;
       if (cl || cr || mouth) {
         await api.humanTeleopCalibrate({ left: cl, right: cr, mouth });
@@ -375,7 +413,11 @@ export function HumanTeleopPanel({
       className={
         "grid gap-2 " +
         (fill
-          ? "min-h-0 grid-cols-[minmax(0,1fr)_300px] overflow-hidden"
+          // h-full is load-bearing: the cockpit gives this panel a full-height
+          // cell, but a block child of it is auto-height, so without this the
+          // camera row's minmax(120px,1fr) resolves to its 120px minimum and
+          // the whole panel bunches up against the top of an empty band.
+          ? "h-full min-h-0 grid-cols-[minmax(0,1fr)_300px] overflow-hidden"
           : "grid-cols-1 lg:grid-cols-[1fr_320px]")
       }
     >
@@ -412,6 +454,7 @@ export function HumanTeleopPanel({
           <span className="pointer-events-none absolute right-2.5 bottom-2 font-mono text-[10px] text-muted-foreground">
             frame age {running ? age(status?.frame_age_ms) : "—"}
           </span>
+          <AcquisitionHUD acquire={running ? status?.acquire : undefined} />
         </div>
 
         <div className="flex flex-wrap items-center gap-2 rounded-lg bg-card px-2.5 py-2 shadow-[0_0_0_1px_var(--border)]">
@@ -420,6 +463,11 @@ export function HumanTeleopPanel({
             trackingLost={trackingLost}
             source={clutchSource}
             reason={status?.clutch?.reason}
+            acquiring={state === "acquiring"}
+            remainingMs={Math.max(
+              status?.acquire?.left?.remaining_ms ?? 0,
+              status?.acquire?.right?.remaining_ms ?? 0,
+            )}
           />
           <span
             className="inline-flex h-6.5 items-center rounded-full px-2.5 label-micro tracking-[0.14em]"
@@ -498,6 +546,7 @@ export function HumanTeleopPanel({
                 liveJawOpen={liveJaw}
                 value={mouthCalib}
                 onChange={setMouthCalib}
+                recorder={jawRecorderRef.current}
               />
             ) : null}
           </div>
@@ -507,10 +556,12 @@ export function HumanTeleopPanel({
       <div className={"flex flex-col gap-2 " + (fill ? "min-h-0 overflow-y-auto" : "")}>
         <ArmScopePanel label={leftArm} goal={status?.goal_deg?.left}
                        limits={limitsFor(armsState, leftArm)}
-                       diag={status?.joints?.left} />
+                       diag={status?.joints?.left}
+                       acq={running ? status?.acquire?.left : undefined} />
         <ArmScopePanel label={rightArm} goal={status?.goal_deg?.right}
                        limits={limitsFor(armsState, rightArm)}
-                       diag={status?.joints?.right} />
+                       diag={status?.joints?.right}
+                       acq={running ? status?.acquire?.right : undefined} />
       </div>
     </div>
   );
@@ -526,14 +577,71 @@ const REASON_LABEL: Partial<Record<JointReason, string>> = {
   held: "HELD",
 };
 
+/**
+ * The acquisition countdown, over the picture the operator is already looking
+ * at. It has to be here rather than in the control strip: during acquisition
+ * they are watching their own arms line up with the ghost, and a number they
+ * have to look away to read is a number they will not read.
+ */
+function AcquisitionHUD({ acquire }: { acquire?: HumanTeleopStatus["acquire"] }) {
+  if (!acquire) return null;
+  const sides = ([["left", acquire.left], ["right", acquire.right]] as const)
+    .filter(([, s]) => s?.authority === "acquiring");
+  if (sides.length === 0) return null;
+
+  const remaining = Math.max(...sides.map(([, s]) => s.remaining_ms ?? 0));
+  const matched = sides.every(([, s]) => s.matched);
+  // Named, not just counted. "shoulder_pan +38°" is something the operator can
+  // act on; "not matched" is something they can only guess at.
+  const blocking = sides.flatMap(([side, s]) =>
+    s.blocking.map((j) => `${side} ${j} ${fmtSigned(s.error_deg[j])}`),
+  );
+
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-8 flex flex-col items-center gap-1">
+      <div
+        className="rounded-md px-4 py-1.5 font-mono text-[28px] leading-none tabular-nums"
+        style={{
+          background: "color-mix(in oklab, var(--card) 85%, transparent)",
+          color: matched
+            ? "var(--haller-live, oklch(80% 0.18 142))"
+            : "var(--haller-warn, oklch(75% 0.16 70))",
+        }}
+      >
+        {(remaining / 1000).toFixed(1)}s
+      </div>
+      <div
+        className="rounded-sm px-2.5 py-1 font-mono text-[11px]"
+        style={{ background: "color-mix(in oklab, var(--card) 85%, transparent)" }}
+      >
+        {matched
+          ? "hold still — acquiring"
+          : blocking.length
+            ? `match the ghost · ${blocking.join(" · ")}`
+            : "match the ghost"}
+      </div>
+    </div>
+  );
+}
+
+function fmtSigned(deg: number | undefined): string {
+  if (deg === undefined) return "";
+  return `${deg >= 0 ? "+" : ""}${deg.toFixed(0)}°`;
+}
+
 function ArmScopePanel({
-  label, goal, limits, diag,
+  label, goal, limits, diag, acq,
 }: {
   label: string;
   goal?: Record<string, number>;
   limits?: Record<string, { min: number; max: number }>;
   diag?: Record<string, JointDiag>;
+  acq?: AcquireSide;
 }) {
+  // While acquiring, the right-hand column shows how far each joint is from a
+  // match — every joint reports HELD in that state, so the reason badge has
+  // nothing to say and the error has everything.
+  const acquiring = acq?.authority === "acquiring";
   return (
     <div className="flex flex-1 flex-col gap-1.5 rounded-lg bg-card p-2.5 shadow-[0_0_0_1px_var(--border)]">
       <div className="flex items-center gap-2">
@@ -543,13 +651,15 @@ function ArmScopePanel({
         </span>
         <span aria-hidden className="h-px flex-1 bg-border" />
         <span className="font-mono text-[9px] text-muted-foreground">
-          asked → committed
+          {acquiring ? "to match" : "asked → committed"}
         </span>
       </div>
       <div className="space-y-1">
         {JOINTS.map((j) => {
           const d = diag?.[j];
           const badge = d ? REASON_LABEL[d.reason] : undefined;
+          const err = acq?.error_deg?.[j];
+          const blocked = !!acq?.blocking?.includes(j);
           return (
             <div key={j} className="flex items-center gap-2">
               <div className="flex-1">
@@ -558,11 +668,22 @@ function ArmScopePanel({
                   min={limits?.[j]?.min ?? -90}
                   max={limits?.[j]?.max ?? 90}
                   commanded={goal?.[j] ?? 0}
-                  intended={d?.target ?? undefined}
+                  // While acquiring, the ghost tick is where the operator's
+                  // pose would put this joint — the thing they are closing.
+                  intended={acquiring
+                    ? (goal?.[j] ?? 0) + (err ?? 0)
+                    : (d?.target ?? undefined)}
                 />
               </div>
-              <span className="w-14 text-right font-mono text-[10px] text-[var(--haller-warn)]">
-                {badge ?? ""}
+              <span
+                className="w-14 text-right font-mono text-[10px] tabular-nums"
+                style={{
+                  color: acquiring && !blocked
+                    ? "var(--haller-live, oklch(80% 0.18 142))"
+                    : "var(--haller-warn)",
+                }}
+              >
+                {acquiring ? fmtSigned(err) : (badge ?? "")}
               </span>
             </div>
           );
@@ -600,7 +721,7 @@ function defaultCalib(): { left: PinchCalib; right: PinchCalib } {
 }
 
 function defaultMouthCalib(): MouthCalib {
-  return { talk_max: null, open_min: null };
+  return { talk_hold: null, open_hold: null, talk_peak: null };
 }
 
 /** Restore a persisted mouth calibration, or null if there isn't a usable one.
@@ -614,10 +735,14 @@ function parseMouthCalib(raw: string | null): MouthCalib | null {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { talk_max, open_min } = parsed as Record<string, unknown>;
+    const { talk_hold, open_hold, talk_peak } = parsed as Record<string, unknown>;
     const ok = (v: unknown) => v === null || (typeof v === "number" && Number.isFinite(v));
-    if (!ok(talk_max) || !ok(open_min)) return null;
-    return { talk_max: talk_max as number | null, open_min: open_min as number | null };
+    if (!ok(talk_hold) || !ok(open_hold) || !ok(talk_peak)) return null;
+    return {
+      talk_hold: (talk_hold ?? null) as number | null,
+      open_hold: (open_hold ?? null) as number | null,
+      talk_peak: (talk_peak ?? null) as number | null,
+    };
   } catch {
     return null;
   }

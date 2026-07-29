@@ -13,13 +13,22 @@ testable with synthetic geometry.
 from __future__ import annotations
 
 import math
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 import numpy as np
 
-# MediaPipe pose world coords are right-handed metres: +X right, +Y down, +Z
-# *toward the camera*. We rebase: +X right, +Y up, +Z away from the camera
-# (i.e. "into the room"). This rebase happens once at the boundary.
+# Coordinates are MediaPipe pose-world metres, passed through unchanged from
+# the browser: +X image-right, +Y image-DOWN, +Z away from the camera (per
+# MediaPipe, a smaller z is nearer the lens). Nothing here rebases them.
+#
+# Read the joint names as labels for these axes rather than as anatomy:
+# `shoulder_lift` is asin(U_y / |U|) in a frame whose +Y points down, so it
+# grows as the arm points DOWNWARD. That has been the deployed convention since
+# the retargeter shipped and the operator's calibration is built on it — the
+# note this replaced claimed a rebase to +Y up that no code has ever performed,
+# which is a trap for anyone deriving new geometry from it (see
+# `arm_direction_vectors`, which must invert what the code does, not what the
+# comment said).
 
 Vec3 = tuple[float, float, float]
 
@@ -115,6 +124,54 @@ def compute_arm_angles(
     elbow = math.degrees(math.acos(max(-1.0, min(1.0, cos_t))))
 
     return pan, lift, elbow
+
+
+def arm_direction_vectors(
+    pan_deg: float, lift_deg: float, elbow_deg: float
+) -> tuple[Vec3, Vec3]:
+    """Inverse of `compute_arm_angles`: angles → unit upper-arm + forearm.
+
+    Used to draw the robot's current pose back onto the operator's camera as a
+    ghost to match before authority transfers. Kept here, beside the forward
+    map and tested against it by round-trip, so the two can never drift into
+    disagreeing about a convention; the browser only draws what this returns.
+
+    `compute_arm_angles` throws away one degree of freedom — the elbow's swivel
+    about the upper-arm axis — because the SO-101 has no joint for it. Any
+    inverse must therefore pick a swivel. This one bends the forearm toward +Y,
+    which in the frame above is image-down: the resting human choice, and the
+    one that makes the ghost reachable without contortion. When the upper arm
+    is itself along ±Y (a hanging arm — common, not exotic) that direction is
+    undefined, and the forearm falls back to -Z, i.e. forward, out of the
+    screen toward the camera.
+    """
+    pan = math.radians(pan_deg)
+    lift = math.radians(lift_deg)
+    elbow = math.radians(elbow_deg)
+
+    # Exactly inverts pan = atan2(U_x, U_z) and lift = asin(U_y / |U|).
+    u = np.array([
+        math.cos(lift) * math.sin(pan),
+        math.sin(lift),
+        math.cos(lift) * math.cos(pan),
+    ])
+
+    # Bend direction: the component of +Y perpendicular to the upper arm. `d`
+    # and `u` are orthonormal, so rotating u toward d by the elbow angle is a
+    # plain 2-D combination — no rotation matrix needed, and the round trip
+    # through acos(u . f) returns `elbow` by construction.
+    y_axis = np.array([0.0, 1.0, 0.0])
+    d = y_axis - float(np.dot(y_axis, u)) * u
+    if float(np.linalg.norm(d)) < 1e-6:
+        d = np.array([0.0, 0.0, -1.0])
+        d = d - float(np.dot(d, u)) * u
+    d = d / _safe_norm(d)
+
+    f = u * math.cos(elbow) + d * math.sin(elbow)
+    return (
+        cast(Vec3, tuple(float(v) for v in u)),
+        cast(Vec3, tuple(float(v) for v in f)),
+    )
 
 
 def compute_wrist_angles(

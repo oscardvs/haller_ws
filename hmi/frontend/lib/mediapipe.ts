@@ -59,7 +59,7 @@ export type KeypointFrame = {
   clutch_source: "spacebar" | "mouth";
   dead_man: boolean;
   jaw_open: number | null;
-  mouth_calib?: { talk_max: number; open_min: number };
+  mouth_calib?: { talk_hold: number; open_hold: number; talk_peak?: number | null };
   pinch_calib?: {
     left?:  { min_m: number; max_m: number };
     right?: { min_m: number; max_m: number };
@@ -80,6 +80,12 @@ export type OverlaySide = {
 };
 
 export type OverlaySides = { left: OverlaySide | null; right: OverlaySide | null };
+
+/** The robot's current pose, drawn back onto the operator's own body as
+ *  something to stand on top of. `pose` is [shoulder, elbow, wrist] in
+ *  image-normalized coords, same as OverlaySide. */
+export type GhostSide = { pose: [number, number][]; matched: boolean };
+export type GhostSides = { left: GhostSide | null; right: GhostSide | null };
 
 /** Face inference runs on every Nth tracking tick. At the panel's ~30 Hz cap
  *  that is a real jaw sample about every 100ms. The backend's staleness
@@ -223,6 +229,116 @@ export function buildOverlaySides(
     right: buildSide(POSE_RIGHT_SHOULDER, POSE_RIGHT_ELBOW, POSE_RIGHT_WRIST,
                      "Right", opts.rightLost, opts.rightPinch01),
   };
+}
+
+/** Upper arm and forearm as fractions of the operator's image-space shoulder
+ *  width. Rough anthropometry, and that is fine: what the operator matches is
+ *  the ghost's DIRECTION, which is exact, and a limb drawn a few percent long
+ *  costs nothing. Deriving the length from their own arm instead would be
+ *  circular — their arm is foreshortened by exactly the angle being corrected. */
+const GHOST_UPPER_ARM = 0.85;
+const GHOST_FOREARM = 0.70;
+
+/**
+ * Project the robot's pose into the operator's camera view.
+ *
+ * The backend sends unit upper-arm/forearm vectors already expressed in the
+ * operator's frame (`retarget.arm_direction_vectors`, un-mirrored per side), so
+ * all this does is anchor them at the operator's own shoulder and scale them to
+ * their body. Dropping z is an orthographic projection: a limb pointing at the
+ * camera draws short, which is what it looks like, and the operator resolves
+ * the remaining depth ambiguity against the per-joint error readout.
+ *
+ * `aspect` (canvas width / height) is not optional decoration. Landmarks are
+ * normalized to [0,1] on BOTH axes, so a direction expressed in them is skewed
+ * by the frame's aspect ratio; the maths happens in an isotropic space and
+ * converts back at the end. Without it the ghost's angles are simply wrong,
+ * and wrong by more the further the camera is from square.
+ */
+export function buildGhostSides(
+  pose: Pick<PoseLandmarkerResult, "landmarks">,
+  ghosts: {
+    left: { upper: number[]; fore: number[] } | null;
+    right: { upper: number[]; fore: number[] } | null;
+  },
+  opts: { aspect: number; leftMatched: boolean; rightMatched: boolean },
+): GhostSides {
+  const poseLm = pose.landmarks?.[0];
+  const lShoulder = poseLm?.[POSE_LEFT_SHOULDER];
+  const rShoulder = poseLm?.[POSE_RIGHT_SHOULDER];
+  if (!lShoulder || !rShoulder) return { left: null, right: null };
+
+  const aspect = opts.aspect > 0 ? opts.aspect : 1;
+  const toIso = (x: number, y: number): [number, number] => [x, y / aspect];
+  const fromIso = ([x, y]: [number, number]): [number, number] => [x, y * aspect];
+
+  const [lx, ly] = toIso(lShoulder.x, lShoulder.y);
+  const [rx, ry] = toIso(rShoulder.x, rShoulder.y);
+  const shoulderWidth = Math.hypot(lx - rx, ly - ry);
+  // A body too small in frame to measure would make every ghost a dot at the
+  // shoulder, which reads as "matched" when nothing is known at all.
+  if (!(shoulderWidth > 1e-3)) return { left: null, right: null };
+
+  const build = (
+    ghost: { upper: number[]; fore: number[] } | null,
+    shoulder: { x: number; y: number },
+    matched: boolean,
+  ): GhostSide | null => {
+    if (!ghost) return null;
+    const anchor = toIso(shoulder.x, shoulder.y);
+    const elbow: [number, number] = [
+      anchor[0] + shoulderWidth * GHOST_UPPER_ARM * (ghost.upper[0] ?? 0),
+      anchor[1] + shoulderWidth * GHOST_UPPER_ARM * (ghost.upper[1] ?? 0),
+    ];
+    const wrist: [number, number] = [
+      elbow[0] + shoulderWidth * GHOST_FOREARM * (ghost.fore[0] ?? 0),
+      elbow[1] + shoulderWidth * GHOST_FOREARM * (ghost.fore[1] ?? 0),
+    ];
+    return { pose: [fromIso(anchor), fromIso(elbow), fromIso(wrist)], matched };
+  };
+
+  return {
+    left: build(ghosts.left, lShoulder, opts.leftMatched),
+    right: build(ghosts.right, rShoulder, opts.rightMatched),
+  };
+}
+
+/**
+ * Collects jawOpen samples for a calibration or verification window.
+ *
+ * Fed from the render loop rather than from React state on purpose. The panel's
+ * live readout deliberately bails out of re-rendering when a sample repeats its
+ * predecessor, so a component that recorded what it was re-rendered with would
+ * silently drop samples — and this trace is analysed as a windowed MINIMUM,
+ * where a dropped sample is exactly the one that mattered.
+ */
+export class JawTraceRecorder {
+  private samples: [number, number][] = [];
+  private active = false;
+
+  start() {
+    this.samples = [];
+    this.active = true;
+  }
+
+  /** Called on every face tick. Null samples (no face) are skipped rather than
+   *  ending the window — a blink must not truncate a capture. */
+  push(t_ms: number, jaw: number | null) {
+    if (this.active && jaw !== null) this.samples.push([t_ms, jaw]);
+  }
+
+  stop(): [number, number][] {
+    this.active = false;
+    return this.samples;
+  }
+
+  get count(): number {
+    return this.samples.length;
+  }
+
+  get recording(): boolean {
+    return this.active;
+  }
 }
 
 /** Stateful runner: loads the WASM bundle once, then runs inference per frame.

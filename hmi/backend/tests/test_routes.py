@@ -343,11 +343,11 @@ def test_start_refuses_mouth_mode_with_overlapping_calibration(app_with_mocks):
     import haller_hmi.server as srv_mod
     r_calib = app_with_mocks.post(
         "/teleop/human/calibrate",
-        json={"mouth": {"talk_max": 0.50, "open_min": 0.55}},
+        json={"mouth": {"talk_hold": 0.50, "open_hold": 0.55}},
     )
     assert r_calib.status_code == 200
     srv_mod.human_teleop.set_mouth_calib.assert_called_once_with(
-        {"talk_max": 0.50, "open_min": 0.55}
+        {"talk_hold": 0.50, "open_hold": 0.55, "talk_peak": None}
     )
     # Separation here (0.05) is below the 0.25 safety margin, so a real
     # session's mouth_calib_is_valid() would return False (see
@@ -364,7 +364,7 @@ def test_start_accepts_mouth_mode_with_valid_calibration(app_with_mocks):
     import haller_hmi.server as srv_mod
     app_with_mocks.post(
         "/teleop/human/calibrate",
-        json={"mouth": {"talk_max": 0.10, "open_min": 0.90}},
+        json={"mouth": {"talk_hold": 0.10, "open_hold": 0.90}},
     )
     srv_mod.human_teleop.mouth_calib_is_valid.return_value = True
     r = app_with_mocks.post("/teleop/human/start", json={

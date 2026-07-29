@@ -110,8 +110,14 @@ export const api = {
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/swap", { swap }),
   humanTeleopCalibrate: (body: {
     left?: PinchCalibSide; right?: PinchCalibSide;
-    mouth?: { talk_max: number; open_min: number };
+    mouth?: MouthCalib;
   }) => postJson<{ ok: true }>("/teleop/human/calibrate", body),
+  /** Derive mouth thresholds from recorded traces, and/or replay one through
+   *  the real clutch. The browser records; the backend decides — the policy
+   *  has exactly one implementation and it is the one that will run. */
+  mouthAnalyze: (body: {
+    talk?: JawTrace; open?: JawTrace; verify?: JawTrace; calib?: MouthCalib;
+  }) => postJson<MouthAnalysis>("/teleop/human/mouth/analyze", body),
   recordStatus: () => getJson<RecordStatus>("/record/status"),
   recordStart: (repoId: string, task: string) =>
     postJson<{ ok: true } & RecordStatus>("/record/start", { repo_id: repoId, task }),
@@ -130,7 +136,71 @@ export type TeleopStatus = {
   started_at?: number | null;
 };
 
-export type HumanTeleopState = "idle" | "armed" | "tracking" | "driving";
+export type HumanTeleopState =
+  | "idle" | "armed" | "tracking" | "acquiring" | "driving";
+
+/** Per-side authority. `driving` is the only one that writes to an arm. */
+export type SideAuthority = "held" | "acquiring" | "driving";
+
+/** [t_ms, jawOpen] samples in arrival order. */
+export type JawTrace = [number, number][];
+
+/** Sustained levels over a hold window — never peaks. See backend safety.py. */
+export type MouthCalib = {
+  talk_hold: number;
+  open_hold: number;
+  talk_peak?: number | null;
+};
+
+export type MouthCaptureStats = {
+  n: number;
+  duration_ms: number;
+  interval_ms: number | null;
+  samples_per_window: number | null;
+  peak: number | null;
+  floor: number | null;
+  sustained: number | null;
+};
+
+export type MouthVerdict = {
+  /** The safety claim, as a boolean: normal speech must leave this false. */
+  engaged: boolean;
+  first_engage_ms: number | null;
+  engaged_samples: number;
+  n: number;
+  peak: number | null;
+  sustained: number | null;
+  t_engage: number | null;
+  /** t_engage minus what the trace sustained. Negative means it would drive. */
+  margin: number | null;
+};
+
+export type MouthAnalysis = {
+  window_ms?: number;
+  talk?: MouthCaptureStats;
+  open?: MouthCaptureStats;
+  calib?: MouthCalib | null;
+  thresholds?: { t_engage: number; t_release: number } | null;
+  ok?: boolean;
+  problems?: string[];
+  verify?: MouthVerdict;
+};
+
+export type AcquireSide = {
+  authority: SideAuthority;
+  matched: boolean;
+  /** Joints still outside tolerance, so the operator is told what to move. */
+  blocking: string[];
+  error_deg: Record<string, number>;
+  tol_deg: Record<string, number>;
+  /** Countdown to the earliest handover; null unless acquiring. */
+  remaining_ms: number | null;
+  /** 0..1 through the rate ramp; null unless driving. */
+  ramp: number | null;
+  /** The arm's pose as unit upper-arm/forearm vectors in the operator's own
+   *  frame — what the ghost overlay is drawn from. */
+  ghost: { upper: number[]; fore: number[] } | null;
+};
 
 export type PinchCalibSide = { min_m: number; max_m: number };
 
@@ -166,6 +236,13 @@ export type HumanTeleopStatus = {
   joints?: {
     left?:  Record<string, JointDiag>;
     right?: Record<string, JointDiag>;
+  };
+  /** Optional because a backend older than acquisition omits it. */
+  acquire?: {
+    acquire_ms: number;
+    match_dwell_ms: number;
+    left: AcquireSide;
+    right: AcquireSide;
   };
   /** Optional because a backend older than the mouth clutch omits it. */
   clutch?: {

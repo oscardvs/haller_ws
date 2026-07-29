@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fuseLandmarkResults, buildOverlaySides, extractJawOpen, FACE_EVERY_N, MediaPipeRunner, type SideFrame } from "@/lib/mediapipe";
+import { fuseLandmarkResults, buildOverlaySides, buildGhostSides, extractJawOpen, JawTraceRecorder, FACE_EVERY_N, MediaPipeRunner, type SideFrame } from "@/lib/mediapipe";
 import { FaceLandmarker } from "@mediapipe/tasks-vision";
 
 // Real HandLandmarker/PoseLandmarker, a FaceLandmarker that always rejects its
@@ -211,5 +211,136 @@ describe("MediaPipeRunner: a failing face model must not take hand/pose down wit
     // mouth mode is selected; a real retry-every-call would hammer the GPU
     // delegate constructor at that rate for a model that already failed.
     expect(createFromOptions).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---- ghost projection --------------------------------------------------
+
+const shoulders = (aspectShoulderY = 0.4) => {
+  const lm: { x: number; y: number; z: number; visibility: number }[] = [];
+  for (let i = 0; i < 33; i++) lm.push({ x: 0, y: 0, z: 0, visibility: 0 });
+  lm[11] = { x: 0.6, y: aspectShoulderY, z: 0, visibility: 0.9 };  // left
+  lm[12] = { x: 0.4, y: aspectShoulderY, z: 0, visibility: 0.9 };  // right
+  return { landmarks: [lm] };
+};
+
+const GHOST_DOWN = { upper: [0, 1, 0], fore: [0, 1, 0] };
+
+describe("buildGhostSides", () => {
+  it("anchors each ghost arm at that shoulder", () => {
+    const out = buildGhostSides(
+      shoulders(),
+      { left: GHOST_DOWN, right: GHOST_DOWN },
+      { aspect: 1, leftMatched: false, rightMatched: false },
+    );
+    expect(out.left!.pose[0]).toEqual([0.6, 0.4]);
+    expect(out.right!.pose[0]).toEqual([0.4, 0.4]);
+    expect(out.left!.pose).toHaveLength(3);   // shoulder, elbow, wrist
+  });
+
+  it("keeps the ghost's angle true in PIXEL space, not landmark space", () => {
+    // Landmarks are normalized to [0,1] on both axes, so a direction written in
+    // them is skewed by the frame's aspect ratio. A 45-degree ghost drawn
+    // without correcting for that lands at 30 degrees on a 16:9 canvas, and an
+    // operator who lines their arm up with it is 15 degrees out — the overlay
+    // would be actively lying about the pose it is asking them to match.
+    const aspect = 16 / 9;
+    const d = Math.SQRT1_2;
+    const out = buildGhostSides(
+      shoulders(),
+      { left: { upper: [d, d, 0], fore: [d, d, 0] }, right: null },
+      { aspect, leftMatched: false, rightMatched: false },
+    );
+    const [sx, sy] = out.left!.pose[0];
+    const [ex, ey] = out.left!.pose[1];
+    // Pixels: x scales with width, y with height, and width/height = aspect.
+    const dxPx = (ex - sx) * aspect;
+    const dyPx = ey - sy;
+    expect(dxPx).toBeCloseTo(dyPx, 6);
+  });
+
+  it("foreshortens a limb pointing at the camera instead of faking its length", () => {
+    // Mostly +z (away from the lens) leaves little in the image plane, and the
+    // ghost should draw short — that is what the operator's own arm looks like
+    // in the same pose.
+    const out = buildGhostSides(
+      shoulders(),
+      { left: { upper: [0.2, 0, 0.98], fore: [0.2, 0, 0.98] }, right: null },
+      { aspect: 1, leftMatched: false, rightMatched: false },
+    );
+    const [sx, sy] = out.left!.pose[0];
+    const [ex, ey] = out.left!.pose[1];
+    const drawn = Math.hypot(ex - sx, ey - sy);
+    const full = buildGhostSides(
+      shoulders(), { left: GHOST_DOWN, right: null },
+      { aspect: 1, leftMatched: false, rightMatched: false },
+    );
+    const fullLen = Math.hypot(full.left!.pose[1][0] - full.left!.pose[0][0],
+                               full.left!.pose[1][1] - full.left!.pose[0][1]);
+    expect(drawn).toBeLessThan(fullLen * 0.3);
+  });
+
+  it("returns nothing when there is no body to anchor to", () => {
+    expect(buildGhostSides(
+      { landmarks: [] }, { left: GHOST_DOWN, right: GHOST_DOWN },
+      { aspect: 1, leftMatched: false, rightMatched: false },
+    )).toEqual({ left: null, right: null });
+  });
+
+  it("returns nothing when the operator is too small in frame to measure", () => {
+    const lm = shoulders().landmarks[0];
+    lm[12] = { ...lm[11] };     // both shoulders on the same point
+    expect(buildGhostSides(
+      { landmarks: [lm] }, { left: GHOST_DOWN, right: GHOST_DOWN },
+      { aspect: 1, leftMatched: false, rightMatched: false },
+    )).toEqual({ left: null, right: null });
+  });
+
+  it("omits a side the backend has no pose for", () => {
+    const out = buildGhostSides(
+      shoulders(), { left: GHOST_DOWN, right: null },
+      { aspect: 1, leftMatched: true, rightMatched: false },
+    );
+    expect(out.left!.matched).toBe(true);
+    expect(out.right).toBeNull();
+  });
+});
+
+// ---- jaw trace recording -----------------------------------------------
+
+describe("JawTraceRecorder", () => {
+  it("records nothing until started", () => {
+    const r = new JawTraceRecorder();
+    r.push(0, 0.5);
+    expect(r.count).toBe(0);
+    expect(r.recording).toBe(false);
+  });
+
+  it("skips lost-face samples without ending the window", () => {
+    // A blink or a decimated frame must not truncate a capture.
+    const r = new JawTraceRecorder();
+    r.start();
+    r.push(0, 0.3);
+    r.push(100, null);
+    r.push(200, 0.4);
+    expect(r.stop()).toEqual([[0, 0.3], [200, 0.4]]);
+  });
+
+  it("drops the previous window on restart", () => {
+    const r = new JawTraceRecorder();
+    r.start();
+    r.push(0, 0.9);
+    r.stop();
+    r.start();
+    r.push(0, 0.1);
+    expect(r.stop()).toEqual([[0, 0.1]]);
+  });
+
+  it("stops recording after stop", () => {
+    const r = new JawTraceRecorder();
+    r.start();
+    r.stop();
+    r.push(0, 0.5);
+    expect(r.count).toBe(0);
   });
 });

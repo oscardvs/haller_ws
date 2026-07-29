@@ -25,6 +25,7 @@ from .config import load_config
 from .human_teleop import ClutchSource, HumanTeleopSession
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
+from . import safety
 from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
@@ -109,8 +110,28 @@ class HumanPinchCalibSide(BaseModel):
 
 
 class HumanMouthCalib(BaseModel):
-    talk_max: float
-    open_min: float
+    # Sustained levels over a hold window, not peaks — see safety.py. The
+    # browser never derives these itself; it records traces and posts them to
+    # /teleop/human/mouth/analyze, which returns exactly this shape.
+    talk_hold: float
+    open_hold: float
+    talk_peak: float | None = None
+
+
+class MouthTraceBody(BaseModel):
+    """Recorded jawOpen traces as [t_ms, score] pairs, in arrival order.
+
+    Stateless on purpose: the analyser is a pure function of the traces, so the
+    same request can be replayed, unit-tested, and reasoned about without a
+    live session. `verify` is checked against `calib` — the calibration the
+    operator is about to trust — which is why it is supplied rather than read
+    off the session.
+    """
+
+    talk: list[tuple[float, float]] | None = None
+    open: list[tuple[float, float]] | None = None
+    verify: list[tuple[float, float]] | None = None
+    calib: HumanMouthCalib | None = None
 
 
 class HumanTeleopCalibrateBody(BaseModel):
@@ -431,6 +452,38 @@ async def post_human_teleop_calibrate(body: HumanTeleopCalibrateBody):
     if body.mouth is not None:
         human_teleop.set_mouth_calib(body.mouth.model_dump())
     return {"ok": True}
+
+
+@app.post("/teleop/human/mouth/analyze")
+async def post_human_teleop_mouth_analyze(body: MouthTraceBody):
+    """Derive a mouth calibration from recorded traces, and/or replay one.
+
+    Two jobs, one route, because they are the same measurement seen twice:
+      - talk+open  → the thresholds the operator would run with.
+      - verify     → what those thresholds would have done to a fresh recording
+                     of them speaking normally. `engaged: false` there is the
+                     one safety claim this feature rests on, and it is the only
+                     way to check it against a real person rather than against
+                     an assumption about jaws in general.
+    """
+    out: dict = {}
+    if body.talk is not None or body.open is not None:
+        out.update(safety.analyze_mouth_capture(body.talk or [], body.open or []))
+    if body.verify is not None:
+        if body.calib is None:
+            raise HTTPException(
+                status_code=400,
+                detail="verify needs a calib to check against",
+            )
+        out["verify"] = safety.replay_mouth_clutch(
+            body.verify,
+            safety.MouthClutchCalib(
+                talk_hold=body.calib.talk_hold,
+                open_hold=body.calib.open_hold,
+                talk_peak=body.calib.talk_peak,
+            ),
+        )
+    return out
 
 
 @app.post("/teleop/sim/start")

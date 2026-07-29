@@ -1,12 +1,26 @@
 """Tests for HumanTeleopSession — session lifecycle + state machine."""
 from __future__ import annotations
 
+import math
 from unittest.mock import MagicMock
 
 import pytest
 
 from haller_hmi.human_teleop import HumanState, HumanTeleopSession
 from haller_hmi.safety import Mode
+
+
+def _fast_acquire(**kw) -> dict:
+    """Session kwargs that make authority transfer immediate and unconditional.
+
+    Acquisition has its own section at the bottom of this file, where the
+    countdown, the pose gate and the ramp are each tested at their real
+    defaults. Tests about the commit loop, the clutch or the session lifecycle
+    use this instead, so they reach the code they are actually about without
+    every one of them having to stage a 3 s countdown and a matched pose.
+    """
+    return {"acquire_ms": 0.0, "match_dwell_ms": 0.0,
+            "acquire_tol_default_deg": 1e6, "acquire_tol_deg": {}, **kw}
 
 
 def _fake_arm_manager():
@@ -141,7 +155,14 @@ def test_first_ingest_transitions_armed_to_tracking():
         sess.stop()
 
 
-def test_dead_man_held_transitions_tracking_to_driving():
+def test_dead_man_starts_an_acquisition_rather_than_handing_over():
+    """Closing the clutch is a request, not a handover.
+
+    This used to assert DRIVING on the very frame the dead-man arrived — the
+    behaviour the acquisition work exists to remove. The robot began following
+    instantly, from wherever the operator's arms happened to be, which is
+    essentially never where the robot's arms are.
+    """
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
     sess.start(left_arm="left", right_arm="right", swap=False)
@@ -149,9 +170,28 @@ def test_dead_man_held_transitions_tracking_to_driving():
         sess.ingest_frame(_kp_frame(dead_man=False))
         assert sess.state is HumanState.TRACKING
         sess.ingest_frame(_kp_frame(dead_man=True))
-        assert sess.state is HumanState.DRIVING
+        assert sess.state is HumanState.ACQUIRING
         sess.ingest_frame(_kp_frame(dead_man=False))
         assert sess.state is HumanState.TRACKING
+    finally:
+        sess.stop()
+
+
+def test_releasing_the_dead_man_drops_authority_on_the_same_frame():
+    """Release must never wait for the commit loop, whatever acquisition adds
+    in the other direction."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, **_fast_acquire())
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(lambda: sess.state is HumanState.DRIVING)
+        sess.ingest_frame(_kp_frame(dead_man=False))
+        # Synchronous: no sleep, no loop tick.
+        assert sess.state is HumanState.TRACKING
+        st = sess.status()["acquire"]
+        assert st["left"]["authority"] == "held"
+        assert st["right"]["authority"] == "held"
     finally:
         sess.stop()
 
@@ -202,7 +242,7 @@ def _wait_until(predicate, timeout: float = 1.0, interval: float = 0.01) -> bool
 
 def test_commit_loop_writes_to_arms_when_driving():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)  # fast loop for tests
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))  # fast loop for tests
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -230,7 +270,7 @@ def test_commit_loop_clamps_to_arm_joint_limits():
     mgr, arms = _fake_arm_manager()
     # Squeeze the left arm's pan limit so retarget output gets clamped.
     arms["left"].joint_limits_deg["shoulder_pan"] = (-5.0, 5.0)
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
         # Build a frame whose left-arm pan should retarget to ≈ +90° (far above 5°).
@@ -280,7 +320,7 @@ def test_restart_does_not_inherit_previous_session_targets():
     hands were when they last stopped, before a single new frame has arrived.
     """
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right", swap=False)
     # A pose well away from neutral, so a leaked target would be obvious.
     frame = _kp_frame(dead_man=True)
@@ -305,8 +345,8 @@ def test_restart_does_not_inherit_previous_session_targets():
 
 def test_per_arm_tracking_loss_freezes_only_that_side():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0,
-                              frame_age_ms_loss=80.0)
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0,
+                              frame_age_ms_loss=80.0))
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
         # Drive a frame where only the left side has fresh keypoints.
@@ -329,8 +369,8 @@ def test_per_arm_tracking_loss_freezes_only_that_side():
 
 def test_session_demotes_to_armed_on_ws_disconnect_window():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0,
-                              ws_disconnect_grace_s=0.1)
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0,
+                              ws_disconnect_grace_s=0.1))
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -522,12 +562,12 @@ def test_mouth_calib_is_valid_on_a_real_session():
     # Never calibrated at all.
     assert sess.mouth_calib_is_valid() is False
     # Separation 0.05 — speech overlaps the deliberate open, no safe threshold.
-    sess.set_mouth_calib({"talk_max": 0.50, "open_min": 0.55})
+    sess.set_mouth_calib({"talk_hold": 0.50, "open_hold": 0.55})
     assert sess.mouth_calib_is_valid() is False
     # Inverted captures are not valid either.
-    sess.set_mouth_calib({"talk_max": 0.90, "open_min": 0.10})
+    sess.set_mouth_calib({"talk_hold": 0.90, "open_hold": 0.10})
     assert sess.mouth_calib_is_valid() is False
-    sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+    sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
     assert sess.mouth_calib_is_valid() is True
     # Clearing it takes the gate back to refusing.
     sess.set_mouth_calib(None)
@@ -548,7 +588,7 @@ def test_mouth_releases_immediately_at_session_level(monkeypatch):
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         clock = {"t": 1000.0}
         monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
                             lambda: clock["t"])
@@ -556,11 +596,15 @@ def test_mouth_releases_immediately_at_session_level(monkeypatch):
         clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
         sess.ingest_frame(_mouth_frame(0.95))
         assert sess.status()["clutch"]["engaged"] is True
-        assert sess.status()["state"] == "driving"
+        # Asserted on the clutch, not on `state`. Since acquisition exists the
+        # two are no longer the same event: an engaged clutch is the operator
+        # ASKING for the arms, and these frames carry no keypoints at all, so
+        # no side has anything to acquire against. The clutch is what this
+        # test is about.
 
-        # ONE sample below t_release (0.34 for this calibration), and NO clock
+        # ONE sample below t_release (0.15 for this calibration), and NO clock
         # advance at all: the very next frame must have dropped the arms.
-        sess.ingest_frame(_mouth_frame(0.20))
+        sess.ingest_frame(_mouth_frame(0.05))
         st = sess.status()
         assert st["clutch"]["engaged"] is False
         assert st["clutch"]["reason"] == "below_threshold"
@@ -574,7 +618,7 @@ def test_spacebar_mode_ignores_jaw_open():
     sess = HumanTeleopSession(mgr)
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         sess.ingest_frame({
             "type": "keypoints", "ts_ms": 0,
             "clutch_source": "spacebar", "dead_man": False,
@@ -594,7 +638,7 @@ def test_mouth_mode_ignores_dead_man_boolean():
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         sess.ingest_frame({
             "type": "keypoints", "ts_ms": 0,
             "clutch_source": "mouth", "dead_man": True,
@@ -627,7 +671,7 @@ def test_mouth_invalid_calibration_never_engages():
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.50, "open_min": 0.55})
+        sess.set_mouth_calib({"talk_hold": 0.50, "open_hold": 0.55})
         sess.ingest_frame(_mouth_frame(0.99))
         st = sess.status()
         assert st["state"] != "driving"
@@ -642,7 +686,7 @@ def test_mouth_engages_after_sustained_hold(monkeypatch):
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         clock = {"t": 1000.0}
         monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
                             lambda: clock["t"])
@@ -678,7 +722,7 @@ def test_mouth_hold_is_not_satisfied_by_a_face_dropout(monkeypatch):
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         clock = {"t": 1000.0}
         monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
                             lambda: clock["t"])
@@ -717,7 +761,7 @@ def test_mouth_decimated_nulls_within_budget_do_not_disengage(monkeypatch):
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         clock = {"t": 1000.0}
         monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
                             lambda: clock["t"])
@@ -743,7 +787,7 @@ def test_mouth_stale_face_disengages(monkeypatch):
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         clock = {"t": 1000.0}
         monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
                             lambda: clock["t"])
@@ -784,7 +828,7 @@ def test_source_mismatch_reports_a_reason_the_frontend_prints():
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         # A spacebar-labelled frame reaches a session armed for mouth.
         sess.ingest_frame(_spacebar_frame(True))
         st = sess.status()
@@ -823,14 +867,14 @@ def test_the_browser_cannot_hand_authority_to_the_other_source(monkeypatch):
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
     try:
-        sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+        sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
         clock = {"t": 1000.0}
         monkeypatch.setattr("haller_hmi.human_teleop.time.perf_counter",
                             lambda: clock["t"])
         sess.ingest_frame(_mouth_frame(0.95))
         clock["t"] += (MOUTH_HOLD_MS + 10) / 1000.0
         sess.ingest_frame(_mouth_frame(0.95))
-        assert sess.status()["state"] == "driving"
+        assert sess.status()["clutch"]["engaged"] is True
 
         # Authority must never hand over mid-motion, even though every one of
         # these frames arrives with dead_man=True.
@@ -863,7 +907,7 @@ def test_a_spacebar_session_ignores_mouth_frames_entirely(monkeypatch):
             frame = _mouth_frame(0.99)
             # Calibration riding on the frame must not arm the mouth clutch
             # in a session that did not select it.
-            frame["mouth_calib"] = {"talk_max": 0.10, "open_min": 0.90}
+            frame["mouth_calib"] = {"talk_hold": 0.10, "open_hold": 0.90}
             sess.ingest_frame(frame)
             st = sess.status()
             assert st["state"] != "driving"
@@ -896,7 +940,7 @@ def test_stopped_session_still_reports_the_source_it_ran_with():
     sess = HumanTeleopSession(mgr)
     sess.start(left_arm="left", right_arm="right", swap=False,
                clutch_source="mouth")
-    sess.set_mouth_calib({"talk_max": 0.10, "open_min": 0.90})
+    sess.set_mouth_calib({"talk_hold": 0.10, "open_hold": 0.90})
     sess.ingest_frame(_mouth_frame(0.99))
     sess.stop()
 
@@ -909,3 +953,263 @@ def test_stopped_session_still_reports_the_source_it_ran_with():
         assert sess.status()["clutch"]["source"] == "spacebar"
     finally:
         sess.stop()
+
+
+# ---- authority transfer: the acquisition gate --------------------------
+#
+# Everything above uses _fast_acquire() to get out of the way. This section is
+# the acquisition itself, at real tolerances.
+
+def _pump(sess, frame, seconds: float, interval: float = 0.02) -> None:
+    """Keep a frame fresh for `seconds`. Tracking is judged on frame age, so a
+    countdown cannot be tested by sleeping — the side would go stale and the
+    acquisition would be released, which is itself correct behaviour."""
+    deadline = _time.monotonic() + seconds
+    while _time.monotonic() < deadline:
+        sess.ingest_frame(frame)
+        _time.sleep(interval)
+
+
+def _off_pose_frame(dead_man: bool = True) -> dict:
+    """Operator's arm swung out to the side: retargets to shoulder_pan ~ +90,
+    which is nowhere near a mock arm sitting at zero."""
+    frame = _kp_frame(dead_man=dead_man)
+    for side in ("left", "right"):
+        frame[side]["pose"]["elbow"] = [0.3, 1.4, 0.0]
+        frame[side]["pose"]["wrist"] = [0.6, 1.4, 0.0]
+    return frame
+
+
+def test_defaults_are_the_ones_the_operator_was_promised():
+    """The fast-acquire helper hides these everywhere else, so pin them once."""
+    from haller_hmi import human_teleop as ht
+    assert ht.ACQUIRE_MS == 3000.0
+    assert ht.MATCH_DWELL_MS == 400.0
+    assert ht.ACQUIRE_RATE_DEG_S == 20.0
+    # The worst-case matched pose must close inside the ramp, or the two
+    # constants are describing different handovers.
+    worst_case_s = ht.ACQUIRE_TOL_DEFAULT_DEG / ht.ACQUIRE_RATE_DEG_S
+    assert worst_case_s <= ht.ACQUIRE_RAMP_MS / 1000.0
+
+
+def test_acquisition_holds_off_until_the_countdown_expires():
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0,
+                              acquire_ms=400.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        frame = _kp_frame(dead_man=True)      # matches an arm sitting at zero
+        _pump(sess, frame, 0.15)
+        assert sess.state is HumanState.ACQUIRING
+        assert not arms["left"].send_goal.called, "handed over mid-countdown"
+        _pump(sess, frame, 0.5)
+        assert sess.state is HumanState.DRIVING
+        assert arms["left"].send_goal.called
+    finally:
+        sess.stop()
+
+
+def test_acquisition_never_hands_over_a_mismatched_pose():
+    """The countdown expiring is not enough. An operator standing somewhere the
+    robot is not stays in ACQUIRING for as long as they like."""
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0,
+                              acquire_ms=100.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _off_pose_frame(), 0.6)   # 6x the countdown
+        assert sess.state is HumanState.ACQUIRING
+        assert not arms["left"].send_goal.called
+        left = sess.status()["acquire"]["left"]
+        assert left["matched"] is False
+        assert left["blocking"] == ["shoulder_pan"], (
+            "the operator has to be told WHICH joint is holding it up"
+        )
+        assert left["error_deg"]["shoulder_pan"] == pytest.approx(90.0, abs=2.0)
+    finally:
+        sess.stop()
+
+
+def test_a_target_past_a_joint_limit_matches_at_the_limit():
+    """Matched against the CLAMPED target, because that is where the arm would
+    actually go. Comparing against the raw ask would make any pose that
+    saturates a joint permanently unacquirable — the gate would be unreachable
+    through no fault of the operator."""
+    mgr, arms = _fake_arm_manager()
+    for arm in arms.values():
+        arm.joint_limits_deg["shoulder_pan"] = (-5.0, 5.0)
+        arm.read_joints_deg.return_value = {
+            j: (5.0 if j == "shoulder_pan" else 0.0) for j in arm.joint_limits_deg
+        }
+    sess = HumanTeleopSession(mgr, hz_override=200.0,
+                              acquire_ms=100.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _off_pose_frame(), 0.4)   # asks for +90, arm maxes at +5
+        assert sess.state is HumanState.DRIVING
+        assert sess.status()["acquire"]["left"]["error_deg"]["shoulder_pan"] == \
+            pytest.approx(0.0, abs=0.01)
+    finally:
+        sess.stop()
+
+
+def test_committed_state_does_not_slew_while_the_clutch_is_open():
+    """The root cause of the lurch.
+
+    The smoothing state used to track the operator's pose on every tick
+    regardless of authority, so by the time the clutch closed it had already
+    arrived at wherever they were standing — and the first commit was a single
+    step to it. The rate cap had been spent against an arm that never moved.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _off_pose_frame(dead_man=False), 0.3)   # clutch OPEN
+        goal = sess.status()["goal_deg"]["left"]["shoulder_pan"]
+        assert goal == pytest.approx(0.0, abs=1.0), (
+            f"goal drifted to {goal} deg toward the operator with the clutch open"
+        )
+    finally:
+        sess.stop()
+
+
+def test_the_first_commanded_step_is_not_a_jump():
+    """The behavioural bar, as a unit test.
+
+    The arm sits at zero, the operator holds a pose 90 deg away, and the gate
+    is disabled so the handover happens anyway — the worst case the ramp has to
+    survive. The first thing written to the arm must be where the arm already
+    is, and every step after it must stay inside the ramping rate cap.
+    """
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _off_pose_frame(), 0.4)
+        sent = [c.args[0]["shoulder_pan"]
+                for c in arms["left"].send_goal.call_args_list]
+        assert len(sent) > 20, "not enough commits to judge the trajectory"
+        assert sent[0] == pytest.approx(0.0, abs=0.5), (
+            f"first commit jumped to {sent[0]} deg from an arm at 0"
+        )
+        # 20 deg/s for the first instant of driving; the loop runs at 200 Hz,
+        # so no single tick may move more than ~0.1 deg early on.
+        steps = [abs(b - a) for a, b in zip(sent, sent[1:])]
+        assert max(steps[:20]) < 0.5, f"early step of {max(steps[:20])} deg"
+        assert max(steps) <= 4.0 + 1e-6, "exceeded the session rate cap"
+        assert sent[-1] > sent[0], "the arm never actually started moving"
+    finally:
+        sess.stop()
+
+
+def test_losing_a_side_demotes_only_that_side_and_re_acquires():
+    """Recovery goes through acquisition, and only for the side that dropped.
+
+    A hand leaving frame used to leave the session DRIVING and merely skip that
+    arm's write, so when the hand came back the arm resumed instantly from
+    wherever the operator now was — the same lurch as a cold start, arriving
+    without warning mid-task.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+                              acquire_ms=100.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _kp_frame(dead_man=True), 0.4)
+        assert sess.state is HumanState.DRIVING
+
+        both_lost = _kp_frame(dead_man=True)
+        left_only = _kp_frame(dead_man=True)
+        left_only["right"] = None
+        _pump(sess, left_only, 0.3)          # right hand leaves frame
+        acq = sess.status()["acquire"]
+        assert acq["right"]["authority"] == "held"
+        assert acq["left"]["authority"] == "driving", (
+            "one hand leaving frame must not freeze the arm the other is using"
+        )
+
+        _pump(sess, both_lost, 0.4)          # it comes back
+        acq = sess.status()["acquire"]
+        assert acq["right"]["authority"] == "driving"
+        assert acq["left"]["authority"] == "driving"
+    finally:
+        sess.stop()
+
+
+def test_a_recovering_side_serves_out_a_fresh_countdown():
+    """Re-acquisition is a cold start, not a resume."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+                              acquire_ms=400.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _kp_frame(dead_man=True), 0.7)
+        assert sess.status()["acquire"]["right"]["authority"] == "driving"
+        left_only = _kp_frame(dead_man=True)
+        left_only["right"] = None
+        _pump(sess, left_only, 0.2)
+        assert sess.status()["acquire"]["right"]["authority"] == "held"
+        # Back in frame, but only briefly: not long enough for the countdown.
+        _pump(sess, _kp_frame(dead_man=True), 0.15)
+        right = sess.status()["acquire"]["right"]
+        assert right["authority"] == "acquiring"
+        assert right["remaining_ms"] > 0.0
+    finally:
+        sess.stop()
+
+
+def test_the_ghost_pose_is_published_before_the_clutch_ever_closes():
+    """The operator has to be able to pre-position against the robot BEFORE
+    engaging, or the countdown is the first they hear of the mismatch."""
+    mgr, arms = _fake_arm_manager()
+    for arm in arms.values():
+        arm.read_joints_deg.return_value = {
+            j: (45.0 if j == "shoulder_pan" else 0.0) for j in arm.joint_limits_deg
+        }
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        ghost = sess.status()["acquire"]["left"]["ghost"]
+        assert ghost is not None
+        upper = ghost["upper"]
+        assert len(upper) == 3
+        assert upper[0] == pytest.approx(math.sin(math.radians(45.0)), abs=1e-6)
+        # Unit vectors, so the browser can scale them to the operator's limbs.
+        assert math.isclose(sum(v * v for v in upper), 1.0, abs_tol=1e-9)
+        assert math.isclose(sum(v * v for v in ghost["fore"]), 1.0, abs_tol=1e-9)
+    finally:
+        sess.stop()
+
+
+def test_the_ghost_is_un_mirrored_back_into_the_operators_frame():
+    """Right-side goals go through apply_mirror on the way out, so the ghost has
+    to come back through it or the operator is shown the wrong arm's pose and
+    matches it by pointing the wrong way."""
+    mgr, arms = _fake_arm_manager()
+    for arm in arms.values():
+        arm.read_joints_deg.return_value = {
+            j: (45.0 if j == "shoulder_pan" else 0.0) for j in arm.joint_limits_deg
+        }
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        acq = sess.status()["acquire"]
+        # swap=False means left is un-mirrored and right is mirrored.
+        assert acq["left"]["ghost"]["upper"][0] == pytest.approx(
+            -acq["right"]["ghost"]["upper"][0])
+    finally:
+        sess.stop()
+
+
+def test_stop_clears_authority_and_the_countdown():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.ingest_frame(_kp_frame(dead_man=True))
+    assert _wait_until(lambda: sess.state is HumanState.DRIVING)
+    sess.stop()
+    acq = sess.status()["acquire"]
+    for side in ("left", "right"):
+        assert acq[side]["authority"] == "held"
+        assert acq[side]["remaining_ms"] is None

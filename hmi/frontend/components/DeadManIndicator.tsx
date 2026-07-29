@@ -27,17 +27,36 @@ export type ClutchSource = "spacebar" | "mouth";
 const NON_BLOCKING: readonly string[] = ["below_threshold", "spacebar_mode"];
 
 export function DeadManIndicator({
-  held, trackingLost, source = "spacebar", reason,
+  held, trackingLost, source = "spacebar", reason, acquiring, remainingMs,
 }: {
   held: boolean;
   trackingLost: boolean;
   source?: ClutchSource;
   reason?: string;
+  /** The clutch is closed but authority has not transferred yet. */
+  acquiring?: boolean;
+  /** Countdown to the earliest handover, null once it has run out and the
+   *  pose match is what is left. */
+  remainingMs?: number | null;
 }) {
   if (trackingLost) {
     return (
       <div className="font-mono text-[12px] px-3 py-1 rounded-sm border border-amber-500 text-amber-500">
         HOLD — tracking lost
+      </div>
+    );
+  }
+  // Ranked above `held` because during acquisition the clutch IS closed. The
+  // operator has to be able to tell "asking" from "driving" at a glance —
+  // reading a chip that says DRIVING while the arms are still frozen is how
+  // someone learns to distrust the chip.
+  if (acquiring) {
+    const secs = remainingMs != null && remainingMs > 0
+      ? ` ${(remainingMs / 1000).toFixed(1)}s`
+      : "";
+    return (
+      <div className="font-mono text-[12px] px-3 py-1 rounded-sm border border-[var(--instrument-line,oklch(80%_0.18_142))]/50 text-[var(--instrument-line,oklch(80%_0.18_142))]/80">
+        ACQUIRING{secs} — hold the pose
       </div>
     );
   }
