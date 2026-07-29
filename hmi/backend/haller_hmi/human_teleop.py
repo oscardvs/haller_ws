@@ -118,8 +118,14 @@ class _SideAcquire:
     error_deg: dict[str, float] = field(default_factory=dict)
     blocking: tuple[str, ...] = ()
     matched: bool = False
+    #: Why this side is where it is. The blocking-joint list explains a failed
+    #: MATCH, but says nothing about a side that never got as far as matching —
+    #: which is the state an operator is most likely to be stuck in and least
+    #: able to diagnose, since a countdown that silently restarts looks
+    #: identical to one that is frozen.
+    reason: str = "clutch_open"
 
-    def release(self) -> None:
+    def release(self, reason: str) -> None:
         self.authority = SideAuthority.HELD
         self.since_perf = None
         self.matched_since_perf = None
@@ -127,6 +133,7 @@ class _SideAcquire:
         self.error_deg = {}
         self.blocking = ()
         self.matched = False
+        self.reason = reason
 
 
 #: Which source holds dead-man authority. Exactly these two strings, mirrored
@@ -417,6 +424,7 @@ class HumanTeleopSession:
                        / max(1.0, self._acquire_ramp_ms))
         return {
             "authority": acq.authority.value,
+            "reason": acq.reason,
             "matched": acq.matched,
             "blocking": list(acq.blocking),
             "error_deg": dict(acq.error_deg),
@@ -502,7 +510,7 @@ class HumanTeleopSession:
             # previous one ended holding.
             self._seen_frame = False
             for acq in self._acq.values():
-                acq.release()
+                acq.release("clutch_open")
             self._reseed_pending = {"left": True, "right": True}
             # The membership check above is what narrows the bare str.
             self._reset_clutch_state(cast(ClutchSource, clutch_source))
@@ -553,7 +561,7 @@ class HumanTeleopSession:
             # still advertise an arm as DRIVING or mid-countdown.
             self._seen_frame = False
             for acq in self._acq.values():
-                acq.release()
+                acq.release("idle")
         logger.info("human teleop stopped")
 
     def ingest_frame(self, frame: dict) -> None:
@@ -626,16 +634,36 @@ class HumanTeleopSession:
             mirror = bool(self._cfg and self._cfg.swap)
             left_side = frame.get("left")
             right_side = frame.get("right")
+            # A side counts as tracked only when it produced a USABLE goal.
+            #
+            # `compute_joint_goal` returns None below the confidence floor, and
+            # this used to store that None while still stamping the side as
+            # freshly seen. The effect was invisible and nasty: one sub-floor
+            # frame — routine when a hand is near the edge of frame — made the
+            # side momentarily not-live, which released its acquisition and
+            # restarted the 3 s countdown, while `tracking.age_ms` went on
+            # reporting a healthy few milliseconds because a frame HAD
+            # arrived. The operator saw a countdown that would not count down
+            # and nothing anywhere saying why.
+            #
+            # Treating an unusable frame exactly like an absent one fixes both
+            # halves: the 300 ms staleness budget now absorbs a flicker instead
+            # of resetting on it, and a side that really is below the floor
+            # ages out and reads as lost, which is the truth.
             if left_side is not None:
-                self._target_left = retarget.compute_joint_goal(
+                goal = retarget.compute_joint_goal(
                     left_side, self._pinch_calib_left, mirror=mirror,
                 )
-                self._last_left_perf = now_perf
+                if goal is not None:
+                    self._target_left = goal
+                    self._last_left_perf = now_perf
             if right_side is not None:
-                self._target_right = retarget.compute_joint_goal(
+                goal = retarget.compute_joint_goal(
                     right_side, self._pinch_calib_right, mirror=not mirror,
                 )
-                self._last_right_perf = now_perf
+                if goal is not None:
+                    self._target_right = goal
+                    self._last_right_perf = now_perf
 
             self._seen_frame = True
             # Evaluated here as well as in the commit loop, and for different
@@ -666,15 +694,17 @@ class HumanTeleopSession:
             # `target is None` also covers a side below the confidence floor:
             # compute_joint_goal refuses to emit a goal there, so the
             # confidence gate is an acquisition gate for free.
-            live = (self._dead_man
-                    and self._side_trackable(side, now)
-                    and target is not None)
-            if not live:
+            tracked = self._side_trackable(side, now) and target is not None
+            if not self._dead_man or not tracked:
                 if acq.authority is not SideAuthority.HELD:
                     # Coming back from a handover: re-read the arm before its
                     # position is trusted again.
                     self._reseed_pending[side] = True
-                acq.release()
+                # Tracking outranks the clutch: an operator holding the
+                # dead-man over a side the robot cannot see needs to be told
+                # about the side, not about the clutch they are already
+                # holding.
+                acq.release("no_tracking" if not tracked else "clutch_open")
                 continue
 
             if acq.authority is SideAuthority.HELD:
@@ -697,6 +727,7 @@ class HumanTeleopSession:
             acq.matched = not acq.blocking
 
             if acq.authority is SideAuthority.DRIVING:
+                acq.reason = "driving"
                 continue    # the error stays published; the ramp handles it
 
             if acq.matched:
@@ -704,6 +735,7 @@ class HumanTeleopSession:
                     acq.matched_since_perf = now
             else:
                 acq.matched_since_perf = None
+            acq.reason = "counting" if acq.matched else "matching"
 
             counted_down = (acq.since_perf is not None
                             and (now - acq.since_perf) * 1000.0 >= self._acquire_ms)
@@ -713,6 +745,11 @@ class HumanTeleopSession:
             if counted_down and dwelled:
                 acq.authority = SideAuthority.DRIVING
                 acq.driving_since_perf = now
+                # Here, not only on the next pass: for one tick the block would
+                # otherwise advertise `authority: driving` beside
+                # `reason: counting`, which is the kind of self-contradiction
+                # that teaches an operator to stop reading the diagnostics.
+                acq.reason = "driving"
                 logger.info("human teleop: %s arm acquired (max error %.1f deg)",
                             side, max((abs(e) for e in acq.error_deg.values()),
                                       default=0.0))

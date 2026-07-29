@@ -186,8 +186,14 @@ export type MouthAnalysis = {
   verify?: MouthVerdict;
 };
 
+/** Why a side is where it is. `no_tracking` is the one that used to be
+ *  invisible: a countdown silently restarting looks exactly like a frozen one. */
+export type AcquireReason =
+  | "clutch_open" | "no_tracking" | "matching" | "counting" | "driving" | "idle";
+
 export type AcquireSide = {
   authority: SideAuthority;
+  reason: AcquireReason;
   matched: boolean;
   /** Joints still outside tolerance, so the operator is told what to move. */
   blocking: string[];

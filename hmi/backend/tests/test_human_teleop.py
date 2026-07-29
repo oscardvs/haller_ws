@@ -1213,3 +1213,76 @@ def test_stop_clears_authority_and_the_countdown():
     for side in ("left", "right"):
         assert acq[side]["authority"] == "held"
         assert acq[side]["remaining_ms"] is None
+
+
+def test_one_sub_floor_frame_does_not_restart_the_countdown():
+    """The bug that made the countdown look frozen.
+
+    `compute_joint_goal` refuses below the confidence floor, and the session
+    used to store that refusal as the target while still stamping the side as
+    freshly seen. One sub-floor frame — routine when a hand is near the edge of
+    frame — made the side momentarily not-live, which released its acquisition
+    and restarted the 3 s countdown. Meanwhile `tracking.age_ms` went on
+    reporting a healthy few milliseconds, because a frame HAD arrived. The
+    operator saw a countdown that would not count down, and nothing anywhere
+    saying why.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0,
+                              acquire_ms=3000.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _kp_frame(dead_man=True), 0.2)
+        before = sess.status()["acquire"]["left"]["remaining_ms"]
+        assert before is not None and before < 3000.0, "countdown never started"
+
+        # A flicker below the floor, then back to a good frame.
+        sess.ingest_frame(_kp_frame(dead_man=True, confidence=0.1))
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        after = sess.status()["acquire"]["left"]["remaining_ms"]
+
+        assert after is not None and after < before, (
+            f"a sub-floor frame restarted the countdown ({before:.0f} -> {after:.0f} ms)"
+        )
+        assert sess.status()["acquire"]["left"]["authority"] == "acquiring"
+    finally:
+        sess.stop()
+
+
+def test_a_side_below_the_confidence_floor_reads_as_lost_rather_than_fresh():
+    """An unusable frame is an absent frame, and must age out like one.
+
+    Reporting a few milliseconds of age for a side the retargeter is refusing
+    to emit a goal for is the more dangerous half of the same bug: it tells the
+    operator the arm is being tracked while nothing can be done with it.
+    """
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+                              acquire_ms=100.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _kp_frame(dead_man=True), 0.3)
+        assert sess.state is HumanState.DRIVING
+        _pump(sess, _kp_frame(dead_man=True, confidence=0.1), 0.3)
+        st = sess.status()
+        assert st["tracking"]["left"]["lost"] is True
+        assert st["acquire"]["left"]["authority"] == "held"
+        assert st["acquire"]["left"]["reason"] == "no_tracking", (
+            "a stalled side has to say which fault stalled it"
+        )
+    finally:
+        sess.stop()
+
+
+def test_the_acquire_block_says_why_a_side_is_not_driving():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=False))
+        assert sess.status()["acquire"]["left"]["reason"] == "clutch_open"
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(lambda: sess.state is HumanState.DRIVING)
+        assert sess.status()["acquire"]["left"]["reason"] == "driving"
+    finally:
+        sess.stop()

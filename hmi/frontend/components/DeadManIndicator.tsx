@@ -39,7 +39,13 @@ export function DeadManIndicator({
    *  pose match is what is left. */
   remainingMs?: number | null;
 }) {
-  if (trackingLost) {
+  // Tracking loss is ranked BELOW acquiring and driving, because the sides are
+  // independent: one hand out of frame while the other is mid-acquisition is
+  // the normal single-arm case, and a chip reading "HOLD — tracking lost" over
+  // a countdown that is visibly running just tells the operator the chip is
+  // wrong. The per-side age pills carry which arm is missing; this only claims
+  // the whole session is stalled when nothing at all is under way.
+  if (trackingLost && !acquiring && !held) {
     return (
       <div className="font-mono text-[12px] px-3 py-1 rounded-sm border border-amber-500 text-amber-500">
         HOLD — tracking lost

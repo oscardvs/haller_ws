@@ -231,6 +231,24 @@ export function buildOverlaySides(
   };
 }
 
+/** The operator's own upper-arm and forearm as unit vectors, in the same world
+ *  frame the backend expresses the robot's pose in — so the two can be drawn
+ *  through one projection and compared. Returns null for a side that is not
+ *  being tracked, or whose limbs are too short to give a direction. */
+export function armDirections(
+  side: SideFrame | null,
+): { upper: Vec3; fore: Vec3 } | null {
+  if (!side) return null;
+  const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const unit = (v: Vec3): Vec3 | null => {
+    const n = Math.hypot(v[0], v[1], v[2]);
+    return n > 1e-6 ? [v[0] / n, v[1] / n, v[2] / n] : null;
+  };
+  const upper = unit(sub(side.pose.elbow, side.pose.shoulder));
+  const fore = unit(sub(side.pose.wrist, side.pose.elbow));
+  return upper && fore ? { upper, fore } : null;
+}
+
 /** Upper arm and forearm as fractions of the operator's image-space shoulder
  *  width. Rough anthropometry, and that is fine: what the operator matches is
  *  the ghost's DIRECTION, which is exact, and a limb drawn a few percent long

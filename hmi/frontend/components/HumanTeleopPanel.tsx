@@ -34,9 +34,10 @@ import { isEditableTarget } from "@/lib/keys";
 import { useTelemetry, type ArmState } from "@/lib/telemetry";
 import {
   MediaPipeRunner, fuseLandmarkResults, buildOverlaySides, buildGhostSides,
-  extractJawOpen, JawTraceRecorder, FACE_EVERY_N,
+  armDirections, extractJawOpen, JawTraceRecorder, FACE_EVERY_N,
   type KeypointFrame, type SideFrame,
 } from "@/lib/mediapipe";
+import { PoseMatchGizmo, type ArmDirections } from "./PoseMatchGizmo";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 
 import { CameraOverlay, type CameraOverlayHandle } from "./CameraOverlay";
@@ -112,6 +113,14 @@ export function HumanTeleopPanel({
       ? defaultMouthCalib()
       : parseMouthCalib(localStorage.getItem(MOUTH_LS_KEY)) ?? defaultMouthCalib()),
   );
+  // The operator's own arm directions, for the pose-match gizmo. Throttled
+  // below the tracking rate on purpose: it is a visual aid, and re-rendering
+  // this whole panel (six scope bars a side) at the full frame rate to animate
+  // a 108px widget is not a trade worth making.
+  const [liveArms, setLiveArms] = useState<{
+    left: ArmDirections | null; right: ArmDirections | null;
+  }>({ left: null, right: null });
+  const gizmoTickRef = useRef(0);
   const [liveJaw, setLiveJaw] = useState<number | null>(null);
   // Fed straight from the render loop rather than from `liveJaw`, whose
   // identity bail-out drops a repeated sample. A calibration trace is analysed
@@ -328,6 +337,15 @@ export function HumanTeleopPanel({
         prev.left === lc.left && prev.right === lc.right ? prev : lc,
       );
 
+      // ~10 Hz. Same rule as the others: never add `liveArms` to the effect's
+      // dep array or the loop is rebuilt on every frame.
+      gizmoTickRef.current = (gizmoTickRef.current + 1) % 3;
+      if (gizmoTickRef.current === 0) {
+        setLiveArms({
+          left: armDirections(fused.left), right: armDirections(fused.right),
+        });
+      }
+
       // Same identity bail-out as liveDistance/liveConf above, and the same
       // rule: do NOT add `liveJaw` to the effect's dep array, or the loop is
       // torn down and rebuilt on every face tick. Only face ticks publish —
@@ -455,6 +473,23 @@ export function HumanTeleopPanel({
             frame age {running ? age(status?.frame_age_ms) : "—"}
           </span>
           <AcquisitionHUD acquire={running ? status?.acquire : undefined} />
+          {/* Top-right, clear of the operator's own body. Two arms in one
+              synthetic three-quarter view — see PoseMatchGizmo for why the
+              on-body ghost alone is not enough. */}
+          {running && status?.acquire ? (
+            <div className="pointer-events-none absolute top-2 right-2.5 flex gap-1.5">
+              {(["left", "right"] as const).map((side) => (
+                <PoseMatchGizmo
+                  key={side}
+                  side={side}
+                  robot={status.acquire![side]?.ghost ?? null}
+                  operator={liveArms[side]}
+                  matched={!!status.acquire![side]?.matched}
+                  authority={status.acquire![side]?.authority}
+                />
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 rounded-lg bg-card px-2.5 py-2 shadow-[0_0_0_1px_var(--border)]">
@@ -596,6 +631,10 @@ function AcquisitionHUD({ acquire }: { acquire?: HumanTeleopStatus["acquire"] })
   const blocking = sides.flatMap(([side, s]) =>
     s.blocking.map((j) => `${side} ${j} ${fmtSigned(s.error_deg[j])}`),
   );
+  // A side the robot cannot see is not counting down, and its absence from the
+  // list above is not an explanation. Say which arm and why.
+  const untracked = (["left", "right"] as const)
+    .filter((side) => acquire[side]?.reason === "no_tracking");
 
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-8 flex flex-col items-center gap-1">
@@ -620,6 +659,17 @@ function AcquisitionHUD({ acquire }: { acquire?: HumanTeleopStatus["acquire"] })
             ? `match the ghost · ${blocking.join(" · ")}`
             : "match the ghost"}
       </div>
+      {untracked.length ? (
+        <div
+          className="rounded-sm px-2.5 py-1 font-mono text-[11px]"
+          style={{
+            background: "color-mix(in oklab, var(--card) 85%, transparent)",
+            color: "var(--haller-warn, oklch(75% 0.16 70))",
+          }}
+        >
+          {untracked.join(" + ")} not tracked — that arm is not counting down
+        </div>
+      ) : null}
     </div>
   );
 }
