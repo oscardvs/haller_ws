@@ -1,0 +1,40 @@
+- generic [active] [ref=f1e1]:
+  - banner [ref=f1e2]:
+    - generic [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - link "Haller HMI — back to cockpit" [ref=f1e5] [cursor=pointer]:
+          - /url: /
+          - generic [ref=f1e9]: Haller
+        - generic [ref=f1e10]: Human teleop
+        - link "← cockpit" [ref=f1e11] [cursor=pointer]:
+          - /url: /
+      - button "Emergency stop" [ref=f1e12]: E-STOP
+    - generic [ref=f1e14]:
+      - generic "connecting…" [ref=f1e15]: Reconnecting
+      - generic [ref=f1e19]:
+        - generic [ref=f1e20]: t
+        - generic [ref=f1e21]: —
+      - generic [ref=f1e22]:
+        - generic [ref=f1e23]: v
+        - generic [ref=f1e24]: — m/s
+      - generic [ref=f1e25]:
+        - generic [ref=f1e26]: ω
+        - generic [ref=f1e27]: — rad/s
+      - generic [ref=f1e28]:
+        - generic [ref=f1e29]: x
+        - generic [ref=f1e30]: —
+      - generic [ref=f1e31]:
+        - generic [ref=f1e32]: "y"
+        - generic [ref=f1e33]: —
+      - generic [ref=f1e34]:
+        - generic [ref=f1e35]: Alerts
+        - generic [ref=f1e36]: none
+  - main [ref=f1e37]:
+    - generic [ref=f1e39]:
+      - heading "Human Teleop" [level=1] [ref=f1e40]
+      - paragraph [ref=f1e41]: bimanual · monocular RGB · SPACE or mouth-open to drive
+    - generic [ref=f1e42]:
+      - text: human teleop needs ≥2 enabled arms in
+      - code [ref=f1e43]: hmi/backend/config.yaml
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f1e49] [cursor=pointer]

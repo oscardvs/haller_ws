@@ -1,0 +1,14 @@
+[    1219ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    1350ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    5989ms] [LOG] I0729 18:30:05.012000 2186832 gl_context.cc:407] GL version: 3.0 (OpenGL ES 3.0 (WebGL 2.0 (OpenGL ES 3.0 Chromium))), renderer: WebKit WebGL @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    5991ms] [WARNING] W0729 18:30:05.015000 2186832 gl_context.cc:1119] OpenGL error checking is disabled @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    5992ms] [LOG] Graph successfully started running. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    9877ms] [LOG] I0729 18:30:08.899000 2186832 gl_context.cc:407] GL version: 3.0 (OpenGL ES 3.0 (WebGL 2.0 (OpenGL ES 3.0 Chromium))), renderer: WebKit WebGL @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    9883ms] [WARNING] W0729 18:30:08.905999 2186832 gl_context.cc:1119] OpenGL error checking is disabled @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    9885ms] [LOG] Graph successfully started running. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[   21146ms] [WARNING] W0729 18:30:20.168999 2186832 landmark_projection_calculator.cc:81] Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the square ROI. Provide IMAGE_DIMENSIONS or use PROJECTION_MATRIX. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[   34522ms] [WARNING] W0729 18:30:33.544999 2186832 landmark_projection_calculator.cc:81] Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the square ROI. Provide IMAGE_DIMENSIONS or use PROJECTION_MATRIX. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[   36883ms] [WARNING] [.WebGL-0x2f64000f5000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels @ http://localhost:3000/teleop/human:0
+[   39680ms] [WARNING] [.WebGL-0x2f64000f5000]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels @ http://localhost:3000/teleop/human:0
+[   39680ms] [WARNING] [.WebGL-0x2f6408684e00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels @ http://localhost:3000/teleop/human:0
+[   39681ms] [WARNING] [.WebGL-0x2f6408684e00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat) @ http://localhost:3000/teleop/human:0

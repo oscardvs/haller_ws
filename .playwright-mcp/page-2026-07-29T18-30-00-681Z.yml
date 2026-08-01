@@ -1,0 +1,39 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - link "Haller HMI — back to cockpit" [ref=e5] [cursor=pointer]:
+          - /url: /
+          - generic [ref=e9]: Haller
+        - generic [ref=e10]: Human teleop
+        - link "← cockpit" [ref=e11] [cursor=pointer]:
+          - /url: /
+      - button "Emergency stop" [ref=e12]: E-STOP
+    - generic [ref=e14]:
+      - generic "connecting…" [ref=e15]: Reconnecting
+      - generic [ref=e19]:
+        - generic [ref=e20]: t
+        - generic [ref=e21]: —
+      - generic [ref=e22]:
+        - generic [ref=e23]: v
+        - generic [ref=e24]: — m/s
+      - generic [ref=e25]:
+        - generic [ref=e26]: ω
+        - generic [ref=e27]: — rad/s
+      - generic [ref=e28]:
+        - generic [ref=e29]: x
+        - generic [ref=e30]: —
+      - generic [ref=e31]:
+        - generic [ref=e32]: "y"
+        - generic [ref=e33]: —
+      - generic [ref=e34]:
+        - generic [ref=e35]: Alerts
+        - generic [ref=e36]: none
+  - main [ref=e37]:
+    - generic [ref=e39]:
+      - heading "Human Teleop" [level=1] [ref=e40]
+      - paragraph [ref=e41]: bimanual · monocular RGB · SPACE or mouth-open to drive
+    - generic [ref=e42]:
+      - text: human teleop needs ≥2 enabled arms in
+      - code [ref=e43]: hmi/backend/config.yaml
+  - region "Notifications alt+T"

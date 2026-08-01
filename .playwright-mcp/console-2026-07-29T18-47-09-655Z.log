@@ -1,0 +1,10 @@
+[    3880ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    3955ms] [LOG] [HMR] connected @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    6852ms] [LOG] I0729 18:47:16.504999 2186832 gl_context.cc:407] GL version: 3.0 (OpenGL ES 3.0 (WebGL 2.0 (OpenGL ES 3.0 Chromium))), renderer: WebKit WebGL @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    6854ms] [WARNING] W0729 18:47:16.508000 2186832 gl_context.cc:1119] OpenGL error checking is disabled @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    6855ms] [LOG] Graph successfully started running. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    7722ms] [LOG] I0729 18:47:17.376000 2186832 gl_context.cc:407] GL version: 3.0 (OpenGL ES 3.0 (WebGL 2.0 (OpenGL ES 3.0 Chromium))), renderer: WebKit WebGL @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    7724ms] [WARNING] W0729 18:47:17.377999 2186832 gl_context.cc:1119] OpenGL error checking is disabled @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[    7725ms] [LOG] Graph successfully started running. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[   17480ms] [WARNING] W0729 18:47:27.134000 2186832 landmark_projection_calculator.cc:81] Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the square ROI. Provide IMAGE_DIMENSIONS or use PROJECTION_MATRIX. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
+[   28200ms] [WARNING] W0729 18:47:37.852999 2186832 landmark_projection_calculator.cc:81] Using NORM_RECT without IMAGE_DIMENSIONS is only supported for the square ROI. Provide IMAGE_DIMENSIONS or use PROJECTION_MATRIX. @ http://localhost:3000/_next/static/chunks/0z~i_next_dist_080cxwf._.js:2477
