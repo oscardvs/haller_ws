@@ -1268,3 +1268,120 @@ No spec requirement is unimplemented.
 - The route fixture in `tests/test_routes.py` is `app_with_mocks`, not `client`.
 
 **Known gap left deliberately:** the frontend still shows a plain Home button and will surface the 409 as a generic error. Improving that copy belongs with spec B's UI work, not here.
+
+---
+
+## Amendments after Task 4's review
+
+Task 4's review found three design defects that originate in this plan, not in
+the implementation. All three were ruled on by the plan owner on 2026-08-01.
+
+### A1 — Streaming path must not command a joint it cannot measure (was Critical)
+
+`read_joints_deg()` omits any joint whose `.pos` was missing from the
+observation, and `limit_step` passes joints absent from `current` through
+**uncapped**. So a flaky UART read at seed time — the first command after any
+torque toggle, including E-STOP recovery — delivered the full uncapped jump on
+the dropped joints. That is the exact failure this task exists to prevent, on
+the exact hardware fault the plan cites as its motivation, and it contradicts
+the ruling already made for the discrete path in Task 6.
+
+**Ruling: don't move what you can't measure.** `send_goal` drops goal joints
+that have no entry in `_last_commanded`, and re-attempts a read for missing
+joints on later calls so a joint recovers as soon as one read succeeds. A
+dropped packet costs one tick of that joint, never an unbounded jump.
+`limit_step`'s own pass-through contract is unchanged — the guard is at the
+caller, matching how A1's sibling was handled in Task 6.
+
+### A2 — The cap must be per-second, not per-call (was Important)
+
+`max_speed_deg_s / ramp_hz` is a per-*call* budget, but the loops that call
+`send_goal` do not run at `ramp_hz`. Shipped defaults gave 1.2°/call, so teleop
+at 60 Hz enforced **72°/s against a config that reads 60**, and sim tests at
+200 Hz enforced **240°/s**. Raising a loop rate silently raised the arm's speed
+ceiling.
+
+**Ruling: compute the budget from elapsed time.** Add to `safety.py`:
+
+```python
+# Largest gap that still earns proportional budget. Beyond this a caller has
+# stalled, and a stalled caller must not bank a large jump.
+MAX_STEP_DT_S = 0.1
+
+
+def step_budget_deg(
+    dt_s: float,
+    max_speed_deg_s: float,
+    ramp_hz: float,
+    max_dt_s: float = MAX_STEP_DT_S,
+) -> float:
+    """Degrees one joint may move on a single call, given time since the last.
+
+    Steady-state speed is exactly `max_speed_deg_s` at any loop rate. `ramp_hz`
+    sets the floor so the first call after a seed (dt ~ 0) still moves, and
+    `max_dt_s` sets the ceiling so a long idle cannot bank an unbounded step.
+    """
+    dt = min(max(dt_s, 1.0 / ramp_hz), max_dt_s)
+    return max_speed_deg_s * dt
+```
+
+Both handles gain `_last_command_at: float | None`, set from
+`time.monotonic()` alongside `_last_commanded` and cleared with it.
+`ramp_hz` keeps its original meaning on the discrete path, where `plan_ramp`
+genuinely does emit waypoints at that rate.
+
+### A3 — Test coverage restored (was Important)
+
+`tests/sim/test_human_teleop_sim.py::test_acquisition_and_recovery_against_real_sim_arms`
+sets a 2000°-per-call override at step 0 and never restores it, so the suite's
+only real-session-drive test runs with the cap effectively off. Restore
+`MotionConfig()` on both handles once the park settles, so steps 1-6 exercise
+the composition of the session's own 4°/tick cap with this one.
+
+---
+
+### Task 8: Record what was commanded, not what was requested
+
+**Files:**
+- Modify: `hmi/backend/haller_hmi/human_teleop.py` (`_commit`, around line 927)
+- Test: `hmi/backend/tests/test_human_teleop.py`
+
+**Interfaces:**
+- Consumes: `send_goal`'s return value, which is the post-cap commanded dict.
+- Produces: no new public interface; `status()["goal_deg"]` becomes the
+  commanded pose rather than the requested one.
+
+**Why this is in scope.** `recorder.py:216` builds the dataset's `action`
+column from `human_teleop.status()["goal_deg"]`, while `observation.state`
+comes from the measured position. `_commit` discards `send_goal`'s return, so
+once the cap can shorten a command, every frame recorded while the operator
+outruns the limit pairs a real observed state with an action the arm was never
+given — overstated in the direction of motion. That is directional label noise
+in the training data, which is this rig's entire product. It must land before
+the first dataset anyone intends to train on.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+def test_commit_records_the_commanded_pose_not_the_requested_one(...):
+    """recorder.py builds the dataset action column from status()["goal_deg"].
+    If that reports the requested pose while the arm was given a capped one,
+    every fast-motion frame teaches a policy to over-command."""
+    # Arrange a session whose handle caps a large request down to a small step,
+    # drive one tick, then assert status()["goal_deg"] equals what send_goal
+    # returned — not what the retargeter asked for.
+```
+
+Follow the existing construction in `tests/test_human_teleop.py` for building a
+session with mock handles; make the mock `send_goal` return a value strictly
+smaller than its input so requested and commanded are distinguishable.
+
+- [ ] **Step 2: Run it and watch it fail** (it reports the requested pose today)
+- [ ] **Step 3: Have `_commit` keep the return value and store that as the committed goal**
+- [ ] **Step 4: Run the tests, then the full suite**
+- [ ] **Step 5: Commit**
+
+```bash
+git add hmi/backend/haller_hmi/human_teleop.py hmi/backend/tests/test_human_teleop.py
+git commit -m "fix(hmi): record the commanded pose, not the requested one"
+```
