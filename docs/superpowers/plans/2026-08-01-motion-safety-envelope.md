@@ -1379,6 +1379,47 @@ by a plausible "make it gentler" config edit.
 config load rather than at move time, with a message naming
 `1 / MAX_STEP_DT_S` as the floor.
 
+### A6 — Task 7 additions from Task 6's review
+
+Task 6 landed the ownership refusal but could not wire it; `server.py` was out
+of scope. Task 7 owns all of the following, and the first two are the
+difference between a working guard and a decorative one.
+
+1. **Wire the refusal, in one place.** `teleop_owner` returns `None` on an
+   empty `_peers`, so the mechanism **fails open in production and closed in
+   tests** — a handle Task 7 forgets to wire silently allows every move, with
+   no log and no test that would notice. Attach inside
+   `ArmManager.connect_all()`, which already constructs every handle, rather
+   than as 3 × N attachments in `_lifespan`. One wiring point, not N.
+2. **Close the other direction.** `move_to` yields to a running session, but
+   `TeleopSession.start()`, `HumanTeleopSession.start()` and
+   `SimLeaderTeleop.start()` do not check for an in-flight ramp. Pressing Home
+   and *then* starting teleop is arguably the easier sequence to hit, and
+   `TeleopSession.start()` sets the follower to `Mode.MANUAL` — already
+   MANUAL — so a playing ramp writes straight through teleop's first ticks.
+   Add `handle.executor.is_running` checks to the three `start()` methods.
+3. **Cancel ramps on shutdown and E-STOP.** `_lifespan` teardown stops the
+   sessions then calls `arms.disconnect_all()`, never `executor.cancel()`. A
+   mid-ramp shutdown nulls `handle.robot` under a live daemon thread; it
+   degrades safely via `_play`'s broad `except`, but `for h in arms.values():
+   h.executor.cancel()` before `disconnect_all()` is the honest fix. `/estop`
+   should do the same rather than relying solely on the per-waypoint guard.
+   **Do not call `cancel()` inline on the event loop** — it blocks up to 2 s
+   per arm while joining, and `is_running`/`wait()` now take the same lock.
+   Signal first, drop torque, then join.
+4. **`test_routes.py`'s fixture will refuse every home.** `app_with_mocks`
+   builds a bare `MagicMock()`, so `executor.teleop_owner(...)` returns a
+   truthy Mock and the route 409s with "a teleop session (MagicMock) owns it".
+   It also needs a real `MotionConfig` on `arm.motion`, a real dict for
+   `joint_limits_deg`, and a real `read_joints_deg` return — a plain Mock
+   reaches `plan_ramp(max_speed_deg_s=<Mock>)`. Budget for more than a
+   two-line route change.
+5. **Decide the return-value semantics deliberately.** `move_to` returns the
+   goal and returns while the ramp is still playing, so the route reports
+   `{"sent": <final goal>}` for a move that has barely started — where it used
+   to report what `send_goal` actually wrote. Any mid-ramp failure lands only
+   in `executor.last_error`, which nothing reads or surfaces.
+
 ### A3 — Test coverage restored (was Important)
 
 `tests/sim/test_human_teleop_sim.py::test_acquisition_and_recovery_against_real_sim_arms`
