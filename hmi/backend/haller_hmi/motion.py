@@ -36,10 +36,20 @@ class MoveExecutor:
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
         self._lock = threading.Lock()
+        #: Set by `_play` when a waypoint raises anything other than
+        #: ModeError (e.g. a comm failure). None means either "no run yet"
+        #: or "the most recent run finished without one" — cleared at the
+        #: start of every `run()`, so it never outlives the ramp it describes.
+        self.last_error: Exception | None = None
 
     @property
     def is_running(self) -> bool:
-        t = self._thread
+        # Snapshot under the lock: `run()` holds `_lock` across both
+        # constructing the Thread and calling `.start()`, so a lock-taking
+        # read here can only ever observe a thread that is either fully
+        # started already or not yet assigned — never the gap in between.
+        with self._lock:
+            t = self._thread
         return t is not None and t.is_alive()
 
     def run(self, waypoints: list[dict[str, float]], hz: float) -> None:
@@ -47,6 +57,7 @@ class MoveExecutor:
             raise ValueError("hz must be positive")
         with self._lock:
             self._cancel_locked()
+            self.last_error = None
             self._cancel = threading.Event()
             self._thread = threading.Thread(
                 target=self._play,
@@ -65,10 +76,22 @@ class MoveExecutor:
         t = self._thread
         if t is not None and t.is_alive() and t is not threading.current_thread():
             t.join(timeout=2.0)
+            if t.is_alive():
+                arm_id = getattr(self._handle.config, "id", "?")
+                logger.error(
+                    "move on arm %s: ramp thread did not stop within 2.0s of "
+                    "cancellation; it may still be commanding",
+                    arm_id,
+                )
 
     def wait(self, timeout: float | None = None) -> None:
         """Block until the current ramp finishes. Test helper."""
-        t = self._thread
+        # Same snapshot-under-the-lock reasoning as `is_running`: without it,
+        # a caller can read `self._thread` in the gap between `run()`
+        # assigning it and calling `.start()`, and `Thread.join()` raises
+        # RuntimeError on a thread that has not been started yet.
+        with self._lock:
+            t = self._thread
         if t is not None:
             t.join(timeout=timeout)
 
@@ -81,8 +104,14 @@ class MoveExecutor:
                 return
             try:
                 self._handle.guard.assert_manual()
+                self._handle.send_goal(waypoint)
             except ModeError:
                 logger.warning("move on arm %s stopped: mode left manual", arm_id)
                 return
-            self._handle.send_goal(waypoint)
+            except Exception as exc:
+                self.last_error = exc
+                logger.exception(
+                    "move on arm %s: ramp failed sending a waypoint", arm_id
+                )
+                return
             time.sleep(period)
