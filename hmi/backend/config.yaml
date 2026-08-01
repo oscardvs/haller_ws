@@ -1,8 +1,29 @@
 # hmi/backend/config.yaml
+# Bounds on commanded arm motion. Added after the 2026-08-01 incident, where
+# Home straight after a recalibration slewed the right arm into the bench and
+# burnt the 7.4 V DC-DC. See
+# docs/superpowers/specs/2026-08-01-motion-safety-envelope-design.md.
+motion:
+  max_speed_deg_s: 60.0
+  large_move_deg: 30.0
+  ramp_hz: 50.0
 arms:
   - id: right
     model: so101_follower
-    port: /dev/haller_arm_follower   # udev symlink from scripts/99-haller-devices.rules
+    # Driven over the Jetson's 40-pin UART (pins 6/8/10 -> ttyTHS1), NOT over
+    # this board's CH343P USB bridge.
+    #
+    # 2026-08-01: the USB path on this board (serial 5B14031413) never
+    # enumerated. That was originally read as a dead adapter, but every USB test
+    # was run with the barrel jack disconnected, and the board needs its DC
+    # supply to bring up the rails — so the chip may simply have been unpowered
+    # rather than faulty. Untested either way. It does not matter: the UART path
+    # reaches all six servos at 1 Mbaud first try, and lerobot drives them
+    # through it. Waveshare's straight-through TX->TX convention is correct here.
+    #
+    # NOTE: this only works while the board's jumper selects UART. Moving it to
+    # USB-SERVO to test the CH343P disconnects these pins and this arm goes away.
+    port: /dev/haller_arm_uart       # udev symlink from scripts/99-haller-devices.rules
     calibration_id: haller_follower  # robots/so_follower/haller_follower.json
     enabled: true
   - id: left
@@ -28,19 +49,47 @@ cameras:
   # /cameras/<id>/snapshot + /cameras/<id>/stream. The same (index_or_path,
   # width, height, fps) tuple is what `lerobot-record --robot.cameras=...` wants,
   # so swapping a camera in here also wires it for dataset collection.
-  - id: wrist_right
-    role: wrist
-    arm_id: right
-    source: placeholder  # set source: opencv + index_or_path when wrist cam arrives
   - id: base_front
     role: base
     source: opencv
     # RealSense D455 RGB node, tower-mounted, looking at the bimanual workspace.
-    # The D455 exposes plain UVC nodes, so no librealsense is needed for RGB:
-    #   /dev/video0 = Z16 depth, /dev/video2 = infrared, /dev/video4 = YUYV colour.
-    # Node numbering can shift across reboots — re-check with:
-    #   udevadm info -q property -n /dev/videoN | grep ID_V4L
-    index_or_path: /dev/video4
+    # The D455 exposes plain UVC nodes, so no librealsense is needed for RGB.
+    #
+    # Addressed by udev symlink, NOT by /dev/videoN. The numbering is genuinely
+    # unstable: enabling the CSI camera overlay moved the colour node from
+    # /dev/video4 to /dev/video6, and moving the camera to the USB 3.0 bus moves
+    # it again. See scripts/99-haller-devices.rules for how the symlink pins the
+    # colour interface specifically.
+    index_or_path: /dev/haller_cam_mast
     width: 640
     height: 480
     fps: 30
+  - id: wrist_right
+    role: wrist
+    arm_id: right
+    # IMX219 (Raspberry Pi Camera v2.1) on a Tegra CSI slot. Raw Bayer, so it is
+    # captured via nvarguscamerasrc rather than OpenCV — see csi_camera.py.
+    # sensor_id is the Argus index, not a /dev/video number.
+    source: csi
+    sensor_id: 1        # CSI slot 1 (i2c 9) -> /dev/haller_cam_wrist_c
+    width: 1280
+    height: 720
+    fps: 60
+    # The module is mounted rotated on the arm. UNVERIFIED: 3 (CW90) is a
+    # reasoned guess from the live view — the operator appeared rotated with
+    # "up" pointing left, which is a CCW-rotated source. If 3 is wrong, 1
+    # (CCW90) is the other candidate. Check the Cameras tab after restarting
+    # the backend and correct it; do NOT fix this in the browser instead, or
+    # the dataset and the live view will disagree about which way is up.
+    flip_method: 3
+  - id: wrist_left
+    role: wrist
+    arm_id: left
+    # CSI slot 0 (sensor_id 0, i2c 10) is physically faulty: the connector's
+    # retaining clip is broken, so the ribbon does not seat hard enough to carry
+    # the MIPI data lanes. i2c still works, which is why the sensor probes and
+    # reports its full mode table while every capture returns 0 frames with
+    # "Argus Correctable Error Status". Left as a placeholder rather than csi so
+    # the HMI starts cleanly instead of logging a connect failure every boot.
+    # Flip to `source: csi, sensor_id: 0` once the connector is repaired.
+    source: placeholder

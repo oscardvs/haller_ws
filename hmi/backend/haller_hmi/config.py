@@ -23,6 +23,9 @@ class ArmConfig:
     # Required when source == "sim": which arm body in the composed MJCF this
     # handle owns. Typically "left" or "right".
     sim_arm_name: str | None = None
+    # Per-arm motion overrides. None means "inherit the global motion block".
+    max_speed_deg_s: float | None = None
+    large_move_deg: float | None = None
 
 
 @dataclass
@@ -40,16 +43,42 @@ class TelemetryConfig:
 
 
 @dataclass
+class MotionConfig:
+    """Bounds on commanded arm motion. See
+    docs/superpowers/specs/2026-08-01-motion-safety-envelope-design.md.
+    """
+    # The STS3215 reaches ~375 deg/s at 7.4 V. This is deliberately ~16% of
+    # capability: two arms share one bench.
+    max_speed_deg_s: float = 60.0
+    # A discrete move needing more than this on any joint is refused outright
+    # rather than ramped, because ramping still sweeps an unplanned path.
+    large_move_deg: float = 30.0
+    # Waypoint rate. Also sets the streaming per-step cap, at
+    # max_speed_deg_s / ramp_hz.
+    ramp_hz: float = 50.0
+
+
+@dataclass
 class CameraConfig:
     id: str
     role: str  # "wrist" or "base"
-    source: str  # "placeholder" | "opencv" | "mjpeg" | "webrtc" | "sim_camera"
+    source: str  # "placeholder" | "opencv" | "csi" | "mjpeg" | "webrtc" | "sim_camera"
     arm_id: str | None = None
     # OpenCV-specific.
     index_or_path: str | int | None = None
     width: int = 640
     height: int = 480
     fps: int = 30
+    # csi-specific: the Argus sensor index, NOT a /dev/video number. IMX219s on
+    # the Tegra CSI slots emit raw Bayer, so they are addressed through
+    # nvarguscamerasrc rather than by device path — see csi_camera.py.
+    sensor_id: int | None = None
+    # csi-specific: nvvidconv flip-method, for a camera mounted at an angle.
+    # Corrected in the ISP rather than downstream so that the live view, the
+    # recorded dataset and anything a policy later sees are the same pixels —
+    # rotating only the browser preview would train on one orientation and
+    # display another. 0=none 1=CCW90 2=180 3=CW90 4=horiz 6=vert.
+    flip_method: int = 0
     # sim_camera-specific: which <camera name="..."> in the composed MJCF.
     mjcf_camera: str | None = None
 
@@ -66,6 +95,7 @@ class Config:
     ros: RosConfig = field(default_factory=RosConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
+    motion: MotionConfig = field(default_factory=MotionConfig)
     sim_leader: SimLeaderConfig | None = None
 
 
@@ -78,5 +108,19 @@ def load_config(path: Path | None = None) -> Config:
         ros=RosConfig(**raw.get("ros", {})),
         telemetry=TelemetryConfig(**raw.get("telemetry", {})),
         cameras=[CameraConfig(**c) for c in raw.get("cameras", [])],
+        motion=MotionConfig(**raw.get("motion", {})),
         sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
+    )
+
+
+def resolve_motion(arm: ArmConfig, default: MotionConfig) -> MotionConfig:
+    """Merge an arm's overrides over the global motion config."""
+    return MotionConfig(
+        max_speed_deg_s=(arm.max_speed_deg_s
+                         if arm.max_speed_deg_s is not None
+                         else default.max_speed_deg_s),
+        large_move_deg=(arm.large_move_deg
+                        if arm.large_move_deg is not None
+                        else default.large_move_deg),
+        ramp_hz=default.ramp_hz,
     )

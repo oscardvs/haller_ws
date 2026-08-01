@@ -61,3 +61,42 @@ arms:
     cfg = load_config(cfg_file)
     assert cfg.arms[0].source == "real"
     assert cfg.arms[0].sim_arm_name is None
+
+
+from haller_hmi.config import ArmConfig, MotionConfig, resolve_motion
+
+
+def test_motion_defaults_are_conservative():
+    m = MotionConfig()
+    # STS3215 does ~375 deg/s at 7.4 V; 60 is ~16% of capability.
+    assert m.max_speed_deg_s == 60.0
+    assert m.large_move_deg == 30.0
+    assert m.ramp_hz == 50.0
+
+
+def test_resolve_motion_uses_global_when_arm_sets_no_override():
+    arm = ArmConfig(id="right", model="so101_follower", port="/dev/null",
+                    calibration_id="haller_follower")
+    assert resolve_motion(arm, MotionConfig()) == MotionConfig()
+
+
+def test_resolve_motion_applies_per_arm_overrides():
+    arm = ArmConfig(id="right", model="so101_follower", port="/dev/null",
+                    calibration_id="haller_follower",
+                    max_speed_deg_s=25.0, large_move_deg=15.0)
+    got = resolve_motion(arm, MotionConfig())
+    assert got.max_speed_deg_s == 25.0
+    assert got.large_move_deg == 15.0
+    assert got.ramp_hz == 50.0  # not overridden, inherits the global
+
+
+def test_load_config_reads_motion_block(tmp_path):
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "arms: []\ncameras: []\nmotion:\n  max_speed_deg_s: 30.0\n  large_move_deg: 20.0\n"
+    )
+    cfg = load_config(p)
+    assert cfg.motion.max_speed_deg_s == 30.0
+    assert cfg.motion.large_move_deg == 20.0
+    assert cfg.motion.ramp_hz == 50.0
