@@ -1347,6 +1347,38 @@ site where the missing timestamp actually is.
 `ramp_hz` keeps its original meaning on the discrete path, where `plan_ramp`
 genuinely does emit waypoints at that rate.
 
+### A4 — A ramp must not run while a teleop session owns the arm (was Important)
+
+Task 5's review found that `POST /arm/{id}/home` during an active teleop
+session starts a ramp on an arm a 60 Hz loop is already streaming to. Both
+threads then write `Goal_Position` on one `PortHandler` that has no lock
+anywhere in lerobot, and both share `_last_commanded`/`_last_command_at`
+unsynchronised — each measuring `dt` against the other's timestamp, collapsing
+both budgets toward zero. Unlike the bounded 2-second-join case this is a
+sustained overlap for the whole ramp.
+
+**Task 6:** `move_to` must refuse when a teleop session owns the arm.
+`TeleopSession` already has an `attach_peer` mutual-exclusion mechanism for
+exactly this class of conflict (`teleop.py`); put the executor in that same
+peer set rather than inventing a second scheme. Refusal raises `MoveRefused`,
+so it surfaces as the same 409 as every other refusal.
+
+### A5 — `ramp_hz` below 10 silently under-runs every ramp (was Minor, config-reachable)
+
+`step_budget_deg` saturates at `max_speed_deg_s * MAX_STEP_DT_S` = 6° at the
+shipped defaults. `plan_ramp` sizes waypoints at `max_speed_deg_s / ramp_hz`.
+So for `ramp_hz < 1 / MAX_STEP_DT_S` = 10 Hz, every waypoint asks for more than
+the budget can ever grant and the shortfall is unrecoverable. Nothing validates
+it: `MotionConfig`, `resolve_motion`, `plan_ramp` and `MoveExecutor.run` all
+accept any positive value. `ramp_hz: 5` with the shipped 60 °/s turns a 30°
+move into an 18° one, and the route still returns `{"sent": {...30.0}}` with
+nothing logged — the exact defect class this plan exists to eliminate, reachable
+by a plausible "make it gentler" config edit.
+
+**Task 8:** validate it in `MotionConfig.__post_init__` so a bad value fails at
+config load rather than at move time, with a message naming
+`1 / MAX_STEP_DT_S` as the floor.
+
 ### A3 — Test coverage restored (was Important)
 
 `tests/sim/test_human_teleop_sim.py::test_acquisition_and_recovery_against_real_sim_arms`
