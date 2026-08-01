@@ -910,6 +910,22 @@ def test_move_to_refuses_when_torque_is_disabled():
         move_to(h, {"shoulder_pan": 1.0})
     assert "torque" in str(e.value).lower()
     assert h.sent == []
+
+
+def test_move_to_refuses_when_a_commanded_joint_has_no_current_reading():
+    """read_joints_deg drops a joint whose .pos was missing from the
+    observation, which this rig's UART does intermittently. Ramping the rest
+    would command a partial move and report it as complete."""
+    h = _movable_handle({"shoulder_pan": 0.0})
+    h.joint_limits_deg = {"shoulder_pan": (-180.0, 180.0),
+                          "wrist_flex": (-180.0, 180.0)}
+    h.read_joints_deg.return_value = {"shoulder_pan": 0.0}  # wrist_flex dropped
+
+    with pytest.raises(MoveRefused) as e:
+        move_to(h, {"shoulder_pan": 1.0, "wrist_flex": 1.0})
+
+    assert "wrist_flex" in str(e.value)
+    assert h.sent == []
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -943,6 +959,19 @@ def move_to(handle, goal_deg: dict[str, float]) -> dict[str, float]:
 
     clamped = clamp_joint_goal(goal_deg, handle.joint_limits_deg)
     current = handle.read_joints_deg()
+
+    # read_joints_deg omits any joint whose .pos was missing from the
+    # observation — it tolerates the intermittent UART failures this rig has.
+    # Without this guard, plan_ramp would silently drop those joints from every
+    # waypoint while move_to still returned them in `clamped`, so the route
+    # would report a partial move as complete. Refuse instead.
+    unmeasured = sorted(set(clamped) - set(current))
+    if unmeasured:
+        raise MoveRefused(
+            f"move refused on arm {arm_id!r}: no current position for "
+            f"{', '.join(unmeasured)}. Commanding the rest would be a partial "
+            "move reported as complete. Retry the move."
+        )
 
     oversize = check_move_size(current, clamped, motion.large_move_deg)
     if oversize:
