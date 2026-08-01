@@ -246,6 +246,9 @@ class HumanTeleopSession:
         self._clutch_source: ClutchSource = "spacebar"
         self._mouth_calib: MouthClutchCalib | None = None
         self._clutch_reason: str = "spacebar_mode"
+        # Frame-carried mirror override: "none" | "both" | None (legacy
+        # swap-based parity). See _side_mirrored.
+        self._mirror_mode: str | None = None
         # Acquisition: per-side authority, and the parameters that gate it.
         self._acquire_ms = acquire_ms
         self._match_dwell_ms = match_dwell_ms
@@ -483,12 +486,27 @@ class HumanTeleopSession:
         return self._acquire_tol_deg.get(joint, self._acquire_tol_default_deg)
 
     def _side_mirrored(self, side: str) -> bool:
-        """Whether this side's goals went through `apply_mirror`.
+        """Whether this side's goals go through `apply_mirror`.
 
-        Mirrors the call in `ingest_frame` exactly — left follows `swap`, right
-        follows its inverse — because the ghost has to be un-mirrored back into
-        the operator's own frame or it renders the wrong arm's pose.
+        The one source of truth for both `ingest_frame` and the ghost — the
+        ghost has to be un-mirrored back into the operator's own frame or it
+        renders the wrong arm's pose.
+
+        The default (left follows `swap`, right its inverse) is the camera
+        path's convention: a front-facing webcam delivers a pre-mirrored view
+        of the operator, and exactly one side must be negated to land that on
+        two identical, same-yaw arms. Egocentric sources are different: a
+        headset's frames are NOT pre-mirrored, and two mirror-symmetric hand
+        gestures already retarget to opposite pan signs — which is precisely
+        what identical side-by-side arms need. So the VR adapter stamps its
+        frames `mirror_mode: "none"`, and a hypothetical rig with genuinely
+        mirrored mounts would use `"both"`. Frame-carried like `pinch_calib`:
+        it is a property of the input source, not of the session.
         """
+        if self._mirror_mode == "none":
+            return False
+        if self._mirror_mode == "both":
+            return True
         swap = bool(self._cfg and self._cfg.swap)
         return swap if side == "left" else not swap
 
@@ -546,6 +564,9 @@ class HumanTeleopSession:
             self._ws_disconnected_at_perf = None
             self._target_left = None
             self._target_right = None
+            # Mirror parity belongs to the input source; the next session's
+            # frames re-assert it or fall back to the swap-based default.
+            self._mirror_mode = None
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
             # A new session starts with neither arm handed over, whatever the
@@ -687,7 +708,8 @@ class HumanTeleopSession:
             # WS is healthy: cancel any pending grace window.
             self._ws_disconnected_at_perf = None
 
-            mirror = bool(self._cfg and self._cfg.swap)
+            mode = frame.get("mirror_mode")
+            self._mirror_mode = mode if mode in ("none", "both") else None
             left_side = frame.get("left")
             right_side = frame.get("right")
             # A side counts as tracked only when it produced a USABLE goal.
@@ -708,14 +730,16 @@ class HumanTeleopSession:
             # ages out and reads as lost, which is the truth.
             if left_side is not None:
                 goal = retarget.compute_joint_goal(
-                    left_side, self._pinch_calib_left, mirror=mirror,
+                    left_side, self._pinch_calib_left,
+                    mirror=self._side_mirrored("left"),
                 )
                 if goal is not None:
                     self._target_left = goal
                     self._last_left_perf = now_perf
             if right_side is not None:
                 goal = retarget.compute_joint_goal(
-                    right_side, self._pinch_calib_right, mirror=not mirror,
+                    right_side, self._pinch_calib_right,
+                    mirror=self._side_mirrored("right"),
                 )
                 if goal is not None:
                     self._target_right = goal

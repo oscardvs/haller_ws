@@ -46,6 +46,7 @@ const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/vr/in`;
 const PUBLISH_MS = 33;
 
 const BODY_LS_KEY = "haller.vrTeleop.body.v1";
+const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
 
 function fmtMm(m: number | undefined): string {
   return m === undefined ? "—" : `${(m * 1000).toFixed(0)} mm`;
@@ -58,24 +59,29 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [estopped, setEstopped] = useState(false);
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
   const [body, setBody] = useState<BodyOverride>({});
+  const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
 
   const sessionRef = useRef<XRSessionLike | null>(null);
   const refSpaceRef = useRef<unknown>(null);
   const clientRef = useRef<HumanTeleopClient<VRFrame> | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<BodyOverride>({});
+  const mirrorModeRef = useRef<"none" | "both">("none");
   const lastPubRef = useRef(0);
   const estopDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
   const prevAuthRef = useRef<Partial<Record<"left" | "right", SideAuthorityLike>>>({});
 
   bodyRef.current = body;
+  mirrorModeRef.current = mirrorMode;
 
   useEffect(() => {
     void xrSupported().then(setSupported);
     try {
       const raw = localStorage.getItem(BODY_LS_KEY);
       if (raw) setBody(JSON.parse(raw));
+      const mm = localStorage.getItem(MIRROR_LS_KEY);
+      if (mm === "both") setMirrorMode("both");
     } catch {
       /* a corrupt override must not block entering VR; defaults are fine */
     }
@@ -259,6 +265,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         tsMs: Date.now(),
         body: Object.keys(bodyRef.current).length ? bodyRef.current : undefined,
         forceDisengaged: blurred,
+        mirrorMode: mirrorModeRef.current,
       });
       client.queueFrame(vrFrame);
       client.tick();
@@ -449,6 +456,25 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           controller is the handover.
         </div>
       </div>
+
+      <label className="flex items-center gap-2 text-muted-foreground">
+        <span>arm mounting</span>
+        <select
+          className="bg-transparent border rounded px-1 py-0.5"
+          value={mirrorMode}
+          onChange={(e) => {
+            const v = e.target.value === "both" ? "both" : "none";
+            setMirrorMode(v);
+            try { localStorage.setItem(MIRROR_LS_KEY, v); } catch { /* non-fatal */ }
+          }}
+        >
+          <option value="none">identical, side by side (Haller tower)</option>
+          <option value="both">mirrored pair</option>
+        </select>
+        <span>
+          — if an arm drives <b>away</b> from where your hand goes, flip this.
+        </span>
+      </label>
 
       <details className="text-muted-foreground">
         <summary className="cursor-pointer">operator limb lengths (metres)</summary>

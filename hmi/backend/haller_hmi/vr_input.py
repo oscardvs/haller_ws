@@ -385,6 +385,14 @@ def vr_frame_to_keypoint_frame(
                      or bool(sq_left) or bool(sq_right)),
         "jaw_open": None,
         "pinch_calib": {"left": VR_PINCH_CALIB, "right": VR_PINCH_CALIB},
+        # Egocentric frames are not pre-mirrored the way a front-facing
+        # webcam's are, and two mirror-symmetric hand gestures already
+        # retarget to opposite pan signs — exactly what identical side-by-side
+        # arms need. The camera path's one-side-negated convention here makes
+        # the right arm swing PARALLEL to the left instead of toward it.
+        # "both" is for a rig whose mounts really are mirror images.
+        "mirror_mode": ("both" if frame.get("mirror_mode") == "both"
+                        else "none"),
         "left": left_side,
         "right": right_side,
     }

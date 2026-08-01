@@ -94,6 +94,10 @@ export type VRFrame = {
   /** Either grip — kept for the status chip and for backends that predate the
    *  per-side split. The split itself rides on each controller's `squeeze`. */
   dead_man: boolean;
+  /** "none" (default): identical arms mounted side by side, no mirroring —
+   *  egocentric frames already give opposite pan signs for symmetric
+   *  gestures. "both": a rig whose two mounts are true mirror images. */
+  mirror_mode?: "none" | "both";
   head: { position: Vec3; orientation: Quat } | null;
   left: ControllerSample | null;
   right: ControllerSample | null;
@@ -229,7 +233,8 @@ export function sampleVRFrame(
   session: XRSessionLike,
   frame: XRFrameLike,
   refSpace: unknown,
-  opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean },
+  opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean;
+          mirrorMode?: "none" | "both" },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));
 
@@ -267,6 +272,7 @@ export function sampleVRFrame(
     type: "vr_keypoints",
     ts_ms: opts.tsMs,
     dead_man: deadMan,
+    ...(opts.mirrorMode ? { mirror_mode: opts.mirrorMode } : {}),
     head,
     left,
     right,

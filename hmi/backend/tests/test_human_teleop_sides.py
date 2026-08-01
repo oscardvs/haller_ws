@@ -89,3 +89,27 @@ def test_stop_clears_the_split():
     sess.ingest_frame(_sided_frame(left=True, right=True))
     sess.stop()
     assert sess.status()["clutch"]["sides"] == {"left": False, "right": False}
+
+
+def test_mirror_mode_none_disables_both_mirrors():
+    """A vr frame stamped mirror_mode=none must retarget BOTH sides
+    unmirrored, whatever swap says — see _side_mirrored's docstring."""
+    sess, _ = _session()
+    try:
+        frame = _sided_frame(left=True, right=True)
+        frame["mirror_mode"] = "none"
+        sess.ingest_frame(frame)
+        assert sess._side_mirrored("left") is False
+        assert sess._side_mirrored("right") is False
+    finally:
+        sess.stop()
+
+
+def test_frames_without_mirror_mode_keep_the_swap_convention():
+    sess, _ = _session()
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert sess._side_mirrored("left") is False   # swap=False
+        assert sess._side_mirrored("right") is True
+    finally:
+        sess.stop()

@@ -67,3 +67,17 @@ def test_both_open_is_a_present_but_disengaged_split():
         _frame(left=_ctrl(squeeze=False), right=_ctrl(squeeze=False)))
     assert out["dead_man"] is False
     assert out["dead_man_sides"] == {"left": False, "right": False}
+
+
+def test_vr_frames_default_to_unmirrored():
+    """Egocentric frames are not pre-mirrored the way a webcam's are; on two
+    identical side-by-side arms the camera path's one-side negation makes the
+    right arm swing parallel to the left instead of toward it."""
+    out = vr_frame_to_keypoint_frame(_frame(left=_ctrl(squeeze=True), right=None))
+    assert out["mirror_mode"] == "none"
+
+
+def test_vr_frames_pass_an_explicit_mirrored_pair_through():
+    f = _frame(left=None, right=_ctrl(squeeze=False))
+    f["mirror_mode"] = "both"
+    assert vr_frame_to_keypoint_frame(f)["mirror_mode"] == "both"
