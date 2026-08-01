@@ -118,3 +118,14 @@ def test_read_joints_deg_returns_lerobot_keys():
     handle.connect()
     out = handle.read_joints_deg()
     assert set(out) == {"shoulder_pan", "gripper"}
+
+
+def test_sim_send_goal_does_not_silently_enable_torque():
+    _world, handle = _make_world_and_handle()
+    handle.connect()
+    handle.guard.set(Mode.MANUAL)
+    handle.torque_enabled = False
+
+    handle.send_goal({"shoulder_pan": 10.0})
+
+    assert handle.torque_enabled is False

@@ -98,11 +98,6 @@ class ArmHandle:
 
     def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
         self.guard.assert_manual()
-        # If the user previously disabled torque (free-drive), re-engage it before
-        # commanding new positions — otherwise the goal is silently stored but the
-        # arm doesn't move.
-        if not self.torque_enabled:
-            self.enable_torque()
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
         # lerobot expects keys suffixed with ".pos"
         action = {f"{j}.pos": v for j, v in clamped.items()}

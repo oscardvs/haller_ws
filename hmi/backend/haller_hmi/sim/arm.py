@@ -68,8 +68,6 @@ class SimArmHandle:
 
     def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
         self.guard.assert_manual()
-        if not self.torque_enabled:
-            self.enable_torque()
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
         # Translate snake_case → CamelCase + add arm prefix for the world.
         mjcf_goal = {

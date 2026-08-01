@@ -215,3 +215,16 @@ def test_connect_without_a_calibration_file_raises_a_clear_error(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no calibration"):
         handle.connect()
+
+
+def test_send_goal_does_not_silently_enable_torque(monkeypatch):
+    """A limp arm must stay limp. Silently energizing it is half of what made
+    the 2026-08-01 Home command dangerous."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.torque_enabled = False
+
+    handle.send_goal({"shoulder_pan": 10.0})
+
+    handle.robot.bus.enable_torque.assert_not_called()
+    assert handle.torque_enabled is False
