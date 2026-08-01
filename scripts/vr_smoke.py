@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import ssl
 import sys
 import time
 import urllib.request
@@ -40,6 +41,12 @@ import urllib.request
 import websockets
 
 CHECKS: list[tuple[str, bool, str]] = []
+
+# The single-origin Caddy uses `tls internal` (self-signed). Accepting it here
+# mirrors the one-time cert acceptance the operator does in the Quest browser.
+_SSL = ssl.create_default_context()
+_SSL.check_hostname = False
+_SSL.verify_mode = ssl.CERT_NONE
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -54,8 +61,14 @@ def req(base: str, path: str, body: dict | None = None) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST" if body is not None else "GET",
     )
-    with urllib.request.urlopen(r, timeout=5.0) as resp:
+    kw = {"context": _SSL} if base.startswith("https") else {}
+    with urllib.request.urlopen(r, timeout=5.0, **kw) as resp:
         return json.loads(resp.read())
+
+
+def ws_connect(ws_url: str):
+    kw = {"ssl": _SSL} if ws_url.startswith("wss") else {}
+    return websockets.connect(ws_url, **kw)
 
 
 IDENT = [0.0, 0.0, 0.0, 1.0]
@@ -163,7 +176,7 @@ async def main() -> int:
     req(base, "/teleop/human/start",
         {"left_arm": "left", "right_arm": "right", "swap": False,
          "clutch_source": "vr_grip"})
-    async with websockets.connect(ws_url) as ws:
+    async with ws_connect(ws_url) as ws:
         await ws.send(frame(left_squeeze=False, right_squeeze=False))
         s = await wait_for(base, lambda st: st.get("state") == "tracking", 2.0,
                            ws=ws, left_squeeze=False, right_squeeze=False)
@@ -277,7 +290,7 @@ async def main() -> int:
     req(base, "/teleop/human/start",
         {"left_arm": "left", "right_arm": "right", "swap": False,
          "clutch_source": "vr_grip"})
-    ws = await websockets.connect(ws_url)
+    ws = await ws_connect(ws_url)
     await stream(ws, 0.3, left_squeeze=False, right_squeeze=False)
     await ws.close()
     deadline = time.monotonic() + 8.0
