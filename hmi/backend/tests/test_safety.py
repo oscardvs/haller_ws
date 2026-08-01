@@ -4,7 +4,9 @@ import pytest
 import math
 
 from haller_hmi.safety import (
+    check_move_size,
     clamp_joint_goal,
+    limit_step,
     ModeGuard,
     ModeError,
     Mode,
@@ -12,6 +14,7 @@ from haller_hmi.safety import (
     MouthClutchState,
     mouth_clutch_thresholds,
     mouth_clutch_decision,
+    plan_ramp,
     analyze_mouth_capture,
     replay_mouth_clutch,
     sustained_level,
@@ -410,9 +413,6 @@ def test_mouth_none_score_disengages_an_engaged_clutch():
                                  stale=False, engaged=True) is False
 
 
-from haller_hmi.safety import check_move_size, limit_step, plan_ramp
-
-
 def test_limit_step_caps_large_delta_both_directions():
     current = {"shoulder_pan": 0.0, "elbow_flex": 10.0}
     goal = {"shoulder_pan": 100.0, "elbow_flex": -90.0}
@@ -446,6 +446,18 @@ def test_check_move_size_empty_when_all_within_threshold():
     assert check_move_size({"a": 0.0}, {"a": 29.9}, threshold_deg=30.0) == {}
 
 
+def test_check_move_size_boundary_at_threshold():
+    # delta exactly at threshold should NOT be reported
+    assert check_move_size({"a": 0.0}, {"a": 30.0}, threshold_deg=30.0) == {}
+
+
+def test_check_move_size_skips_unmeasured_joints():
+    # check_move_size skips joints absent from current (opposite of limit_step)
+    current = {"shoulder_pan": 0.0}
+    goal = {"shoulder_pan": 90.0, "wrist_flex": 200.0}
+    assert check_move_size(current, goal, threshold_deg=30.0) == {"shoulder_pan": 90.0}
+
+
 def test_plan_ramp_bounds_every_consecutive_step():
     current = {"shoulder_pan": 0.0, "elbow_flex": 0.0}
     goal = {"shoulder_pan": 20.0, "elbow_flex": -10.0}
@@ -467,4 +479,8 @@ def test_plan_ramp_rejects_nonpositive_rates():
     with pytest.raises(ValueError):
         plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=0.0, hz=50.0)
     with pytest.raises(ValueError):
+        plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=-1.0, hz=50.0)
+    with pytest.raises(ValueError):
         plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=60.0, hz=0.0)
+    with pytest.raises(ValueError):
+        plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=60.0, hz=-1.0)

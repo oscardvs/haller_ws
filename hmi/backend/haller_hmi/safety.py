@@ -110,6 +110,10 @@ def plan_ramp(
 
     All joints share one step count so they arrive together; the joint with the
     largest excursion sets the pace. The final waypoint is exactly `goal`.
+
+    Every joint in `goal` must also appear in `current`; the caller guarantees
+    this. Joints missing from `current` are dropped, so an unmatched key would
+    silently omit that joint from every waypoint.
     """
     if max_speed_deg_s <= 0:
         raise ValueError("max_speed_deg_s must be positive")
