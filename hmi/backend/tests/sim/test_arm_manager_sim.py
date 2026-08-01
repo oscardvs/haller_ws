@@ -35,7 +35,7 @@ def test_mixed_real_and_sim_arms_share_one_world(monkeypatch):
                           source="sim", sim_arm_name="right")
 
     mgr = ArmManager([cfg_real, cfg_sim_l, cfg_sim_r])
-    mgr.connect_all()
+    mgr.connect_all(teleop_peers=[])
     try:
         assert isinstance(mgr["sim_left"], SimArmHandle)
         assert isinstance(mgr["sim_right"], SimArmHandle)
@@ -62,6 +62,6 @@ def test_all_real_arms_dont_construct_a_world(monkeypatch):
                     port="/dev/null", calibration_id="x", source="real")
     with patch("haller_hmi.sim.world.MuJoCoWorld") as MockWorld:
         mgr = ArmManager([cfg])
-        mgr.connect_all()
+        mgr.connect_all(teleop_peers=[])
         mgr.disconnect_all()
         MockWorld.assert_not_called()

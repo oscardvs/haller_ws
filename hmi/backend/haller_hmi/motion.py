@@ -145,6 +145,17 @@ class MoveExecutor:
         for every executor first, do the time-critical work, and only then
         `wait()` each one to reap its thread. See server.py's `/estop` and
         `_lifespan` teardown.
+
+        This is only genuinely non-blocking as long as `run()`/`cancel()` are
+        never invoked from a thread other than the event loop's. Both are
+        currently reached only from `async def` routes with synchronous
+        bodies (`move_to`, called by `/home` and `/preset`), so they can
+        never be mid-`_cancel_locked()` — and therefore mid-join, holding
+        this same lock for up to 2s — while this method runs on that same
+        thread. A future caller on a different OS thread (e.g. a sync `def`
+        route, which Starlette runs in its threadpool) invoking `cancel()`
+        concurrently would reintroduce exactly the stall this method exists
+        to avoid.
         """
         with self._lock:
             self._cancel.set()

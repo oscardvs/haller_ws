@@ -451,19 +451,20 @@ def test_home_route_returns_409_when_the_move_is_too_large(app_with_mocks, monke
     assert "shoulder_pan" in r.json()["detail"]
 
 
-def test_goal_route_returns_409_when_the_move_is_too_large(app_with_mocks, monkeypatch):
-    """Obligation A6.6: /goal is the same stale-absolute-pose hazard as Home,
-    so it must go through the same refusal, not just call send_goal directly."""
-    from haller_hmi import motion
-    from haller_hmi.motion import MoveRefused
+def test_goal_route_refuses_when_torque_is_disabled(app_with_mocks):
+    """Task 7 review, fix 1: /goal reverted to handle.send_goal (the jog
+    channel — see the route's docstring), which itself writes even with
+    torque disabled since the servo just ignores it. The route must not
+    report success for a goal that physically did nothing — the gap Task 3's
+    review found, now restored at the route instead of the policy."""
+    import haller_hmi.server as srv_mod
+    srv_mod.arms["right"].torque_enabled = False
 
-    def _refuse(handle, goal):
-        raise MoveRefused(f"move refused on arm 'right': {goal}")
+    r = app_with_mocks.post("/arm/right/goal", json={"shoulder_pan": 30.0})
 
-    monkeypatch.setattr(motion, "move_to", _refuse)
-    r = app_with_mocks.post("/arm/right/goal", json={"shoulder_pan": 90.0})
     assert r.status_code == 409
-    assert "shoulder_pan" in r.json()["detail"]
+    assert "torque" in r.json()["detail"].lower()
+    srv_mod.arms["right"].send_goal.assert_not_called()
 
 
 def test_preset_route_returns_409_when_the_move_is_too_large(app_with_mocks, monkeypatch):
@@ -477,6 +478,35 @@ def test_preset_route_returns_409_when_the_move_is_too_large(app_with_mocks, mon
     monkeypatch.setattr(motion, "move_to", _refuse)
     r = app_with_mocks.post("/arm/right/preset", json={"name": "home"})
     assert r.status_code == 409
+
+
+def test_home_route_refuses_a_real_post_recalibration_pose_end_to_end(app_with_mocks):
+    """The incident, through the route, with entirely real policy code
+    underneath it — unlike the test above, which monkeypatches motion.home
+    out. Task 7 review, fix 5: test_motion_sim.py covers the policy in
+    isolation, and the route tests cover the HTTP-to-exception mapping in
+    isolation; neither exercises the join between them, which is the
+    headline claim of the whole plan."""
+    import haller_hmi.server as srv_mod
+    srv_mod.arms["right"].read_joints_deg.return_value = {"shoulder_pan": -126.5}
+
+    r = app_with_mocks.post("/arm/right/home")
+
+    assert r.status_code == 409
+    assert "shoulder_pan" in r.json()["detail"]
+
+
+def test_preset_route_refuses_a_real_post_recalibration_pose_end_to_end(app_with_mocks):
+    """Same join as above, through /preset: the preset's recorded pose (the
+    fixture's mocked {"shoulder_pan": 0.0}) is exactly as stale as Home's
+    implicit zero once the arm has been recalibrated."""
+    import haller_hmi.server as srv_mod
+    srv_mod.arms["right"].read_joints_deg.return_value = {"shoulder_pan": -126.5}
+
+    r = app_with_mocks.post("/arm/right/preset", json={"name": "home"})
+
+    assert r.status_code == 409
+    assert "shoulder_pan" in r.json()["detail"]
 
 
 def test_estop_signals_and_reaps_every_ramp_executor(app_with_mocks):
@@ -494,3 +524,18 @@ def test_estop_signals_and_reaps_every_ramp_executor(app_with_mocks):
     arm.executor.request_stop.assert_called_once()
     arm.disable_torque.assert_called()
     arm.executor.wait.assert_called_once_with(timeout=2.0)
+
+
+def test_estop_stops_sim_teleop(app_with_mocks):
+    """Task 7 review, fix 4: Mode.STOP alone does not stop a running
+    SimLeaderTeleop — its _loop catches send_goal's resulting ModeError
+    inside a broad `except Exception` and keeps ticking forever. /estop must
+    call sim_teleop.stop() directly, the same as it already does for teleop
+    and human_teleop."""
+    import haller_hmi.server as srv_mod
+    srv_mod.sim_teleop = MagicMock()
+
+    r = app_with_mocks.post("/estop")
+
+    assert r.status_code == 200
+    srv_mod.sim_teleop.stop.assert_called_once()

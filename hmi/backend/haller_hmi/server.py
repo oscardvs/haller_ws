@@ -185,17 +185,19 @@ async def _lifespan(app: FastAPI):
         recorder.close()
     if telemetry is not None:
         await telemetry.stop()
+    # Signal every in-flight ramp to stop FIRST, before the three sessions'
+    # .stop() calls below — each joins its own thread for up to ~1-2s, during
+    # which an unsignalled ramp would keep commanding. Same ordering fix as
+    # /estop, and for the same reason: a mid-ramp shutdown would otherwise
+    # null `handle.robot` under a live daemon thread once disconnect_all()
+    # runs (MoveExecutor._play degrades safely via its broad except, but this
+    # is the honest fix, not a reason to leave the window open longer than it
+    # has to be).
+    for handle in arms.values():
+        handle.executor.request_stop()
     teleop.stop()
     human_teleop.stop()
     sim_teleop.stop()
-    # A mid-ramp shutdown would otherwise null `handle.robot` under a live
-    # daemon thread while disconnect_all() runs (MoveExecutor._play degrades
-    # safely via its broad except, but this is the honest fix). Signal every
-    # ramp to stop before joining any of them — not `handle.executor.cancel()`
-    # in a single loop, which would serialise each arm's up-to-2s join behind
-    # the last; same reasoning as `/estop` below.
-    for handle in arms.values():
-        handle.executor.request_stop()
     for handle in arms.values():
         handle.executor.wait(timeout=2.0)
     cameras.disconnect_all()
@@ -262,12 +264,28 @@ def post_cmd_vel(body: CmdVel):
 
 @app.post("/arm/{arm_id}/goal")
 async def post_arm_goal(arm_id: str, body: dict[str, float]):
+    """The jog channel: `JointSlider` debounces at 50ms, so a drag can post up
+    to 20 Hz. This deliberately stays on `handle.send_goal` — bounded by
+    elapsed time via `step_budget_deg` (see arm.py) — rather than
+    `motion.move_to`'s ramp-and-refuse policy, which is sized for a single
+    discrete pose change, not a stream: comparing a fast drag's goal against
+    measured position while the previous call is still ramping accumulates
+    error until it crosses `large_move_deg` and starts 409-ing mid-drag, and
+    each call would additionally cost a blocking serial read plus a
+    `Thread.join()` on the event loop. `/home` and `/preset` stay on
+    `move_to` — they command an absolute pose a recalibration can invalidate,
+    which is the incident this plan exists to prevent; a bounded jog cannot
+    reproduce it the same way.
+    """
     handle = _arm_or_404(arm_id)
+    if not handle.torque_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"arm {arm_id!r} has torque disabled; enable it before sending a goal",
+        )
     try:
-        clamped = motion_policy.move_to(handle, body)
+        clamped = handle.send_goal(body)
     except ModeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except MoveRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "sent": clamped}
 
@@ -391,18 +409,29 @@ async def get_camera_stream(camera_id: str):
 @app.post("/estop")
 async def post_estop():
     logger.warning("E-STOP triggered")
+    # Signal every in-flight ramp to stop FIRST — before anything below that
+    # blocks the event loop. calibration.abort() and each session's .stop()
+    # (including sim_teleop, whose _loop otherwise catches ModeError and
+    # keeps looping instead of exiting — see below) can each join a thread
+    # for up to ~1-2s; an unsignalled ramp would keep commanding for however
+    # long all of those take before it even hears the request to stop.
+    # handle.executor.cancel() would also join (up to 2s) under the same lock
+    # is_running()/wait() take, so calling it per-arm here — instead of
+    # signal-all-then-join-all — would delay disable_torque() on arm 2 behind
+    # arm 1's join. See MoveExecutor.request_stop and A6 in the plan.
+    for handle in arms.values():
+        handle.executor.request_stop()
     calibration.abort()
     teleop.stop()
     human_teleop.stop()
-    # Ordering matters: signal every in-flight ramp to stop before doing
-    # anything that blocks. handle.executor.cancel() joins its thread (up to
-    # 2s) under the same lock is_running()/wait() take, so calling it per-arm
-    # here would delay disable_torque() on arm 2 behind arm 1's join — the
-    # one thing E-STOP exists to do without delay. Signal all, drop torque on
-    # all, and only then reap the (by now almost certainly already-exited)
-    # ramp threads. See MoveExecutor.request_stop and A6 in the plan.
-    for handle in arms.values():
-        handle.executor.request_stop()
+    # Mode.STOP alone does not stop a running SimLeaderTeleop: its _loop
+    # catches send_goal's resulting ModeError inside a broad `except
+    # Exception`, sleeps 50ms, and ticks again forever — nothing sets
+    # `_stop`. Without this, the normal recovery (POST /arm/{id}/mode
+    # {"mode":"manual"}, which also re-enables torque) would let the
+    # still-live loop resume driving the arm with no further operator
+    # action. _lifespan teardown already calls this; /estop must too.
+    sim_teleop.stop()
     for handle in arms.values():
         handle.disable_torque()
         handle.guard.set(Mode.STOP)
@@ -519,7 +548,16 @@ async def post_human_teleop_mouth_analyze(body: MouthTraceBody):
 
 
 @app.post("/teleop/sim/start")
-def teleop_sim_start(body: SimTeleopStartBody):
+async def teleop_sim_start(body: SimTeleopStartBody):
+    # async, not a plain def: a sync def route runs in Starlette's threadpool,
+    # genuinely concurrent with the event loop — so it could race move_to()
+    # (called from /home and /preset, both async def with synchronous bodies)
+    # across the ~5-20ms window between move_to's read_joints_deg()/plan_ramp
+    # and handle.executor.run(). Both configured arms are source: real, so
+    # that race reaches hardware: two threads writing Goal_Position on one
+    # unlocked PortHandler. async def puts this route on the same event loop
+    # thread as move_to's callers, where neither body has an await point, so
+    # they can't interleave.
     leader_cfg = body.leader
     src_kind = leader_cfg.get("source")
     if src_kind == "mouse":

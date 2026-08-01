@@ -19,7 +19,7 @@ def test_sim_teleop_calls_send_goal_at_configured_rate():
     cfg_r = ArmConfig(id="sim_right", model="so101_follower", port="(sim)",
                       calibration_id="(sim)", source="sim", sim_arm_name="right")
     mgr = ArmManager([cfg_l, cfg_r])
-    mgr.connect_all()
+    mgr.connect_all(teleop_peers=[])
     try:
         fake_source = MagicMock()
         fake_source.read.return_value = {"shoulder_pan": 5.0}
@@ -54,7 +54,7 @@ def test_sim_teleop_blocks_when_peer_running():
     cfg = ArmConfig(id="sim_right", model="so101_follower", port="(sim)",
                     calibration_id="(sim)", source="sim", sim_arm_name="right")
     mgr = ArmManager([cfg])
-    mgr.connect_all()
+    mgr.connect_all(teleop_peers=[])
     try:
         session = SimLeaderTeleop(arms=mgr)
         peer = MagicMock()

@@ -232,7 +232,7 @@ class ArmManager:
         self._world.start()
         return self._world
 
-    def connect_all(self, *, teleop_peers: list | None = None) -> None:
+    def connect_all(self, *, teleop_peers: list) -> None:
         """Connect every configured arm.
 
         `teleop_peers` — normally [TeleopSession, HumanTeleopSession,
@@ -250,6 +250,13 @@ class ArmManager:
         where `arms`, `teleop`, `human_teleop` and `sim_teleop` all already
         exist — is the earliest that's possible while still keeping the
         actual attachment loop inside this method rather than in the caller.
+
+        No default: a caller must pass a list, `[]` if it genuinely has no
+        peers to wire. A `None`/`()` default let `teleop_peers=[...]` be
+        deleted from server.py's one call site with all 332 tests staying
+        green while the guard failed open in production — obligation 1's own
+        failure mode, one level up. Making this required turns that deletion
+        into an immediate `TypeError` instead.
         """
         from .calibration_bootstrap import ensure_follower_calibrations
         from .config import resolve_motion
@@ -272,7 +279,7 @@ class ArmManager:
                 handle = ArmHandle(cfg)
                 handle.connect()
             handle.motion = resolve_motion(cfg, self._motion)
-            for peer in teleop_peers or ():
+            for peer in teleop_peers:
                 handle.executor.attach_peer(peer)
             self._handles[cfg.id] = handle
 

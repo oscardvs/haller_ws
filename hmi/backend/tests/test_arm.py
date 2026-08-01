@@ -105,7 +105,7 @@ def test_arm_manager_lookup_by_id(monkeypatch):
         lambda configs: None,
     )
     mgr = ArmManager([cfg_right])
-    mgr.connect_all()
+    mgr.connect_all(teleop_peers=[])
     assert mgr["right"].config.id == "right"
 
 
@@ -136,9 +136,9 @@ def test_connect_all_wires_teleop_peers_onto_every_handle_executor(monkeypatch):
     assert mgr["right"].executor.teleop_owner("right") == type(peer).__name__
 
 
-def test_connect_all_with_no_teleop_peers_still_works(monkeypatch):
-    """teleop_peers is optional — every existing connect_all() call site
-    (tests, and any future caller) must keep working unchanged."""
+def test_connect_all_with_an_empty_teleop_peers_list_wires_nothing(monkeypatch):
+    """An explicit `[]` is how a caller says "no peers to wire" — distinct
+    from omitting the argument entirely, which is a TypeError (below)."""
     monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
     monkeypatch.setattr(
         "haller_hmi.arm.ArmHandle._load_joint_limits",
@@ -152,9 +152,24 @@ def test_connect_all_with_no_teleop_peers_still_works(monkeypatch):
                     port="/dev/null", calibration_id="haller_follower")
     mgr = ArmManager([cfg])
 
-    mgr.connect_all()
+    mgr.connect_all(teleop_peers=[])
 
     assert mgr["right"].executor.teleop_owner("right") is None
+
+
+def test_connect_all_requires_teleop_peers_to_be_passed_explicitly():
+    """Task 7 review, fix 2: a `None`/`()` default meant deleting
+    `teleop_peers=[...]` from server.py's one call site left all tests green
+    while the guard failed open in production — obligation 1's own failure
+    mode, one level up. No default turns that deletion into an immediate
+    TypeError instead of a silent, untested regression. Raised by argument
+    binding before the method body runs, so this needs no monkeypatching."""
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    mgr = ArmManager([cfg])
+
+    with pytest.raises(TypeError):
+        mgr.connect_all()
 
 
 def test_read_joints_deg_strips_pos_suffix(monkeypatch):
@@ -192,7 +207,7 @@ def test_teleop_loop_uses_read_joints_deg_and_send_goal(monkeypatch):
     cfg_l = ArmConfig(id="left",  model="so101_follower", port="/dev/null", calibration_id="x")
     cfg_r = ArmConfig(id="right", model="so101_follower", port="/dev/null", calibration_id="y")
     mgr = ArmManager([cfg_l, cfg_r])
-    mgr.connect_all()
+    mgr.connect_all(teleop_peers=[])
 
     leader = mgr["left"]
     follower = mgr["right"]
