@@ -408,3 +408,63 @@ def test_mouth_none_score_disengages_an_engaged_clutch():
     th = (0.55, 0.35)
     assert mouth_clutch_decision(None, th, held_ms=0.0,
                                  stale=False, engaged=True) is False
+
+
+from haller_hmi.safety import check_move_size, limit_step, plan_ramp
+
+
+def test_limit_step_caps_large_delta_both_directions():
+    current = {"shoulder_pan": 0.0, "elbow_flex": 10.0}
+    goal = {"shoulder_pan": 100.0, "elbow_flex": -90.0}
+    out = limit_step(current, goal, max_step_deg=1.2)
+    assert out == {"shoulder_pan": 1.2, "elbow_flex": 8.8}
+
+
+def test_limit_step_passes_small_delta_through_untouched():
+    current = {"shoulder_pan": 5.0}
+    out = limit_step(current, {"shoulder_pan": 5.5}, max_step_deg=1.2)
+    assert out == {"shoulder_pan": 5.5}
+
+
+def test_limit_step_passes_through_joints_with_no_reference_position():
+    # clamp_joint_goal already dropped unknown joints; a joint missing from
+    # `current` means we have no measurement, not that the joint is bogus.
+    out = limit_step({}, {"wrist_roll": 42.0}, max_step_deg=1.2)
+    assert out == {"wrist_roll": 42.0}
+
+
+def test_check_move_size_reports_only_offending_joints_with_signed_delta():
+    current = {"shoulder_pan": 0.0, "elbow_flex": 0.0, "gripper": 0.0}
+    goal = {"shoulder_pan": 45.0, "elbow_flex": -31.0, "gripper": 5.0}
+    assert check_move_size(current, goal, threshold_deg=30.0) == {
+        "shoulder_pan": 45.0,
+        "elbow_flex": -31.0,
+    }
+
+
+def test_check_move_size_empty_when_all_within_threshold():
+    assert check_move_size({"a": 0.0}, {"a": 29.9}, threshold_deg=30.0) == {}
+
+
+def test_plan_ramp_bounds_every_consecutive_step():
+    current = {"shoulder_pan": 0.0, "elbow_flex": 0.0}
+    goal = {"shoulder_pan": 20.0, "elbow_flex": -10.0}
+    wps = plan_ramp(current, goal, max_speed_deg_s=60.0, hz=50.0)
+    step = 60.0 / 50.0
+    prev = current
+    for wp in wps:
+        for j, v in wp.items():
+            assert abs(v - prev[j]) <= step + 1e-9
+        prev = wp
+    assert wps[-1] == goal
+
+
+def test_plan_ramp_returns_empty_when_already_at_goal():
+    assert plan_ramp({"a": 5.0}, {"a": 5.0}, max_speed_deg_s=60.0, hz=50.0) == []
+
+
+def test_plan_ramp_rejects_nonpositive_rates():
+    with pytest.raises(ValueError):
+        plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=0.0, hz=50.0)
+    with pytest.raises(ValueError):
+        plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=60.0, hz=0.0)
