@@ -14,8 +14,8 @@ from functools import partial
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
-from .config import ArmConfig
-from .safety import Mode, ModeGuard, clamp_joint_goal
+from .config import ArmConfig, MotionConfig
+from .safety import Mode, ModeGuard, clamp_joint_goal, limit_step
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,8 @@ class ArmHandle:
     guard: ModeGuard = field(default_factory=lambda: ModeGuard(Mode.MANUAL))
     robot: SO101Follower | None = None
     torque_enabled: bool = True
+    motion: MotionConfig = field(default_factory=MotionConfig)
+    _last_commanded: dict[str, float] | None = None
 
     def connect(self) -> None:
         cfg = SO101FollowerConfig(
@@ -99,11 +101,22 @@ class ArmHandle:
     def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
         self.guard.assert_manual()
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
+        if self._last_commanded is None:
+            # First command since connect or a torque toggle: seed from a real
+            # read. Every later call limits against the last command, so the
+            # 60 Hz teleop path costs no extra serial traffic.
+            self._last_commanded = self.read_joints_deg()
+        capped = limit_step(
+            self._last_commanded,
+            clamped,
+            self.motion.max_speed_deg_s / self.motion.ramp_hz,
+        )
         # lerobot expects keys suffixed with ".pos"
-        action = {f"{j}.pos": v for j, v in clamped.items()}
+        action = {f"{j}.pos": v for j, v in capped.items()}
         assert self.robot is not None
         self.robot.send_action(action)
-        return clamped
+        self._last_commanded = {**self._last_commanded, **capped}
+        return capped
 
     def home(self) -> dict[str, float]:
         """Go to the calibrated home pose (0° on every joint)."""
@@ -114,11 +127,13 @@ class ArmHandle:
         if self.robot is not None:
             self.robot.bus.disable_torque()
             self.torque_enabled = False
+            self._last_commanded = None
 
     def enable_torque(self) -> None:
         if self.robot is not None:
             self.robot.bus.enable_torque()
             self.torque_enabled = True
+            self._last_commanded = None
 
     def read_joints_deg(self) -> dict[str, float]:
         """Latest joint positions in degrees, keyed by joint name (no `.pos` suffix).
@@ -156,8 +171,10 @@ class ArmHandle:
 class ArmManager:
     """Lookup-by-id collection of arm handles (real or sim)."""
 
-    def __init__(self, arm_configs: list[ArmConfig]):
+    def __init__(self, arm_configs: list[ArmConfig],
+                 motion: MotionConfig | None = None):
         self._configs = [c for c in arm_configs if c.enabled]
+        self._motion = motion or MotionConfig()
         self._handles: dict[str, "ArmHandle | SimArmHandle"] = {}
         self._world = None  # lazily constructed if any sim arm/camera needs it
 
@@ -176,6 +193,7 @@ class ArmManager:
 
     def connect_all(self) -> None:
         from .calibration_bootstrap import ensure_follower_calibrations
+        from .config import resolve_motion
         from .sim.arm import SimArmHandle
 
         real_configs = [c for c in self._configs if c.source == "real"]
@@ -194,6 +212,7 @@ class ArmManager:
             else:
                 handle = ArmHandle(cfg)
                 handle.connect()
+            handle.motion = resolve_motion(cfg, self._motion)
             self._handles[cfg.id] = handle
 
     def disconnect_all(self) -> None:

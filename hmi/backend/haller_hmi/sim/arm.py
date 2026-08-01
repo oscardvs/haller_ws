@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from ..config import ArmConfig
-from ..safety import Mode, ModeGuard, clamp_joint_goal
+from ..config import ArmConfig, MotionConfig
+from ..safety import Mode, ModeGuard, clamp_joint_goal, limit_step
 from .world import MuJoCoWorld
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,8 @@ class SimArmHandle:
     joint_limits_deg: dict[str, tuple[float, float]] = field(default_factory=dict)
     guard: ModeGuard = field(default_factory=lambda: ModeGuard(Mode.MANUAL))
     torque_enabled: bool = True
+    motion: MotionConfig = field(default_factory=MotionConfig)
+    _last_commanded: dict[str, float] | None = None
 
     @property
     def _prefix(self) -> str:
@@ -69,14 +71,22 @@ class SimArmHandle:
     def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
         self.guard.assert_manual()
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
+        if self._last_commanded is None:
+            self._last_commanded = self.read_joints_deg()
+        capped = limit_step(
+            self._last_commanded,
+            clamped,
+            self.motion.max_speed_deg_s / self.motion.ramp_hz,
+        )
         # Translate snake_case → CamelCase + add arm prefix for the world.
         mjcf_goal = {
             f"{self._prefix}{LEROBOT_TO_MJCF[j]}": v
-            for j, v in clamped.items()
+            for j, v in capped.items()
             if j in LEROBOT_TO_MJCF
         }
         self.world.write_ctrl_deg(self.config.sim_arm_name, mjcf_goal)
-        return clamped
+        self._last_commanded = {**self._last_commanded, **capped}
+        return capped
 
     def home(self) -> dict[str, float]:
         goal = {j: 0.0 for j in self.joint_limits_deg}
@@ -85,10 +95,12 @@ class SimArmHandle:
     def disable_torque(self) -> None:
         self.world.set_arm_torque(self.config.sim_arm_name, enabled=False)
         self.torque_enabled = False
+        self._last_commanded = None
 
     def enable_torque(self) -> None:
         self.world.set_arm_torque(self.config.sim_arm_name, enabled=True)
         self.torque_enabled = True
+        self._last_commanded = None
 
     def read_joints_deg(self) -> dict[str, float]:
         """Latest joint positions in degrees, keyed by LeRobot snake_case names —

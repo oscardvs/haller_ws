@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from haller_hmi.arm import ArmManager, ArmHandle
-from haller_hmi.config import ArmConfig
+from haller_hmi.config import ArmConfig, MotionConfig
 from haller_hmi.safety import Mode, ModeError
 
 
@@ -52,6 +52,10 @@ def test_send_goal_in_auto_mode_raises(monkeypatch):
 def test_send_goal_clamps_and_calls_lerobot(monkeypatch):
     handle = _make_handle(monkeypatch)
     handle.guard.set(Mode.MANUAL)
+    # A large max_speed_deg_s keeps this test about joint-limit clamping and
+    # forwarding to lerobot, not about the per-step cap (covered separately by
+    # test_send_goal_caps_a_garbage_jump_to_one_step and friends below).
+    handle.motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
     sent = handle.send_goal({"shoulder_pan": 999.0, "gripper": -50.0, "unknown": 10.0})
     assert sent == {"shoulder_pan": 120.0, "gripper": 0.0}
     handle.robot.send_action.assert_called_once_with({"shoulder_pan.pos": 120.0,
@@ -228,3 +232,40 @@ def test_send_goal_does_not_silently_enable_torque(monkeypatch):
 
     handle.robot.bus.enable_torque.assert_not_called()
     assert handle.torque_enabled is False
+
+
+def test_send_goal_caps_a_garbage_jump_to_one_step(monkeypatch):
+    """A corrupted frame commanding +100 deg must yield one bounded step. Also
+    covers the suspected UART corruption that poisoned the right arm's sweep."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = {"shoulder_pan": 0.0}
+
+    sent = handle.send_goal({"shoulder_pan": 100.0})
+
+    assert sent["shoulder_pan"] == pytest.approx(1.2)
+
+
+def test_send_goal_tracks_last_commanded_across_calls(monkeypatch):
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = {"shoulder_pan": 0.0}
+
+    handle.send_goal({"shoulder_pan": 100.0})
+    second = handle.send_goal({"shoulder_pan": 100.0})
+
+    assert second["shoulder_pan"] == pytest.approx(2.4)
+
+
+def test_send_goal_seeds_last_commanded_from_a_real_read(monkeypatch):
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = None
+    handle.robot.get_observation.return_value = {"shoulder_pan.pos": 50.0}
+
+    sent = handle.send_goal({"shoulder_pan": 100.0})
+
+    assert sent["shoulder_pan"] == pytest.approx(51.2)

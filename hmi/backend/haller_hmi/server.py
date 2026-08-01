@@ -39,7 +39,7 @@ VERSION = "0.1.0"
 
 # Globals — wired in lifespan
 cfg = load_config()
-arms = ArmManager(cfg.arms)
+arms = ArmManager(cfg.arms, motion=cfg.motion)
 cameras: CameraManager | None = None   # constructed in lifespan, after arms.connect_all()
 ros = RosBridge(cfg.ros)
 presets = PresetStore()

@@ -15,7 +15,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 import pytest
 
-from haller_hmi.config import ArmConfig
+from haller_hmi.config import ArmConfig, MotionConfig
 from haller_hmi.human_teleop import HumanState, HumanTeleopSession
 from haller_hmi.sim.arm import SimArmHandle
 from haller_hmi.sim.builder import build_scene
@@ -158,6 +158,10 @@ def test_start_seeds_committed_goals_from_observed_sim_pose(sim_arms):
     to all-zeros would make the first driving tick a jump from a false origin."""
     mgr, handles, world = sim_arms
     # Park the left arm somewhere clearly non-zero and let physics settle.
+    # A large max_speed_deg_s makes this single send_goal call effectively
+    # uncapped, so it still parks in one shot — the motion-safety per-step cap
+    # is exercised elsewhere (test_arm.py) and is not this test's subject.
+    handles["left"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
     handles["left"].send_goal({"shoulder_pan": 45.0})
     assert _wait_until(
         lambda: abs(handles["left"].read_joints_deg()["shoulder_pan"] - 45.0) < 5.0
@@ -310,6 +314,12 @@ def test_acquisition_and_recovery_against_real_sim_arms(sim_arms):
         #    purpose: the two SO-101s in this scene reach each other at about
         #    26 deg of shoulder_pan and simply stop, so a bigger pose would
         #    have the test measuring a collision rather than a handover.
+        #    A large max_speed_deg_s makes each single send_goal call
+        #    effectively uncapped, so parking still lands in one shot — the
+        #    motion-safety per-step cap is exercised elsewhere (test_arm.py).
+        motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
+        handles["left"].motion = motion
+        handles["right"].motion = motion
         handles["left"].send_goal({"shoulder_pan": 20.0})
         handles["right"].send_goal({"shoulder_pan": -20.0})
         assert _wait_until(

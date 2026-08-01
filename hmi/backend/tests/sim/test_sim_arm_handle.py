@@ -8,7 +8,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 
 import pytest
 
-from haller_hmi.config import ArmConfig
+from haller_hmi.config import ArmConfig, MotionConfig
 from haller_hmi.safety import Mode, ModeError
 from haller_hmi.sim.arm import SimArmHandle
 from haller_hmi.sim.world import MuJoCoWorld
@@ -71,6 +71,10 @@ def test_send_goal_takes_lerobot_keys_and_writes_to_mjcf_actuators():
     world, handle = _make_world_and_handle()
     handle.connect()
     world.start()
+    # A large max_speed_deg_s keeps this test about clamping-and-forwarding to
+    # the MJCF actuators, not about the per-step motion-safety cap (covered
+    # separately in test_arm.py).
+    handle.motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
     try:
         sent = handle.send_goal({"shoulder_pan": 30.0, "gripper": 999.0})
         assert sent["shoulder_pan"] == pytest.approx(30.0, abs=1e-3)
