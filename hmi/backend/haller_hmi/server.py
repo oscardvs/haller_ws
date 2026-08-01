@@ -557,7 +557,9 @@ async def teleop_sim_start(body: SimTeleopStartBody):
     # that race reaches hardware: two threads writing Goal_Position on one
     # unlocked PortHandler. async def puts this route on the same event loop
     # thread as move_to's callers, where neither body has an await point, so
-    # they can't interleave.
+    # they can't interleave — PROVIDED nothing in this function's own body
+    # awaits in the middle of claiming the arm. See the next comment: this is
+    # exactly what src.prepare() would have broken if left inline.
     leader_cfg = body.leader
     src_kind = leader_cfg.get("source")
     if src_kind == "mouse":
@@ -571,6 +573,17 @@ async def teleop_sim_start(body: SimTeleopStartBody):
         src = DatasetReplaySource(dataset_path=leader_cfg["dataset_path"])
     else:
         raise HTTPException(status_code=400, detail=f"unknown leader source {src_kind!r}")
+    # The slow half of getting a source ready — a "replay" source loads a
+    # LeRobotDataset here, which can be a network round trip if it resolves
+    # against the Hub (see sim/sources.py) — runs off the event loop, and
+    # strictly BEFORE any arm state is touched. Everything from here on is
+    # synchronous with no further await, so it stays one atomic, non-yielding
+    # stretch on the event loop, serialised against move_to() the same way
+    # two async def routes already are relative to each other. This is what
+    # keeps that property from depending on "nothing else in this file ever
+    # awaits" as an invariant to remember — the one await here is placed
+    # before sim_teleop.start() claims the follower, not interleaved with it.
+    await asyncio.to_thread(src.prepare)
     try:
         sim_teleop.start(follower_id=body.follower, source=src, hz=body.hz)
     except RuntimeError as e:

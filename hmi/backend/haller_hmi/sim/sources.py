@@ -3,6 +3,20 @@
 A LeaderSource just promises `read() -> dict[lerobot_joint_name -> degrees]`
 returning the next leader pose. SimLeaderTeleop ticks it at a fixed rate and
 forwards the result to a sim follower via the existing send_goal path.
+
+`prepare()` and `start()` are deliberately separate, not one method. A
+"replay" source's `prepare()` loads a LeRobotDataset — a filesystem read at
+best, a network round trip at worst if it resolves against the Hub (see
+`DatasetReplaySource`) — while `start()` must stay cheap and instant. The
+caller (server.py's `/teleop/sim/start`) awaits `prepare()` off the event
+loop, before touching any arm state; only then does it call
+`SimLeaderTeleop.start()`, which calls this class's `start()` as one
+synchronous, non-yielding stretch that claims the follower arm. That's what
+keeps it serialised against `motion.move_to()` (also reached only from
+`async def` routes with synchronous bodies) without leaning on "nothing here
+ever awaits" as an invariant someone could quietly break by adding one — the
+one await in the route happens strictly before any arm is claimed, not
+interleaved with it. See task-7-report.md, review round 2.
 """
 from __future__ import annotations
 
@@ -21,8 +35,9 @@ LEROBOT_JOINTS = list(LEROBOT_TO_MJCF.keys())
 
 
 class LeaderSource(Protocol):
-    def read(self) -> dict[str, float]: ...
+    def prepare(self) -> None: ...
     def start(self) -> None: ...
+    def read(self) -> dict[str, float]: ...
     def stop(self) -> None: ...
 
 
@@ -36,6 +51,9 @@ class MouseDragSource:
         self.world = world
         self.arm_name = arm_name
         self.prefix = f"{arm_name}_"
+
+    def prepare(self) -> None:
+        pass  # nothing to load — reads live world state on demand
 
     def start(self) -> None:
         pass
@@ -75,7 +93,9 @@ class DatasetReplaySource:
         self._joint_names: list[str] = []
         self._lock = threading.Lock()
 
-    def start(self) -> None:
+    def prepare(self) -> None:
+        """Load the dataset. The slow, potentially network-bound half — see
+        the module docstring for why this is not done in `start()`."""
         self._ds = _load_lerobot_dataset(self.dataset_path)
         # Prefer the dataset's own joint-name list; fall back to canonical LeRobot.
         try:
@@ -85,12 +105,15 @@ class DatasetReplaySource:
         # Pad/truncate to canonical length so downstream slicing stays stable.
         self._joint_names = (names + LEROBOT_JOINTS)[: len(LEROBOT_JOINTS)]
 
+    def start(self) -> None:
+        pass  # the dataset is already loaded by prepare(); nothing left to do
+
     def stop(self) -> None:
         self._ds = None
 
     def read(self) -> dict[str, float]:
         if self._ds is None:
-            raise RuntimeError("DatasetReplaySource: start() not called")
+            raise RuntimeError("DatasetReplaySource: prepare() not called")
         with self._lock:
             row = self._ds[self._idx]
             self._idx = (self._idx + 1) % len(self._ds)

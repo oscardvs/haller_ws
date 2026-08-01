@@ -48,6 +48,7 @@ def test_dataset_replay_source_walks_observation_state(tmp_path, monkeypatch):
         lambda path: FakeDataset(),
     )
     src = DatasetReplaySource(dataset_path=str(tmp_path))
+    src.prepare()
     src.start()
     try:
         first = src.read()
@@ -79,9 +80,22 @@ def test_dataset_replay_falls_back_to_canonical_joint_names_if_meta_missing(tmp_
         lambda path: FakeDataset(),
     )
     src = DatasetReplaySource(dataset_path=str(tmp_path))
+    src.prepare()
     src.start()
     try:
         out = src.read()
         assert set(out) == set(LEROBOT_JOINTS)
     finally:
         src.stop()
+
+
+def test_dataset_replay_source_read_before_prepare_raises(tmp_path):
+    """Task 7 review round 2: prepare() (the slow dataset load) and start()
+    (now a no-op — see sim/sources.py) are deliberately separate so the
+    caller can run prepare() off the event loop before claiming the arm.
+    start() alone must not be enough to make read() work — that would mean
+    the split isn't real and the dataset load is happening somewhere else."""
+    src = DatasetReplaySource(dataset_path=str(tmp_path))
+    src.start()
+    with pytest.raises(RuntimeError, match="prepare"):
+        src.read()

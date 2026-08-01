@@ -52,6 +52,11 @@ def app_with_mocks(monkeypatch, tmp_path):
     # it" — the fixture must say no peer owns this arm, same as production
     # with no teleop session running.
     arm.executor.teleop_owner.return_value = None
+    # Same shape of problem for SimLeaderTeleop.start()'s obligation-2 guard
+    # (sim/teleop.py): a bare Mock's .is_running is truthy, so this arm must
+    # say explicitly that it has no move in progress, same as an idle arm in
+    # production.
+    arm.executor.is_running = False
 
     arm_mgr = MagicMock()
     arm_mgr.keys.return_value = ["right"]
@@ -112,6 +117,18 @@ def app_with_mocks(monkeypatch, tmp_path):
         "goal_deg": {"left": {}, "right": {}},
     }
     srv_mod.human_teleop = human_teleop_mock
+    # sim_teleop is deliberately NOT a MagicMock (unlike teleop/human_teleop
+    # above) — real end-to-end tests exercise it directly (see
+    # test_teleop_sim_start_...). But the reload above re-runs
+    # `from .arm import ArmManager`, which clobbers the ArmManager
+    # monkeypatch BEFORE `arms = ArmManager(...)` executes, so the
+    # module-level `sim_teleop = SimLeaderTeleop(arms)` it just built was
+    # constructed against a fresh, real, unconnected ArmManager — not
+    # `arm_mgr`. Rebuilding it here, against the arm_mgr this fixture
+    # actually wires up, is what makes `sim_teleop.start(...)` resolve
+    # "right" instead of failing with "unknown arm id 'right'; known: []".
+    from haller_hmi.sim.teleop import SimLeaderTeleop
+    srv_mod.sim_teleop = SimLeaderTeleop(arm_mgr)
     srv_mod.calibration = cal_mgr
     return TestClient(srv_mod.app)
 
@@ -539,3 +556,44 @@ def test_estop_stops_sim_teleop(app_with_mocks):
 
     assert r.status_code == 200
     srv_mod.sim_teleop.stop.assert_called_once()
+
+
+def test_teleop_sim_start_prepares_a_replay_source_then_claims_the_arm(app_with_mocks, monkeypatch):
+    """Task 7 review round 2: /teleop/sim/start must run through the real
+    route, the real DatasetReplaySource, and the real (unmocked in this
+    fixture) SimLeaderTeleop with prepare() and start() split apart —
+    proving the split's two halves still cooperate end to end, not just that
+    each one works in isolation (test_sources.py) or that the route calls
+    the right method names.
+
+    This fakes only `_load_lerobot_dataset` (never the network) and does not
+    attempt to measure whether the event loop was blocked — TestClient
+    creates a fresh event loop per call when not used as a context manager
+    (as `app_with_mocks` is not, here), so two concurrent `.post()` calls
+    never share a loop and a timing assertion could not actually observe a
+    stall either way. See task-7-report.md, review round 2, for why that
+    property is asserted by design/code-reading instead.
+    """
+    from haller_hmi.sim.arm import LEROBOT_TO_MJCF
+    joints = list(LEROBOT_TO_MJCF.keys())
+    fake_rows = [{"observation.state": [0.0] * len(joints)}]
+
+    class _FakeDataset:
+        meta = MagicMock(features={"observation.state": {"names": joints}})
+        def __len__(self): return len(fake_rows)
+        def __getitem__(self, i): return fake_rows[i]
+
+    monkeypatch.setattr(
+        "haller_hmi.sim.sources._load_lerobot_dataset", lambda path: _FakeDataset(),
+    )
+    import haller_hmi.server as srv_mod
+
+    r = app_with_mocks.post("/teleop/sim/start", json={
+        "follower": "right", "hz": 60.0,
+        "leader": {"source": "replay", "dataset_path": "/fake/path"},
+    })
+    try:
+        assert r.status_code == 200
+        assert r.json()["running"] is True
+    finally:
+        srv_mod.sim_teleop.stop()
