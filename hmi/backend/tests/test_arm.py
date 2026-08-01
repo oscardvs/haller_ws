@@ -252,6 +252,12 @@ def test_send_goal_tracks_last_commanded_across_calls(monkeypatch):
     handle.guard.set(Mode.MANUAL)
     handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
     handle._last_commanded = {"shoulder_pan": 0.0}
+    # The cap is governed by real elapsed time between calls, so pin the
+    # clock rather than relying on however long two back-to-back Python
+    # calls actually take — one ramp period must have "elapsed" for the
+    # second call to earn another full step.
+    clock = iter([100.0, 100.0 + 1.0 / handle.motion.ramp_hz])
+    monkeypatch.setattr("haller_hmi.arm.time.monotonic", lambda: next(clock))
 
     handle.send_goal({"shoulder_pan": 100.0})
     second = handle.send_goal({"shoulder_pan": 100.0})
@@ -300,6 +306,10 @@ def test_send_goal_recovers_a_dropped_joint_once_a_read_succeeds(monkeypatch):
     handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
     handle._last_commanded = None
     handle.robot.get_observation.return_value = {"gripper.pos": 0.0}
+    # Pin the clock so the second call's budget is deterministic — see
+    # test_send_goal_tracks_last_commanded_across_calls.
+    clock = iter([100.0, 100.0 + 1.0 / handle.motion.ramp_hz])
+    monkeypatch.setattr("haller_hmi.arm.time.monotonic", lambda: next(clock))
 
     first = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
     assert "shoulder_pan" not in first

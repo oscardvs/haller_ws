@@ -121,10 +121,14 @@ class ArmHandle:
         # UNCAPPED — exactly the fail-open a flaky read must not produce. Drop
         # it here instead; it rejoins on whichever later call next reads it.
         measurable = {j: v for j, v in clamped.items() if j in self._last_commanded}
-        dt_s = now - self._last_command_at if self._last_command_at is not None else 0.0
-        max_step_deg = step_budget_deg(
-            dt_s, self.motion.max_speed_deg_s, self.motion.ramp_hz,
-        )
+        # No previous call to measure real elapsed time from: a seeded first
+        # call still earns one ramp period's worth of motion. Every call
+        # after that is governed by real elapsed time — step_budget_deg
+        # itself has no floor, or a loop faster than ramp_hz would land back
+        # on a fixed per-call cap and reintroduce the over-speed this fixed.
+        dt = (1.0 / self.motion.ramp_hz) if self._last_command_at is None \
+            else (now - self._last_command_at)
+        max_step_deg = step_budget_deg(dt, self.motion.max_speed_deg_s)
         capped = limit_step(self._last_commanded, measurable, max_step_deg)
         # lerobot expects keys suffixed with ".pos"
         action = {f"{j}.pos": v for j, v in capped.items()}
