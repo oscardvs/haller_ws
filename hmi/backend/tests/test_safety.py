@@ -17,7 +17,9 @@ from haller_hmi.safety import (
     plan_ramp,
     analyze_mouth_capture,
     replay_mouth_clutch,
+    step_budget_deg,
     sustained_level,
+    MAX_STEP_DT_S,
     MOUTH_HOLD_MS,
     MOUTH_ENGAGE_MARGIN,
     MOUTH_RELEASE_MARGIN,
@@ -431,6 +433,47 @@ def test_limit_step_passes_through_joints_with_no_reference_position():
     # `current` means we have no measurement, not that the joint is bogus.
     out = limit_step({}, {"wrist_roll": 42.0}, max_step_deg=1.2)
     assert out == {"wrist_roll": 42.0}
+
+
+def test_step_budget_deg_floors_at_the_ramp_hz_step_for_a_near_zero_gap():
+    """dt ~ 0 (the call right after a seed, or two calls back to back) must
+    still earn the ramp_hz-sized step, not next to nothing."""
+    got = step_budget_deg(0.0, max_speed_deg_s=60.0, ramp_hz=50.0)
+    assert got == pytest.approx(60.0 / 50.0)
+
+
+def test_step_budget_deg_floor_is_flat_below_the_ramp_hz_gap():
+    # Anything below the floor clips to exactly the floor's budget — not
+    # something smaller and not something proportional to the tiny gap.
+    below_floor = 0.3 * (1.0 / 50.0)
+    got = step_budget_deg(below_floor, max_speed_deg_s=60.0, ramp_hz=50.0)
+    assert got == pytest.approx(60.0 / 50.0)
+
+
+def test_step_budget_deg_is_proportional_between_the_floor_and_the_ceiling():
+    got = step_budget_deg(0.05, max_speed_deg_s=60.0, ramp_hz=50.0)
+    assert got == pytest.approx(60.0 * 0.05)
+    # Steady state at a loop rate at or below ramp_hz is exactly
+    # max_speed_deg_s: this is the property the fixed max_speed_deg_s/ramp_hz
+    # divisor could not deliver away from ramp_hz itself.
+    assert got / 0.05 == pytest.approx(60.0)
+
+
+def test_step_budget_deg_ceilings_at_max_dt_s_for_a_stalled_caller():
+    # A caller that stalls for a long time must not bank an unbounded step.
+    got = step_budget_deg(10.0, max_speed_deg_s=60.0, ramp_hz=50.0)
+    assert got == pytest.approx(60.0 * MAX_STEP_DT_S)
+
+
+def test_step_budget_deg_ceiling_is_flat_above_max_dt_s():
+    at_ceiling = step_budget_deg(MAX_STEP_DT_S, max_speed_deg_s=60.0, ramp_hz=50.0)
+    way_past = step_budget_deg(50.0, max_speed_deg_s=60.0, ramp_hz=50.0)
+    assert at_ceiling == pytest.approx(way_past)
+
+
+def test_step_budget_deg_custom_max_dt_s_overrides_the_default_ceiling():
+    got = step_budget_deg(1.0, max_speed_deg_s=60.0, ramp_hz=50.0, max_dt_s=0.5)
+    assert got == pytest.approx(60.0 * 0.5)
 
 
 def test_check_move_size_reports_only_offending_joints_with_signed_delta():

@@ -269,3 +269,45 @@ def test_send_goal_seeds_last_commanded_from_a_real_read(monkeypatch):
     sent = handle.send_goal({"shoulder_pan": 100.0})
 
     assert sent["shoulder_pan"] == pytest.approx(51.2)
+
+
+def test_send_goal_drops_a_joint_the_seed_read_could_not_measure(monkeypatch):
+    """A flaky seed read (first call, or right after a torque toggle) can come
+    back missing a joint. limit_step's own contract passes a joint absent from
+    `current` through UNCAPPED — the right behaviour when the caller already
+    knows every joint is measured, but a fail-open if send_goal handed it an
+    unmeasured one. send_goal must refuse to command that joint at all rather
+    than inherit the pass-through."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = None
+    # The seed read comes back missing shoulder_pan entirely.
+    handle.robot.get_observation.return_value = {"gripper.pos": 0.0}
+
+    sent = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
+
+    assert "shoulder_pan" not in sent
+    assert sent["gripper"] == pytest.approx(1.2)
+    handle.robot.send_action.assert_called_once_with({"gripper.pos": pytest.approx(1.2)})
+
+
+def test_send_goal_recovers_a_dropped_joint_once_a_read_succeeds(monkeypatch):
+    """The joint that a flaky seed read dropped must rejoin as soon as a later
+    call's retry read actually measures it — not stay locked out forever."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = None
+    handle.robot.get_observation.return_value = {"gripper.pos": 0.0}
+
+    first = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
+    assert "shoulder_pan" not in first
+
+    # The read recovers: shoulder_pan is now measured too.
+    handle.robot.get_observation.return_value = {
+        "shoulder_pan.pos": 10.0, "gripper.pos": 1.2,
+    }
+    second = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
+
+    assert second["shoulder_pan"] == pytest.approx(11.2)

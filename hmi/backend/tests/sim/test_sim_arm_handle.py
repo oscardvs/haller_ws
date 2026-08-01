@@ -133,3 +133,18 @@ def test_sim_send_goal_does_not_silently_enable_torque():
     handle.send_goal({"shoulder_pan": 10.0})
 
     assert handle.torque_enabled is False
+
+
+def test_send_goal_drops_a_joint_the_seed_read_could_not_measure(monkeypatch):
+    """Same fail-open guard as ArmHandle: a joint missing from the seed read
+    must be dropped from the command, not passed through uncapped."""
+    _world, handle = _make_world_and_handle()
+    handle.connect()
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    # Simulate a flaky seed read that only measured gripper.
+    monkeypatch.setattr(handle, "read_joints_deg", lambda: {"gripper": 0.0})
+
+    sent = handle.send_goal({"shoulder_pan": 30.0, "gripper": 10.0})
+
+    assert "shoulder_pan" not in sent
+    assert sent["gripper"] == pytest.approx(1.2)

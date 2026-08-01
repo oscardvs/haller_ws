@@ -9,13 +9,14 @@ The HMI's safety surface lives on top of lerobot's raw API:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from functools import partial
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .config import ArmConfig, MotionConfig
-from .safety import Mode, ModeGuard, clamp_joint_goal, limit_step
+from .safety import Mode, ModeGuard, clamp_joint_goal, limit_step, step_budget_deg
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class ArmHandle:
     torque_enabled: bool = True
     motion: MotionConfig = field(default_factory=MotionConfig)
     _last_commanded: dict[str, float] | None = None
+    _last_command_at: float | None = None
 
     def connect(self) -> None:
         cfg = SO101FollowerConfig(
@@ -100,22 +102,35 @@ class ArmHandle:
 
     def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
         self.guard.assert_manual()
+        assert self.robot is not None
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
+        now = time.monotonic()
         if self._last_commanded is None:
             # First command since connect or a torque toggle: seed from a real
             # read. Every later call limits against the last command, so the
             # 60 Hz teleop path costs no extra serial traffic.
             self._last_commanded = self.read_joints_deg()
-        capped = limit_step(
-            self._last_commanded,
-            clamped,
-            self.motion.max_speed_deg_s / self.motion.ramp_hz,
+        if any(j not in self._last_commanded for j in clamped):
+            # A flaky read can drop a joint at seed time, or leave it dropped
+            # from an earlier call. Retry so it rejoins as soon as one read
+            # succeeds, rather than staying unmeasured indefinitely.
+            self._last_commanded = {**self._last_commanded, **self.read_joints_deg()}
+        # Don't move what you can't measure: a joint missing from
+        # `_last_commanded` has no reference for limit_step to cap against,
+        # and limit_step's own contract is to pass such a joint through
+        # UNCAPPED — exactly the fail-open a flaky read must not produce. Drop
+        # it here instead; it rejoins on whichever later call next reads it.
+        measurable = {j: v for j, v in clamped.items() if j in self._last_commanded}
+        dt_s = now - self._last_command_at if self._last_command_at is not None else 0.0
+        max_step_deg = step_budget_deg(
+            dt_s, self.motion.max_speed_deg_s, self.motion.ramp_hz,
         )
+        capped = limit_step(self._last_commanded, measurable, max_step_deg)
         # lerobot expects keys suffixed with ".pos"
         action = {f"{j}.pos": v for j, v in capped.items()}
-        assert self.robot is not None
         self.robot.send_action(action)
         self._last_commanded = {**self._last_commanded, **capped}
+        self._last_command_at = now
         return capped
 
     def home(self) -> dict[str, float]:
@@ -128,12 +143,14 @@ class ArmHandle:
             self.robot.bus.disable_torque()
             self.torque_enabled = False
             self._last_commanded = None
+            self._last_command_at = None
 
     def enable_torque(self) -> None:
         if self.robot is not None:
             self.robot.bus.enable_torque()
             self.torque_enabled = True
             self._last_commanded = None
+            self._last_command_at = None
 
     def read_joints_deg(self) -> dict[str, float]:
         """Latest joint positions in degrees, keyed by joint name (no `.pos` suffix).

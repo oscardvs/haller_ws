@@ -79,6 +79,27 @@ def limit_step(
     return out
 
 
+# Largest gap that still earns proportional budget. Beyond this a caller has
+# stalled, and a stalled caller must not bank a large jump.
+MAX_STEP_DT_S = 0.1
+
+
+def step_budget_deg(
+    dt_s: float,
+    max_speed_deg_s: float,
+    ramp_hz: float,
+    max_dt_s: float = MAX_STEP_DT_S,
+) -> float:
+    """Degrees one joint may move on a single call, given time since the last.
+
+    Steady-state speed is exactly `max_speed_deg_s` at any loop rate. `ramp_hz`
+    sets the floor so the first call after a seed (dt ~ 0) still moves, and
+    `max_dt_s` sets the ceiling so a long idle cannot bank an unbounded step.
+    """
+    dt = min(max(dt_s, 1.0 / ramp_hz), max_dt_s)
+    return max_speed_deg_s * dt
+
+
 def check_move_size(
     current: dict[str, float],
     goal: dict[str, float],

@@ -314,18 +314,23 @@ def test_acquisition_and_recovery_against_real_sim_arms(sim_arms):
         #    purpose: the two SO-101s in this scene reach each other at about
         #    26 deg of shoulder_pan and simply stop, so a bigger pose would
         #    have the test measuring a collision rather than a handover.
-        #    A large max_speed_deg_s makes each single send_goal call
-        #    effectively uncapped, so parking still lands in one shot — the
-        #    motion-safety per-step cap is exercised elsewhere (test_arm.py).
-        motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
-        handles["left"].motion = motion
-        handles["right"].motion = motion
+        #    Each handle gets its own large-max_speed_deg_s MotionConfig
+        #    instance (not a shared one) so this single send_goal call parks
+        #    in one shot.
+        handles["left"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
+        handles["right"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
         handles["left"].send_goal({"shoulder_pan": 20.0})
         handles["right"].send_goal({"shoulder_pan": -20.0})
         assert _wait_until(
             lambda: abs(handles["left"].read_joints_deg()["shoulder_pan"] - 20.0) < 2.0,
             timeout=5.0,
         ), "sim arm never reached the parked pose"
+        # The park is done — restore the real motion-safety cap so steps 1-6
+        # below exercise the actual streaming-goal cap composing with the
+        # session's own ramp/rate-cap, which is the point of running this
+        # test against real SimArmHandles rather than mocks.
+        handles["left"].motion = MotionConfig()
+        handles["right"].motion = MotionConfig()
 
         # 1. The operator engages from a pose the robot is nowhere near.
         away = _pose_at_pan(60.0)
