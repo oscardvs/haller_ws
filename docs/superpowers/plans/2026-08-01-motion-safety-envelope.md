@@ -1420,6 +1420,28 @@ difference between a working guard and a decorative one.
    to report what `send_goal` actually wrote. Any mid-ramp failure lands only
    in `executor.last_error`, which nothing reads or surfaces.
 
+### A7 — Jog is streaming, not discrete. `/goal` must not use `move_to`.
+
+This plan's own §5 split the callers correctly — streaming callers send many
+small deltas, discrete callers send one absolute pose — and then A6 obligation 6
+put `POST /arm/{id}/goal` in the discrete set anyway. That was wrong.
+
+`/arm/{id}/goal` is the frontend's **jog channel**: `JointSlider` debounces
+`onChange` at 50 ms and `ArmPanel` posts straight to it, so a slider drag fires
+at up to 20 Hz. Routed through `move_to`, every one of those does a blocking
+serial `read_joints_deg()` and an `executor.run()` → `Thread.join(timeout=2.0)`
+on the asyncio event loop; and because the goal is compared against *measured*
+position while the arm ramps at 60 °/s, any drag faster than that accumulates
+error until it crosses `large_move_deg` and starts returning 409. Most
+full-track drags would refuse partway.
+
+**Ruling: `/goal` returns to `handle.send_goal`**, which Task 4 already bounds
+to `max_speed_deg_s` by elapsed time — the correct envelope for a streaming
+channel. Add the torque-disabled refusal there so it cannot silently no-op (the
+gap Task 3's review found). `/home` and `/preset` stay on `move_to`: they
+command absolute poses that a recalibration can invalidate, which is the
+incident.
+
 ### A3 — Test coverage restored (was Important)
 
 `tests/sim/test_human_teleop_sim.py::test_acquisition_and_recovery_against_real_sim_arms`
