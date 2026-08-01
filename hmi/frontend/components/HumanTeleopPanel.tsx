@@ -107,7 +107,14 @@ export function HumanTeleopPanel({
     left: null, right: null,
   });
 
-  const [clutchSource, setClutchSource] = useState<ClutchSource>("spacebar");
+  // Narrower than `ClutchSource` on purpose. `vr_grip` is a real authority, but
+  // it cannot originate here: this panel's input is a webcam, and a
+  // `KeypointFrame` carrying `clutch_source: "vr_grip"` would be claiming an
+  // authority no controller in this component can release. The VR panel builds
+  // its own frames on its own socket. Keeping the exclusion in the type means
+  // the compiler enforces that rather than a comment asking nicely.
+  const [clutchSource, setClutchSource] =
+    useState<Exclude<ClutchSource, "vr_grip">>("spacebar");
   const [mouthCalib, setMouthCalib] = useState<MouthCalib>(
     () => (typeof window === "undefined"
       ? defaultMouthCalib()

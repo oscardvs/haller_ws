@@ -13,3 +13,42 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{seria
 
 # SO-101 leader arm bus adapter (Waveshare/CH343) -> /dev/haller_arm_leader
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5B14030445", SYMLINK+="haller_arm_leader", MODE="0666"
+
+# Jetson 40-pin UART (pins 6/8/10) -> /dev/haller_arm_uart
+#
+# An SO-101 servo bus can be driven straight off the Tegra UART, bypassing the
+# board's CH343P USB bridge entirely — useful when that path is unavailable, and
+# proven to enumerate all six servos at 1 Mbaud. Note this is ttyTHS1, not
+# ttyTHS2, and there is no ttyTHS0 on this build regardless of what the popular
+# Jetson tutorials say.
+#
+# MODE 0666 for the same reason the arm adapters have it: the `haller` user is
+# not in `dialout`, and these nodes are root:dialout 0660 by default, so without
+# this the port cannot be opened at all — which presents as a ConnectionError
+# that looks exactly like absent hardware.
+#
+# Only meaningful while the board's jumper selects UART rather than USB—SERVO;
+# in USB mode nothing is wired to these pins and the symlink is inert.
+KERNEL=="ttyTHS1", SUBSYSTEM=="tty", SYMLINK+="haller_arm_uart", MODE="0666"
+
+# RealSense D455 RGB node (mast camera) -> /dev/haller_cam_mast
+#
+# The D455 presents six /dev/video* nodes across two USB interfaces: interface
+# 00 carries depth + the two infrared streams, interface 03 carries colour. The
+# *numbering* is not stable — enabling the CSI camera overlay pushed colour from
+# /dev/video4 to /dev/video6, and moving the camera to the USB 3.0 bus will move
+# it again. Matching on (interface 03, index 0) pins the colour node regardless.
+#
+# /dev/v4l/by-id does not help here: it only names interface 00's nodes, so the
+# colour node has no by-id entry at all. by-path does name it, but encodes the
+# USB port number, which is exactly what changes when the camera is replugged.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b5c", ENV{ID_USB_INTERFACE_NUM}=="03", ATTR{index}=="0", SYMLINK+="haller_cam_mast", MODE="0666"
+
+# IMX219 CSI wrist cameras -> /dev/haller_cam_wrist_{a,c}
+#
+# These hang off tegra-capture-vi, not USB, so their by-path names carry no port
+# number and are already stable across reboots. The symlinks exist so config.yaml
+# names a camera by its role rather than by a kernel index that reads as
+# arbitrary. index0 = CAM0 slot (i2c 10), index4 = CAM1 slot (i2c 9).
+SUBSYSTEM=="video4linux", KERNELS=="tegra-capture-vi", ATTR{name}=="vi-output, imx219 10-0010", SYMLINK+="haller_cam_wrist_a", MODE="0666"
+SUBSYSTEM=="video4linux", KERNELS=="tegra-capture-vi", ATTR{name}=="vi-output, imx219 9-0010", SYMLINK+="haller_cam_wrist_c", MODE="0666"

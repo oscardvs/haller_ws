@@ -121,7 +121,7 @@ class CameraManager:
     def __init__(self, camera_configs: list[CameraConfig], world=None):
         from .sim.camera import SimCamera  # late import so non-sim setups don't need mujoco
 
-        self._handles: dict[str, "CameraHandle | SimCamera"] = {}
+        self._handles: dict[str, "CameraHandle | SimCamera | CSICameraHandle"] = {}
         for c in camera_configs:
             if c.source == "sim_camera":
                 if world is None:
@@ -131,6 +131,13 @@ class CameraManager:
                     )
                     continue
                 self._handles[c.id] = SimCamera(c, world=world)
+            elif c.source == "csi":
+                # Late import for the same reason as SimCamera: a machine with
+                # no PyGObject/GStreamer must still be able to run the HMI
+                # against USB cameras or the sim.
+                from .csi_camera import CSICameraHandle
+
+                self._handles[c.id] = CSICameraHandle(c)
             else:
                 self._handles[c.id] = CameraHandle(c)
 

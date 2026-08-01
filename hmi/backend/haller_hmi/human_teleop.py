@@ -136,10 +136,17 @@ class _SideAcquire:
         self.reason = reason
 
 
-#: Which source holds dead-man authority. Exactly these two strings, mirrored
+#: Which source holds dead-man authority. Exactly these three strings, mirrored
 #: in TypeScript as `ClutchSource` — nothing else may reach the session.
-ClutchSource = Literal["spacebar", "mouth"]
-CLUTCH_SOURCES: tuple[str, ...] = ("spacebar", "mouth")
+#:
+#: `vr_grip` is a Quest controller's squeeze button. It shares the spacebar's
+#: code path because both are the same thing to this module: a boolean the
+#: operator holds, carried on the frame, with no threshold or hold timer of its
+#: own. It exists as a distinct name only so `status()` reports honestly which
+#: physical control is armed — a session driven from a headset must not tell the
+#: operator the spacebar holds authority.
+ClutchSource = Literal["spacebar", "mouth", "vr_grip"]
+CLUTCH_SOURCES: tuple[str, ...] = ("spacebar", "mouth", "vr_grip")
 
 
 class HumanState(str, enum.Enum):
@@ -327,8 +334,12 @@ class HumanTeleopSession:
             self._clutch_source = source
         self._mouth.reset()
         self._dead_man = False
+        # Held-button sources report "<source>_mode" — a resting state, not a
+        # fault. Only the mouth clutch starts "stale", because it genuinely
+        # cannot engage until a face has been seen.
         self._clutch_reason = (
-            "spacebar_mode" if self._clutch_source == "spacebar" else "stale"
+            "stale" if self._clutch_source == "mouth"
+            else f"{self._clutch_source}_mode"
         )
 
     def _mouth_thresholds(self) -> tuple[float, float] | None:
@@ -588,8 +599,10 @@ class HumanTeleopSession:
                 )
                 self._clutch_reason = self._mouth.reason
             else:
+                # spacebar and vr_grip are both plain held booleans; the backend
+                # applies no threshold or hold timer to either.
                 engaged = bool(frame.get("dead_man", False))
-                self._clutch_reason = "spacebar_mode"
+                self._clutch_reason = f"{self._clutch_source}_mode"
                 self._mouth.above_since_t = None
             if source_mismatch:
                 # Authority never hands over mid-motion. A frame speaking for

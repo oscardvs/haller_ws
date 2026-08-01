@@ -23,6 +23,7 @@ from .calibration import (
 from .cameras import CameraManager
 from .config import load_config
 from .human_teleop import ClutchSource, HumanTeleopSession
+from .vr_input import vr_frame_to_keypoint_frame
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
 from . import safety
@@ -660,6 +661,32 @@ async def ws_human_teleop_in(ws: WebSocket):
             except Exception:
                 # Don't kill the socket over a bad frame — log and continue.
                 logger.exception("human teleop ingest_frame failed")
+    except WebSocketDisconnect:
+        human_teleop.notify_ws_disconnected()
+        return
+
+
+@app.websocket("/ws/teleop/vr/in")
+async def ws_vr_teleop_in(ws: WebSocket):
+    """Raw WebXR frames from a headset browser.
+
+    A separate socket from the MediaPipe one, but only at the door: the frame is
+    converted to the same `KeypointFrame` and handed to the same `ingest_frame`.
+    The split exists so the browser never has to know how to build a body — it
+    ships headset and controller poses, and `vr_input` synthesizes the shoulder
+    and elbow server-side where that geometry can be tested against the real
+    retargeter. See vr_input.py's module docstring for why it lives there.
+    """
+    await ws.accept()
+    try:
+        while True:
+            frame = await ws.receive_json()
+            try:
+                human_teleop.ingest_frame(vr_frame_to_keypoint_frame(frame))
+            except Exception:
+                # Same rule as the MediaPipe socket: one malformed frame must
+                # not drop the operator's connection mid-session.
+                logger.exception("vr teleop ingest_frame failed")
     except WebSocketDisconnect:
         human_teleop.notify_ws_disconnected()
         return

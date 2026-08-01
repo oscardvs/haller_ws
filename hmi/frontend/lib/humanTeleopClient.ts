@@ -13,10 +13,17 @@
  */
 import type { KeypointFrame } from "./mediapipe";
 
-export class HumanTeleopClient {
+/**
+ * `TFrame` defaults to `KeypointFrame` so every existing call site is unchanged.
+ * The VR panel instantiates it with `VRFrame` instead: the socket only ever
+ * stringifies whatever it is handed, and duplicating the reconnect/coalesce
+ * logic for a second frame shape would mean two places to fix the next time the
+ * grace window changes.
+ */
+export class HumanTeleopClient<TFrame = KeypointFrame> {
   private url: string;
   private ws: WebSocket | null = null;
-  private latest: KeypointFrame | null = null;
+  private latest: TFrame | null = null;
   private shouldReconnect = true;
 
   constructor(url: string) {
@@ -34,7 +41,7 @@ export class HumanTeleopClient {
     this.ws = null;
   }
 
-  queueFrame(frame: KeypointFrame) {
+  queueFrame(frame: TFrame) {
     this.latest = frame;
   }
 

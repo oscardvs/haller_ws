@@ -9,12 +9,13 @@
  * `reason` comes from the backend's clutch block and answers "why isn't it
  * engaging" without a terminal — the same idea as the per-joint reasons.
  */
-export type ClutchSource = "spacebar" | "mouth";
+export type ClutchSource = "spacebar" | "mouth" | "vr_grip";
 
 /** Clutch reasons that explain nothing about a *disengaged* clutch, so they
  *  are never printed as a blocker:
  *    - "below_threshold" — a closed mouth. The resting state, not a fault.
  *    - "spacebar_mode"   — not a fault either; the prompt already says SPACE.
+ *    - "vr_grip_mode"    — same, for a controller grip that simply isn't held.
  *
  *  "engaged" is deliberately NOT on this list. It used to be, to mask a
  *  backend bug where the forced-disengage branch cleared `engaged` without
@@ -24,7 +25,9 @@ export type ClutchSource = "spacebar" | "mouth";
  *  real signal: a disengaged clutch still reporting reason "engaged" means
  *  the clutch block and the state machine disagree, which is worth seeing.
  */
-const NON_BLOCKING: readonly string[] = ["below_threshold", "spacebar_mode"];
+const NON_BLOCKING: readonly string[] = [
+  "below_threshold", "spacebar_mode", "vr_grip_mode",
+];
 
 export function DeadManIndicator({
   held, trackingLost, source = "spacebar", reason, acquiring, remainingMs,

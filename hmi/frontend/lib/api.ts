@@ -102,7 +102,7 @@ export const api = {
     getJson<HumanTeleopStatus>("/teleop/human"),
   humanTeleopStart: (body: {
     left_arm: string; right_arm: string; swap: boolean;
-    hz?: number; clutch_source?: "spacebar" | "mouth";
+    hz?: number; clutch_source?: "spacebar" | "mouth" | "vr_grip";
   }) => postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/start", body),
   humanTeleopStop: () =>
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/stop", {}),
@@ -213,10 +213,12 @@ export type PinchCalibSide = { min_m: number; max_m: number };
 export type JointReason = "ok" | "rate_capped" | "clamped" | "held";
 
 /** Why the clutch is in the state it reports. Mirrors the backend vocabulary
- *  in haller_hmi/human_teleop.py exactly — same seven strings, no others. */
+ *  in haller_hmi/human_teleop.py exactly — same eight strings, no others.
+ *  `vr_grip_mode` is the headset equivalent of `spacebar_mode`: a held button
+ *  at rest, not a fault. */
 export type ClutchReason =
   | "engaged" | "below_threshold" | "holding" | "stale"
-  | "uncalibrated" | "spacebar_mode" | "source_mismatch";
+  | "uncalibrated" | "spacebar_mode" | "vr_grip_mode" | "source_mismatch";
 
 export type JointDiag = {
   /** What the retargeter asked for, in degrees. null when the joint is held. */
