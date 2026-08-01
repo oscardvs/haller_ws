@@ -1109,6 +1109,36 @@ def test_the_first_commanded_step_is_not_a_jump():
         sess.stop()
 
 
+def test_commit_records_the_commanded_pose_not_the_requested_one():
+    """recorder.py builds the dataset action column from status()["goal_deg"].
+    If that reports the requested pose while the arm was given a capped one,
+    every fast-motion frame teaches a policy to over-command.
+
+    send_goal's mock reports "stayed at zero" no matter what it is asked —
+    fixed and input-independent on purpose, so status() must read as exactly
+    that on every tick it might observe, and the assertion below cannot race
+    the commit loop the way comparing two separately-timed live reads would.
+    """
+    mgr, arms = _fake_arm_manager()
+    arms["left"].send_goal.side_effect = lambda goal: {j: 0.0 for j in goal}
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        _pump(sess, _off_pose_frame(), 0.4)
+        requested = [c.args[0]["shoulder_pan"]
+                     for c in arms["left"].send_goal.call_args_list]
+        assert max(abs(v) for v in requested) > 1.0, (
+            "test is meaningless unless the ramp actually asked for motion"
+        )
+        reported = sess.status()["goal_deg"]["left"]["shoulder_pan"]
+        assert reported == pytest.approx(0.0), (
+            "status()['goal_deg'] must report what send_goal returned (the "
+            "commanded pose), not what was requested"
+        )
+    finally:
+        sess.stop()
+
+
 def test_losing_a_side_demotes_only_that_side_and_re_acquires():
     """Recovery goes through acquisition, and only for the side that dropped.
 

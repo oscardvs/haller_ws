@@ -933,14 +933,20 @@ class HumanTeleopSession:
         return out
 
     @staticmethod
-    def _commit(handle, goal: dict[str, float]) -> None:
-        """Write one tick's goal through the ArmHandle interface.
+    def _commit(handle, goal: dict[str, float]) -> dict[str, float]:
+        """Write one tick's goal through the ArmHandle interface and report
+        what was actually sent.
 
         `send_goal` does the joint-limit clamp and the mode-guard check itself,
         and works against both `ArmHandle` and `SimArmHandle` — so the same loop
-        drives real arms and MuJoCo arms.
+        drives real arms and MuJoCo arms. Since Task 4, `send_goal` can
+        legitimately command LESS than it was asked, because it caps each call
+        against real elapsed time rather than this loop's nominal tick — so its
+        return, not `goal`, is what the arm actually received. The caller folds
+        this back into the committed pose, which is what status()["goal_deg"]
+        — and recorder.py's `action` column downstream of it — reports.
         """
-        handle.send_goal({joint: float(value) for joint, value in goal.items()})
+        return handle.send_goal({joint: float(value) for joint, value in goal.items()})
 
     def _loop(self) -> None:
         with self._lock:
@@ -1036,9 +1042,25 @@ class HumanTeleopSession:
                 # disagree. Losing a side now DEMOTES it rather than merely
                 # skipping the write, so recovery re-runs acquisition.
                 if driving_left:
-                    self._commit(left, self._committed_left)
+                    sent_left = self._commit(left, self._committed_left)
                 if driving_right:
-                    self._commit(right, self._committed_right)
+                    sent_right = self._commit(right, self._committed_right)
+                # `_commit` reports what send_goal ACTUALLY sent, which can be
+                # less than `_committed_left`/`_right` asked for (see
+                # `_commit`'s docstring). Fold it back in — merged, not
+                # replaced, so a joint send_goal had to drop (an unmeasured
+                # joint; see ArmHandle.send_goal) keeps its last known value
+                # rather than resetting to 0 on the next `_smooth_step` — and
+                # do it as one lock acquisition covering both sides so
+                # status() can never observe this tick's send reflected on one
+                # side and last tick's on the other. Both `send_goal` calls
+                # above stay outside any lock: real hardware traffic, or a
+                # locked sim step, that status() must not block on.
+                with self._lock:
+                    if driving_left:
+                        self._committed_left = {**self._committed_left, **sent_left}
+                    if driving_right:
+                        self._committed_right = {**self._committed_right, **sent_right}
                 # WS disconnect grace window: if too much time has passed, auto-stop.
                 with self._lock:
                     disc_at = self._ws_disconnected_at_perf
