@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from .safety import MAX_STEP_DT_S
+
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
@@ -53,9 +55,36 @@ class MotionConfig:
     # A discrete move needing more than this on any joint is refused outright
     # rather than ramped, because ramping still sweeps an unplanned path.
     large_move_deg: float = 30.0
-    # Waypoint rate. Also sets the streaming per-step cap, at
-    # max_speed_deg_s / ramp_hz.
+    # The discrete path's waypoint rate: plan_ramp spaces waypoints at
+    # max_speed_deg_s / ramp_hz apart (see motion.plan_ramp). On the
+    # streaming path this no longer sets the per-step cap — that moved to
+    # real elapsed time in Task 4, see safety.step_budget_deg — it only
+    # seeds the very first call after a seed/reconnect, via 1 / ramp_hz
+    # (ArmHandle.send_goal), before a real inter-call gap exists to measure.
+    # See __post_init__ for the floor this places on ramp_hz.
     ramp_hz: float = 50.0
+
+    def __post_init__(self) -> None:
+        if self.max_speed_deg_s <= 0:
+            raise ValueError(
+                f"max_speed_deg_s must be positive, got {self.max_speed_deg_s!r}"
+            )
+        if self.large_move_deg <= 0:
+            raise ValueError(
+                f"large_move_deg must be positive, got {self.large_move_deg!r}"
+            )
+        min_ramp_hz = 1.0 / MAX_STEP_DT_S
+        if self.ramp_hz < min_ramp_hz:
+            raise ValueError(
+                f"ramp_hz must be >= 1 / MAX_STEP_DT_S ({min_ramp_hz:g} Hz); "
+                f"got {self.ramp_hz!r}. Below that floor, "
+                "safety.step_budget_deg saturates at "
+                "max_speed_deg_s * MAX_STEP_DT_S on every send_goal call — "
+                "less than the max_speed_deg_s / ramp_hz spacing plan_ramp "
+                "puts between waypoints — so every waypoint asks for more "
+                "than a single call can ever grant, and the shortfall is "
+                "never made up: a silent partial move."
+            )
 
 
 @dataclass
