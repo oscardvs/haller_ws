@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from unittest.mock import MagicMock
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 
@@ -51,6 +52,21 @@ def _make_world_and_handle():
     )
     handle = SimArmHandle(cfg, world=world)
     return world, handle
+
+
+def test_two_freshly_constructed_handles_with_equal_fields_compare_equal():
+    """Same regression as ArmHandle's (see test_arm.py): `executor` used to
+    make two otherwise-identical handles compare unequal, purely because each
+    builds its own MoveExecutor in __post_init__."""
+    world, handle1 = _make_world_and_handle()
+    handle2 = SimArmHandle(handle1.config, world=world)
+    assert handle1 == handle2
+
+
+def test_executor_constructor_argument_is_rejected():
+    world, handle = _make_world_and_handle()
+    with pytest.raises(TypeError):
+        SimArmHandle(handle.config, world=world, executor=MagicMock())
 
 
 def test_connect_populates_joint_limits_deg_in_lerobot_naming():

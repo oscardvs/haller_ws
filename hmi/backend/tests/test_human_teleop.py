@@ -35,7 +35,7 @@ def _fake_arm_manager():
         # arms. See tests/sim/test_human_teleop_sim.py.
         a = MagicMock(spec_set=[
             "config", "joint_limits_deg", "guard", "torque_enabled",
-            "connect", "disconnect", "send_goal", "home",
+            "connect", "disconnect", "send_goal", "executor",
             "enable_torque", "disable_torque", "read_joints_deg", "state_snapshot",
         ])
         a.config = MagicMock(id=arm_id)

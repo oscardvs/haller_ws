@@ -42,6 +42,26 @@ def _make_handle(monkeypatch) -> ArmHandle:
     return handle
 
 
+def test_two_freshly_constructed_handles_with_equal_fields_compare_equal():
+    """Regression: `executor` is built fresh per-handle in __post_init__, and
+    MoveExecutor has no __eq__ of its own (falls back to identity). Before
+    `executor` was marked compare=False, two otherwise-identical handles
+    compared unequal purely because of it."""
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    assert ArmHandle(cfg) == ArmHandle(cfg)
+
+
+def test_executor_constructor_argument_is_rejected():
+    """executor is init=False: __post_init__ overwrites it unconditionally, so
+    an `executor=` constructor argument that type-checked and was then
+    silently discarded would be a trap, not a feature."""
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    with pytest.raises(TypeError):
+        ArmHandle(cfg, executor=MagicMock())
+
+
 def test_send_goal_in_auto_mode_raises(monkeypatch):
     handle = _make_handle(monkeypatch)
     handle.guard.set(Mode.AUTO)

@@ -1,11 +1,23 @@
+import os
+
+# Required before importing anything under haller_hmi.sim (here: sim/teleop.py,
+# pulled in transitively by the real-session teleop_owner tests below) —
+# mirrors tests/test_session_lock.py and tests/sim/test_sim_arm_handle.py.
+os.environ.setdefault("MUJOCO_GL", "egl")
+
 import time
 from unittest.mock import MagicMock
 
 import pytest
 
+from haller_hmi.arm import ArmHandle
 from haller_hmi.config import MotionConfig
+from haller_hmi.human_teleop import HumanTeleopSession
 from haller_hmi.motion import MoveExecutor, MoveRefused, home, move_to
 from haller_hmi.safety import Mode, ModeGuard
+from haller_hmi.sim.arm import SimArmHandle
+from haller_hmi.sim.teleop import SimLeaderTeleop
+from haller_hmi.teleop import TeleopSession
 
 
 def _fake_handle():
@@ -244,3 +256,99 @@ def test_move_to_is_not_blocked_by_a_peer_that_is_not_running():
     h.executor.wait(timeout=5.0)
 
     assert h.sent, "a stopped peer must not block a move"
+
+
+def test_home_is_not_reintroduced_as_a_handle_method():
+    """Task 6 deleted the duplicated home() on both handles in favour of the
+    shared motion.home(handle) — the two per-class copies being wrong in the
+    same way is exactly what let the 2026-08-01 incident happen in sim too.
+    If either copy comes back, fail loudly here rather than the two handles
+    silently diverging again."""
+    assert not hasattr(ArmHandle, "home")
+    assert not hasattr(SimArmHandle, "home")
+
+
+# ---- teleop_owner vs. the real session classes --------------------------
+#
+# Every test above authors its own MagicMock `status()` dict, which pins
+# nothing against the three real session classes: if TeleopState.to_dict()
+# (or HumanTeleopSession.status()/SimLeaderTeleop.status()) ever renamed
+# "follower", `teleop_owner` would return None for every arm forever, and
+# every test above would keep passing regardless. These start a REAL session
+# of each kind and read its REAL status() — the same construction pattern
+# tests/test_session_lock.py uses for the existing three-way attach_peer
+# lock, just started for real instead of having `.status` monkey-patched.
+
+def _two_arm_manager():
+    """ArmManager-shaped stand-in with two arms ("left", "right"), realistic
+    enough that a real TeleopSession/HumanTeleopSession/SimLeaderTeleop can
+    start() and tick without raising. Deliberately not spec_set: this helper
+    exists to drive the *real* status() of each session below, not to police
+    which handle methods a session may call (that's test_human_teleop.py's
+    _fake_arm_manager, elsewhere)."""
+    mgr = MagicMock()
+
+    def _mkarm(arm_id):
+        a = MagicMock()
+        a.config.id = arm_id
+        a.joint_limits_deg = {"shoulder_pan": (-90.0, 90.0)}
+        a.guard = ModeGuard(Mode.MANUAL)
+        a.torque_enabled = True
+        a.read_joints_deg.return_value = {"shoulder_pan": 0.0}
+        return a
+
+    arms = {"left": _mkarm("left"), "right": _mkarm("right")}
+    mgr.__getitem__.side_effect = lambda k: arms[k]
+    mgr.values.return_value = list(arms.values())
+    return mgr
+
+
+def test_teleop_owner_reads_a_real_running_teleop_session():
+    mgr = _two_arm_manager()
+    session = TeleopSession(mgr)
+    session.start(leader_id="left", follower_id="right", hz=200.0)
+    try:
+        ex = MoveExecutor(_fake_handle())
+        ex.attach_peer(session)
+        assert ex.teleop_owner("right") == "TeleopSession"
+        # The leader is owned too, not just the follower: its guard is set to
+        # Mode.STOP (see teleop.py), but teleop_owner doesn't special-case
+        # that — it reports ownership from status() alone.
+        assert ex.teleop_owner("left") == "TeleopSession"
+        assert ex.teleop_owner("spare") is None
+    finally:
+        session.stop()
+
+
+def test_teleop_owner_reads_a_real_running_human_teleop_session():
+    mgr = _two_arm_manager()
+    session = HumanTeleopSession(mgr)
+    session.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        ex = MoveExecutor(_fake_handle())
+        ex.attach_peer(session)
+        assert ex.teleop_owner("left") == "HumanTeleopSession"
+        assert ex.teleop_owner("right") == "HumanTeleopSession"
+        assert ex.teleop_owner("spare") is None
+    finally:
+        session.stop()
+
+
+def test_teleop_owner_reads_a_real_running_sim_leader_teleop():
+    """SimLeaderTeleop's "leader" is a synthetic mouse/replay source, not an
+    arm, so a running session only ever occupies its follower. This confirms
+    that against the real status(), not just the hand-authored fake in
+    test_move_to_ignores_a_teleop_session_that_owns_a_different_arm above."""
+    mgr = _two_arm_manager()
+    source = MagicMock()
+    source.read.return_value = {}
+    session = SimLeaderTeleop(mgr)
+    session.start(follower_id="right", source=source, hz=200.0)
+    try:
+        ex = MoveExecutor(_fake_handle())
+        ex.attach_peer(session)
+        assert ex.teleop_owner("right") == "SimLeaderTeleop"
+        assert ex.teleop_owner("left") is None
+        assert ex.teleop_owner("spare") is None
+    finally:
+        session.stop()

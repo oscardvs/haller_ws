@@ -12,11 +12,15 @@ import logging
 import time
 from dataclasses import dataclass, field
 from functools import partial
+from typing import TYPE_CHECKING
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
 from .config import ArmConfig, MotionConfig
 from .safety import Mode, ModeGuard, clamp_joint_goal, limit_step, step_budget_deg
+
+if TYPE_CHECKING:
+    from .motion import MoveExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -55,14 +59,27 @@ class ArmHandle:
     robot: SO101Follower | None = None
     torque_enabled: bool = True
     motion: MotionConfig = field(default_factory=MotionConfig)
-    executor: "MoveExecutor | None" = None  # set in __post_init__
+    # init=False: an `executor=` constructor argument would otherwise
+    # type-check and then be silently discarded, since __post_init__
+    # overwrites it unconditionally below. compare=False/repr=False: two
+    # otherwise-identical handles must still compare equal and print sanely —
+    # MoveExecutor has no meaningful equality of its own and holds a live
+    # thread/lock, neither of which belongs in a dataclass repr.
+    executor: MoveExecutor | None = field(
+        init=False, repr=False, compare=False, default=None,
+    )  # set in __post_init__
     _last_commanded: dict[str, float] | None = None
     _last_command_at: float | None = None
 
     def __post_init__(self) -> None:
-        # Deferred: motion.py must never import from arm.py, or the cycle
-        # becomes painful to unpick. arm.py needs MoveExecutor only here, at
-        # construction time, so the import waits until then.
+        # Deferred, not because a cycle exists today — motion.py imports only
+        # stdlib and .safety, and .safety imports only stdlib, so a top-level
+        # `from .motion import MoveExecutor` here would work right now — but
+        # to keep it that way. This is the natural place a future edit to
+        # either module would grow one, so the import waits until it's
+        # actually needed, here at construction time. The TYPE_CHECKING
+        # import above is separate: it's only so the annotation above
+        # resolves for static analysis, and never runs.
         from .motion import MoveExecutor
         self.executor = MoveExecutor(self)
 
