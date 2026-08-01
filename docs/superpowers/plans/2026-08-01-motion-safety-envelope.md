@@ -1312,21 +1312,38 @@ MAX_STEP_DT_S = 0.1
 def step_budget_deg(
     dt_s: float,
     max_speed_deg_s: float,
-    ramp_hz: float,
     max_dt_s: float = MAX_STEP_DT_S,
 ) -> float:
     """Degrees one joint may move on a single call, given time since the last.
 
-    Steady-state speed is exactly `max_speed_deg_s` at any loop rate. `ramp_hz`
-    sets the floor so the first call after a seed (dt ~ 0) still moves, and
-    `max_dt_s` sets the ceiling so a long idle cannot bank an unbounded step.
+    Steady-state speed is exactly `max_speed_deg_s` at any loop rate, because
+    the budget is strictly proportional to real elapsed time. `max_dt_s` caps
+    it so a stalled or long-idle caller cannot bank an unbounded step.
     """
-    dt = min(max(dt_s, 1.0 / ramp_hz), max_dt_s)
-    return max_speed_deg_s * dt
+    return max_speed_deg_s * min(max(dt_s, 0.0), max_dt_s)
 ```
 
-Both handles gain `_last_command_at: float | None`, set from
-`time.monotonic()` alongside `_last_commanded` and cleared with it.
+Both handles gain `_last_command_at: float | None`, stamped from
+`time.monotonic()` and cleared alongside `_last_commanded` in the torque
+methods. The first call after a seed has no previous timestamp, and the call
+site — not `step_budget_deg` — supplies one ramp period as its `dt`, so the
+command is not pinned to zero motion:
+
+```python
+dt = (1.0 / self.motion.ramp_hz) if self._last_command_at is None \
+     else (now - self._last_command_at)
+```
+
+**`step_budget_deg` must not take a floor from `ramp_hz`.** The first draft of
+this amendment did exactly that — `min(max(dt_s, 1.0 / ramp_hz), max_dt_s)` —
+and it silently defeated the entire fix. With the default `ramp_hz=50` the
+floor is 0.02 s, which is *longer* than a 60 Hz loop's 0.0167 s period, so
+`max()` discarded the real elapsed time and every call returned the same 1.2°
+as before: still 72°/s at 60 Hz and 240°/s at 200 Hz, the exact numbers A2
+exists to correct. Any floor at or above a caller's period reintroduces the
+bug. The only safe floor is zero, and the first-call case belongs at the call
+site where the missing timestamp actually is.
+
 `ramp_hz` keeps its original meaning on the discrete path, where `plan_ramp`
 genuinely does emit waypoints at that rate.
 
