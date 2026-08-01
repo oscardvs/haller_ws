@@ -73,21 +73,21 @@ Verified against purchase records. These drive the design — nothing here needs
  HILTI B 22-195  (20.4 – 25.2 V)
  ├── B+ ×2 ──┐
  │           │  BOND THE PAIR                            ┌─────────────────────────────────┐
- │           ├──► XT60 ─► SW ─► 15 A ATO ──┬─► 10 A ATO ►│ ADJ BUCK  8-40 V → 7.4 V  10 A  │
- │           │            ▲     main fuse  │             │ CC limit 10 A · pot LOCKED      │
+ │           ├──► XT60 ─► SW ─► 15 A ATO ──┬─► 10 A ATO ►│ XY6020L  6-70 V → 7.40 V  20 A  │
+ │           │            ▲     main fuse  │             │ CC 10.0 A · digital setpoint    │
  │           │       disconnect            │             └──────────────┬──────────────────┘
  │           │         ≥30 A               │                            │  7.4 V
  │           │                             │                     10 A fuse (FAST BLOW)
  │           │                             │                            │
- │           │                             │                 TVS 8.0 V ─┤ (SMBJ8.0A, to GND)
+ │           │                             │                 TVS 8.0 V ─┤ (P6KE9.1A, to GND)
  │           │                             │                            │
  │           │                             │                ┌───────────▼───────────┐
  │           │                             │                │ RELAY NO  (E-STOP)    │  ◄── §6
  │           │                             │                └───────────┬───────────┘
  │           │                             │                            │
  │           │                             │                 WAGO 3-port node "7V4"
- │           │                             │                   ├── 6 A ──► DC5521 ──► Waveshare R ──► arm R bus
- │           │                             │                   └── 6 A ──► DC5521 ──► Waveshare L ──► arm L bus
+ │           │                             │                   ├── 7.5 A ─► DC5521 ──► Waveshare R ──► arm R bus
+ │           │                             │                   └── 7.5 A ─► DC5521 ──► Waveshare L ──► arm L bus
  │           │                             │
  │           │                             └───► 5 A ATO ──► SEALED BUCK 15-40 V → 12 V 10 A
  │           │                                                        │  12 V
@@ -165,7 +165,7 @@ only one of the two whose balance leads let the 2–6S monitor function at all.
 | B+, immediately at the connector | 15 A (25 A in Phase B) | ATO blade | Everything. **Fit first.** |
 | 7.4 V buck input branch | 10 A | ATO blade | Arm converter + its wiring |
 | 7.4 V rail, between the buck and the TVS tap | 10 A | **fast blow** | Blows when the TVS conducts — §5 |
-| Each arm branch | 6 A | ATO blade | One arm's fault doesn't take out the other |
+| Each arm branch | **7.5 A** | ATO blade | One arm's fault doesn't take out the other |
 | 12 V buck input branch | 5 A | ATO blade | Jetson path |
 | Raw motor rail **[Phase B]** | 20 A | ATO blade | Motor drives |
 
@@ -228,6 +228,32 @@ Four independent mitigations. Fit all of them:
 
 > The 1N4007 diodes on hand are **1 A parts** — they are not a substitute for
 > the TVS and must not be placed in any power rail.
+
+### If the converter is an XY6020L
+
+The part selected in
+[`hardware_inventory.md`](hardware_inventory.md) is digitally set rather than
+trimpot-set. That changes three of the four mitigations above:
+
+- **1 (verify)** becomes continuous — the onboard display reads out V and A while
+  the rail is live, instead of a one-off multimeter check into a dummy load. Do
+  the dummy-load sweep from 25 V down to 19 V anyway; it proves regulation, not
+  just the setpoint.
+- **2 (lock the pot)** is retired. There is no pot. This is the whole reason to
+  prefer a digital module here — §5 exists because of a trimpot, and this
+  deletes it.
+- **4 (CC limit)** is keyed in as `10.0 A` and stored, rather than dialled in
+  against a load.
+
+**3 does not change.** The crowbar is the only mitigation that survives the
+converter itself failing — a shorted high-side FET puts raw pack voltage on the
+rail no matter what the display claims. Fit the TVS and the fast-blow fuse
+exactly as specified above, in that order.
+
+One new failure mode to close out at bring-up: confirm the module's
+**output-on-at-power-up** behaviour. If it powers up with the output disabled,
+the arms will not come back after an E-STOP cycle until someone presses a
+button on the converter — which is a worse failure than the one it prevents.
 
 ---
 

@@ -38,7 +38,7 @@ bring-up, so that mode is still available without buying anything.
 | Waveshare Serial Bus Servo Driver Board | 2 | ✅ | One per arm, USB ↔ TTL half-duplex. `1a86:55d3`. Jumpers on **B** (USB control path). Barrel jack is **DC5521 = 5.5 × 2.1 mm** — *different from the Jetson's 2.5 mm*. |
 | 3-pin TTL daisy-chain cables | 10–12 | ✅ | 5 per arm to chain motors 1–6, plus the upstream link. |
 | Soft fin-ray gripper fingers (TPU 95A) | 2 sets | ✅ | Printed from the [XLeRobot hardware repo](https://github.com/Vector-Wangel/XLeRobot/tree/main/hardware). |
-| Spare STS3215, 7.4 V | 1 | ❌ €18 | `shoulder_lift` carries the most load and is the one that fails. |
+| Spare STS3215, 7.4 V, **C001 (1:345)** | 1 | ❌ €26.15 | `shoulder_lift` carries the most load and is the one that fails. [AliExpress](https://de.aliexpress.com/item/1005012394954023.html) — select `Gear Ratio 1-345`. The ratio is a **paid option**: the €13 listings you'll find are 12 V or low-ratio variants, not C001. |
 
 <Callout type="warn">
 **These are the 19 kg·cm / 7.4 V servos, not the 30 kg·cm / 12 V ones.** Torque is roughly a third lower than the 12 V variant most SO-101 build logs assume. Gravity sag is more visible and payload is lower. Keep anything bolted to the wrist under ~40 g, and expect `shoulder_lift` to work hard at full extension.
@@ -57,7 +57,7 @@ bring-up, so that mode is still available without buying anything.
 |---|---|---|---|
 | Intel RealSense **D455** | 1 | ✅ | Third-person workspace camera on the tower. 87° × 58° FOV covers the whole bimanual workspace from a fixed mount. Build librealsense with `-DFORCE_RSUSB_BACKEND=ON` to avoid kernel-module patching on JetPack. |
 | D455 **fixed** mount | 1 | ✅ | Print `Gimbal_Pitch_Holder` from the XLeRobot hardware repo and bolt it rigid — see [why no gimbal](#deliberately-not-buying). |
-| Wrist / egocentric USB camera module, **MJPEG** 640×480@30, ~30×30 mm | 2 | ❌ €55 | One per gripper. **MJPEG support is mandatory** — see [the USB bandwidth trap](#usb-topology). ELP or Arducam UVC modules. Keep under 40 g. |
+| **ELP 0.3 MP USB camera module**, 32 × 32 mm UVC, MJPEG 640×480@60 | 2 | ❌ €47.02 | One per gripper, €23.51 each +€6.61 shipping. [AliExpress](https://de.aliexpress.com/item/1005011810535562.html) — official ELP store, 5.0★/338 sold. Select lens **L170 (FOV 142°)**: a wrist camera sits ~10 cm from the gripper, so a narrow lens sees only fingers. Native VGA (no downscaling) and MJPEG at 60 fps, double the required rate. Board size is fixed by the printed [`SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module`](https://github.com/TheRobotStudio/SO-ARM100/tree/main/Optional/SO101_Wrist_Cam_Hex-Nut_Mount_32x32_UVC_Module) — 4× M2 to the module, 2× M3×8 + hex nuts to the wrist, manual twist focus. **Ask the seller to confirm 32×32 not 26×26**: the title lists both and there is no size selector. Micro-USB on the board, so budget two micro-USB→A leads. Keep under 40 g. |
 | Slamtec RPLIDAR A1M8 | 1 | ✅ | `/dev/haller_lidar`. `10c4:ea60`. Base subsystem. |
 | IMX219 CSI camera | 1 | ✅ | `/dev/video0`, base navigation. Not yet intrinsically calibrated. |
 
@@ -113,8 +113,8 @@ flowchart TB
 
         FF -.->|"shunt to B−"| TVS
         FF --> Relay --> Node
-        Node -->|"6 A"| WsR --> ArmR
-        Node -->|"6 A"| WsL --> ArmL
+        Node -->|"7.5 A"| WsR --> ArmR
+        Node -->|"7.5 A"| WsL --> ArmL
     end
 
     subgraph Rail12["12 V rail — compute"]
@@ -164,26 +164,67 @@ fault then clears locally instead of dropping the arms and the Jetson with it.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
-| Adjustable buck, **8–40 V in**, 1.25–15 V out, ≥10 A, CC+CV | 1 | ❌ €18 | Set to 7.4 V. The CC limit doubles as a bus current limiter. 300 W class. |
-| **TVS diode, 8.0 V standoff** (SMBJ8.0A / P6KE8.2A) | 1 | ❌ €2 | **The most important €2 in this build** — see below. |
-| Inline fuse holders + ATO fuses (15 A main, 10 A arm-buck input, 10 A **fast-blow** arm rail, 2× 6 A per arm, 5 A Jetson) | 1 set | ❌ €12 | The arm-rail fuse must be fast-blow — it is half of the crowbar. |
+| **XY6020L** digital buck, 6–70 V in → 0–60 V out, 20 A / 1200 W, CC+CV | 1 | ❌ €24.83 | Set to **7.40 V / 10.0 A CC**, both keyed in and stored in memory. [AliExpress — take the base-plate/cased variant](https://de.aliexpress.com/item/1005008144889470.html), not the bare board. Budget alternative: [ZK-SJ20, 7–80 V → 1.4–79 V, 20 A, €7.61](https://de.aliexpress.com/item/1005007979446715.html) — but the trimpots come back with it. |
+| **TVS diode, 8.0 V standoff** — SMBJ8.0A (SMD) or **P6KE9.1A** (DO-15 axial) | 1 | ❌ €2 | **The most important €2 in this build** — see below. Prefer the axial P6KE9.1A: this harness is wire-and-WAGO, and an SMD part needs pigtails soldered on first. **Not P6KE8.2A** — see the correction below. |
+| Inline fuse holders (10–18 AWG, ATO/ATC) + ATO blade fuses (15 A main, 10 A arm-buck input, 10 A arm rail, 2× **7.5 A** per arm, 5 A Jetson) | 6 + set | ❌ €12 | Blade fuses are fast-acting by construction — no special "fast-blow" part needed for the crowbar. |
 | **LA36M E-stop, 22 mm mushroom, 1NC** | 1 | ✅ | AC/DC 12–24 V. Drives the relay coil, **not** the arm current — see [the E-STOP wiring](https://github.com/oscardvs/haller_ws/blob/main/docs/wiring.md#6-e-stop). |
 | 12 V 1-channel relay module (low-level trigger) | 3 | ✅ | The E-stop contactor. Contacts carry the 7.4 V rail; the button only breaks the ~70 mA coil supply, which makes the arrangement failsafe. |
 | Wago-style lever connectors, 2/3/5 port | 90 | ✅ | Star-ground node and rail distribution. |
 | DC barrel pigtails, 18 AWG / 7 A | ~6 | ⚠️ | **5.5 × 2.1 confirmed** (Waveshare). A second lot lists 2.1 in the title and 2.5 in the variant — *measure before plugging anything into the Jetson*. |
 | Heat-shrink kit, 328 pc | 1 | ✅ | |
-| **14 AWG silicone wire** | 2 m | ❌ €10 | The only gauge not on hand. Main run + 7.4 V trunk + ground return. The assorted hook-up wire is 20–22 AWG, signal only. |
-| XT60 pigtail for the Hilti harness | 1 | ❌ €3 | Makes the Hilti pack and the 6S LiPo interchangeable. |
+| **14 AWG silicone wire** | 2× (1 m red + 1 m black) | ❌ €7.94 | The only gauge not on hand. Main run + 7.4 V trunk + ground return. [Search](https://nl.aliexpress.com/w/wholesale-14awg-silicone-wire.html) — select 14 AWG, **buy two packs**: the §4 runs need ~1.5 m red and ~1 m black, so a single pack is short. |
+| XT60 pigtail for the Hilti harness | 1 pair | ❌ €2.00 | Makes the Hilti pack and the 6S LiPo interchangeable. [Search](https://nl.aliexpress.com/w/wholesale-xt60-connector-pigtail-silicone-wire.html) — 2 pcs male + female, 14 AWG 10 cm silicone tails. Battery side is male by convention, so the harness takes the female. |
 
 <Callout type="error">
 **Crowbar the 7.4 V rail.** The gap between safe (7.4 V) and destructive (12 V) is
-4.6 V and it is set by a trimpot on a €18 module. A knocked pot costs you twelve
-servos. Four mitigations, all of them:
+4.6 V. A knocked trimpot costs you twelve servos. Four mitigations, all of them:
 
 1. Set the output and **verify with a multimeter into a dummy load** before any servo is connected.
 2. **Lock the trimpot** — nail varnish or thread-lock over the screw.
 3. Fit the **8.0 V TVS across the rail, downstream of the 10 A fuse**. If the output rises, the TVS conducts hard and blows the fuse before the servos see it.
 4. Set the converter's **CC limit to ~10 A** so a bus fault current-limits instead of running away.
+
+**The XY6020L retires 1, 2 and 4 as manual steps**: the voltage and the current
+limit are both keyed in and stored, and its display makes verification
+continuous rather than a one-off multimeter check. There is no pot to varnish
+because there is no pot.
+
+**3 still applies, unchanged.** A digital setpoint is not a fault mode — a
+shorted high-side FET passes raw pack voltage to the servos regardless of what
+the display says. The TVS and the fast-blow fuse are the only mitigations that
+don't depend on the converter working, which is exactly why they're the ones
+you can't skip.
+
+Two things to confirm on arrival: that the module's **output-on-at-power-up**
+setting is enabled, so the arms come back without a button press after an E-STOP
+cycle, and that it has real airflow — 24 V → 7.4 V at 10 A is 74 W out.
+</Callout>
+
+<Callout type="error">
+**Correction: P6KE8.2A is the wrong TVS and earlier revisions of this page
+listed it.** It would conduct on a healthy rail.
+
+The two series number their parts differently. **SMBJ**8.0A's number is the
+*stand-off* voltage (8.0 V, breakdown 8.89–9.83 V). **P6KE**8.2A's number is the
+*breakdown* voltage — its stand-off is only ~7.02 V, **below the 7.4 V rail**,
+so it sits in leakage the moment the rail comes up, and its 7.79 V minimum
+breakdown is close enough to nominal to nuisance-clear the 10 A fuse on ripple.
+
+The through-hole part matching SMBJ8.0A's intent is **P6KE9.1A** (stand-off
+≈7.78 V, breakdown 8.65–9.55 V). Confirm V<sub>RWM</sub> against your specific
+manufacturer's datasheet before fitting.
+</Callout>
+
+<Callout type="warn">
+**6 A blade fuses don't exist.** The standard ATO/ATC series is 1, 2, 3, 4, 5,
+**7.5**, 10, 15, 20, 25, 30, 35, 40 A. The per-arm branches specified as 6 A
+should be **7.5 A** — a 5 A blade sits exactly at each arm's ~5 A peak and will
+nuisance-blow mid-episode.
+
+The tradeoff to make deliberately: 7.5 A is marginally above the 18 AWG
+pigtails' stated 7 A rating, so the fuse no longer strictly protects the wire.
+18 AWG silicone in free air carries well beyond 7 A and that figure is a
+connector rating rather than a conductor limit — but make the call knowingly.
 </Callout>
 
 <Callout type="warn">
@@ -200,7 +241,7 @@ input pads rather than relying on the barrel.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
-| Sealed automotive buck, **15–40 V in**, 12 V **≥10 A**, synchronous | 1 | ❌ €18 | Verify the *input range*, not the "24V" in the product title — many specify an 18–20 V minimum, which sits at the pack's operating floor. |
+| **RCNUN sealed buck-boost**, 8–40 V in, 12 V **10 A**, IP67 | 1 | ❌ €20.79 | Select `Color: 10A` / `8-40V` / `12V`. [AliExpress](https://de.aliexpress.com/item/32897068247.html) — 8–40 V hits the ≥40 V absolute-max requirement exactly, which is the row every cheaper candidate fails. Budget alternative: [WH 15–35 V → 12 V 10 A, €10.64](https://de.aliexpress.com/item/1005006630139887.html) — pure buck, publishes its input window per variant, but a 35 V ceiling. |
 | LM2596 module | 5 | ✅ | On hand. **Not for the Jetson and not for the arms** (~2 A real, non-synchronous). Fine for bench aux under 1.5 A. |
 
 <Callout type="warn">
@@ -218,7 +259,7 @@ converter's *input* still bounds that branch.
 |---|---|---|---|
 | Hilti sliding battery connector | 1 | ✅ | 6 wires: 2× B+, 2× B−, white + blue data. **Bond each power pair** — a single contact halves the interface's current rating. |
 | **6S LiPo 5200 mAh 80C, XT60** + 6S 40 A BMS | 1 | ✅ | Alternate pack. Same 20.4–25.2 V envelope as the Hilti, so the converter design is pack-agnostic. The Hilti stays primary: 194 Wh vs 115 Wh, integrated BMS, charger on hand. |
-| Main disconnect switch ≥30 A | 1 | ❌ €7 | |
+| Main disconnect switch ≥30 A | 1 | ❌ €3.82 | [Search](https://nl.aliexpress.com/w/wholesale-battery-isolator-switch.html) — the common cut-off switches are rated 100 A+, far past what's needed. **Check the form factor**: many clamp onto a battery *post* on one side. Pick a **two-stud** variant so ring terminals on 14 AWG land on both sides. |
 | TVS 30 V + 2200 µF bulk electrolytic for the **motor** rail | 1 | ⏸️ €10 | BLDC regen protection. Arm servos don't regen — defer until the base is integrated. |
 | ATO fuses, 25 A main + 20 A motor branch | 1 set | ⏸️ €2 | The Phase B uprate. Same holders. |
 
@@ -263,8 +304,9 @@ non-negotiable — it fails intermittently behind a hub.
 
 | Item | Qty | Status | Notes |
 |---|---|---|---|
-| Powered USB 3.0 hub, 4–7 port, **12 V DC input** | 1 | ❌ €25 | The DC jack lets it run off the 12 V rail instead of a wall wart. |
-| Shielded USB cables ≤1.5 m + 5× ferrite clamps | — | ❌ €20 | |
+| Powered USB 3.0 hub, **7-port**, **12 V DC input** | 1 | ❌ €19.04 | The DC jack lets it run off the 12 V rail instead of a wall wart. [Search](https://nl.aliexpress.com/w/wholesale-powered-usb-3.0-hub-12v-dc.html) — measure the jack (2.1 vs 2.5 mm) and confirm polarity before feeding it from the rail. |
+| Ferrite clamps, 5 pcs, 3.5–13 mm | 1 kit | ❌ €3.49 | [Search](https://nl.aliexpress.com/w/wholesale-ferrite-core-clamp-cable.html) — the size spread covers USB leads *and* the hub's DC cord. |
+| Shielded USB cables ≤1.5 m | — | ❌ ~€10 | Generic: 2× USB-A→C for the Waveshare boards, plus the CANable and LiDAR leads. Buy to the connectors you actually have. |
 
 <Callout type="warn">
 **The bandwidth trap.** Two 640×480@30 cameras in raw YUYV need ~147 Mbps *each*;
@@ -313,18 +355,28 @@ bought.
 
 | Item | ~€ | Blocking? |
 |---|---|---|
-| Adjustable buck 8–40 V → 7.4 V, ≥10 A, CC+CV | 18 | **Yes** |
-| Sealed buck 15–40 V → 12 V, ≥10 A | 18 | **Yes** |
+| [XY6020L digital buck](https://de.aliexpress.com/item/1005008144889470.html) 6–70 V → 7.4 V, 20 A, CC+CV | 24.83 | **Yes** |
+| [RCNUN sealed buck-boost](https://de.aliexpress.com/item/32897068247.html) 8–40 V → 12 V, 10 A | 20.79 | **Yes** |
 | TVS 8.0 V (SMBJ8.0A) | 2 | **Yes** |
 | Fuse holders + ATO fuses (15/10/10/6/6/5 A) | 12 | **Yes** |
-| 14 AWG silicone wire, 2 m | 10 | **Yes** |
+| 14 AWG silicone wire, 2 packs | 7.94 | **Yes** |
 | XT60 pigtail + main disconnect ≥30 A | 10 | **Yes** |
-| **Blocking subtotal** | **~70** | |
-| Wrist camera modules (MJPEG) ×2 | 55 | For multi-cam datasets |
-| Powered USB hub, 12 V input | 25 | For multi-cam datasets |
-| USB cables + ferrites | 20 | For multi-cam datasets |
-| Spare STS3215 7.4 V | 18 | Insurance |
-| **Total** | **~188** | |
+| TVS **P6KE9.1A**, 20 pcs axial | 2.02 | **Yes** |
+| XT60 pigtail pair | 2.00 | **Yes** |
+| Main disconnect, two-stud | 3.82 | **Yes** |
+| **Blocking subtotal** | **~73** | |
+| [ELP 0.3 MP 32 × 32 mm UVC camera](https://de.aliexpress.com/item/1005011810535562.html) ×2 | 47.02 | For multi-cam datasets |
+| Powered USB hub, 7-port, 12 V input | 19.04 | For multi-cam datasets |
+| Ferrite clamps ×5 | 3.49 | For multi-cam datasets |
+| Shielded USB cables ≤1.5 m | ~10 *est.* | For multi-cam datasets |
+| Spare STS3215 7.4 V **C001 (1:345)** | 26.15 | Insurance |
+| **Total** | **~179** | |
+
+Everything except the wrist cameras and the USB cables is a **quoted price as of
+2026-08-01**, not an estimate. The total barely moved from the original ~€188,
+but the composition did: the converters and the spare servo came in over
+estimate, the wire, XT60, disconnect and hub came in under. Taking both
+converter budget alternatives above brings the blocking subtotal to ~€55.
 
 **[Phase B]** adds ~€12 when the base is integrated: the motor rail's TVS and
 bulk capacitor, plus the 25 A / 20 A ATO fuses.
