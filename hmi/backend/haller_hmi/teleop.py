@@ -80,6 +80,26 @@ class TeleopSession:
                 raise ValueError("leader and follower must be different arms")
             leader = self._arms[leader_id]   # raises KeyError -> 404 in caller
             follower = self._arms[follower_id]
+            # A discrete move (POST /arm/{id}/home, /goal, /preset) runs on
+            # its own background thread — see motion.MoveExecutor — and is
+            # not stopped by either arm's mode guard here: the follower's
+            # guard is about to sit in Mode.MANUAL for this whole session,
+            # which is exactly what lets THIS loop's writes through, so a
+            # ramp already running on the follower would not self-cancel.
+            # Two threads writing Goal_Position to one serial port with no
+            # lock anywhere in lerobot is Task 5's review finding; this is
+            # its mirror image — move_to refuses when a teleop session owns
+            # the arm, and this refuses the other order. See A6 in the plan.
+            if leader.executor.is_running:
+                raise RuntimeError(
+                    f"arm {leader_id!r} has a move in progress; wait for it "
+                    "to finish or cancel it before starting teleop"
+                )
+            if follower.executor.is_running:
+                raise RuntimeError(
+                    f"arm {follower_id!r} has a move in progress; wait for "
+                    "it to finish or cancel it before starting teleop"
+                )
 
             # Prepare the arms
             leader.disable_torque()

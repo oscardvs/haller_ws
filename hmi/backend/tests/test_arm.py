@@ -109,6 +109,54 @@ def test_arm_manager_lookup_by_id(monkeypatch):
     assert mgr["right"].config.id == "right"
 
 
+def test_connect_all_wires_teleop_peers_onto_every_handle_executor(monkeypatch):
+    """A6 obligation 1: connect_all() is the one place that attaches the
+    ownership guard, so every handle it constructs must come out already
+    wired — not left to a caller who might forget one of N arms.
+    MoveExecutor.teleop_owner returns None on an empty peer list and fails
+    open with no error and no log, so this is the test that would catch a
+    dropped wiring point."""
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
+    monkeypatch.setattr(
+        "haller_hmi.arm.ArmHandle._load_joint_limits",
+        lambda self: {"shoulder_pan": (-120.0, 120.0)},
+    )
+    monkeypatch.setattr(
+        "haller_hmi.calibration_bootstrap.ensure_follower_calibrations",
+        lambda configs: None,
+    )
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    mgr = ArmManager([cfg])
+    peer = MagicMock()
+    peer.status.return_value = {"running": True, "follower": "right"}
+
+    mgr.connect_all(teleop_peers=[peer])
+
+    assert mgr["right"].executor.teleop_owner("right") == type(peer).__name__
+
+
+def test_connect_all_with_no_teleop_peers_still_works(monkeypatch):
+    """teleop_peers is optional — every existing connect_all() call site
+    (tests, and any future caller) must keep working unchanged."""
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
+    monkeypatch.setattr(
+        "haller_hmi.arm.ArmHandle._load_joint_limits",
+        lambda self: {"shoulder_pan": (-120.0, 120.0)},
+    )
+    monkeypatch.setattr(
+        "haller_hmi.calibration_bootstrap.ensure_follower_calibrations",
+        lambda configs: None,
+    )
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    mgr = ArmManager([cfg])
+
+    mgr.connect_all()
+
+    assert mgr["right"].executor.teleop_owner("right") is None
+
+
 def test_read_joints_deg_strips_pos_suffix(monkeypatch):
     handle = _make_handle(monkeypatch)
     handle.robot.get_observation.return_value = {

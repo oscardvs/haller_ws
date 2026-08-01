@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def app_with_mocks(monkeypatch, tmp_path):
     # Mock ArmManager + RosBridge + PresetStore before importing server
-    from haller_hmi.safety import Mode
+    from haller_hmi.config import MotionConfig
+    from haller_hmi.safety import Mode, ModeGuard
 
     arm = MagicMock()
     arm.send_goal.return_value = {"shoulder_pan": 30.0}
@@ -17,8 +18,15 @@ def app_with_mocks(monkeypatch, tmp_path):
         "joints": {"shoulder_pan": {"pos": 0.0, "min": -120.0, "max": 120.0, "torque": True}},
     }
     arm.config = MagicMock(id="right", calibration_id="haller_right")
-    arm.guard = MagicMock()
-    arm.guard.mode = Mode.MANUAL  # real enum — CalibrationManager.start() uses `is not` check
+    # A real ModeGuard, not a MagicMock: motion.move_to() now calls
+    # handle.guard.assert_manual() directly (the old route called the
+    # separately-mocked handle.send_goal() instead, which never touched the
+    # guard) — and unittest.mock's Python 3.12 "unsafe" check rejects any
+    # attribute starting with "assert" on a bare MagicMock, mistaking it for
+    # a misspelled assertion. A real guard sidesteps that and is more honest
+    # besides: CalibrationManager.start() uses `is not Mode.MANUAL`, which
+    # needs the real enum singleton .mode already gave it.
+    arm.guard = ModeGuard(Mode.MANUAL)
 
     # Calibration-related robot/bus attributes
     arm.robot = MagicMock()
@@ -30,6 +38,20 @@ def app_with_mocks(monkeypatch, tmp_path):
     arm.robot.bus.sync_read.return_value = {"shoulder_pan": 1000, "gripper": 3500}
     arm.robot.calibration = None
     arm.torque_enabled = True
+
+    # The goal/home/preset routes now go through motion.move_to()/home(),
+    # which needs a real MotionConfig, a real joint_limits_deg dict, and a
+    # real read_joints_deg() return — a bare Mock would type-check its way
+    # into plan_ramp(max_speed_deg_s=<Mock>) and blow up there instead of
+    # exercising the route. See task-7-report.md, A6 obligation 4.
+    arm.motion = MotionConfig(max_speed_deg_s=60.0, large_move_deg=30.0, ramp_hz=50.0)
+    arm.joint_limits_deg = {"shoulder_pan": (-120.0, 120.0)}
+    arm.read_joints_deg.return_value = {"shoulder_pan": 0.0}
+    # executor.teleop_owner(...) on a bare Mock returns a truthy Mock, so
+    # move_to() would refuse every move with "a teleop session (Mock) owns
+    # it" — the fixture must say no peer owns this arm, same as production
+    # with no teleop session running.
+    arm.executor.teleop_owner.return_value = None
 
     arm_mgr = MagicMock()
     arm_mgr.keys.return_value = ["right"]
@@ -411,3 +433,64 @@ def test_start_rejects_an_unknown_clutch_source(app_with_mocks):
     })
     assert r.status_code == 422
     srv_mod.human_teleop.start.assert_not_called()
+
+
+# ---- motion-safety envelope: routes go through the shared policy ---------
+
+def test_home_route_returns_409_when_the_move_is_too_large(app_with_mocks, monkeypatch):
+    from haller_hmi import motion
+    from haller_hmi.motion import MoveRefused
+
+    def _refuse(handle):
+        raise MoveRefused("move refused on arm 'right': shoulder_pan +126.5° "
+                          "exceeds the 30° limit. Jog the arm closer by hand first.")
+
+    monkeypatch.setattr(motion, "home", _refuse)
+    r = app_with_mocks.post("/arm/right/home")
+    assert r.status_code == 409
+    assert "shoulder_pan" in r.json()["detail"]
+
+
+def test_goal_route_returns_409_when_the_move_is_too_large(app_with_mocks, monkeypatch):
+    """Obligation A6.6: /goal is the same stale-absolute-pose hazard as Home,
+    so it must go through the same refusal, not just call send_goal directly."""
+    from haller_hmi import motion
+    from haller_hmi.motion import MoveRefused
+
+    def _refuse(handle, goal):
+        raise MoveRefused(f"move refused on arm 'right': {goal}")
+
+    monkeypatch.setattr(motion, "move_to", _refuse)
+    r = app_with_mocks.post("/arm/right/goal", json={"shoulder_pan": 90.0})
+    assert r.status_code == 409
+    assert "shoulder_pan" in r.json()["detail"]
+
+
+def test_preset_route_returns_409_when_the_move_is_too_large(app_with_mocks, monkeypatch):
+    """A preset recorded before a recalibration is the same hazard as Home."""
+    from haller_hmi import motion
+    from haller_hmi.motion import MoveRefused
+
+    def _refuse(handle, goal):
+        raise MoveRefused(f"move refused on arm 'right': {goal}")
+
+    monkeypatch.setattr(motion, "move_to", _refuse)
+    r = app_with_mocks.post("/arm/right/preset", json={"name": "home"})
+    assert r.status_code == 409
+
+
+def test_estop_signals_and_reaps_every_ramp_executor(app_with_mocks):
+    """A6 obligation 3: /estop must signal every executor to stop (fast) and
+    drop torque before it blocks on any join. This pins the wiring itself —
+    both calls happen — not the real-thread timing, which
+    test_motion.py::test_estop_mid_ramp_halts_the_move already covers against
+    a real MoveExecutor and a real guard."""
+    import haller_hmi.server as srv_mod
+    arm = srv_mod.arms["right"]
+
+    r = app_with_mocks.post("/estop")
+
+    assert r.status_code == 200
+    arm.executor.request_stop.assert_called_once()
+    arm.disable_torque.assert_called()
+    arm.executor.wait.assert_called_once_with(timeout=2.0)

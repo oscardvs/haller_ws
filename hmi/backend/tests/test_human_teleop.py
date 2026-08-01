@@ -50,6 +50,12 @@ def _fake_arm_manager():
         a.guard = MagicMock(mode=Mode.MANUAL)
         a.torque_enabled = True
         a.read_joints_deg.return_value = {j: 0.0 for j in a.joint_limits_deg}
+        # `executor` is in spec_set above but otherwise unconfigured, so
+        # .is_running would default to a truthy Mock and start() would
+        # refuse every session in this file with "a move in progress". See
+        # A6 obligation 2 (HumanTeleopSession.start's executor.is_running
+        # guard) in task-7-report.md.
+        a.executor.is_running = False
         return a
 
     arms = {"left": _mkarm("left"), "right": _mkarm("right")}

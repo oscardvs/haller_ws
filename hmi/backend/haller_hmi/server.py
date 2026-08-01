@@ -24,6 +24,8 @@ from .cameras import CameraManager
 from .config import load_config
 from .human_teleop import ClutchSource, HumanTeleopSession
 from .vr_input import vr_frame_to_keypoint_frame
+from . import motion as motion_policy
+from .motion import MoveRefused
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
 from . import safety
@@ -165,7 +167,9 @@ class RecordStopBody(BaseModel):
 async def _lifespan(app: FastAPI):
     global telemetry, cameras, recorder
     logger.info("haller-hmi backend starting (version %s)", VERSION)
-    arms.connect_all()
+    # Wire the ownership guard here, not as separate attach_peer calls below:
+    # see ArmManager.connect_all's docstring and A6 in the plan.
+    arms.connect_all(teleop_peers=[teleop, human_teleop, sim_teleop])
     cameras = CameraManager(cfg.cameras, world=arms.world())
     cameras.connect_all()
     ros.start()
@@ -184,6 +188,16 @@ async def _lifespan(app: FastAPI):
     teleop.stop()
     human_teleop.stop()
     sim_teleop.stop()
+    # A mid-ramp shutdown would otherwise null `handle.robot` under a live
+    # daemon thread while disconnect_all() runs (MoveExecutor._play degrades
+    # safely via its broad except, but this is the honest fix). Signal every
+    # ramp to stop before joining any of them — not `handle.executor.cancel()`
+    # in a single loop, which would serialise each arm's up-to-2s join behind
+    # the last; same reasoning as `/estop` below.
+    for handle in arms.values():
+        handle.executor.request_stop()
+    for handle in arms.values():
+        handle.executor.wait(timeout=2.0)
     cameras.disconnect_all()
     arms.disconnect_all()
     ros.stop()
@@ -250,8 +264,10 @@ def post_cmd_vel(body: CmdVel):
 async def post_arm_goal(arm_id: str, body: dict[str, float]):
     handle = _arm_or_404(arm_id)
     try:
-        clamped = handle.send_goal(body)
+        clamped = motion_policy.move_to(handle, body)
     except ModeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MoveRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "sent": clamped}
 
@@ -281,8 +297,10 @@ async def post_arm_mode(arm_id: str, body: ArmModeBody):
 async def post_arm_home(arm_id: str):
     handle = _arm_or_404(arm_id)
     try:
-        sent = handle.home()
+        sent = motion_policy.home(handle)
     except ModeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MoveRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "sent": sent}
 
@@ -321,8 +339,10 @@ async def post_arm_preset(arm_id: str, body: PresetBody):
     except PresetNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     try:
-        clamped = handle.send_goal(goal)
+        clamped = motion_policy.move_to(handle, goal)
     except ModeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MoveRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "sent": clamped}
 
@@ -374,9 +394,20 @@ async def post_estop():
     calibration.abort()
     teleop.stop()
     human_teleop.stop()
+    # Ordering matters: signal every in-flight ramp to stop before doing
+    # anything that blocks. handle.executor.cancel() joins its thread (up to
+    # 2s) under the same lock is_running()/wait() take, so calling it per-arm
+    # here would delay disable_torque() on arm 2 behind arm 1's join — the
+    # one thing E-STOP exists to do without delay. Signal all, drop torque on
+    # all, and only then reap the (by now almost certainly already-exited)
+    # ramp threads. See MoveExecutor.request_stop and A6 in the plan.
+    for handle in arms.values():
+        handle.executor.request_stop()
     for handle in arms.values():
         handle.disable_torque()
         handle.guard.set(Mode.STOP)
+    for handle in arms.values():
+        handle.executor.wait(timeout=2.0)
     ros.zero_cmd_vel()
     return {"ok": True}
 

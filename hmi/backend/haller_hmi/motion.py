@@ -134,6 +134,21 @@ class MoveExecutor:
         with self._lock:
             self._cancel_locked()
 
+    def request_stop(self) -> None:
+        """Signal a running ramp to stop, without joining its thread.
+
+        `cancel()` also blocks on `Thread.join(timeout=2.0)`, under the same
+        lock `is_running`/`wait()` take. A caller stopping every arm at once
+        (E-STOP, shutdown) must not let arm 1's join delay arm 2's — that
+        would make the ONE thing an emergency stop must do fast (drop torque,
+        everywhere) wait behind a 2 s timeout on an unrelated arm. Call this
+        for every executor first, do the time-critical work, and only then
+        `wait()` each one to reap its thread. See server.py's `/estop` and
+        `_lifespan` teardown.
+        """
+        with self._lock:
+            self._cancel.set()
+
     def _cancel_locked(self) -> None:
         self._cancel.set()
         t = self._thread

@@ -494,6 +494,22 @@ class HumanTeleopSession:
                 )
             left = self._arms[left_arm]
             right = self._arms[right_arm]
+            # See TeleopSession.start's identical guard (teleop.py): once
+            # this session sets both arms to Mode.MANUAL below, an in-flight
+            # discrete-move ramp is no longer visible to the mode guard, so
+            # it must be refused explicitly here rather than trusted to
+            # self-cancel. Mirrors move_to's refusal when a teleop session
+            # already owns the arm — see motion.py and A6 in the plan.
+            if left.executor.is_running:
+                raise RuntimeError(
+                    f"arm {left_arm!r} has a move in progress; wait for it "
+                    "to finish or cancel it before starting teleop"
+                )
+            if right.executor.is_running:
+                raise RuntimeError(
+                    f"arm {right_arm!r} has a move in progress; wait for it "
+                    "to finish or cancel it before starting teleop"
+                )
             for a in (left, right):
                 if not a.torque_enabled:
                     a.enable_torque()

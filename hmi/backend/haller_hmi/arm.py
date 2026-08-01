@@ -232,7 +232,25 @@ class ArmManager:
         self._world.start()
         return self._world
 
-    def connect_all(self) -> None:
+    def connect_all(self, *, teleop_peers: list | None = None) -> None:
+        """Connect every configured arm.
+
+        `teleop_peers` — normally [TeleopSession, HumanTeleopSession,
+        SimLeaderTeleop] — gets attached to every handle's `executor` right
+        here, in the one place that constructs every handle, instead of the
+        caller looping over `arms.values()` after the fact (3 sessions x N
+        arms, repeated at every call site that ever constructs a handle).
+        `MoveExecutor.teleop_owner` returns None on an empty peer list, so a
+        handle nobody wires silently allows every discrete move with no
+        error and no log — see motion.py and amendment A6 in the plan.
+
+        The three sessions take this ArmManager as a constructor argument, so
+        they cannot be constructed before it and cannot be passed to
+        `__init__`. Passing them here instead — the one place in `_lifespan`
+        where `arms`, `teleop`, `human_teleop` and `sim_teleop` all already
+        exist — is the earliest that's possible while still keeping the
+        actual attachment loop inside this method rather than in the caller.
+        """
         from .calibration_bootstrap import ensure_follower_calibrations
         from .config import resolve_motion
         from .sim.arm import SimArmHandle
@@ -254,6 +272,8 @@ class ArmManager:
                 handle = ArmHandle(cfg)
                 handle.connect()
             handle.motion = resolve_motion(cfg, self._motion)
+            for peer in teleop_peers or ():
+                handle.executor.attach_peer(peer)
             self._handles[cfg.id] = handle
 
     def disconnect_all(self) -> None:

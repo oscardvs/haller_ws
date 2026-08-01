@@ -62,6 +62,13 @@ class SimLeaderTeleop:
                 if getattr(_peer, "status", lambda: {})().get("running"):
                     raise RuntimeError("another teleop is already running")
             follower = self._arms[follower_id]
+            # See TeleopSession.start's identical guard (teleop.py) for why
+            # this can't rely on the mode guard alone.
+            if follower.executor.is_running:
+                raise RuntimeError(
+                    f"arm {follower_id!r} has a move in progress; wait for "
+                    "it to finish or cancel it before starting teleop"
+                )
             follower.guard.set(Mode.MANUAL)
             if not follower.torque_enabled:
                 follower.enable_torque()

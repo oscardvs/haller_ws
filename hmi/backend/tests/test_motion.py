@@ -295,6 +295,11 @@ def _two_arm_manager():
         a.guard = ModeGuard(Mode.MANUAL)
         a.torque_enabled = True
         a.read_joints_deg.return_value = {"shoulder_pan": 0.0}
+        # A bare Mock's .executor.is_running is a truthy Mock, which would
+        # make every session.start() below refuse immediately ("a move in
+        # progress") before ever reaching the real status()/teleop_owner
+        # behaviour these tests exist to exercise. See A6 obligation 2.
+        a.executor.is_running = False
         return a
 
     arms = {"left": _mkarm("left"), "right": _mkarm("right")}
@@ -352,3 +357,63 @@ def test_teleop_owner_reads_a_real_running_sim_leader_teleop():
         assert ex.teleop_owner("spare") is None
     finally:
         session.stop()
+
+
+# ---- the other direction: a ramp must block teleop from starting ----------
+#
+# move_to refuses when a teleop session already owns the arm (above). A6
+# obligation 2 closes the reverse gap: Home, then start teleop before the
+# ramp finishes. TeleopSession's follower and HumanTeleopSession's two arms
+# are commanded into Mode.MANUAL by start() itself — exactly the mode the
+# ramp thread's own guard check lets through — so an in-flight ramp would not
+# self-cancel; two threads would write Goal_Position to the same serial port
+# with no lock anywhere in lerobot, for the whole ramp. See teleop.py,
+# human_teleop.py and sim/teleop.py's `executor.is_running` checks.
+
+def _long_running_executor(handle) -> MoveExecutor:
+    """A MoveExecutor mid-ramp on `handle`, for testing the refusal itself —
+    not a race against a real serial write, which test_estop_mid_ramp_halts_
+    the_move and friends already cover."""
+    ex = MoveExecutor(handle)
+    ex.run([{"shoulder_pan": float(i)} for i in range(200)], hz=200.0)
+    return ex
+
+
+def test_teleop_session_start_refuses_while_a_ramp_is_in_flight():
+    mgr = _two_arm_manager()
+    follower = mgr["right"]
+    follower.executor = _long_running_executor(follower)
+    try:
+        session = TeleopSession(mgr)
+        with pytest.raises(RuntimeError) as e:
+            session.start(leader_id="left", follower_id="right", hz=60.0)
+        assert "right" in str(e.value)
+    finally:
+        follower.executor.cancel()
+
+
+def test_human_teleop_session_start_refuses_while_a_ramp_is_in_flight():
+    mgr = _two_arm_manager()
+    right = mgr["right"]
+    right.executor = _long_running_executor(right)
+    try:
+        session = HumanTeleopSession(mgr)
+        with pytest.raises(RuntimeError) as e:
+            session.start(left_arm="left", right_arm="right", swap=False)
+        assert "right" in str(e.value)
+    finally:
+        right.executor.cancel()
+
+
+def test_sim_leader_teleop_start_refuses_while_a_ramp_is_in_flight():
+    mgr = _two_arm_manager()
+    follower = mgr["right"]
+    follower.executor = _long_running_executor(follower)
+    try:
+        session = SimLeaderTeleop(mgr)
+        source = MagicMock()
+        with pytest.raises(RuntimeError) as e:
+            session.start(follower_id="right", source=source, hz=60.0)
+        assert "right" in str(e.value)
+    finally:
+        follower.executor.cancel()
