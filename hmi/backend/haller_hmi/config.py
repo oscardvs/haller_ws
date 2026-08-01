@@ -59,6 +59,64 @@ class MotionConfig:
 
 
 @dataclass
+class ArmMountConfig:
+    """Where one arm's base sits in the shared workspace frame, metres.
+
+    The frame is the collision guard's world: z up, origin wherever you like —
+    only the arms' *relative* placement and the table height matter. Defaults
+    mirror the bimanual sim scene (`sim/builder.py`: bases at x = ±0.20, both
+    facing the same way). Measure the real rig plate before trusting the guard
+    at millimetre margins; the QUICKSTART's first-run check shows how.
+    """
+    pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    yaw_deg: float = 0.0
+
+
+@dataclass
+class CollisionConfig:
+    """Bimanual self-collision + workspace guard. See collision.py."""
+    enabled: bool = True
+    # Minimum allowed surface-to-surface gap between any two capsules before
+    # the guard stops the approach. Also absorbs calibration-zero offsets
+    # between the real arms and the MJCF convention the FK assumes.
+    margin_m: float = 0.025
+    # Same-arm pairs get a tighter margin: the capsules already envelope the
+    # meshes generously, and an SO-101's normal working poses run its forearm
+    # within ~30 mm of its own base column — the full margin would leave the
+    # guard permanently one step from clamping an arm that is nowhere near
+    # hitting itself.
+    self_margin_m: float = 0.008
+    # Height of the bench surface in the mount frame, or null to disable the
+    # height floors entirely.
+    table_z_m: float | None = 0.0
+    # Per-point height floors above table_z_m. The tip floor is 0 so the
+    # gripper can touch the surface it picks from; wrist and elbow carry the
+    # bulk of the hand/forearm and must stay clear of it.
+    tip_min_m: float = 0.0
+    wrist_min_m: float = 0.03
+    elbow_min_m: float = 0.02
+    mounts: dict[str, ArmMountConfig] = field(default_factory=lambda: {
+        "left": ArmMountConfig(pos=(-0.20, 0.0, 0.0)),
+        "right": ArmMountConfig(pos=(0.20, 0.0, 0.0)),
+    })
+
+
+def _collision_from(raw: dict | None) -> CollisionConfig:
+    raw = dict(raw or {})
+    mounts_raw = raw.pop("mounts", None)
+    cfg = CollisionConfig(**raw)
+    if mounts_raw:
+        cfg.mounts = {
+            arm_id: ArmMountConfig(
+                pos=tuple(m.get("pos", (0.0, 0.0, 0.0))),
+                yaw_deg=float(m.get("yaw_deg", 0.0)),
+            )
+            for arm_id, m in mounts_raw.items()
+        }
+    return cfg
+
+
+@dataclass
 class CameraConfig:
     id: str
     role: str  # "wrist" or "base"
@@ -96,6 +154,7 @@ class Config:
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
     motion: MotionConfig = field(default_factory=MotionConfig)
+    collision: CollisionConfig = field(default_factory=CollisionConfig)
     sim_leader: SimLeaderConfig | None = None
 
 
@@ -109,6 +168,7 @@ def load_config(path: Path | None = None) -> Config:
         telemetry=TelemetryConfig(**raw.get("telemetry", {})),
         cameras=[CameraConfig(**c) for c in raw.get("cameras", [])],
         motion=MotionConfig(**raw.get("motion", {})),
+        collision=_collision_from(raw.get("collision")),
         sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
     )
 

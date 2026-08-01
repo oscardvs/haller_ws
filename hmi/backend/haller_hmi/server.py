@@ -44,7 +44,21 @@ cameras: CameraManager | None = None   # constructed in lifespan, after arms.con
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
-human_teleop = HumanTeleopSession(arms)
+# The bimanual collision guard needs a mount pose for every enabled arm; an
+# arm it has no geometry for would silently pass every check, which is the
+# fail-open a guard must not have. Missing mounts therefore disable it loudly.
+_collision_guard = None
+if cfg.collision.enabled:
+    _unmounted = [a.id for a in cfg.arms
+                  if a.enabled and a.id not in cfg.collision.mounts]
+    if _unmounted:
+        logger.warning(
+            "collision guard DISABLED: no mounts configured for arms %s "
+            "(add them under collision.mounts in config.yaml)", _unmounted)
+    else:
+        from .collision import CollisionGuard
+        _collision_guard = CollisionGuard(cfg.collision)
+human_teleop = HumanTeleopSession(arms, collision_guard=_collision_guard)
 sim_teleop = SimLeaderTeleop(arms)
 # Bilateral session lock between every pair — any one running blocks the others.
 teleop.attach_peer(human_teleop)
