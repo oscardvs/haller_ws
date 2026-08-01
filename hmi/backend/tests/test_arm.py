@@ -141,3 +141,77 @@ def test_teleop_loop_uses_read_joints_deg_and_send_goal(monkeypatch):
     assert follower.send_goal.called, "loop must call follower.send_goal()"
     last_call = follower.send_goal.call_args
     assert last_call.args[0] == {"shoulder_pan": 42.0, "gripper": 50.0}
+
+
+JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex",
+          "wrist_flex", "wrist_roll", "gripper"]
+
+
+class _FakeSOFollower:
+    """The slice of lerobot's SOFollower contract that connect() depends on.
+
+    lerobot's connect() delegates to self.calibrate() whenever the motors
+    disagree with the calibration file, and the stock calibrate() asks a
+    question on stdin. Under uvicorn there is no stdin, so it raises EOFError
+    on the spot. The MagicMock used elsewhere in this file cannot express that,
+    which is why the reload path went untested.
+    """
+
+    def __init__(self, is_calibrated: bool) -> None:
+        self.is_calibrated = is_calibrated
+        self.id = "haller_follower"
+        self.calibration_fpath = "/nonexistent/haller_follower.json"
+        self.calibration = {j: MagicMock(range_min=0, range_max=4095) for j in JOINTS}
+        self.bus = MagicMock()
+        self.bus.motors = {j: MagicMock(id=i + 1) for i, j in enumerate(JOINTS)}
+
+    def connect(self, calibrate: bool = True) -> None:
+        if not self.is_calibrated and calibrate:
+            self.calibrate()
+
+    def calibrate(self) -> None:
+        raise EOFError("EOF when reading a line")
+
+
+def _handle_with(monkeypatch, fake) -> ArmHandle:
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: fake)
+    monkeypatch.setattr("haller_hmi.arm.SO101FollowerConfig",
+                        lambda **kw: MagicMock(**kw))
+    cfg = ArmConfig(id="right", model="so101_follower",
+                    port="/dev/null", calibration_id="haller_follower")
+    return ArmHandle(cfg)
+
+
+def test_connect_writes_calibration_instead_of_prompting(monkeypatch):
+    """Regression: saving a new calibration is exactly what makes the motors
+    disagree with the file, so the wizard's post-save reload always landed in
+    lerobot's interactive calibrate() and died with EOFError — turning an
+    already-committed save into a 500, and the retry into a 409."""
+    fake = _FakeSOFollower(is_calibrated=False)
+    handle = _handle_with(monkeypatch, fake)
+
+    handle.connect()  # must not raise
+
+    fake.bus.write_calibration.assert_called_once_with(fake.calibration)
+    assert set(handle.joint_limits_deg) == set(JOINTS)
+
+
+def test_connect_leaves_motors_alone_when_calibration_already_matches(monkeypatch):
+    """The happy path must stay untouched: no redundant EEPROM writes."""
+    fake = _FakeSOFollower(is_calibrated=True)
+    handle = _handle_with(monkeypatch, fake)
+
+    handle.connect()
+
+    fake.bus.write_calibration.assert_not_called()
+
+
+def test_connect_without_a_calibration_file_raises_a_clear_error(monkeypatch):
+    """With no file to push there is genuinely nothing a headless connect can
+    do, so it must say so rather than surface lerobot's EOFError."""
+    fake = _FakeSOFollower(is_calibrated=False)
+    fake.calibration = {}
+    handle = _handle_with(monkeypatch, fake)
+
+    with pytest.raises(RuntimeError, match="no calibration"):
+        handle.connect()

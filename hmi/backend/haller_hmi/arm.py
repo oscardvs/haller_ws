@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from functools import partial
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
@@ -23,6 +24,26 @@ logger = logging.getLogger(__name__)
 # we derive these per-joint from each motor's calibrated range converted to degrees.
 TICKS_PER_REV = 4096
 DEG_PER_TICK = 360.0 / TICKS_PER_REV
+
+
+def _write_calibration_to_motors(robot: SO101Follower) -> None:
+    """Non-interactive stand-in for `SOFollower.calibrate()`.
+
+    lerobot resolves a motors-vs-file calibration mismatch by asking on stdin
+    whether to adopt the file or re-run calibration. Answering ENTER — the
+    default — writes the file into the motors' registers, and that is the only
+    answer the HMI ever wants: the file is the artefact the calibration wizard
+    just committed. Since uvicorn has no stdin, leaving lerobot to ask raises
+    EOFError instead, so we answer it ourselves.
+    """
+    if not robot.calibration:
+        raise RuntimeError(
+            f"arm {robot.id!r} has no calibration file at {robot.calibration_fpath}; "
+            "run the calibration wizard before connecting"
+        )
+    logger.info("arm %s: writing calibration from %s into motors",
+                robot.id, robot.calibration_fpath)
+    robot.bus.write_calibration(robot.calibration)
 
 
 @dataclass
@@ -40,6 +61,12 @@ class ArmHandle:
             use_degrees=True,
         )
         self.robot = SO101Follower(cfg)
+        # connect() delegates to robot.calibrate() whenever the motors disagree
+        # with the calibration file — precisely the state the wizard leaves
+        # behind the instant it writes a new one. Substitute the prompt-free
+        # equivalent before connecting, so lerobot keeps its own ordering and
+        # still applies the calibration before configure() touches the motors.
+        self.robot.calibrate = partial(_write_calibration_to_motors, self.robot)
         self.robot.connect(calibrate=True)
         # Load joint limits from the now-loaded calibration.
         self.joint_limits_deg = self._load_joint_limits()
