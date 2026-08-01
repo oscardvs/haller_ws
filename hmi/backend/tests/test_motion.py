@@ -1,7 +1,10 @@
 import time
 from unittest.mock import MagicMock
 
-from haller_hmi.motion import MoveExecutor
+import pytest
+
+from haller_hmi.config import MotionConfig
+from haller_hmi.motion import MoveExecutor, MoveRefused, home, move_to
 from haller_hmi.safety import Mode, ModeGuard
 
 
@@ -124,3 +127,120 @@ def test_last_error_is_cleared_at_the_start_of_the_next_run():
 
     assert ex.last_error is None
     assert h.sent == [{"a": 2.0}]
+
+
+# ---- move_to / home: the shared bounded-move policy ------------------------
+
+
+def _movable_handle(current, limits=None):
+    h = _fake_handle()
+    h.torque_enabled = True
+    h.motion = MotionConfig(max_speed_deg_s=60.0, large_move_deg=30.0, ramp_hz=50.0)
+    h.joint_limits_deg = limits or {j: (-180.0, 180.0) for j in current}
+    h.read_joints_deg.return_value = current
+    h.executor = MoveExecutor(h)
+    return h
+
+
+def test_move_to_refuses_when_any_joint_exceeds_the_threshold():
+    h = _movable_handle({"shoulder_pan": 0.0, "gripper": 0.0})
+    with pytest.raises(MoveRefused) as e:
+        move_to(h, {"shoulder_pan": 90.0, "gripper": 1.0})
+    assert "shoulder_pan" in str(e.value)
+    assert "gripper" not in str(e.value)
+    assert h.sent == [], "nothing may be commanded when a move is refused"
+
+
+def test_home_refuses_right_after_a_recalibration():
+    """The 2026-08-01 incident. Calibration redefines 0 deg, leaving the arm far
+    from it; Home then slewed the arm across the bench. It must refuse."""
+    h = _movable_handle({"shoulder_pan": -126.5, "wrist_flex": 148.9})
+    with pytest.raises(MoveRefused):
+        home(h)
+    assert h.sent == []
+
+
+def test_move_to_ramps_a_small_move():
+    h = _movable_handle({"shoulder_pan": 0.0})
+    move_to(h, {"shoulder_pan": 10.0})
+    h.executor.wait(timeout=5.0)
+    assert h.sent, "a small move should have been commanded"
+    assert h.sent[-1]["shoulder_pan"] == pytest.approx(10.0)
+
+
+def test_move_to_refuses_when_torque_is_disabled():
+    h = _movable_handle({"shoulder_pan": 0.0})
+    h.torque_enabled = False
+    with pytest.raises(MoveRefused) as e:
+        move_to(h, {"shoulder_pan": 1.0})
+    assert "torque" in str(e.value).lower()
+    assert h.sent == []
+
+
+def test_move_to_refuses_when_a_commanded_joint_has_no_current_reading():
+    """read_joints_deg drops a joint whose .pos was missing from the
+    observation, which this rig's UART does intermittently. Ramping the rest
+    would command a partial move and report it as complete."""
+    h = _movable_handle({"shoulder_pan": 0.0})
+    h.joint_limits_deg = {"shoulder_pan": (-180.0, 180.0),
+                          "wrist_flex": (-180.0, 180.0)}
+    h.read_joints_deg.return_value = {"shoulder_pan": 0.0}  # wrist_flex dropped
+
+    with pytest.raises(MoveRefused) as e:
+        move_to(h, {"shoulder_pan": 1.0, "wrist_flex": 1.0})
+
+    assert "wrist_flex" in str(e.value)
+    assert h.sent == []
+
+
+# ---- move_to vs. a running teleop session -----------------------------
+#
+# Task 5's review: POST /arm/{id}/home during an active teleop session starts
+# a ramp thread that writes Goal_Position on the same serial port a 60 Hz
+# teleop loop is already streaming to — there is no lock anywhere in lerobot,
+# and the overlap lasts the whole ramp, not a moment. `_fake_handle` names its
+# arm "right" (see the top of this file); TeleopSession/HumanTeleopSession/
+# SimLeaderTeleop all report which arm(s) they own through a `status()` dict
+# ("follower/leader" or "left_arm/right_arm"), so a stand-in with the same
+# shape is enough to exercise `MoveExecutor.teleop_owner` without importing
+# any of the three.
+
+def test_move_to_refuses_when_a_teleop_session_owns_the_arm():
+    h = _movable_handle({"shoulder_pan": 0.0})
+    peer = MagicMock()
+    peer.status.return_value = {"running": True, "follower": "right"}
+    h.executor.attach_peer(peer)
+
+    with pytest.raises(MoveRefused) as e:
+        move_to(h, {"shoulder_pan": 10.0})
+
+    assert "right" in str(e.value)
+    assert "teleop" in str(e.value).lower()
+    assert h.sent == []
+
+
+def test_move_to_ignores_a_teleop_session_that_owns_a_different_arm():
+    """The check is scoped to the arm being moved, not "is any teleop running
+    anywhere": an idle arm must stay movable while a teleop session drives its
+    sibling (e.g. SimLeaderTeleop, which only ever occupies its follower)."""
+    h = _movable_handle({"shoulder_pan": 0.0})
+    peer = MagicMock()
+    peer.status.return_value = {"running": True, "follower": "left"}
+    h.executor.attach_peer(peer)
+
+    move_to(h, {"shoulder_pan": 10.0})
+    h.executor.wait(timeout=5.0)
+
+    assert h.sent, "a move on an arm no running peer owns must not be refused"
+
+
+def test_move_to_is_not_blocked_by_a_peer_that_is_not_running():
+    h = _movable_handle({"shoulder_pan": 0.0})
+    peer = MagicMock()
+    peer.status.return_value = {"running": False, "follower": "right"}
+    h.executor.attach_peer(peer)
+
+    move_to(h, {"shoulder_pan": 10.0})
+    h.executor.wait(timeout=5.0)
+
+    assert h.sent, "a stopped peer must not block a move"

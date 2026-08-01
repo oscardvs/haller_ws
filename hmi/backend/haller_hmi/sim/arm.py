@@ -1,7 +1,9 @@
 """SimArmHandle: drop-in for ArmHandle backed by a MuJoCoWorld.
 
 Public surface matches ArmHandle exactly: connect, disconnect, send_goal,
-home, disable_torque, enable_torque, state_snapshot, read_joints_deg.
+disable_torque, enable_torque, state_snapshot, read_joints_deg, executor.
+`home()` used to be part of that surface; it is now `motion.home(handle)`,
+shared with ArmHandle instead of duplicated per class — see motion.py.
 
 The HMI speaks LeRobot snake_case joint names (e.g. "shoulder_pan", "gripper")
 because the real ArmHandle gets those names from LeRobot's SO101Follower
@@ -43,8 +45,16 @@ class SimArmHandle:
     guard: ModeGuard = field(default_factory=lambda: ModeGuard(Mode.MANUAL))
     torque_enabled: bool = True
     motion: MotionConfig = field(default_factory=MotionConfig)
+    executor: "MoveExecutor | None" = None  # set in __post_init__
     _last_commanded: dict[str, float] | None = None
     _last_command_at: float | None = None
+
+    def __post_init__(self) -> None:
+        # Deferred: motion.py must never import from arm.py, or the cycle
+        # becomes painful to unpick. sim/arm.py needs MoveExecutor only here,
+        # at construction time, so the import waits until then.
+        from ..motion import MoveExecutor
+        self.executor = MoveExecutor(self)
 
     @property
     def _prefix(self) -> str:
@@ -106,10 +116,6 @@ class SimArmHandle:
         self._last_commanded = {**self._last_commanded, **capped}
         self._last_command_at = now
         return capped
-
-    def home(self) -> dict[str, float]:
-        goal = {j: 0.0 for j in self.joint_limits_deg}
-        return self.send_goal(goal)
 
     def disable_torque(self) -> None:
         self.world.set_arm_torque(self.config.sim_arm_name, enabled=False)

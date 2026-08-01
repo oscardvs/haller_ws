@@ -55,8 +55,16 @@ class ArmHandle:
     robot: SO101Follower | None = None
     torque_enabled: bool = True
     motion: MotionConfig = field(default_factory=MotionConfig)
+    executor: "MoveExecutor | None" = None  # set in __post_init__
     _last_commanded: dict[str, float] | None = None
     _last_command_at: float | None = None
+
+    def __post_init__(self) -> None:
+        # Deferred: motion.py must never import from arm.py, or the cycle
+        # becomes painful to unpick. arm.py needs MoveExecutor only here, at
+        # construction time, so the import waits until then.
+        from .motion import MoveExecutor
+        self.executor = MoveExecutor(self)
 
     def connect(self) -> None:
         cfg = SO101FollowerConfig(
@@ -136,11 +144,6 @@ class ArmHandle:
         self._last_commanded = {**self._last_commanded, **capped}
         self._last_command_at = now
         return capped
-
-    def home(self) -> dict[str, float]:
-        """Go to the calibrated home pose (0° on every joint)."""
-        goal = {j: 0.0 for j in self.joint_limits_deg}
-        return self.send_goal(goal)
 
     def disable_torque(self) -> None:
         if self.robot is not None:
