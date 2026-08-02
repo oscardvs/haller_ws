@@ -35,6 +35,7 @@ export type XRGamepadLike = {
 export type XRInputSourceLike = {
   handedness: XRHandedness;
   gripSpace?: unknown;
+  targetRaySpace?: unknown;
   gamepad?: XRGamepadLike;
 };
 
@@ -354,6 +355,7 @@ export type HudStatusLike = {
     authority: string;
     remaining_ms: number | null;
     blocking: string[];
+    error_deg?: Record<string, number>;
     reason: string;
   }>>;
 } | null;
@@ -422,7 +424,15 @@ export function paintHud(
     let line = acq.authority;
     if (acq.authority === "acquiring") {
       if (acq.remaining_ms !== null) line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
-      if (acq.blocking.length) line += `  match: ${acq.blocking.join(", ")}`;
+      if (acq.blocking.length) {
+        // Signed errors, so the operator knows which WAY to move, not just
+        // which joint is off: "elbow_flex +61°" means reach further.
+        line += "  match: " + acq.blocking.map((j) => {
+          const e = acq.error_deg?.[j];
+          return e === undefined ? j
+            : `${j} ${e > 0 ? "+" : ""}${e.toFixed(0)}°`;
+        }).join(", ");
+      }
     }
     if (acq.reason === "no_tracking") line += "  (no tracking)";
     ctx.fillText(line, 140, y);
@@ -483,9 +493,21 @@ export function sampleVRFrame(
     if (squeeze) deadMan = true;
 
     const pose = src.gripSpace ? poseToPair(frame.getPose(src.gripSpace, refSpace)) : null;
+    // Orientation comes from the TARGET RAY, not the grip. On Quest Touch
+    // controllers the grip frame is tilted ~50-60° from where a relaxed hand
+    // actually points (it follows the handle, not the knuckles), and the
+    // backend synthesizes the whole hand from this orientation — with the
+    // grip frame, holding a controller naturally reads as a steeply
+    // pitched-down wrist, which both drives wrist_flex oddly and makes the
+    // acquisition gate nearly unmatchable. The ray frame is each vendor's
+    // own answer to "where is this hand pointing"; position stays on the
+    // grip (the ray origin sits forward of the palm).
+    const ray = src.targetRaySpace
+      ? poseToPair(frame.getPose(src.targetRaySpace, refSpace)) : null;
     const sample: ControllerSample = pose
       ? {
-          ...pose,
+          position: pose.position,
+          orientation: (ray ?? pose).orientation,
           trigger: buttons[BUTTON_TRIGGER]?.value ?? 0,
           squeeze,
           tracked: true,

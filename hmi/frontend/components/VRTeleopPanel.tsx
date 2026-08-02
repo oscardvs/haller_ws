@@ -363,7 +363,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         </span>
         {a.authority === "acquiring" && a.blocking.length > 0 && (
           <span className="text-amber-300 truncate">
-            match: {a.blocking.join(", ")}
+            match: {a.blocking.map((j) => {
+              const e = a.error_deg?.[j];
+              return e === undefined ? j
+                : `${j} ${e > 0 ? "+" : ""}${e.toFixed(0)}°`;
+            }).join(", ")}
           </span>
         )}
         {a.reason === "no_tracking" && (

@@ -84,10 +84,11 @@ HEAD = {"position": [0.0, 1.6, 0.0], "orientation": IDENT}
 # sim arm (all joints 0°) already holds, so the acquisition gate can match.
 SHOULDER_Y = 1.6 - 0.22
 REACH_Z = -0.50
-# The jaw joint's zero sits mid-range, and the gripper maps to 1 − trigger of
-# the full range: matching a zeroed arm therefore needs the trigger about 90%
-# squeezed. A human sees exactly this on the HUD as "match: gripper".
-TRIGGER = 0.9
+# Deliberately relaxed: the gripper is EXEMPT from the VR acquisition gate
+# (vr_grip sessions use VR_ACQUIRE_TOL_DEG), so engagement must succeed with
+# the trigger at rest. This constant staying 0.0 is the regression test for
+# that exemption — it used to have to be 0.9.
+TRIGGER = 0.0
 
 
 def controller(side: str, *, dx: float = 0.0, squeeze: bool = True,

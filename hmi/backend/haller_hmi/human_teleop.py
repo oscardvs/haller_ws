@@ -80,6 +80,27 @@ ACQUIRE_TOL_DEG: dict[str, float] = {
     # see the robot holding.
     "gripper": 30.0,
 }
+#: The VR path's tolerances, selected by clutch source. The camera path's
+#: errors are NOISE — a per-frame estimator wobble the operator can shrink by
+#: holding still — so 20° is reachable. The VR path's errors are SYSTEMATIC:
+#: the elbow is synthesized from BodyModel limb lengths, so an operator whose
+#: arm differs from the model carries a constant elbow offset no amount of
+#: care removes (a straight-elbow target needs a reach the model may simply
+#: not allow), and the first headset session stalled exactly there. The gate
+#: is legibility, not the safety mechanism — the acquisition RAMP bounds the
+#: handover speed regardless of the matched error (see the block comment
+#: above) — so these are sized to what a headset can actually deliver:
+#: precise pan/lift, model-limited elbow, and a gripper that is EXEMPT
+#: (110° of jaw range < 360): the trigger is an explicit, low-inertia ask,
+#: and demanding it be held ~90% squeezed through the countdown taught the
+#: first operator that engagement was broken.
+VR_ACQUIRE_TOL_DEFAULT_DEG = 30.0
+VR_ACQUIRE_TOL_DEG: dict[str, float] = {
+    "elbow_flex": 60.0,
+    "wrist_flex": 35.0,
+    "wrist_roll": 60.0,
+    "gripper": 360.0,
+}
 #: Countdown from the clutch closing to the earliest possible handover.
 ACQUIRE_MS = 3000.0
 #: How long the pose match must hold before handover. Separate from the
@@ -193,6 +214,8 @@ class HumanTeleopSession:
         match_dwell_ms: float = MATCH_DWELL_MS,
         acquire_tol_deg: dict[str, float] | None = None,
         acquire_tol_default_deg: float = ACQUIRE_TOL_DEFAULT_DEG,
+        vr_acquire_tol_deg: dict[str, float] | None = None,
+        vr_acquire_tol_default_deg: float = VR_ACQUIRE_TOL_DEFAULT_DEG,
         acquire_rate_deg_s: float = ACQUIRE_RATE_DEG_S,
         acquire_ramp_ms: float = ACQUIRE_RAMP_MS,
         collision_guard=None,
@@ -254,6 +277,8 @@ class HumanTeleopSession:
         self._match_dwell_ms = match_dwell_ms
         self._acquire_tol_deg = dict(acquire_tol_deg or ACQUIRE_TOL_DEG)
         self._acquire_tol_default_deg = acquire_tol_default_deg
+        self._vr_acquire_tol_deg = dict(vr_acquire_tol_deg or VR_ACQUIRE_TOL_DEG)
+        self._vr_acquire_tol_default_deg = vr_acquire_tol_default_deg
         self._acquire_rate_deg_s = acquire_rate_deg_s
         self._acquire_ramp_ms = acquire_ramp_ms
         self._acq: dict[str, _SideAcquire] = {
@@ -483,6 +508,11 @@ class HumanTeleopSession:
         }
 
     def _tol_for(self, joint: str) -> float:
+        """Tolerance by clutch source: vr_grip sessions get the VR set — see
+        VR_ACQUIRE_TOL_DEG for why headset errors are systematic, not noise."""
+        if self._clutch_source == "vr_grip":
+            return self._vr_acquire_tol_deg.get(
+                joint, self._vr_acquire_tol_default_deg)
         return self._acquire_tol_deg.get(joint, self._acquire_tol_default_deg)
 
     def _side_mirrored(self, side: str) -> bool:

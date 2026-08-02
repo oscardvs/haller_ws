@@ -222,3 +222,43 @@ describe("paintHud", () => {
     expect(texts.join(" ")).toContain("E-STOP");
   });
 });
+
+describe("sampleVRFrame orientation source", () => {
+  it("takes orientation from the target ray, position from the grip", () => {
+    // Quest grip frames tilt ~50-60° from where the hand points; the backend
+    // synthesizes the whole hand from this orientation, so shipping the grip
+    // frame made a naturally held controller read as a pitched-down wrist.
+    const src: XRInputSourceLike = {
+      handedness: "right",
+      gripSpace: { tag: "grip" },
+      targetRaySpace: { tag: "ray" },
+      gamepad: { buttons: [] },
+    };
+    const s = session([src]);
+    const f: XRFrameLike = {
+      getViewerPose: frame.getViewerPose,
+      getPose: (space: unknown) => ({
+        transform: {
+          position: { x: 1, y: 2, z: 3, w: 1 },
+          orientation: (space as { tag: string }).tag === "ray"
+            ? { x: 0.5, y: 0, z: 0, w: 0.866 }
+            : { x: 0, y: 0, z: 0, w: 1 },
+        },
+        emulatedPosition: false,
+      }),
+    };
+    const out = sampleVRFrame(s, f, {}, { tsMs: 1 });
+    expect(out.right?.position).toEqual([1, 2, 3]);
+    expect(out.right?.orientation[0]).toBeCloseTo(0.5);
+  });
+
+  it("falls back to the grip orientation when no ray space exists", () => {
+    const src: XRInputSourceLike = {
+      handedness: "left",
+      gripSpace: { tag: "grip" },
+      gamepad: { buttons: [] },
+    };
+    const out = sampleVRFrame(session([src]), frame, {}, { tsMs: 1 });
+    expect(out.left?.orientation).toEqual([0, 0, 0, 1]);
+  });
+});

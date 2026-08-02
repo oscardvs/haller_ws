@@ -113,3 +113,31 @@ def test_frames_without_mirror_mode_keep_the_swap_convention():
         assert sess._side_mirrored("right") is True
     finally:
         sess.stop()
+
+
+def test_vr_sessions_get_the_vr_tolerances():
+    """Headset errors are systematic (BodyModel mismatch), not estimator
+    noise, so vr_grip sessions gate on the wider VR set — and the gripper is
+    effectively exempt: forcing the trigger ~90% squeezed through the whole
+    countdown reads as 'engagement is broken', not as a safety feature."""
+    from haller_hmi.human_teleop import HumanTeleopSession as S
+
+    mgr, _ = _fake_arm_manager()
+    vr = S(mgr)
+    vr.start(left_arm="left", right_arm="right", swap=False,
+             clutch_source="vr_grip")
+    try:
+        assert vr._tol_for("elbow_flex") == 60.0
+        assert vr._tol_for("shoulder_pan") == 30.0
+        assert vr._tol_for("gripper") >= 360.0
+    finally:
+        vr.stop()
+
+    cam = S(mgr)
+    cam.start(left_arm="left", right_arm="right", swap=False,
+              clutch_source="spacebar")
+    try:
+        assert cam._tol_for("elbow_flex") == 20.0
+        assert cam._tol_for("gripper") == 30.0
+    finally:
+        cam.stop()

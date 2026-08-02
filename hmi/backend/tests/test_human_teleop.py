@@ -20,7 +20,8 @@ def _fast_acquire(**kw) -> dict:
     every one of them having to stage a 3 s countdown and a matched pose.
     """
     return {"acquire_ms": 0.0, "match_dwell_ms": 0.0,
-            "acquire_tol_default_deg": 1e6, "acquire_tol_deg": {}, **kw}
+            "acquire_tol_default_deg": 1e6, "acquire_tol_deg": {},
+            "vr_acquire_tol_default_deg": 1e6, "vr_acquire_tol_deg": {}, **kw}
 
 
 def _fake_arm_manager():
