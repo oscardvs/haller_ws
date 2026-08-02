@@ -27,7 +27,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
-import { api, type HumanTeleopStatus } from "@/lib/api";
+import {
+  api, cameraStreamUrl, type CameraInfo, type HumanTeleopStatus,
+} from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import {
@@ -60,6 +62,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
   const [body, setBody] = useState<BodyOverride>({});
   const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
+  // The workspace camera floated into the HUD. In passthrough the operator
+  // normally watches the REAL arms — but against a sim backend there is
+  // nothing physical to look at, so the MuJoCo camera IS the workspace view
+  // and defaults on. On the real rig the same toggle shows the mast camera.
+  const [baseCam, setBaseCam] = useState<CameraInfo | null>(null);
+  const [showCam, setShowCam] = useState(false);
 
   const sessionRef = useRef<XRSessionLike | null>(null);
   const refSpaceRef = useRef<unknown>(null);
@@ -77,6 +85,14 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
 
   useEffect(() => {
     void xrSupported().then(setSupported);
+    api.cameras()
+      .then(({ cameras }) => {
+        const base = cameras.filter((c) => c.role === "base" && c.active);
+        const cam = base.find((c) => c.source === "sim_camera") ?? base[0] ?? null;
+        setBaseCam(cam);
+        if (cam?.source === "sim_camera") setShowCam(true);
+      })
+      .catch(() => { /* no cameras is fine; the toggle just stays hidden */ });
     try {
       const raw = localStorage.getItem(BODY_LS_KEY);
       if (raw) setBody(JSON.parse(raw));
@@ -329,6 +345,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           : "rounded border p-2 space-y-1"
       }
     >
+      {inSession && showCam && baseCam && (
+        // MJPEG rides a plain <img>; the dom-overlay composites it into the
+        // headset view. pointer-events-none so a stray controller ray can
+        // never "click" the video instead of the E-STOP below it.
+        <img
+          src={cameraStreamUrl(baseCam.id)}
+          alt={`${baseCam.id} live view`}
+          className="rounded-lg border border-white/25 pointer-events-none"
+          style={{ width: "min(85vw, 560px)" }}
+        />
+      )}
       <div
         className={
           "font-mono text-[13px] space-y-1 " +
@@ -375,6 +402,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           >
             E-STOP
           </Button>
+          {baseCam && (
+            <Button variant="secondary" onClick={() => setShowCam((v) => !v)}>
+              {showCam ? "Cam off" : "Cam on"}
+            </Button>
+          )}
           <Button
             variant="secondary"
             onClick={() => void teardown({ stopBackend: true })}
