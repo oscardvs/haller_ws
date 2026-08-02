@@ -160,3 +160,65 @@ describe("disengagedFrame", () => {
     expect(f.ts_ms).toBe(123);
   });
 });
+
+import { mat4Multiply, paintHud, type HudStatusLike } from "../lib/vrTeleop";
+
+describe("mat4Multiply", () => {
+  it("multiplies column-major like WebXR expects", () => {
+    const I = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+    const T = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 2,3,4,1]); // translate
+    const S = new Float32Array([2,0,0,0, 0,2,0,0, 0,0,2,0, 0,0,0,1]); // scale
+    expect(Array.from(mat4Multiply(I, T))).toEqual(Array.from(T));
+    // T * S: scale first, then translate — translation must survive unscaled.
+    const TS = mat4Multiply(T, S);
+    expect(TS[0]).toBe(2);
+    expect([TS[12], TS[13], TS[14]]).toEqual([2, 3, 4]);
+    // S * T: translation gets scaled.
+    const ST = mat4Multiply(S, T);
+    expect([ST[12], ST[13], ST[14]]).toEqual([4, 6, 8]);
+  });
+});
+
+describe("paintHud", () => {
+  function stubCtx() {
+    const texts: string[] = [];
+    const ctx = {
+      canvas: { width: 1024, height: 768 },
+      clearRect: () => {},
+      fillRect: () => {},
+      drawImage: () => {},
+      fillText: (t: string) => { texts.push(t); },
+      set fillStyle(_v: string) {},
+      set font(_v: string) {},
+      set textAlign(_v: string) {},
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, texts };
+  }
+
+  it("shows the collision hold and the blocking joints", () => {
+    const { ctx, texts } = stubCtx();
+    const status: HudStatusLike = {
+      state: "acquiring",
+      collision: { enabled: true, slack_m: -0.004, limited: true },
+      clutch: { sides: { left: true, right: false } },
+      acquire: {
+        left: { authority: "acquiring", remaining_ms: 1200,
+                blocking: ["gripper"], reason: "matching" },
+        right: { authority: "held", remaining_ms: null,
+                 blocking: [], reason: "clutch_open" },
+      },
+    };
+    paintHud(ctx, status, null);
+    const all = texts.join(" | ");
+    expect(all).toContain("ACQUIRING");
+    expect(all).toContain("COLLISION HOLD -4 mm");
+    expect(all).toContain("match: gripper");
+    expect(all).toContain("no workspace camera");
+  });
+
+  it("never throws on an empty status", () => {
+    const { ctx, texts } = stubCtx();
+    expect(() => paintHud(ctx, null, null)).not.toThrow();
+    expect(texts.join(" ")).toContain("E-STOP");
+  });
+});

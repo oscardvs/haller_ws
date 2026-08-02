@@ -171,37 +171,270 @@ export async function requestTeleopSession(
   }
 }
 
-/**
- * Give the session something to composite, or the headset presents nothing at
- * all. We render no geometry — in AR a transparent clear leaves pure
- * passthrough (plus the DOM overlay); in VR an intentional near-black replaces
- * what would otherwise be an undefined void. Returns a per-frame `clear()` to
- * call from the XR loop, or a no-op when WebGL/XRWebGLLayer are unavailable
- * (unit tests, exotic browsers) — teleop must not depend on rendering.
- */
-export function attachRenderLayer(
+// ---- in-scene rendering ------------------------------------------------------
+//
+// Two jobs, one scene object. First: give the session something to composite,
+// or the headset presents nothing at all — in AR a transparent clear leaves
+// pure passthrough; in VR an intentional near-black replaces what would
+// otherwise be an undefined void. Second: on browsers with no `dom-overlay`
+// (the Meta Quest Browser rejects it on-device for immersive-ar — it only
+// works in Meta's desktop emulator), the HUD has to live INSIDE the scene:
+// a world-locked quad textured from a 2D canvas the panel repaints with the
+// workspace camera and the status lines. Plain WebGL1, no dependencies.
+
+/** Column-major 4x4 multiply, WebXR's matrix convention. Exported for tests. */
+export function mat4Multiply(a: Float32Array, b: Float32Array): Float32Array {
+  const out = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      out[c * 4 + r] =
+        a[0 * 4 + r] * b[c * 4 + 0] +
+        a[1 * 4 + r] * b[c * 4 + 1] +
+        a[2 * 4 + r] * b[c * 4 + 2] +
+        a[3 * 4 + r] * b[c * 4 + 3];
+    }
+  }
+  return out;
+}
+
+/** Where the HUD quad hangs in local-floor space: eye-ish height, just over a
+ *  metre out — near enough to read, far enough not to crowd the workspace. */
+const HUD_POS: [number, number, number] = [0, 1.35, -1.15];
+const HUD_W = 1.1;   // metres; canvas is 4:3, height follows
+
+type XRViewLike = {
+  projectionMatrix: Float32Array;
+  transform: { inverse: { matrix: Float32Array } };
+};
+
+export type XRScene = {
+  /** Clear both eyes; when `hud` is given, draw it as a world-locked quad.
+   *  `hudDirty` re-uploads the canvas texture (skip it on unchanged frames —
+   *  a texture upload per display frame is the whole cost of this HUD). */
+  render(frame: XRFrameLike, refSpace: unknown,
+         hud: HTMLCanvasElement | null, hudDirty: boolean): void;
+};
+
+const _NOOP_SCENE: XRScene = { render: () => {} };
+
+export function attachRenderScene(
   session: XRSessionLike,
   mode: TeleopXRSession["mode"],
-): () => void {
-  type LayerCtor = new (s: XRSessionLike, gl: unknown) => { framebuffer: unknown };
+): XRScene {
+  type LayerLike = {
+    framebuffer: unknown;
+    getViewport?: (v: unknown) =>
+      { x: number; y: number; width: number; height: number } | null;
+  };
+  type LayerCtor = new (s: XRSessionLike, gl: unknown) => LayerLike;
   const XRWebGLLayerCtor = (globalThis as { XRWebGLLayer?: LayerCtor }).XRWebGLLayer;
-  if (!XRWebGLLayerCtor || !session.updateRenderState) return () => {};
+  if (!XRWebGLLayerCtor || !session.updateRenderState) return _NOOP_SCENE;
   const canvas = document.createElement("canvas");
   const gl = (canvas.getContext("webgl", { xrCompatible: true, alpha: true })
     ?? canvas.getContext("webgl2", { xrCompatible: true, alpha: true })) as
     WebGLRenderingContext | null;
-  if (!gl) return () => {};
+  if (!gl) return _NOOP_SCENE;
   const layer = new XRWebGLLayerCtor(session, gl);
   session.updateRenderState({ baseLayer: layer });
   const [r, g, b, a] = mode === "immersive-ar"
     ? [0, 0, 0, 0]           // transparent: passthrough shows through
     : [0.05, 0.05, 0.07, 1]; // VR fallback: deliberate near-black, not a void
-  return () => {
-    const fb = (session.renderState?.baseLayer ?? layer).framebuffer;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fb as WebGLFramebuffer | null);
-    gl.clearColor(r, g, b, a);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  // Minimal textured-quad pipeline. Compiled lazily on the first HUD frame so
+  // the overlay-capable path never pays for it.
+  let prog: WebGLProgram | null = null;
+  let uMVP: WebGLUniformLocation | null = null;
+  let tex: WebGLTexture | null = null;
+  let model: Float32Array | null = null;
+
+  function ensurePipeline(hud: HTMLCanvasElement): boolean {
+    if (prog) return true;
+    if (!gl) return false;
+    const compile = (type: number, src: string) => {
+      const s = gl.createShader(type);
+      if (!s) return null;
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      return gl.getShaderParameter(s, gl.COMPILE_STATUS) ? s : null;
+    };
+    const vs = compile(gl.VERTEX_SHADER,
+      "attribute vec3 aPos; attribute vec2 aUV; uniform mat4 uMVP;" +
+      "varying vec2 vUV;" +
+      "void main(){ gl_Position = uMVP * vec4(aPos, 1.0); vUV = aUV; }");
+    const fs = compile(gl.FRAGMENT_SHADER,
+      "precision mediump float; varying vec2 vUV; uniform sampler2D uTex;" +
+      "void main(){ gl_FragColor = texture2D(uTex, vUV); }");
+    if (!vs || !fs) return false;
+    const p = gl.createProgram();
+    if (!p) return false;
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return false;
+    // Interleaved x,y,z,u,v — unit quad centred on the origin, v flipped so
+    // canvas row 0 lands at the TOP of the quad.
+    const verts = new Float32Array([
+      -0.5, -0.5, 0, 0, 1,
+       0.5, -0.5, 0, 1, 1,
+      -0.5,  0.5, 0, 0, 0,
+       0.5,  0.5, 0, 1, 0,
+    ]);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(p, "aPos");
+    const aUV = gl.getAttribLocation(p, "aUV");
+    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 20, 12);
+    gl.enableVertexAttribArray(aUV);
+    uMVP = gl.getUniformLocation(p, "uMVP");
+    tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const hudH = HUD_W * (hud.height / hud.width);
+    // Column-major scale + translate: the quad's unit extents become metres.
+    model = new Float32Array([
+      HUD_W, 0, 0, 0,
+      0, hudH, 0, 0,
+      0, 0, 1, 0,
+      HUD_POS[0], HUD_POS[1], HUD_POS[2], 1,
+    ]);
+    prog = p;
+    return true;
+  }
+
+  return {
+    render(frame, refSpace, hud, hudDirty) {
+      const fb = (session.renderState?.baseLayer ?? layer).framebuffer;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb as WebGLFramebuffer | null);
+      gl.clearColor(r, g, b, a);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (!hud || !ensurePipeline(hud)) return;
+      const pose = frame.getViewerPose(refSpace) as unknown as
+        { views?: XRViewLike[] } | null | undefined;
+      const views = pose?.views;
+      if (!views?.length) return;
+      gl.useProgram(prog);
+      gl.disable(gl.DEPTH_TEST);
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      if (hudDirty) {
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, hud);
+      }
+      const active = (session.renderState?.baseLayer ?? layer) as LayerLike;
+      for (const view of views) {
+        const vp = active.getViewport?.(view);
+        if (!vp) continue;
+        gl.viewport(vp.x, vp.y, vp.width, vp.height);
+        const mvp = mat4Multiply(
+          mat4Multiply(view.projectionMatrix, view.transform.inverse.matrix),
+          model as Float32Array,
+        );
+        gl.uniformMatrix4fv(uMVP, false, mvp);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    },
   };
+}
+
+// ---- HUD canvas painter -------------------------------------------------------
+
+export type HudStatusLike = {
+  state?: string;
+  last_error?: string | null;
+  clutch?: { sides?: { left: boolean; right: boolean }; engaged?: boolean };
+  collision?: { enabled: boolean; slack_m?: number; limited?: boolean };
+  acquire?: Partial<Record<"left" | "right", {
+    authority: string;
+    remaining_ms: number | null;
+    blocking: string[];
+    reason: string;
+  }>>;
+} | null;
+
+/**
+ * Repaint the in-scene HUD. Layout: workspace camera on top (when a frame is
+ * available), status strip below. Pure canvas 2D so it can run anywhere;
+ * failures to draw the camera (stream warming up, no camera) degrade to the
+ * text strip alone, never to an exception — this runs inside the XR loop.
+ */
+export function paintHud(
+  ctx: CanvasRenderingContext2D,
+  status: HudStatusLike,
+  cam: HTMLImageElement | null,
+): void {
+  const W = ctx.canvas.width;
+  const H = ctx.canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "rgba(8, 10, 14, 0.82)";
+  ctx.fillRect(0, 0, W, H);
+
+  const camH = Math.round(H * 0.72);
+  if (cam && cam.complete && cam.naturalWidth > 0) {
+    try {
+      const scale = Math.min(W / cam.naturalWidth, camH / cam.naturalHeight);
+      const dw = cam.naturalWidth * scale;
+      const dh = cam.naturalHeight * scale;
+      ctx.drawImage(cam, (W - dw) / 2, (camH - dh) / 2, dw, dh);
+    } catch {
+      /* a mid-frame MJPEG boundary can throw; next repaint recovers */
+    }
+  } else {
+    ctx.fillStyle = "#9aa0a6";
+    ctx.font = "28px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("no workspace camera", W / 2, camH / 2);
+  }
+
+  ctx.textAlign = "left";
+  ctx.font = "bold 30px monospace";
+  let y = camH + 42;
+  const state = (status?.state ?? "—").toUpperCase();
+  const col = status?.collision;
+  ctx.fillStyle = "#e8eaed";
+  ctx.fillText(state, 24, y);
+  if (col?.enabled) {
+    const slack = col.slack_m;
+    ctx.fillStyle = col.limited ? "#f28b82"
+      : (slack ?? 1) < 0 ? "#fdd663" : "#9aa0a6";
+    ctx.fillText(
+      col.limited
+        ? `COLLISION HOLD ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`
+        : `clearance ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`,
+      300, y);
+  }
+  ctx.font = "28px monospace";
+  for (const side of ["left", "right"] as const) {
+    y += 40;
+    const acq = status?.acquire?.[side];
+    const grip = status?.clutch?.sides?.[side] ?? status?.clutch?.engaged;
+    ctx.fillStyle = "#9aa0a6";
+    ctx.fillText(`${side === "left" ? "L" : "R"} ${grip ? "●" : "○"}`, 24, y);
+    if (!acq) continue;
+    ctx.fillStyle = acq.authority === "driving" ? "#81c995"
+      : acq.authority === "acquiring" ? "#fdd663" : "#9aa0a6";
+    let line = acq.authority;
+    if (acq.authority === "acquiring") {
+      if (acq.remaining_ms !== null) line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
+      if (acq.blocking.length) line += `  match: ${acq.blocking.join(", ")}`;
+    }
+    if (acq.reason === "no_tracking") line += "  (no tracking)";
+    ctx.fillText(line, 140, y);
+  }
+  y += 40;
+  if (status?.last_error) {
+    ctx.fillStyle = "#f28b82";
+    ctx.fillText(status.last_error.slice(0, 60), 24, y);
+  } else {
+    ctx.fillStyle = "#9aa0a6";
+    ctx.fillText("grips = drive · trigger = gripper · B/Y = E-STOP", 24, y);
+  }
 }
 
 function poseToPair(pose: XRPose | null | undefined) {

@@ -33,8 +33,8 @@ import {
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import {
-  attachRenderLayer, disengagedFrame, estopPressed, hapticCues, pulse,
-  requestTeleopSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
+  attachRenderScene, disengagedFrame, estopPressed, hapticCues, paintHud,
+  pulse, requestTeleopSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
   type BodyOverride, type SideAuthorityLike, type TeleopXRSession,
   type VRFrame, type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
@@ -79,9 +79,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const estopDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
   const prevAuthRef = useRef<Partial<Record<"left" | "right", SideAuthorityLike>>>({});
+  const statusRef = useRef<HumanTeleopStatus | null>(null);
+  const baseCamRef = useRef<CameraInfo | null>(null);
+  const showCamRef = useRef(false);
+  const camImgRef = useRef<HTMLImageElement | null>(null);
+  const hudPaintRef = useRef(0);
 
   bodyRef.current = body;
   mirrorModeRef.current = mirrorMode;
+  statusRef.current = status;
+  baseCamRef.current = baseCam;
+  showCamRef.current = showCam;
 
   useEffect(() => {
     void xrSupported().then(setSupported);
@@ -143,6 +151,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     const session = sessionRef.current;
     sessionRef.current = null;
     refSpaceRef.current = null;
+    if (camImgRef.current) {
+      // Detach the MJPEG stream or it keeps pulling frames forever.
+      camImgRef.current.src = "";
+      camImgRef.current = null;
+    }
     const client = clientRef.current;
     clientRef.current = null;
     if (client) {
@@ -257,14 +270,41 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     const onEnd = () => { void teardown({ stopBackend: true }); };
     session.addEventListener("end", onEnd);
 
-    const clearFrame = attachRenderLayer(session, xrs.mode);
+    const scene = attachRenderScene(session, xrs.mode);
     estopDownRef.current = false;
+
+    // The Meta Quest Browser refuses `dom-overlay` on-device (it only works
+    // in Meta's desktop emulator), and the feature is optional by design —
+    // so when the session comes back without it, the HUD moves INTO the
+    // scene: a world-locked quad repainted from a canvas at ~10 Hz.
+    const overlayActive = Boolean(
+      (session as unknown as { domOverlayState?: unknown }).domOverlayState);
+    let hudCanvas: HTMLCanvasElement | null = null;
+    let hudCtx: CanvasRenderingContext2D | null = null;
+    if (!overlayActive) {
+      hudCanvas = document.createElement("canvas");
+      hudCanvas.width = 1024;
+      hudCanvas.height = 768;
+      hudCtx = hudCanvas.getContext("2d");
+      toast.info("browser has no dom-overlay — HUD is drawn inside the scene");
+    }
+    if (showCamRef.current && baseCamRef.current && !overlayActive) {
+      const img = new Image();
+      img.src = cameraStreamUrl(baseCamRef.current.id);
+      camImgRef.current = img;
+    }
 
     const onXRFrame = (t: number, frame: XRFrameLike) => {
       const live = sessionRef.current;
       if (!live) return;
       live.requestAnimationFrame(onXRFrame);
-      clearFrame();
+      let hudDirty = false;
+      if (hudCanvas && hudCtx && t - hudPaintRef.current > 100) {
+        hudPaintRef.current = t;
+        paintHud(hudCtx, statusRef.current, camImgRef.current);
+        hudDirty = true;
+      }
+      scene.render(frame, refSpaceRef.current, hudCanvas, hudDirty);
 
       // E-STOP scan runs at display rate, not publish rate: 33 ms of extra
       // latency on a stop button is 33 ms too many. Edge-detected so one
