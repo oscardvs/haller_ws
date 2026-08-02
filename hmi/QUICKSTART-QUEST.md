@@ -72,13 +72,18 @@ ssh jetson 'cd ~/haller_ws && git fetch origin && git checkout feat/quest-bimanu
 | release a grip | that arm freezes exactly where it is |
 | take off headset / open Quest menu | frames force-disengage; arms freeze |
 
-Engagement is deliberate by design — squeezing a grip does **not** move the
-arm. It starts a 3 s countdown, and authority only transfers once your hand
-has *matched the robot's current pose* for 400 ms (the HUD lists the joints
-still blocking, e.g. `match: gripper` means squeeze the trigger further —
-the jaw's zero sits mid-range). The buzz in your controller is the handover.
-From there the arm tracks you through a rate limiter (60 °/s ceiling at the
-handle, less during the first 1.5 s ramp).
+**Position mode (default).** Squeezing a grip *anchors*: your hand's current
+position is bound to the arm's current pose, so there is nothing to match —
+hold still through the 3 s countdown, feel the buzz, and from then on your
+hand's movement drives the gripper tip through IK on the robot's own
+kinematics. Release to freeze; move your hand somewhere comfortable and
+squeeze again to ratchet across the workspace. Controller pitch/roll steer
+the wrist relative to where it was anchored. No limb-length calibration is
+involved. (The *hand mapping* selector still offers the legacy body-angle
+mode; expect it to fight you — the SO-101's shoulder barely pitches below
+horizontal and its elbow folds the opposite way to yours, which is why
+position mode exists.) All motion rides the same rate limiter (60 °/s
+ceiling at the handle, less during the first 1.5 s ramp).
 
 The HUD floats over passthrough: per-side authority + countdown, grip state,
 live collision clearance, an E-STOP button you can click with the controller

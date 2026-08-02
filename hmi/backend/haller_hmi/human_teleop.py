@@ -775,18 +775,12 @@ class HumanTeleopSession:
             # of resetting on it, and a side that really is below the floor
             # ages out and reads as lost, which is the truth.
             if left_side is not None:
-                goal = retarget.compute_joint_goal(
-                    left_side, self._pinch_calib_left,
-                    mirror=self._side_mirrored("left"),
-                )
+                goal = self._side_goal(left_side, self._pinch_calib_left, "left")
                 if goal is not None:
                     self._target_left = goal
                     self._last_left_perf = now_perf
             if right_side is not None:
-                goal = retarget.compute_joint_goal(
-                    right_side, self._pinch_calib_right,
-                    mirror=self._side_mirrored("right"),
-                )
+                goal = self._side_goal(right_side, self._pinch_calib_right, "right")
                 if goal is not None:
                     self._target_right = goal
                     self._last_right_perf = now_perf
@@ -798,6 +792,24 @@ class HumanTeleopSession:
             # frame that reports it rather than up to a tick later. Release
             # must never wait for the loop.
             self._update_authority(now_perf)
+
+    def _side_goal(self, side_frame: dict, pinch_calib: dict,
+                   side: str) -> dict | None:
+        """One side's joint target, whichever shape the frame carried.
+
+        Camera and VR-angle frames hold landmarks for the retargeter. VR
+        position-mode frames (vr_pose_mode.py) hold a ``joint_goal`` the
+        adapter already solved in ROBOT joint space — degrees, gripper in
+        [0, 1], same contract as compute_joint_goal's output — and mirroring
+        is the adapter's business there: applying it again here would apply
+        handedness twice.
+        """
+        joint_goal = side_frame.get("joint_goal")
+        if joint_goal is not None:
+            return {k: float(v) for k, v in joint_goal.items()}
+        return retarget.compute_joint_goal(
+            side_frame, pinch_calib, mirror=self._side_mirrored(side),
+        )
 
     # ---- authority transfer ---------------------------------------------
 

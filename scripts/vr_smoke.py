@@ -108,6 +108,9 @@ def frame(*, left_dx: float = 0.0, right_dx: float = 0.0,
     return json.dumps({
         "type": "vr_keypoints",
         "ts_ms": int(time.time() * 1000),
+        # Phases 1-8 exercise the original angle-copying adapter; the server
+        # now defaults to position mode, so say so explicitly.
+        "vr_mode": "joints",
         "dead_man": left_squeeze or right_squeeze,
         "head": HEAD,
         "left": controller("left", dx=left_dx, squeeze=left_squeeze),
@@ -152,6 +155,138 @@ def authorities(status: dict) -> tuple[str, str]:
     acq = status.get("acquire", {})
     return (acq.get("left", {}).get("authority", "?"),
             acq.get("right", {}).get("authority", "?"))
+
+
+def _fk_tip(goal_deg: dict) -> "object | None":
+    """Left-arm gripper-tip position from a joint dict, via the repo's own FK.
+    Optional: the smoke test can run on a box without the backend package, so
+    FK-based checks soft-skip when the import fails."""
+    try:
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve()
+                               .parents[1] / "hmi" / "backend"))
+        from haller_hmi.collision import fk_points
+    except Exception:
+        return None
+    return fk_points((0.0, 0.0, 0.0), 0.0, goal_deg)["tip"]
+
+
+async def pose_mode_section(base: str, ws_url: str) -> None:
+    """Position mode (the server default): anchor-on-squeeze hand tracking."""
+    print("\n-- 9: position mode — lock in anywhere, drive, grab, guard --")
+    cfg = req(base, "/config")
+    for arm in (a["id"] for a in cfg["arms"]):
+        req(base, f"/arm/{arm}/mode", {"mode": "manual"})
+    req(base, "/teleop/human/stop", {})
+    req(base, "/teleop/human/start",
+        {"left_arm": "left", "right_arm": "right", "swap": False,
+         "clutch_source": "vr_grip"})
+
+    L0 = [-0.25, 1.15, -0.30]
+    R0 = [0.25, 1.15, -0.30]
+
+    def pframe(lpos, rpos, *, lsq=True, rsq=True, ltrig=0.0):
+        def hand(pos, sq, trig):
+            return {"position": list(pos), "orientation": IDENT,
+                    "trigger": trig, "squeeze": sq, "tracked": True}
+        return json.dumps({
+            "ts_ms": int(time.time() * 1000),
+            "vr_mode": "pose",
+            "dead_man": lsq or rsq,
+            "head": HEAD,
+            "left": hand(lpos, lsq, ltrig),
+            "right": hand(rpos, rsq, 0.0),
+        })
+
+    async def hold(seconds, lpos, rpos, **kw):
+        for _ in range(max(1, int(seconds * 30))):
+            await ws.send(pframe(lpos, rpos, **kw))
+            await asyncio.sleep(1 / 30)
+
+    async with ws_connect(ws_url) as ws:
+        # Hands ANYWHERE, held still: that must be enough to engage.
+        await hold(0.3, L0, R0, lsq=False, rsq=False)
+        t0 = time.monotonic()
+        deadline = time.monotonic() + 8.0
+        st = None
+        while time.monotonic() < deadline:
+            await ws.send(pframe(L0, R0))
+            st = req(base, "/teleop/human")
+            if authorities(st) == ("driving", "driving"):
+                break
+            await asyncio.sleep(0.033)
+        check("pose mode locks in from an arbitrary hand position",
+              authorities(st or {}) == ("driving", "driving"),
+              f"{time.monotonic() - t0:.1f}s, authorities={st and authorities(st)}")
+
+        tip0 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
+
+        # Lateral drag: hand right by 12 cm -> tip tracks in +x.
+        n = 45
+        for i in range(n):
+            lp = [L0[0] + 0.12 * (i + 1) / n, L0[1], L0[2]]
+            await ws.send(pframe(lp, R0))
+            await asyncio.sleep(1 / 30)
+        await hold(0.8, [L0[0] + 0.12, L0[1], L0[2]], R0)
+        tip1 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
+        if tip0 is not None and tip1 is not None:
+            check("hand right 12 cm drags the tip right",
+                  float(tip1[0] - tip0[0]) > 0.06,
+                  f"tip dx={float(tip1[0] - tip0[0]) * 1000:.0f} mm")
+
+        # The grab: hand DOWN 14 cm + trigger. This is the motion that was
+        # impossible under angle copying (human elbows do not bend that way).
+        L1 = [L0[0] + 0.12, L0[1], L0[2]]
+        for i in range(n):
+            lp = [L1[0], L1[1] - 0.14 * (i + 1) / n, L1[2]]
+            await ws.send(pframe(lp, R0, ltrig=0.8))
+            await asyncio.sleep(1 / 30)
+        await hold(0.8, [L1[0], L1[1] - 0.14, L1[2]], R0, ltrig=0.8)
+        g = req(base, "/teleop/human")["goal_deg"]["left"]
+        tip2 = _fk_tip(g)
+        if tip1 is not None and tip2 is not None:
+            # The hand asks for more dive than the bench allows; the right
+            # outcome is BOTH: the tip tracks downward AND the guard's height
+            # floors stop it at the surface instead of through it.
+            dz = float(tip2[2] - tip1[2])
+            check("hand down 14 cm dives the tip until the bench holds it",
+                  dz < -0.04 and float(tip2[2]) > -0.005,
+                  f"tip dz={dz * 1000:.0f} mm, final z={float(tip2[2]) * 1000:.0f} mm")
+        lo, hi = -10.0, 100.0  # sim gripper range, deg
+        check("trigger closes the gripper in pose mode",
+              g.get("gripper", hi) < lo + 0.45 * (hi - lo),
+              f"gripper={g.get('gripper'):.0f} deg")
+
+        # Both hands driven at each other: the guard must still bite.
+        limited = False
+        for i in range(90):
+            dx = 0.35 * (i + 1) / 90
+            await ws.send(pframe([L0[0] + dx, L0[1], L0[2]],
+                                 [R0[0] - dx, R0[1], R0[2]]))
+            if i % 6 == 0 and req(base, "/teleop/human")["collision"].get("limited"):
+                limited = True
+            await asyncio.sleep(1 / 30)
+        st = req(base, "/teleop/human")
+        limited = limited or bool(st["collision"].get("limited"))
+        check("collision guard limits pose-mode crossings", limited,
+              f"slack={st['collision'].get('slack_m')}")
+
+        # Drive back and release: freeze.
+        for i in range(60):
+            k = 1 - (i + 1) / 60
+            await ws.send(pframe([L0[0] + 0.35 * k, L0[1], L0[2]],
+                                 [R0[0] - 0.35 * k, R0[1], R0[2]]))
+            await asyncio.sleep(1 / 30)
+        await hold(0.4, L0, R0, lsq=False, rsq=False)
+        g0 = req(base, "/teleop/human")["goal_deg"]
+        await hold(0.8, [L0[0] + 0.3, L0[1] + 0.2, L0[2]], R0,
+                   lsq=False, rsq=False)
+        g1 = req(base, "/teleop/human")["goal_deg"]
+        drift = max(abs(g1[s].get(j, 0.0) - g0[s].get(j, 0.0))
+                    for s in ("left", "right") for j in g0[s])
+        check("released grips freeze the arms in pose mode",
+              drift < 0.5, f"max drift {drift:.2f} deg")
+
+    req(base, "/teleop/human/stop", {})
 
 
 async def main() -> int:
@@ -303,6 +438,8 @@ async def main() -> int:
         await asyncio.sleep(0.25)
     check("dropping the socket auto-stops the session within the grace window",
           stopped)
+
+    await pose_mode_section(base, ws_url)
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{'=' * 60}\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")

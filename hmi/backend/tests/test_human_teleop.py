@@ -1166,7 +1166,13 @@ def test_losing_a_side_demotes_only_that_side_and_re_acquires():
             "one hand leaving frame must not freeze the arm the other is using"
         )
 
-        _pump(sess, both_lost, 0.4)          # it comes back
+        # It comes back. The window is deliberately several times the
+        # 100 ms countdown + 50 ms dwell: recovery restarts from zero every
+        # time a pump iteration stalls past the 80 ms staleness budget, and
+        # on a loaded machine (the full suite next to a live sim stack) a
+        # single scheduler hiccup inside a 0.4 s window was enough to fail
+        # a test about AUTHORITY, not about scheduling.
+        _pump(sess, both_lost, 1.2)
         acq = sess.status()["acquire"]
         assert acq["right"]["authority"] == "driving"
         assert acq["left"]["authority"] == "driving"

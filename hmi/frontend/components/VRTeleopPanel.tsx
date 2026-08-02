@@ -49,6 +49,7 @@ const PUBLISH_MS = 33;
 
 const BODY_LS_KEY = "haller.vrTeleop.body.v1";
 const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
+const VRMODE_LS_KEY = "haller.vrTeleop.mode.v1";
 
 function fmtMm(m: number | undefined): string {
   return m === undefined ? "—" : `${(m * 1000).toFixed(0)} mm`;
@@ -62,6 +63,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
   const [body, setBody] = useState<BodyOverride>({});
   const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
+  const [vrMode, setVrMode] = useState<"pose" | "joints">("pose");
   // The workspace camera floated into the HUD. In passthrough the operator
   // normally watches the REAL arms — but against a sim backend there is
   // nothing physical to look at, so the MuJoCo camera IS the workspace view
@@ -75,6 +77,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<BodyOverride>({});
   const mirrorModeRef = useRef<"none" | "both">("none");
+  const vrModeRef = useRef<"pose" | "joints">("pose");
   const lastPubRef = useRef(0);
   const estopDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
@@ -87,6 +90,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
 
   bodyRef.current = body;
   mirrorModeRef.current = mirrorMode;
+  vrModeRef.current = vrMode;
   statusRef.current = status;
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
@@ -106,6 +110,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       if (raw) setBody(JSON.parse(raw));
       const mm = localStorage.getItem(MIRROR_LS_KEY);
       if (mm === "both") setMirrorMode("both");
+      if (localStorage.getItem(VRMODE_LS_KEY) === "joints") setVrMode("joints");
     } catch {
       /* a corrupt override must not block entering VR; defaults are fine */
     }
@@ -322,6 +327,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         body: Object.keys(bodyRef.current).length ? bodyRef.current : undefined,
         forceDisengaged: blurred,
         mirrorMode: mirrorModeRef.current,
+        vrMode: vrModeRef.current,
       });
       client.queueFrame(vrFrame);
       client.tick();
@@ -526,12 +532,41 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           <b>B or Y</b> (either controller) is the E-STOP: torque drops on both
           arms instantly.
         </div>
-        <div>
-          Engagement runs the same acquisition countdown as the camera path:
-          match the robot&apos;s pose, then authority transfers. The buzz on your
-          controller is the handover.
-        </div>
+        {vrMode === "pose" ? (
+          <div>
+            Squeezing a grip <b>anchors your hand to the arm where it is</b> —
+            hold still through the countdown, feel the buzz, then your hand&apos;s
+            movement drives the gripper. Release, reposition your hand, squeeze
+            again to ratchet across the workspace.
+          </div>
+        ) : (
+          <div>
+            Engagement runs the acquisition countdown: match the robot&apos;s pose
+            (the HUD lists what&apos;s off), then authority transfers. The buzz on
+            your controller is the handover.
+          </div>
+        )}
       </div>
+
+      <label className="flex items-center gap-2 text-muted-foreground">
+        <span>hand mapping</span>
+        <select
+          className="bg-transparent border rounded px-1 py-0.5"
+          value={vrMode}
+          onChange={(e) => {
+            const v = e.target.value === "joints" ? "joints" : "pose";
+            setVrMode(v);
+            try { localStorage.setItem(VRMODE_LS_KEY, v); } catch { /* non-fatal */ }
+          }}
+        >
+          <option value="pose">hand position (natural, default)</option>
+          <option value="joints">body angles (legacy)</option>
+        </select>
+        <span>
+          — position mode tracks your hand through IK; no pose matching, no
+          limb-length calibration.
+        </span>
+      </label>
 
       <label className="flex items-center gap-2 text-muted-foreground">
         <span>arm mounting</span>

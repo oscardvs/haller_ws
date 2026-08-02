@@ -766,19 +766,30 @@ async def ws_human_teleop_in(ws: WebSocket):
 async def ws_vr_teleop_in(ws: WebSocket):
     """Raw WebXR frames from a headset browser.
 
-    A separate socket from the MediaPipe one, but only at the door: the frame is
-    converted to the same `KeypointFrame` and handed to the same `ingest_frame`.
-    The split exists so the browser never has to know how to build a body — it
-    ships headset and controller poses, and `vr_input` synthesizes the shoulder
-    and elbow server-side where that geometry can be tested against the real
-    retargeter. See vr_input.py's module docstring for why it lives there.
+    A separate socket from the MediaPipe one, but only at the door: the frame
+    is converted to the same `KeypointFrame` and handed to the same
+    `ingest_frame`. Two converters exist:
+
+      - position mode (default): clutch-relative hand tracking through IK on
+        the real chain — see vr_pose_mode.py for why angle copying cannot
+        feel natural on this kinematics. Stateful per CONNECTION (the anchors
+        live exactly as long as the operator's socket), hence constructed
+        here and not module-level.
+      - `vr_mode: "joints"`: the original angle-copying adapter
+        (vr_input.py), kept for comparison and for the body-angle purists.
     """
     await ws.accept()
+    from .vr_pose_mode import VRPoseMode
+    pose_mode = VRPoseMode(human_teleop, arms)
     try:
         while True:
             frame = await ws.receive_json()
             try:
-                human_teleop.ingest_frame(vr_frame_to_keypoint_frame(frame))
+                if frame.get("vr_mode") == "joints":
+                    kp = vr_frame_to_keypoint_frame(frame)
+                else:
+                    kp = pose_mode.convert(frame)
+                human_teleop.ingest_frame(kp)
             except Exception:
                 # Same rule as the MediaPipe socket: one malformed frame must
                 # not drop the operator's connection mid-session.

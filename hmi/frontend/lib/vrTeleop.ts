@@ -99,6 +99,10 @@ export type VRFrame = {
    *  egocentric frames already give opposite pan signs for symmetric
    *  gestures. "both": a rig whose two mounts are true mirror images. */
   mirror_mode?: "none" | "both";
+  /** "pose" (default): clutch-relative hand-position tracking — squeezing a
+   *  grip anchors your hand to the arm's current pose and deltas drive the
+   *  gripper through IK. "joints": the original body-angle copying. */
+  vr_mode?: "pose" | "joints";
   head: { position: Vec3; orientation: Quat } | null;
   left: ControllerSample | null;
   right: ControllerSample | null;
@@ -477,7 +481,7 @@ export function sampleVRFrame(
   frame: XRFrameLike,
   refSpace: unknown,
   opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean;
-          mirrorMode?: "none" | "both" },
+          mirrorMode?: "none" | "both"; vrMode?: "pose" | "joints" },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));
 
@@ -527,6 +531,7 @@ export function sampleVRFrame(
     type: "vr_keypoints",
     ts_ms: opts.tsMs,
     dead_man: deadMan,
+    ...(opts.vrMode ? { vr_mode: opts.vrMode } : {}),
     ...(opts.mirrorMode ? { mirror_mode: opts.mirrorMode } : {}),
     head,
     left,
