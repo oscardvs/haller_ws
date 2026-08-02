@@ -1,0 +1,162 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  BUTTON_BY, BUTTON_SQUEEZE, BUTTON_TRIGGER,
+  disengagedFrame, estopPressed, hapticCues, pulse, sampleVRFrame,
+  type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
+} from "../lib/vrTeleop";
+
+const IDENT = { x: 0, y: 0, z: 0, w: 1 };
+
+function controller(
+  handedness: "left" | "right",
+  opts: { squeeze?: boolean; trigger?: number; estop?: boolean;
+          pose?: boolean;
+          pulse?: (intensity: number, durationMs: number) => unknown } = {},
+): XRInputSourceLike {
+  const buttons: { pressed: boolean; value: number }[] = [];
+  buttons[BUTTON_TRIGGER] = { pressed: false, value: opts.trigger ?? 0 };
+  buttons[BUTTON_SQUEEZE] = { pressed: opts.squeeze ?? false, value: 0 };
+  buttons[BUTTON_BY] = { pressed: opts.estop ?? false, value: 0 };
+  return {
+    handedness,
+    gripSpace: opts.pose === false ? undefined : { space: handedness },
+    gamepad: {
+      buttons,
+      ...(opts.pulse ? { hapticActuators: [{ pulse: opts.pulse }] } : {}),
+    },
+  };
+}
+
+function session(sources: XRInputSourceLike[]): XRSessionLike {
+  return {
+    inputSources: sources,
+    requestReferenceSpace: () => Promise.resolve({}),
+    requestAnimationFrame: () => 0,
+    end: () => Promise.resolve(),
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+}
+
+const frame: XRFrameLike = {
+  getViewerPose: () => ({
+    transform: { position: { ...IDENT, y: 1.6 }, orientation: IDENT },
+    emulatedPosition: false,
+  }),
+  getPose: () => ({
+    transform: { position: { ...IDENT, z: -0.4 }, orientation: IDENT },
+    emulatedPosition: false,
+  }),
+};
+
+describe("sampleVRFrame", () => {
+  it("ships each hand's squeeze separately and ORs them into dead_man", () => {
+    const s = session([
+      controller("left", { squeeze: true }),
+      controller("right", { squeeze: false }),
+    ]);
+    const out = sampleVRFrame(s, frame, {}, { tsMs: 42 });
+    expect(out.dead_man).toBe(true);
+    expect(out.left?.squeeze).toBe(true);
+    expect(out.right?.squeeze).toBe(false);
+  });
+
+  it("keeps squeeze on an untracked controller so the clutch is honest", () => {
+    // A controller that lost pose tracking still has a held grip; the backend
+    // freezes the side on tracking, not on a fabricated clutch release.
+    const s = session([controller("left", { squeeze: true, pose: false })]);
+    const out = sampleVRFrame(s, frame, {}, { tsMs: 1 });
+    expect(out.left?.tracked).toBe(false);
+    expect(out.left?.squeeze).toBe(true);
+  });
+
+  it("forceDisengaged zeroes every clutch bit while poses keep flowing", () => {
+    // The Quest system menu freezes input state; a grip held when it opened
+    // must not stay held. Poses may keep shipping — releasing authority is
+    // the clutch's job.
+    const s = session([
+      controller("left", { squeeze: true }),
+      controller("right", { squeeze: true }),
+    ]);
+    const out = sampleVRFrame(s, frame, {}, { tsMs: 1, forceDisengaged: true });
+    expect(out.dead_man).toBe(false);
+    expect(out.left?.squeeze).toBe(false);
+    expect(out.right?.squeeze).toBe(false);
+    expect(out.left?.tracked).toBe(true);
+  });
+
+  it("reports the analog trigger through untouched", () => {
+    const s = session([controller("right", { trigger: 0.62 })]);
+    const out = sampleVRFrame(s, frame, {}, { tsMs: 1 });
+    expect(out.right?.trigger).toBeCloseTo(0.62);
+  });
+});
+
+describe("estopPressed", () => {
+  it("fires on B/Y from either controller", () => {
+    expect(estopPressed(session([controller("left", { estop: true })]))).toBe(true);
+    expect(estopPressed(session([controller("right", { estop: true })]))).toBe(true);
+  });
+
+  it("stays quiet for grips and triggers", () => {
+    const s = session([
+      controller("left", { squeeze: true, trigger: 1 }),
+      controller("right", { squeeze: true, trigger: 1 }),
+    ]);
+    expect(estopPressed(s)).toBe(false);
+  });
+});
+
+describe("hapticCues", () => {
+  it("buzzes hard exactly when an arm goes live", () => {
+    const cues = hapticCues(
+      { left: "acquiring", right: "held" },
+      { left: "driving", right: "held" },
+    );
+    expect(cues).toHaveLength(1);
+    expect(cues[0].hand).toBe("left");
+    expect(cues[0].intensity).toBeGreaterThan(0.5);
+  });
+
+  it("ticks softly on countdown start and medium on release", () => {
+    const start = hapticCues({ left: "held" }, { left: "acquiring" });
+    expect(start[0].intensity).toBeLessThan(0.5);
+    const release = hapticCues({ left: "driving" }, { left: "held" });
+    expect(release[0].intensity).toBeGreaterThan(start[0].intensity);
+  });
+
+  it("says nothing when nothing changed, or on first sight", () => {
+    expect(hapticCues({ left: "driving" }, { left: "driving" })).toHaveLength(0);
+    // First status after entering a session: no prior state, no phantom buzz.
+    expect(hapticCues({}, { left: "held", right: "held" })).toHaveLength(0);
+  });
+});
+
+describe("pulse", () => {
+  it("reaches only the named hand and survives a throwing actuator", () => {
+    const leftPulse = vi.fn<(i: number, ms: number) => unknown>();
+    const rightPulse = vi.fn<(i: number, ms: number) => unknown>(() => {
+      throw new Error("nope");
+    });
+    const s = session([
+      controller("left", { pulse: leftPulse }),
+      controller("right", { pulse: rightPulse }),
+    ]);
+    pulse(s, "left", 0.5, 100);
+    expect(leftPulse).toHaveBeenCalledWith(0.5, 100);
+    expect(rightPulse).not.toHaveBeenCalled();
+    expect(() => pulse(s, "right", 1, 10)).not.toThrow();
+  });
+});
+
+describe("disengagedFrame", () => {
+  it("asks for nothing at all", () => {
+    const f = disengagedFrame(123);
+    expect(f.dead_man).toBe(false);
+    expect(f.head).toBeNull();
+    expect(f.left).toBeNull();
+    expect(f.right).toBeNull();
+    expect(f.ts_ms).toBe(123);
+  });
+});

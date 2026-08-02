@@ -1,0 +1,40 @@
+# One HTTPS origin for the Quest teleop page and its backend.
+#
+# Why this file exists at all (none of it is optional — see
+# hmi/QUICKSTART-QUEST.md and the haller-quest-teleop notes):
+#   - `navigator.xr` only exists in a secure context, so the page MUST be
+#     HTTPS; plain http on a LAN address reads as "WebXR unsupported".
+#   - An HTTPS page may not open a ws:// socket (mixed content), and a cert
+#     warning cannot be click-through-accepted for a WebSocket. So the teleop
+#     socket must ride the SAME origin, which is what /api/* does here.
+#   - `bind` is required because Caddy binds the wildcard address regardless
+#     of the site address, and Tailscale already holds :8443/:8444 on its own
+#     interface.
+#   - `skip_install_trust` because `tls internal` otherwise shells out to
+#     sudo to install its root CA.
+#   - `auto_https disable_redirects` because the HTTP->HTTPS redirect wants
+#     port 80, which needs root.
+#
+# Every knob is an env var with the 2026-08-01 working values as defaults:
+#   HALLER_DESKTOP_IP, HALLER_HTTPS_PORT, HALLER_BACKEND, HALLER_NEXT_PORT
+
+{
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+https://{$HALLER_DESKTOP_IP:192.168.0.191}:{$HALLER_HTTPS_PORT:8444} {
+	bind {$HALLER_DESKTOP_IP:192.168.0.191}
+	tls internal
+
+	# Backend (FastAPI on the Jetson), prefix stripped: /api/health -> /health.
+	# WebSockets (/api/ws/...) proxy transparently.
+	handle_path /api/* {
+		reverse_proxy {$HALLER_BACKEND:192.168.0.124:8000}
+	}
+
+	# Everything else is the Next.js frontend on this machine.
+	handle {
+		reverse_proxy localhost:{$HALLER_NEXT_PORT:3001}
+	}
+}

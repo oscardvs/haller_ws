@@ -361,13 +361,41 @@ def vr_frame_to_keypoint_frame(
             )
         left_side, right_side = sides["left"], sides["right"]
 
-    return {
+    # Per-controller squeeze → per-side dead-man. A grip held on one
+    # controller must not hand over the arm the other hand is idly waving
+    # around, so each squeeze speaks only for its own side. Frames from a
+    # client that predates the split (no `squeeze` on either controller)
+    # emit no `dead_man_sides` at all, and the session mirrors the global
+    # boolean onto both sides — the old behaviour, chosen by the old wire
+    # shape rather than by a version flag.
+    def _squeeze(raw) -> bool | None:
+        if isinstance(raw, dict) and "squeeze" in raw:
+            return bool(raw["squeeze"])
+        return None
+
+    sq_left = _squeeze(frame.get("left"))
+    sq_right = _squeeze(frame.get("right"))
+    has_split = sq_left is not None or sq_right is not None
+
+    out = {
         "type": "keypoints",
         "ts_ms": int(frame.get("ts_ms", 0)),
         "clutch_source": "vr_grip",
-        "dead_man": bool(frame.get("dead_man", False)),
+        "dead_man": (bool(frame.get("dead_man", False))
+                     or bool(sq_left) or bool(sq_right)),
         "jaw_open": None,
         "pinch_calib": {"left": VR_PINCH_CALIB, "right": VR_PINCH_CALIB},
+        # Egocentric frames are not pre-mirrored the way a front-facing
+        # webcam's are, and two mirror-symmetric hand gestures already
+        # retarget to opposite pan signs — exactly what identical side-by-side
+        # arms need. The camera path's one-side-negated convention here makes
+        # the right arm swing PARALLEL to the left instead of toward it.
+        # "both" is for a rig whose mounts really are mirror images.
+        "mirror_mode": ("both" if frame.get("mirror_mode") == "both"
+                        else "none"),
         "left": left_side,
         "right": right_side,
     }
+    if has_split:
+        out["dead_man_sides"] = {"left": bool(sq_left), "right": bool(sq_right)}
+    return out

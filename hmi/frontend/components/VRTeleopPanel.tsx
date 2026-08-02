@@ -4,22 +4,24 @@
  * Quest teleop. Owns the WebXR session, the ~30 Hz publish loop, and the
  * start/stop of the backend human-teleop session.
  *
- * It decides nothing about safety. `dead_man` is the raw grip-button state and
- * the controller poses are shipped unmodified; the backend applies the
- * acquisition countdown, the confidence floor, the staleness budget and every
- * joint clamp. Same contract the MediaPipe panel has — see HumanTeleopPanel.
+ * It decides nothing about safety. Squeeze state and controller poses are
+ * shipped unmodified; the backend applies the acquisition countdown, the
+ * confidence floor, the staleness budget, every joint clamp and the bimanual
+ * collision guard. Same contract the MediaPipe panel has — see
+ * HumanTeleopPanel. The two decisions this file DOES own are input-shaped,
+ * not safety-shaped: B/Y on either controller fires POST /estop (one press,
+ * one post), and while the session is not fully visible (Quest system menu
+ * open) every published frame is forced disengaged — the page keeps receiving
+ * the last input state in that menu, so a grip held when it opened would
+ * otherwise stay held forever.
  *
- * Why the grip button rather than the mouth clutch this replaces: the mouth
- * clutch's usable band was ~0.12 of jaw range at the very top of one operator's
- * travel, sustained while both arms move, and a 22 s trace never once reached
- * `driving` (see hmi/HANDOVER-teleop-engagement.md). A squeeze button is
- * holdable for a whole session and cannot be closed by speech, so the safety
- * property that was untested there is structural here.
- *
- * The publish loop runs off `XRSession.requestAnimationFrame`, NOT
- * `window.requestAnimationFrame`. Only the XR callback is handed an `XRFrame`,
- * which is the sole way to resolve poses — and the window loop is throttled to
- * near-nothing while an immersive session holds the display.
+ * The session asks for **passthrough AR first** (the operator must watch the
+ * REAL arms, not a void) with the HUD div as a dom-overlay, falling back to
+ * plain immersive-vr where AR is refused. The publish loop runs off
+ * `XRSession.requestAnimationFrame`, NOT `window.requestAnimationFrame` —
+ * only the XR callback is handed an `XRFrame`, which is the sole way to
+ * resolve poses, and the window loop is throttled to near-nothing while an
+ * immersive session holds the display.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -29,8 +31,10 @@ import { api, type HumanTeleopStatus } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import {
-  requestVRSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
-  type BodyOverride, type VRFrame, type XRFrameLike, type XRSessionLike,
+  attachRenderLayer, disengagedFrame, estopPressed, hapticCues, pulse,
+  requestTeleopSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
+  type BodyOverride, type SideAuthorityLike, type TeleopXRSession,
+  type VRFrame, type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
 import { DeadManIndicator } from "./DeadManIndicator";
 
@@ -42,38 +46,78 @@ const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/vr/in`;
 const PUBLISH_MS = 33;
 
 const BODY_LS_KEY = "haller.vrTeleop.body.v1";
+const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
+
+function fmtMm(m: number | undefined): string {
+  return m === undefined ? "—" : `${(m * 1000).toFixed(0)} mm`;
+}
 
 export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [supported, setSupported] = useState<boolean | null>(null);
   const [inSession, setInSession] = useState(false);
+  const [xrMode, setXrMode] = useState<TeleopXRSession["mode"] | null>(null);
+  const [estopped, setEstopped] = useState(false);
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
   const [body, setBody] = useState<BodyOverride>({});
+  const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
 
   const sessionRef = useRef<XRSessionLike | null>(null);
   const refSpaceRef = useRef<unknown>(null);
   const clientRef = useRef<HumanTeleopClient<VRFrame> | null>(null);
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<BodyOverride>({});
+  const mirrorModeRef = useRef<"none" | "both">("none");
   const lastPubRef = useRef(0);
+  const estopDownRef = useRef(false);
+  const estopInFlightRef = useRef(false);
+  const prevAuthRef = useRef<Partial<Record<"left" | "right", SideAuthorityLike>>>({});
 
   bodyRef.current = body;
+  mirrorModeRef.current = mirrorMode;
 
   useEffect(() => {
     void xrSupported().then(setSupported);
     try {
       const raw = localStorage.getItem(BODY_LS_KEY);
       if (raw) setBody(JSON.parse(raw));
+      const mm = localStorage.getItem(MIRROR_LS_KEY);
+      if (mm === "both") setMirrorMode("both");
     } catch {
       /* a corrupt override must not block entering VR; defaults are fine */
     }
   }, []);
 
-  // Status poll. Cheap, and it is the only thing that reports what the backend
-  // actually did with our frames — the headset shows the operator nothing.
+  // Status poll. Cheap, and it is what feeds the HUD — the only thing the
+  // operator can see from inside the headset. Also the haptic driver: the
+  // controller buzz on handover comes from status transitions seen here.
   useEffect(() => {
     let alive = true;
     const t = setInterval(() => {
       api.humanTeleopStatus()
-        .then((s) => { if (alive) setStatus(s); })
+        .then((s) => {
+          if (!alive) return;
+          setStatus(s);
+          const session = sessionRef.current;
+          if (session && s.acquire) {
+            const next: Partial<Record<"left" | "right", SideAuthorityLike>> = {
+              left: s.acquire.left.authority,
+              right: s.acquire.right.authority,
+            };
+            for (const cue of hapticCues(prevAuthRef.current, next)) {
+              pulse(session, cue.hand, cue.intensity, cue.durationMs);
+            }
+            // A guard actively holding a step back is worth feeling, not just
+            // reading: a light buzz on every driving hand while it clamps.
+            if (s.collision?.limited) {
+              for (const hand of ["left", "right"] as const) {
+                if (next[hand] === "driving") pulse(session, hand, 0.2, 60);
+              }
+            }
+            prevAuthRef.current = next;
+          } else {
+            prevAuthRef.current = {};
+          }
+        })
         .catch(() => { /* transient; the next tick retries */ });
     }, 250);
     return () => { alive = false; clearInterval(t); };
@@ -83,9 +127,18 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     const session = sessionRef.current;
     sessionRef.current = null;
     refSpaceRef.current = null;
-    clientRef.current?.close();
+    const client = clientRef.current;
     clientRef.current = null;
+    if (client) {
+      // Parting shot: an explicit disengage releases both arms on THIS frame
+      // instead of leaving the backend to age the last engaged frame past the
+      // staleness budget.
+      client.queueFrame(disengagedFrame(Date.now()));
+      client.tick();
+      client.close();
+    }
     setInSession(false);
+    setXrMode(null);
     if (session) {
       try { await session.end(); } catch { /* already ended */ }
     }
@@ -98,6 +151,40 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   }, []);
 
+  const fireEstop = useCallback(async () => {
+    if (estopInFlightRef.current) return;
+    estopInFlightRef.current = true;
+    const session = sessionRef.current;
+    if (session) {
+      pulse(session, "left", 1.0, 300);
+      pulse(session, "right", 1.0, 300);
+    }
+    try {
+      await api.estop();
+      setEstopped(true);
+      toast.warning("E-STOP: torque dropped on both arms");
+    } catch (e) {
+      toast.error(`E-STOP request failed: ${(e as Error).message}`);
+    } finally {
+      estopInFlightRef.current = false;
+    }
+    // Leave the headset session: after an E-STOP the operator deals with the
+    // rig, and the 2D panel is where re-arming lives.
+    await teardown({ stopBackend: false });
+  }, [teardown]);
+
+  const rearm = useCallback(async () => {
+    try {
+      for (const id of armIds) {
+        await api.armMode(id, "manual");   // MANUAL also re-enables torque
+      }
+      setEstopped(false);
+      toast.success("arms back in MANUAL with torque on");
+    } catch (e) {
+      toast.error(`re-arm failed: ${(e as Error).message}`);
+    }
+  }, [armIds]);
+
   const enterVR = useCallback(async () => {
     if (armIds.length < 2) {
       // Checked here rather than letting the backend 400, because the reason is
@@ -109,14 +196,16 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       );
       return;
     }
-    let session: XRSessionLike;
+    let xrs: TeleopXRSession;
     try {
-      session = await requestVRSession();
+      xrs = await requestTeleopSession(overlayRef.current);
     } catch (e) {
-      toast.error(`could not start VR: ${(e as Error).message}`);
+      toast.error(`could not start XR: ${(e as Error).message}`);
       return;
     }
+    const session = xrs.session;
     sessionRef.current = session;
+    setXrMode(xrs.mode);
 
     try {
       refSpaceRef.current = await session.requestReferenceSpace("local-floor");
@@ -147,25 +236,42 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     client.connect();
     clientRef.current = client;
     setInSession(true);
+    setEstopped(false);
 
     const onEnd = () => { void teardown({ stopBackend: true }); };
     session.addEventListener("end", onEnd);
+
+    const clearFrame = attachRenderLayer(session, xrs.mode);
+    estopDownRef.current = false;
 
     const onXRFrame = (t: number, frame: XRFrameLike) => {
       const live = sessionRef.current;
       if (!live) return;
       live.requestAnimationFrame(onXRFrame);
+      clearFrame();
+
+      // E-STOP scan runs at display rate, not publish rate: 33 ms of extra
+      // latency on a stop button is 33 ms too many. Edge-detected so one
+      // press is one POST.
+      const down = estopPressed(live);
+      if (down && !estopDownRef.current) void fireEstop();
+      estopDownRef.current = down;
+
       if (t - lastPubRef.current < PUBLISH_MS) return;
       lastPubRef.current = t;
+      const blurred =
+        live.visibilityState !== undefined && live.visibilityState !== "visible";
       const vrFrame = sampleVRFrame(live, frame, refSpaceRef.current, {
         tsMs: Date.now(),
         body: Object.keys(bodyRef.current).length ? bodyRef.current : undefined,
+        forceDisengaged: blurred,
+        mirrorMode: mirrorModeRef.current,
       });
       client.queueFrame(vrFrame);
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown]);
+  }, [armIds, teardown, fireEstop]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
   // be left mounted-but-hidden: an immersive session already owns the display,
@@ -174,19 +280,127 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
 
   const clutch = status?.clutch;
   const running = Boolean(status?.running);
+  const acquire = status?.acquire;
+  const collision = status?.collision;
+
+  const sideRow = (side: "left" | "right") => {
+    const a = acquire?.[side];
+    if (!a) return null;
+    const grip = clutch?.sides?.[side] ?? clutch?.engaged ?? false;
+    return (
+      <div key={side} className="flex items-center gap-2">
+        <span className="w-10 uppercase">{side}</span>
+        <span className={grip ? "text-lime-400" : "text-neutral-400"}>
+          {grip ? "grip ●" : "grip ○"}
+        </span>
+        <span
+          className={
+            a.authority === "driving" ? "text-lime-400 font-bold"
+            : a.authority === "acquiring" ? "text-amber-400"
+            : "text-neutral-400"
+          }
+        >
+          {a.authority}
+          {a.authority === "acquiring" && a.remaining_ms !== null
+            ? ` ${(a.remaining_ms / 1000).toFixed(1)}s`
+            : ""}
+        </span>
+        {a.authority === "acquiring" && a.blocking.length > 0 && (
+          <span className="text-amber-300 truncate">
+            match: {a.blocking.join(", ")}
+          </span>
+        )}
+        {a.reason === "no_tracking" && (
+          <span className="text-red-400">no tracking</span>
+        )}
+      </div>
+    );
+  };
+
+  // The HUD div doubles as the dom-overlay root. In-session it floats over
+  // the passthrough view; out of session the identical markup sits in the
+  // page as the live status card. One element, one code path.
+  const hud = (
+    <div
+      ref={overlayRef}
+      className={
+        inSession
+          ? "fixed inset-x-0 bottom-0 z-50 flex flex-col items-center gap-2 p-6 pointer-events-none"
+          : "rounded border p-2 space-y-1"
+      }
+    >
+      <div
+        className={
+          "font-mono text-[13px] space-y-1 " +
+          (inSession
+            ? "rounded-lg bg-black/75 text-white px-4 py-3 min-w-[340px]"
+            : "")
+        }
+      >
+        <div className="flex items-center gap-3">
+          <span className="uppercase font-bold">{status?.state ?? "—"}</span>
+          {collision?.enabled ? (
+            <span
+              className={
+                collision.limited
+                  ? "text-red-400 font-bold"
+                  : (collision.slack_m ?? 1) < 0
+                    ? "text-amber-400"
+                    : "text-neutral-300"
+              }
+            >
+              {collision.limited ? "◉ COLLISION HOLD · " : "clearance "}
+              {fmtMm(collision.slack_m)}
+            </span>
+          ) : (
+            <span className="text-amber-400">no collision guard</span>
+          )}
+        </div>
+        {sideRow("left")}
+        {sideRow("right")}
+        {status?.last_error && (
+          <div className="text-red-400 truncate">{status.last_error}</div>
+        )}
+        <div className="text-neutral-400">
+          grip = drive · trigger = gripper · <b>B / Y = E-STOP</b>
+        </div>
+      </div>
+      {inSession && (
+        <div className="flex gap-3 pointer-events-auto">
+          <Button
+            variant="destructive"
+            size="lg"
+            className="font-bold"
+            onClick={() => void fireEstop()}
+          >
+            E-STOP
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => void teardown({ stopBackend: true })}
+          >
+            Exit
+          </Button>
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-3 font-mono text-[12px]">
       <div className="flex items-center gap-3">
         {!inSession ? (
           <Button onClick={() => void enterVR()} disabled={supported !== true}>
-            Enter VR
+            Enter Passthrough
           </Button>
         ) : (
           <Button variant="destructive" onClick={() => void teardown({ stopBackend: true })}>
             Exit VR
           </Button>
         )}
+        <Button variant="outline" onClick={() => void rearm()}>
+          Re-arm arms
+        </Button>
         <DeadManIndicator
           held={Boolean(clutch?.engaged)}
           trackingLost={Boolean(status?.tracking?.left?.lost && status?.tracking?.right?.lost)}
@@ -195,13 +409,21 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         />
         <span className="text-muted-foreground">
           state: {status?.state ?? "—"}{running ? "" : " (stopped)"}
+          {xrMode === "immersive-vr" ? " · VR fallback (no passthrough!)" : ""}
         </span>
       </div>
+
+      {estopped && (
+        <div className="rounded border border-destructive/60 p-2 text-destructive">
+          E-STOPPED — both arms are torque-off in STOP mode. Check the bench,
+          then <b>Re-arm arms</b> to restore MANUAL + torque.
+        </div>
+      )}
 
       {supported === false && (
         <div className="rounded border border-destructive/40 p-2 text-destructive">
           {xrAvailableAtAll()
-            ? "This browser has WebXR but refused an immersive-vr session."
+            ? "This browser has WebXR but refused an immersive session."
             : (
               <>
                 <div>WebXR is not available on this page.</div>
@@ -216,14 +438,43 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         </div>
       )}
 
+      {hud}
+
       <div className="text-muted-foreground">
-        <div>Hold either <b>grip</b> to drive. Release to freeze both arms.</div>
+        <div>
+          Hold a <b>grip</b> to drive that side&apos;s arm — each grip is its own
+          dead-man. Release to freeze that arm where it is.
+        </div>
         <div><b>Trigger</b> is the gripper — analog, 0 open to 1 closed.</div>
         <div>
+          <b>B or Y</b> (either controller) is the E-STOP: torque drops on both
+          arms instantly.
+        </div>
+        <div>
           Engagement runs the same acquisition countdown as the camera path:
-          match the robot&apos;s pose, then authority transfers.
+          match the robot&apos;s pose, then authority transfers. The buzz on your
+          controller is the handover.
         </div>
       </div>
+
+      <label className="flex items-center gap-2 text-muted-foreground">
+        <span>arm mounting</span>
+        <select
+          className="bg-transparent border rounded px-1 py-0.5"
+          value={mirrorMode}
+          onChange={(e) => {
+            const v = e.target.value === "both" ? "both" : "none";
+            setMirrorMode(v);
+            try { localStorage.setItem(MIRROR_LS_KEY, v); } catch { /* non-fatal */ }
+          }}
+        >
+          <option value="none">identical, side by side (Haller tower)</option>
+          <option value="both">mirrored pair</option>
+        </select>
+        <span>
+          — if an arm drives <b>away</b> from where your hand goes, flip this.
+        </span>
+      </label>
 
       <details className="text-muted-foreground">
         <summary className="cursor-pointer">operator limb lengths (metres)</summary>

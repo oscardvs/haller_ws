@@ -7,6 +7,25 @@ motion:
   max_speed_deg_s: 60.0
   large_move_deg: 30.0
   ramp_hz: 50.0
+# Bimanual self-collision + workspace guard (haller_hmi/collision.py). Runs
+# inside the teleop commit loop: capsule model of both arms, blocks any step
+# that would close below margin_m, never blocks a step that escapes.
+#
+# `mounts` is where each arm's base plate sits, metres, z up, both measured in
+# ONE shared frame (origin anywhere you like — only relative placement and
+# table height matter). The values below are the sim scene's ±0.20 m and are a
+# PLACEHOLDER for the real tower: measure base-bolt to base-bolt on the plate,
+# set x to ±half that, and verify with the live `collision.slack_m` readout on
+# the VR page (torque off, move the arms toward each other by hand — the
+# number must shrink as they approach and go negative just before they touch).
+collision:
+  enabled: true
+  margin_m: 0.025
+  self_margin_m: 0.008
+  table_z_m: 0.0        # bench surface height relative to the mount plane
+  mounts:
+    left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
+    right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
 arms:
   - id: right
     model: so101_follower

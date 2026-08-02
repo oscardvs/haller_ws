@@ -1,0 +1,27 @@
+# Jetson systemd unit for the HMI backend, so it survives a reboot.
+#
+# Install (on the Jetson, needs sudo):
+#   sudo cp ~/haller_ws/scripts/quest-teleop/haller-hmi-backend.service \
+#        /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now haller-hmi-backend
+#
+# Check the legacy haller-robot.service first: it claims the same serial
+# ports. The Conflicts= below makes systemd stop it rather than fight it.
+
+[Unit]
+Description=Haller HMI backend (FastAPI, arms, cameras)
+After=network-online.target
+Wants=network-online.target
+Conflicts=haller-robot.service
+
+[Service]
+Type=simple
+User=haller
+WorkingDirectory=/home/haller/haller_ws
+ExecStart=/home/haller/haller_ws/scripts/quest-teleop/backend-jetson.sh
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target

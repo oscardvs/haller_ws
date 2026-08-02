@@ -254,14 +254,34 @@ export type HumanTeleopStatus = {
   };
   /** Optional because a backend older than the mouth clutch omits it. */
   clutch?: {
-    source: "spacebar" | "mouth";
+    source: "spacebar" | "mouth" | "vr_grip";
     jaw_open: number | null;
     t_engage: number | null;
     t_release: number | null;
     engaged: boolean;
+    /** Which sides `engaged` actually covers. For vr_grip these are the two
+     *  squeeze buttons; single-boolean sources mirror `engaged` onto both. */
+    sides?: { left: boolean; right: boolean };
     stale: boolean;
     reason: ClutchReason;
   };
+  /** Bimanual collision guard. Absent on backends that predate it;
+   *  `enabled: false` means no guard is wired for this config. */
+  collision?: CollisionStatus;
+};
+
+export type CollisionStatus = {
+  enabled: boolean;
+  /** Gap left before the guard clamps, metres. Negative while inside the
+   *  margin (escape-only regime — the guard blocks approach, never retreat). */
+  slack_m?: number;
+  /** The binding constraint, e.g. "left:hand|right:hand" or "right:tip_floor". */
+  worst?: string;
+  /** True on ticks where the guard actually shortened the commanded step. */
+  limited?: boolean;
+  /** Fraction of the wanted step that survived (1 = untouched). */
+  alpha?: number;
+  margin_m?: number;
 };
 
 export type RecordStatus = {

@@ -195,8 +195,14 @@ class HumanTeleopSession:
         acquire_tol_default_deg: float = ACQUIRE_TOL_DEFAULT_DEG,
         acquire_rate_deg_s: float = ACQUIRE_RATE_DEG_S,
         acquire_ramp_ms: float = ACQUIRE_RAMP_MS,
+        collision_guard=None,
     ):
         self._arms = arms
+        # Bimanual collision/workspace guard (collision.CollisionGuard), or
+        # None to run unguarded. Duck-typed so tests can inject a stub; the
+        # session only calls filter_step()/clearance() and reads .cfg.margin_m.
+        self._collision = collision_guard
+        self._collision_last: dict | None = None
         self._lock = threading.Lock()
         self._state: HumanState = HumanState.IDLE
         self._cfg: _SessionConfig | None = None
@@ -207,6 +213,11 @@ class HumanTeleopSession:
         self._latest_frame_ts_ms: int = 0
         self._latest_arrival_perf: float = 0.0
         self._dead_man: bool = False
+        # Per-side dead-man. A Quest controller's squeeze is per hand, and a
+        # grip held on one controller must not hand over the arm the *other*
+        # hand happens to be waving around. Sources that have only one global
+        # boolean (spacebar, mouth) mirror it onto both sides.
+        self._dead_man_sides: dict[str, bool] = {"left": False, "right": False}
         self._target_left: dict | None = None
         self._target_right: dict | None = None
         self._pinch_calib_left: dict = {"min_m": 0.02, "max_m": 0.18}
@@ -235,6 +246,9 @@ class HumanTeleopSession:
         self._clutch_source: ClutchSource = "spacebar"
         self._mouth_calib: MouthClutchCalib | None = None
         self._clutch_reason: str = "spacebar_mode"
+        # Frame-carried mirror override: "none" | "both" | None (legacy
+        # swap-based parity). See _side_mirrored.
+        self._mirror_mode: str | None = None
         # Acquisition: per-side authority, and the parameters that gate it.
         self._acquire_ms = acquire_ms
         self._match_dwell_ms = match_dwell_ms
@@ -334,6 +348,7 @@ class HumanTeleopSession:
             self._clutch_source = source
         self._mouth.reset()
         self._dead_man = False
+        self._dead_man_sides = {"left": False, "right": False}
         # Held-button sources report "<source>_mode" — a resting state, not a
         # fault. Only the mouth clutch starts "stale", because it genuinely
         # cannot engage until a face has been seen.
@@ -402,9 +417,18 @@ class HumanTeleopSession:
                     "t_engage": th[0] if th else None,
                     "t_release": th[1] if th else None,
                     "engaged": self._dead_man,
+                    # Which sides that global bool actually covers. For
+                    # vr_grip these are the two squeeze buttons; for spacebar
+                    # and mouth they simply mirror `engaged`.
+                    "sides": dict(self._dead_man_sides),
                     "stale": face_stale,
                     "reason": self._clutch_reason,
                 },
+                # Bimanual collision guard. `enabled: false` means no guard is
+                # wired; otherwise `slack_m` is metres of clearance left before
+                # the guard clamps (< 0 while it is actively holding a step
+                # back), and `worst` names the binding constraint.
+                "collision": self._collision_status(),
                 # Authority transfer, per side. `engaged` above says the
                 # operator is ASKING to drive; this says whether either arm has
                 # actually been handed over, and if not, what is still in the
@@ -416,6 +440,16 @@ class HumanTeleopSession:
                     "right": self._acquire_status("right", now),
                 },
             }
+
+    def _collision_status(self) -> dict:
+        """Caller holds the lock."""
+        if self._collision is None:
+            return {"enabled": False}
+        out = {"enabled": True,
+               "margin_m": float(self._collision.cfg.margin_m)}
+        if self._collision_last is not None:
+            out.update(self._collision_last)
+        return out
 
     def _acquire_status(self, side: str, now: float) -> dict:
         """One side's acquisition block. Caller holds the lock.
@@ -452,12 +486,27 @@ class HumanTeleopSession:
         return self._acquire_tol_deg.get(joint, self._acquire_tol_default_deg)
 
     def _side_mirrored(self, side: str) -> bool:
-        """Whether this side's goals went through `apply_mirror`.
+        """Whether this side's goals go through `apply_mirror`.
 
-        Mirrors the call in `ingest_frame` exactly — left follows `swap`, right
-        follows its inverse — because the ghost has to be un-mirrored back into
-        the operator's own frame or it renders the wrong arm's pose.
+        The one source of truth for both `ingest_frame` and the ghost — the
+        ghost has to be un-mirrored back into the operator's own frame or it
+        renders the wrong arm's pose.
+
+        The default (left follows `swap`, right its inverse) is the camera
+        path's convention: a front-facing webcam delivers a pre-mirrored view
+        of the operator, and exactly one side must be negated to land that on
+        two identical, same-yaw arms. Egocentric sources are different: a
+        headset's frames are NOT pre-mirrored, and two mirror-symmetric hand
+        gestures already retarget to opposite pan signs — which is precisely
+        what identical side-by-side arms need. So the VR adapter stamps its
+        frames `mirror_mode: "none"`, and a hypothetical rig with genuinely
+        mirrored mounts would use `"both"`. Frame-carried like `pinch_calib`:
+        it is a property of the input source, not of the session.
         """
+        if self._mirror_mode == "none":
+            return False
+        if self._mirror_mode == "both":
+            return True
         swap = bool(self._cfg and self._cfg.swap)
         return swap if side == "left" else not swap
 
@@ -531,6 +580,9 @@ class HumanTeleopSession:
             self._ws_disconnected_at_perf = None
             self._target_left = None
             self._target_right = None
+            # Mirror parity belongs to the input source; the next session's
+            # frames re-assert it or fall back to the swap-based default.
+            self._mirror_mode = None
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
             # A new session starts with neither arm handed over, whatever the
@@ -636,6 +688,18 @@ class HumanTeleopSession:
                 self._mouth.engaged = False
                 self._clutch_reason = "source_mismatch"
             self._dead_man = engaged
+            # Per-side split, gated on the global decision: a frame that is
+            # disengaged (or disqualified by source_mismatch above) must read
+            # disengaged on both sides no matter what the split claims. Only
+            # frames that carry a split get one; everything else mirrors.
+            sides_raw = frame.get("dead_man_sides")
+            if engaged and isinstance(sides_raw, dict):
+                self._dead_man_sides = {
+                    side: bool(sides_raw.get(side, False))
+                    for side in ("left", "right")
+                }
+            else:
+                self._dead_man_sides = {"left": engaged, "right": engaged}
 
             # Frame-carried calibration follows the same rule as the clutch
             # itself: a spacebar session must not be able to arm the mouth
@@ -660,7 +724,8 @@ class HumanTeleopSession:
             # WS is healthy: cancel any pending grace window.
             self._ws_disconnected_at_perf = None
 
-            mirror = bool(self._cfg and self._cfg.swap)
+            mode = frame.get("mirror_mode")
+            self._mirror_mode = mode if mode in ("none", "both") else None
             left_side = frame.get("left")
             right_side = frame.get("right")
             # A side counts as tracked only when it produced a USABLE goal.
@@ -681,14 +746,16 @@ class HumanTeleopSession:
             # ages out and reads as lost, which is the truth.
             if left_side is not None:
                 goal = retarget.compute_joint_goal(
-                    left_side, self._pinch_calib_left, mirror=mirror,
+                    left_side, self._pinch_calib_left,
+                    mirror=self._side_mirrored("left"),
                 )
                 if goal is not None:
                     self._target_left = goal
                     self._last_left_perf = now_perf
             if right_side is not None:
                 goal = retarget.compute_joint_goal(
-                    right_side, self._pinch_calib_right, mirror=not mirror,
+                    right_side, self._pinch_calib_right,
+                    mirror=self._side_mirrored("right"),
                 )
                 if goal is not None:
                     self._target_right = goal
@@ -724,7 +791,8 @@ class HumanTeleopSession:
             # compute_joint_goal refuses to emit a goal there, so the
             # confidence gate is an acquisition gate for free.
             tracked = self._side_trackable(side, now) and target is not None
-            if not self._dead_man or not tracked:
+            engaged = self._dead_man_sides.get(side, self._dead_man)
+            if not engaged or not tracked:
                 if acq.authority is not SideAuthority.HELD:
                     # Coming back from a handover: re-read the arm before its
                     # position is trusted again.
@@ -1013,16 +1081,59 @@ class HumanTeleopSession:
                     target_right = self._target_right if driving_right else None
                     cap_left = self._ramp_cap("left", period, now)
                     cap_right = self._ramp_cap("right", period, now)
+                    prev_left = dict(self._committed_left)
+                    prev_right = dict(self._committed_right)
                 steps_left = self._smooth_step(
-                    self._committed_left, target_left, left.joint_limits_deg, alpha,
+                    prev_left, target_left, left.joint_limits_deg, alpha,
                     cap=cap_left,
                 )
                 steps_right = self._smooth_step(
-                    self._committed_right, target_right, right.joint_limits_deg, alpha,
+                    prev_right, target_right, right.joint_limits_deg, alpha,
                     cap=cap_right,
                 )
                 committed_left = {j: s.committed for j, s in steps_left.items()}
                 committed_right = {j: s.committed for j, s in steps_right.items()}
+                # Bimanual guard, applied to the pair that would actually be
+                # written — after smoothing and the rate caps, before the
+                # handles — because a bound enforced on any earlier quantity
+                # can be re-violated by a later stage. While nothing is
+                # driving it still publishes live clearance, so the operator
+                # can sanity-check the mount geometry against the real arms
+                # BEFORE the first engagement.
+                collision_last: dict | None = None
+                if self._collision is not None:
+                    pair_prev = {cfg.left_arm: prev_left,
+                                 cfg.right_arm: prev_right}
+                    pair_want = {cfg.left_arm: committed_left,
+                                 cfg.right_arm: committed_right}
+                    if driving_left or driving_right:
+                        result = self._collision.filter_step(pair_prev, pair_want)
+                        for steps, committed, filtered in (
+                            (steps_left, committed_left,
+                             result.poses[cfg.left_arm]),
+                            (steps_right, committed_right,
+                             result.poses[cfg.right_arm]),
+                        ):
+                            for joint, value in filtered.items():
+                                if abs(value - committed.get(joint, value)) > 1e-9:
+                                    st = steps[joint]
+                                    steps[joint] = JointStep(
+                                        target=st.target, committed=value,
+                                        reason="collision",
+                                    )
+                        committed_left = result.poses[cfg.left_arm]
+                        committed_right = result.poses[cfg.right_arm]
+                        collision_last = {
+                            "limited": result.limited,
+                            "alpha": result.alpha,
+                            "slack_m": result.clearance.slack,
+                            "worst": result.clearance.worst,
+                        }
+                    else:
+                        cl = self._collision.clearance(pair_want)
+                        collision_last = {"limited": False, "alpha": 1.0,
+                                          "slack_m": cl.slack,
+                                          "worst": cl.worst}
                 # Rebinding a single dict is atomic in CPython, but that does not
                 # make this four-way update atomic — a reader in status() could
                 # otherwise interleave and see committed_* from this tick paired
@@ -1034,6 +1145,7 @@ class HumanTeleopSession:
                     self._committed_right = committed_right
                     self._steps_left = steps_left
                     self._steps_right = steps_right
+                    self._collision_last = collision_last
                 # Authority IS the write gate. The per-side tracking-loss check
                 # that used to live here moved into `_update_authority`, which
                 # runs off the same `tick_start` a few microseconds earlier —
