@@ -12,7 +12,23 @@ checklist below before trusting it.
 
 ---
 
-## Start everything (each session)
+## Rehearse on the desktop first (no hardware at all)
+
+```bash
+# desktop, repo root
+scripts/quest-teleop/up.sh --sim
+```
+
+Identical chain — same page, same HTTPS origin, same backend code — except
+the backend runs **on this machine against MuJoCo arms**
+(`config.bimanual-sim.yaml`). Put on the headset, open the printed URL, and
+drive: engagement countdown, per-grip dead-men, the collision guard, E-STOP —
+all real, nothing physical that can move. The cockpit page (`/`) on the
+desktop shows the sim arms through the rendered BASE camera, so you can watch
+them track you. This is the recommended way to learn the controls and check
+your limb-length settings before the first hardware run.
+
+## Start everything (each session, real arms)
 
 ```bash
 # desktop, repo root

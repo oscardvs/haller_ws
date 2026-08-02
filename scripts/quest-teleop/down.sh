@@ -5,7 +5,9 @@
 #   ssh jetson 'pkill -f "uvicorn haller_hmi\.server"'
 set -eo pipefail
 RUN_DIR=/tmp/haller-quest
-for name in next caddy; do
+# sim-backend only ever exists when up.sh --sim started it on THIS machine,
+# so stopping it here does not violate the never-stop-the-rig-remotely rule.
+for name in next caddy sim-backend; do
     f="$RUN_DIR/$name.pid"
     if [ -f "$f" ]; then
         pid="$(cat "$f")"
