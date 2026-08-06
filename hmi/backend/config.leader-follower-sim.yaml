@@ -33,7 +33,9 @@ ros:
   max_linear: 1.0
   max_angular: 2.0
 telemetry:
-  hz: 20
+  # 30 Hz, matched to LeRobot's SO-101 convention; also the recorded dataset's
+  # fps (the recorder samples at telemetry rate). Camera fps follows.
+  hz: 30
 cameras:
   - id: threequarter_sim
     role: base
@@ -41,13 +43,13 @@ cameras:
     mjcf_camera: threequarter
     width: 640
     height: 480
-    fps: 15
+    fps: 30
   - id: overhead_sim
     role: base
     source: sim_camera
     mjcf_camera: overhead
     width: 640
     height: 480
-    fps: 15
+    fps: 30
 sim_leader:
   source: mouse

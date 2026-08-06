@@ -21,22 +21,27 @@ ros:
   max_linear: 1.0
   max_angular: 2.0
 telemetry:
-  hz: 20
+  # 30 Hz, matched to the Quest's ~30 Hz publish rate and LeRobot's SO-101
+  # dataset convention. The recorder samples at this rate, so it is also the
+  # recorded dataset's fps. (The real rig stays 20 Hz: the half-duplex Feetech
+  # bus already interleaves 60 Hz writes with these reads.)
+  hz: 30
 cameras:
   # Listed first, so the BASE tab (which shows the first role: base camera)
   # gets the view you can actually judge an arm pose from. The overhead cam
   # reads shoulder_pan well but flattens shoulder_lift and elbow_flex away.
+  # fps matches telemetry.hz so every recorded frame has a fresh render.
   - id: threequarter_sim
     role: base
     source: sim_camera
     mjcf_camera: threequarter
     width: 640
     height: 480
-    fps: 15
+    fps: 30
   - id: overhead_sim
     role: base
     source: sim_camera
     mjcf_camera: overhead
     width: 640
     height: 480
-    fps: 15
+    fps: 30
