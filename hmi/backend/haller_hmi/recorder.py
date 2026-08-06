@@ -88,6 +88,10 @@ class DatasetRecorder:
     _dataset: LeRobotDataset | None = field(default=None, init=False)
     _task_handle: asyncio.Task | None = field(default=None, init=False)
     _state: RecorderState = field(default_factory=RecorderState, init=False)
+    # One writer-side flag so the save/discard tail can happen exactly once
+    # no matter who reaches it first: the operator's /record/stop, or the
+    # record loop itself when the teleop session dies mid-take.
+    _episode_open: bool = field(default=False, init=False)
 
     # ---- public API ------------------------------------------------------
 
@@ -133,20 +137,43 @@ class DatasetRecorder:
             episode_frames=0, started_at=time.time(),
         )
         self._cam_specs = cam_specs
+        self._episode_open = True
         self._task_handle = asyncio.get_event_loop().create_task(self._run())
         logger.info("recorder: episode started repo=%s task=%r fps=%d cams=%s",
                     repo_id, task, fps, [c["id"] for c in cam_specs])
 
     async def stop_episode(self, save: bool = True) -> dict:
-        """Stop the loop and either save or discard the episode buffer."""
+        """Stop the loop and either save or discard the episode buffer.
+
+        Idempotent by design: if the record loop already closed the episode
+        on its own (teleop died mid-take — see `_run`), this is a no-op that
+        just reports status.
+        """
         self._state.recording = False
         if self._task_handle is not None:
             try:
-                await asyncio.wait_for(self._task_handle, timeout=2.0)
+                # Generous on purpose: the loop exits within one telemetry
+                # period, but on the auto-stop path it may be mid-save.
+                await asyncio.wait_for(self._task_handle, timeout=10.0)
             except asyncio.TimeoutError:
                 self._task_handle.cancel()
         self._task_handle = None
 
+        if self._dataset is None:
+            return self.status()  # never started — nothing to finish
+        return self._finish_episode(save)
+
+    def _finish_episode(self, save: bool) -> dict:
+        """Save or discard the buffered episode, exactly once.
+
+        Both exit paths land here: the operator's stop, and the record loop's
+        auto-save when the teleop session stops mid-take. The flag makes the
+        second arrival a harmless no-op instead of a double save.
+        """
+        if not self._episode_open:
+            return self.status()
+        self._episode_open = False
+        self._state.recording = False
         assert self._dataset is not None
         frames = self._state.episode_frames
         if save and frames > 0:
@@ -262,10 +289,23 @@ class DatasetRecorder:
 
     async def _run(self) -> None:
         stream = self.telemetry.subscribe()
+        # Mid-take stop detection. If the teleop session was driving and
+        # stops — E-STOP, WS-grace auto-stop, a manual stop — every further
+        # frame would log action == measured with the arms torque-off: a
+        # silently corrupted tail. Save up to the stop and close the episode
+        # instead. A take where teleop never ran (schema bring-up) never sets
+        # the flag, so it is unaffected.
+        teleop_was_running = bool(self.human_teleop.status().get("running"))
         try:
             async for tele_frame in stream:
                 if not self._state.recording:
                     break
+                teleop_running = bool(self.human_teleop.status().get("running"))
+                if teleop_was_running and not teleop_running:
+                    logger.info("recorder: teleop stopped mid-take; saving episode")
+                    self._finish_episode(save=True)
+                    break
+                teleop_was_running = teleop_was_running or teleop_running
                 try:
                     frame = self._build_frame(tele_frame)
                     if frame is None:

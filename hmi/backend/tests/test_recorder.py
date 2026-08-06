@@ -5,6 +5,8 @@ create a real LeRobotDataset (that path needs hardware + disk and is covered by
 manual Stage-0 validation). The point is to lock in the schema shape and the
 state/action assembly so a refactor can't silently corrupt recorded data.
 """
+import asyncio
+
 import numpy as np
 
 from haller_hmi.recorder import DatasetRecorder, SO101_JOINT_ORDER
@@ -169,3 +171,144 @@ def test_build_frame_skips_when_arm_telemetry_missing():
     tele_frame = {"arms": {"left": _joints_block(0.0)},  # right arm absent this tick
                   "base": {"linear": 0.0, "angular": 0.0}}
     assert r._build_frame(tele_frame) is None
+
+
+# ---- mid-take auto-stop --------------------------------------------------
+#
+# The record loop must save-and-close the episode the moment a teleop session
+# that was driving stops — E-STOP, WS-drop auto-stop, or a manual stop all
+# land here. Otherwise the take keeps appending action == measured frames
+# while the arms sag torque-off, and nothing marks where it went wrong.
+
+class _FakeDataset:
+    def __init__(self):
+        self.saved = 0
+        self.cleared = 0
+        self.frames: list[dict] = []
+
+    def add_frame(self, frame):
+        self.frames.append(frame)
+
+    def save_episode(self):
+        self.saved += 1
+
+    def clear_episode_buffer(self, delete_images=True):
+        self.cleared += 1
+
+
+class _SeqTeleop:
+    """Returns status dicts from a queue, then repeats the last one forever."""
+    def __init__(self, seq):
+        self._seq = list(seq)
+        self._last = seq[-1]
+
+    def status(self):
+        return self._seq.pop(0) if self._seq else self._last
+
+
+class _EndlessStream:
+    """Yields identical valid telemetry frames until cancelled.
+
+    `limit` caps the frame count so a test can let the stream run dry —
+    when it does, the record loop exits the way a real telemetry stop would.
+    """
+    def __init__(self, limit: int | None = None):
+        self.closed = False
+        self._limit = limit
+        self._n = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._limit is not None and self._n >= self._limit:
+            await asyncio.sleep(3600)  # park: stream is dry, loop must not spin
+        self._n += 1
+        await asyncio.sleep(0.001)
+        return {
+            "arms": {"left": _joints_block(1.0), "right": _joints_block(2.0)},
+            "base": {"linear": 0.0, "angular": 0.0},
+        }
+
+    async def aclose(self):
+        self.closed = True
+
+
+class _StreamTelemetry(_FakeTelemetry):
+    def __init__(self, arms, stream, hz=20.0):
+        super().__init__(arms, hz)
+        self._stream = stream
+
+    def subscribe(self):
+        return self._stream
+
+
+def _runnable_recorder(teleop_seq):
+    """A recorder wired for _run(): fake streaming telemetry + dataset.
+
+    status() consumption per loop iteration is 3: one for the stop-transition
+    check in _run, plus one per arm inside _build_frame. Plus one before the
+    loop initializes `teleop_was_running`. Size `teleop_seq` accordingly.
+    """
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    stream = _EndlessStream(limit=1000)
+    r = DatasetRecorder(
+        telemetry=_StreamTelemetry(arms, stream),
+        human_teleop=_SeqTeleop(teleop_seq),
+        cameras=_FakeCameras([]),
+    )
+    r._dataset = _FakeDataset()
+    r._cam_specs = []
+    r._state.task = "t"
+    r._episode_open = True
+    r._state.recording = True
+    return r, stream
+
+
+async def test_teleop_stop_mid_take_saves_and_closes():
+    running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
+    stopped = {"running": False}
+    # 1 init + 3 iterations x (1 check + 2 build) = 10 running, then stopped.
+    r, stream = _runnable_recorder([running] * 10 + [stopped])
+    await asyncio.wait_for(r._run(), timeout=5.0)
+    assert r._dataset.saved == 1
+    assert r._dataset.cleared == 0
+    assert r._state.recording is False
+    assert r._episode_open is False
+    assert r._state.episode_frames == 3  # frames before the stop were kept
+    assert stream.closed
+
+
+async def test_teleop_never_running_does_not_auto_stop():
+    """A bring-up take (no teleop) must not be auto-closed by the loop."""
+    r, stream = _runnable_recorder([{"running": False}])
+    task = asyncio.get_event_loop().create_task(r._run())
+    await asyncio.sleep(0.05)  # let a few frames land
+    assert r._state.episode_frames > 0
+    assert r._episode_open is True     # no transition -> no auto-close
+    assert r._dataset.saved == 0
+    r._state.recording = False         # normal operator stop
+    await asyncio.wait_for(task, timeout=5.0)
+    await r.stop_episode(save=False)
+    assert r._dataset.cleared == 1
+    assert stream.closed
+
+
+async def test_stop_episode_after_auto_save_is_a_noop():
+    running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
+    stopped = {"running": False}
+    # 1 init + 1 iteration x 3 = 4 running, then stopped on iter 2's check.
+    r, stream = _runnable_recorder([running] * 4 + [stopped])
+    await asyncio.wait_for(r._run(), timeout=5.0)
+    assert r._dataset.saved == 1
+    # Operator hits /record/stop a beat later: must not save or clear again.
+    status = await r.stop_episode(save=True)
+    assert r._dataset.saved == 1
+    assert r._dataset.cleared == 0
+    assert status["recording"] is False
+
+
+async def test_stop_episode_with_never_started_dataset_is_graceful():
+    r = _recorder({"running": False})
+    status = await r.stop_episode(save=True)
+    assert status["recording"] is False
