@@ -38,6 +38,9 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from os import environ
+from os.path import expanduser
+from pathlib import Path
 
 import numpy as np
 
@@ -82,8 +85,14 @@ class DatasetRecorder:
     cameras: object                        # CameraManager
     left_arm_id: str = "left"
     right_arm_id: str = "right"
-    root: str | None = None                # local dataset root; None -> HF cache
+    # The dataset's own directory. None -> $HF_LEROBOT_HOME/<repo_id>, which
+    # is where LeRobot puts it anyway; naming it explicitly is what lets a
+    # later take RESUME the dataset instead of clobbering its metadata.
+    root: str | None = None
     image_writer_threads: int = 4
+    # h264, not the libsvtav1 default: a software AV1 encoder cannot keep up
+    # with realtime multi-camera capture on the machines this runs on.
+    vcodec: str = "h264"
 
     _dataset: LeRobotDataset | None = field(default=None, init=False)
     _task_handle: asyncio.Task | None = field(default=None, init=False)
@@ -122,15 +131,7 @@ class DatasetRecorder:
         fps = int(round(1.0 / self.telemetry._period))  # telemetry emits at this rate
 
         if self._dataset is None:
-            self._dataset = LeRobotDataset.create(
-                repo_id=repo_id,
-                fps=fps,
-                features=features,
-                root=self.root,
-                robot_type="haller_bimanual",
-                use_videos=True,
-                image_writer_threads=self.image_writer_threads,
-            )
+            self._dataset = self._open_dataset(repo_id, fps, features)
 
         self._state = RecorderState(
             recording=True, repo_id=repo_id, task=task,
@@ -191,6 +192,54 @@ class DatasetRecorder:
             self._dataset.finalize()
 
     # ---- internals -------------------------------------------------------
+
+    def _dataset_root(self, repo_id: str) -> Path:
+        """Directory the dataset lives in. Explicit `root` wins; otherwise the
+        standard LeRobot home. We must name it ourselves because
+        `LeRobotDataset.resume` refuses to write into the shared Hub cache."""
+        if self.root is not None:
+            return Path(self.root)
+        home = environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
+        return Path(expanduser(home)) / repo_id
+
+    def _open_dataset(self, repo_id: str, fps: int, features: dict) -> LeRobotDataset:
+        """Open for appending, resuming an existing dataset or creating a new one.
+
+        Both paths use streaming video encoding so frames are compressed as
+        they arrive: memory stays flat over a long take, and `save_episode`
+        at stop time is near-instant instead of encoding the whole take.
+        """
+        root = self._dataset_root(repo_id)
+        if (root / "meta" / "info.json").exists():
+            try:
+                ds = LeRobotDataset.resume(
+                    repo_id,
+                    root=root,
+                    vcodec=self.vcodec,
+                    streaming_encoding=True,
+                    image_writer_threads=self.image_writer_threads,
+                )
+            except Exception as e:
+                # The honest failure: an existing dataset we cannot append to.
+                # Creating over it would destroy episodes someone already drove
+                # for, so refuse loudly and make the operator move it aside.
+                raise RuntimeError(
+                    f"dataset at {root} exists but cannot be resumed ({e}); "
+                    "inspect it or move it aside — refusing to overwrite"
+                ) from e
+            logger.info("recorder: resuming existing dataset at %s", root)
+            return ds
+        return LeRobotDataset.create(
+            repo_id=repo_id,
+            fps=fps,
+            features=features,
+            root=root,
+            robot_type="haller_bimanual",
+            use_videos=True,
+            image_writer_threads=self.image_writer_threads,
+            vcodec=self.vcodec,
+            streaming_encoding=True,
+        )
 
     def _joint_order(self, arm_id: str) -> list[str]:
         """SO-101 joints present on this arm, in canonical order."""

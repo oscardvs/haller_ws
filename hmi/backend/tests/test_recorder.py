@@ -8,6 +8,7 @@ state/action assembly so a refactor can't silently corrupt recorded data.
 import asyncio
 
 import numpy as np
+import pytest
 
 from haller_hmi.recorder import DatasetRecorder, SO101_JOINT_ORDER
 
@@ -35,6 +36,22 @@ class _FakeTelemetry:
     def __init__(self, arms, hz=20.0):
         self._arms = arms
         self._period = 1.0 / hz
+
+    def subscribe(self):
+        # The real-dataset tests below drive frames by hand; the record loop
+        # gets a stream that is instantly done so it parks nothing.
+        return _DoneStream()
+
+
+class _DoneStream:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def aclose(self):
+        pass
 
 
 class _FakeCfg:
@@ -312,3 +329,98 @@ async def test_stop_episode_with_never_started_dataset_is_graceful():
     r = _recorder({"running": False})
     status = await r.stop_episode(save=True)
     assert status["recording"] is False
+
+
+# ---- real LeRobotDataset round trip --------------------------------------
+#
+# No mocks here: create -> save -> restart -> resume -> reload. This is the
+# path that used to be covered by "manual Stage-0 validation" only, and it is
+# the one that silently loses takes when it breaks.
+
+def _real_recorder(root):
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    return DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=_FakeCameras([]),
+        root=str(root),
+    )
+
+
+def _real_frame(task: str) -> dict:
+    return {
+        "observation.state": np.zeros(12, dtype=np.float32),
+        "action": np.zeros(12, dtype=np.float32),
+        "observation.base": np.zeros(2, dtype=np.float32),
+        "task": task,
+    }
+
+
+async def _drive(rec, task: str, n_frames: int) -> None:
+    await rec.start_episode("smoke/roundtrip", task)
+    for _ in range(n_frames):
+        rec._dataset.add_frame(_real_frame(task))
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
+
+
+async def test_create_then_resume_appends_episodes(tmp_path):
+    root = tmp_path / "ds"  # create() wants a dir it can make itself
+    await _drive(_real_recorder(root), "lift the cube", 5)
+    await _drive(_real_recorder(root), "lift the cube", 7)  # fresh recorder = restart
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/roundtrip", root=root)
+    assert ds.meta.total_episodes == 2
+    assert ds.meta.total_frames == 12
+    for key in ("observation.state", "action", "observation.base"):
+        assert key in ds.features
+    assert ds.meta.fps == 20
+
+
+async def test_existing_dataset_that_cannot_resume_refuses_loudly(tmp_path):
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "info.json").write_text("this is not dataset metadata")
+    rec = _real_recorder(tmp_path)
+    with pytest.raises(RuntimeError, match="cannot be resumed"):
+        await rec.start_episode("smoke/broken", "lift the cube")
+    assert rec._dataset is None  # nothing half-open left behind
+
+
+async def test_video_take_streams_h264_and_reloads(tmp_path):
+    """The sim-collection path: a camera in the schema means video features,
+    which means the streaming h264 encoder. Drive a short take, save, and read
+    the frames back — this is the round trip a Quest-teleop dataset makes."""
+    root = tmp_path / "vid"
+    cam = _FakeCamera("top", 64, 48)  # has latest_rgb -> admitted to the schema
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    rec = DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=_FakeCameras([cam]),
+        root=str(root),
+    )
+    await rec.start_episode("smoke/video", "lift the cube")
+    assert "observation.images.top" in rec._dataset.meta.features
+    n = 10
+    for i in range(n):
+        frame = _real_frame("lift the cube")
+        # A gradient, so a blank/constant encode would be caught on reload.
+        # (i+1) keeps frame 0 non-black, so the reload check below has signal.
+        img = np.full((48, 64, 3), (i + 1) * 20, dtype=np.uint8)
+        frame["observation.images.top"] = img
+        rec._dataset.add_frame(frame)
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
+    rec.close()  # finalize, as lifespan teardown does — flushes episode meta
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/video", root=root)
+    assert ds.meta.total_frames == n
+    sample = ds[0]
+    img = sample["observation.images.top"]
+    # LeRobot hands images back channel-first (C,H,W) tensors scaled to [0,1].
+    assert tuple(img.shape) == (3, 48, 64)
+    # Frame 0 was solid grey 20; a dead stream would decode black (0.0).
+    assert abs(float(img.mean()) - 20 / 255) < 0.02
