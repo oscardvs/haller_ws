@@ -746,12 +746,39 @@ async def ws_telemetry(ws: WebSocket):
         return
 
 
+# Operators publish continuously (~30 Hz) for as long as a capture session is
+# open, so silence on a teleop socket means the connection is dead — e.g. wifi
+# dropped without a FIN, where `receive` would otherwise sit blocked until the
+# OS gives up, minutes later. Naming that silence turns the session's existing
+# WS-disconnect grace (freeze now, auto-stop after 5 s) into something that
+# actually runs. Both capture paths (MediaPipe panel, VR) publish for the whole
+# time they are live, so there is no legitimate idle to false-positive on.
+WS_IDLE_TIMEOUT_S = 2.0
+
+
+async def _receive_or_idle_timeout(ws: WebSocket):
+    """Await one JSON frame; return `None` if the socket stays silent for
+    `WS_IDLE_TIMEOUT_S`. `WebSocketDisconnect` is left to propagate to the
+    caller's handler."""
+    try:
+        return await asyncio.wait_for(ws.receive_json(),
+                                       timeout=WS_IDLE_TIMEOUT_S)
+    except TimeoutError:
+        return None
+
+
 @app.websocket("/ws/teleop/human/in")
 async def ws_human_teleop_in(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            frame = await ws.receive_json()
+            frame = await _receive_or_idle_timeout(ws)
+            if frame is None:
+                logger.warning("human teleop socket idle %.1fs; treating as "
+                               "disconnected", WS_IDLE_TIMEOUT_S)
+                human_teleop.notify_ws_disconnected()
+                await ws.close()
+                return
             try:
                 human_teleop.ingest_frame(frame)
             except Exception:
@@ -783,7 +810,13 @@ async def ws_vr_teleop_in(ws: WebSocket):
     pose_mode = VRPoseMode(human_teleop, arms)
     try:
         while True:
-            frame = await ws.receive_json()
+            frame = await _receive_or_idle_timeout(ws)
+            if frame is None:
+                logger.warning("vr teleop socket idle %.1fs; treating as "
+                               "disconnected", WS_IDLE_TIMEOUT_S)
+                human_teleop.notify_ws_disconnected()
+                await ws.close()
+                return
             try:
                 if frame.get("vr_mode") == "joints":
                     kp = vr_frame_to_keypoint_frame(frame)
