@@ -19,10 +19,12 @@ Architecture (the load-bearing decision):
       - `observation.images.<cam>`                <- CameraManager grabber threads (RGB)
     No new serial traffic; everything is sampled from in-memory snapshots.
 
-Frozen schema (v0 fills state/action/base/images; lidar + effort are v0.1 slots):
+Frozen schema (v0 fills state/action/base/wall_clock/images; lidar + effort are
+v0.1 slots):
       observation.state        float32[N]   measured joint deg, [left arm..., right arm...]
       action                   float32[N]   commanded joint deg (teleop targets), same layout
       observation.base         float32[2]   (v, omega) — 3-wheel differential drive
+      observation.wall_clock   float32[1]   wall time the frame was captured (gap detection)
       observation.images.<id>  video HxWx3  one per active camera (top / wrist_*)
       task                     str          natural-language instruction
     N = 6 per SO-101 (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex,
@@ -67,6 +69,10 @@ class RecorderState:
     repo_id: str | None = None
     task: str | None = None
     episode_frames: int = 0
+    # Ticks the recorder saw but did not turn into a frame — a camera had no
+    # fresh image, or an arm's telemetry was missing that tick. Nonzero means
+    # the take has gaps; the dataset's wall-clock channel says where.
+    skipped_frames: int = 0
     started_at: float | None = None
     last_error: str | None = None
 
@@ -111,6 +117,7 @@ class DatasetRecorder:
             "repo_id": s.repo_id,
             "task": s.task,
             "episode_frames": s.episode_frames,
+            "skipped_frames": s.skipped_frames,
             "started_at": s.started_at,
             "last_error": s.last_error,
         }
@@ -135,7 +142,7 @@ class DatasetRecorder:
 
         self._state = RecorderState(
             recording=True, repo_id=repo_id, task=task,
-            episode_frames=0, started_at=time.time(),
+            episode_frames=0, skipped_frames=0, started_at=time.time(),
         )
         self._cam_specs = cam_specs
         self._episode_open = True
@@ -280,6 +287,11 @@ class DatasetRecorder:
             "action": {"dtype": "float32", "shape": (n,), "names": names},
             # 3-wheel differential drive -> 2-DoF base command/velocity.
             "observation.base": {"dtype": "float32", "shape": (2,), "names": ["v", "omega"]},
+            # Real capture time of each frame. LeRobot's own `timestamp` column
+            # is synthetic (frame_index / fps), so a skipped tick leaves no gap
+            # there; this channel is what lets training code see real sampling
+            # holes after the fact.
+            "observation.wall_clock": {"dtype": "float32", "shape": (1,), "names": ["t"]},
         }
         for c in cam_specs:
             features[f"observation.images.{c['id']}"] = {
@@ -315,6 +327,7 @@ class DatasetRecorder:
             joints = self._joint_order(arm_id)
             arm_snap = tele_frame.get("arms", {}).get(arm_id)
             if arm_snap is None:
+                self._state.skipped_frames += 1
                 return None  # arm telemetry missing this tick — skip frame
             measured = {j: float(arm_snap["joints"][j]["pos"]) for j in joints}
             state_vec += [measured[j] for j in joints]
@@ -327,11 +340,15 @@ class DatasetRecorder:
             "observation.state": np.asarray(state_vec, dtype=np.float32),
             "action": np.asarray(action_vec, dtype=np.float32),
             "observation.base": np.asarray(base_vec, dtype=np.float32),
+            # When this telemetry frame was built — see the feature's comment.
+            "observation.wall_clock": np.asarray(
+                [float(tele_frame.get("t", time.time()))], dtype=np.float32),
             "task": self._state.task,
         }
         for c in self._cam_specs:
             rgb = self.cameras[c["id"]].latest_rgb()
             if rgb is None:
+                self._state.skipped_frames += 1
                 return None  # a required camera has no fresh frame — skip tick
             frame[f"observation.images.{c['id']}"] = rgb
         return frame

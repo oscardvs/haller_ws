@@ -117,6 +117,8 @@ def test_build_features_shapes_and_video_dtype():
     assert feats["observation.state"]["shape"] == (12,)
     assert feats["action"]["shape"] == (12,)
     assert feats["observation.base"]["shape"] == (2,)
+    assert feats["observation.wall_clock"]["dtype"] == "float32"
+    assert feats["observation.wall_clock"]["shape"] == (1,)
     img = feats["observation.images.top"]
     assert img["dtype"] == "video"
     assert img["shape"] == (480, 640, 3)
@@ -156,6 +158,7 @@ def test_build_frame_assembles_state_action_base_images():
     r._cam_specs = r._active_camera_specs()
     r._state.task = "pick cube"
     tele_frame = {
+        "t": 1720000000.5,
         "arms": {"left": _joints_block(2.0), "right": _joints_block(4.0)},
         "base": {"linear": 0.5, "angular": -0.25},
     }
@@ -165,6 +168,7 @@ def test_build_frame_assembles_state_action_base_images():
     assert frame["observation.state"].shape == (12,)
     assert frame["action"].shape == (12,)
     np.testing.assert_allclose(frame["observation.base"], [0.5, -0.25])
+    np.testing.assert_allclose(frame["observation.wall_clock"], [1720000000.5])
     assert frame["observation.images.top"].shape == (48, 64, 3)
     assert frame["task"] == "pick cube"
     assert frame["action"][0] == 5.0    # left shoulder_pan = commanded
@@ -188,6 +192,27 @@ def test_build_frame_skips_when_arm_telemetry_missing():
     tele_frame = {"arms": {"left": _joints_block(0.0)},  # right arm absent this tick
                   "base": {"linear": 0.0, "angular": 0.0}}
     assert r._build_frame(tele_frame) is None
+
+
+def test_skipped_frames_counts_dropped_ticks():
+    r = _recorder({"running": False}, cams=_FakeCameras([_FakeCamera("top", frame=None)]))
+    r._cam_specs = r._active_camera_specs()
+    r._state.task = "t"
+    assert r._state.skipped_frames == 0
+    # A stale camera skips the tick and counts it.
+    assert r._build_frame({"arms": {"left": _joints_block(0.0),
+                                    "right": _joints_block(0.0)},
+                           "base": {}}) is None
+    assert r._state.skipped_frames == 1
+    # A missing arm skips the tick and counts it too.
+    assert r._build_frame({"arms": {"left": _joints_block(0.0)}, "base": {}}) is None
+    assert r._state.skipped_frames == 2
+    assert r.status()["skipped_frames"] == 2
+
+
+def test_status_reports_zero_skips_before_any_drop():
+    r = _recorder({"running": False})
+    assert r.status()["skipped_frames"] == 0
 
 
 # ---- mid-take auto-stop --------------------------------------------------
@@ -352,6 +377,7 @@ def _real_frame(task: str) -> dict:
         "observation.state": np.zeros(12, dtype=np.float32),
         "action": np.zeros(12, dtype=np.float32),
         "observation.base": np.zeros(2, dtype=np.float32),
+        "observation.wall_clock": np.zeros(1, dtype=np.float32),
         "task": task,
     }
 

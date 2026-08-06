@@ -29,6 +29,7 @@ export function DatasetTab({ cameras }: { cameras: CameraInfo[] }) {
   const setHfUser = useRecorder((s) => s.setHfUser);
   const recording = useRecorder((s) => s.status?.recording ?? false);
   const frames = useRecorder((s) => s.status?.episode_frames ?? 0);
+  const skipped = useRecorder((s) => s.status?.skipped_frames ?? 0);
   const lastError = useRecorder((s) => s.status?.last_error ?? null);
   const busy = useRecorder((s) => s.busy);
   const teleopRunning = useTelemetry((s) => s.lastFrame?.human_teleop?.running ?? false);
@@ -167,6 +168,13 @@ export function DatasetTab({ cameras }: { cameras: CameraInfo[] }) {
             <span data-num className="tabular-nums">
               {frames}
             </span>
+            {/* Nonzero means some ticks were dropped (stale camera / missing arm
+                telemetry) — the take has gaps; flag it rather than hide it. */}
+            {skipped > 0 && (
+              <span className="tabular-nums text-[var(--haller-warn)]">
+                {skipped} skipped
+              </span>
+            )}
           </div>
 
           {/* Warning, not a block: the backend does not enforce this, so a

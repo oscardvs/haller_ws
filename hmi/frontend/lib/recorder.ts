@@ -55,6 +55,7 @@ export const useRecorder = create<Store>((set, get) => ({
         prev &&
         prev.recording === next.recording &&
         prev.episode_frames === next.episode_frames &&
+        prev.skipped_frames === next.skipped_frames &&
         prev.repo_id === next.repo_id &&
         prev.last_error === next.last_error
       ) {

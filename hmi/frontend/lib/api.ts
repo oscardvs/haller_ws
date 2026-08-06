@@ -289,6 +289,8 @@ export type RecordStatus = {
   repo_id: string | null;
   task: string | null;
   episode_frames: number;
+  /** Ticks seen but not recorded (stale camera / missing arm telemetry). */
+  skipped_frames: number;
   started_at: number | null;
   last_error: string | null;
 };
