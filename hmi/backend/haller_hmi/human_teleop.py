@@ -114,6 +114,11 @@ MATCH_DWELL_MS = 400.0
 ACQUIRE_RATE_DEG_S = 20.0
 #: Time over which the cap returns to the session's normal rate limit.
 ACQUIRE_RAMP_MS = 1500.0
+#: How many consecutive failed ticks the 60 Hz loop tolerates before it stops
+#: the session outright. A failed tick sleeps 50 ms and retries, which rides
+#: through transient bus glitches; a PERMANENT fault (a dead arm handle) would
+#: otherwise spin forever, "running" the whole time. 50 x 50 ms ≈ 2.5 s.
+MAX_CONSECUTIVE_TICK_ERRORS = 50
 
 
 class SideAuthority(str, enum.Enum):
@@ -1068,6 +1073,7 @@ class HumanTeleopSession:
         # Smoothing time constant ≈ 100 ms (frequency-independent).
         tau_s = 0.100
         alpha = 1.0 - math.exp(-period / tau_s) if period > 0 else 1.0
+        consecutive_errors = 0
         while not self._stop_flag.is_set():
             tick_start = time.perf_counter()
             try:
@@ -1224,10 +1230,21 @@ class HumanTeleopSession:
                     break
                 with self._lock:
                     self._last_error = None
+                consecutive_errors = 0
             except Exception as e:
                 logger.exception("human teleop tick failed")
+                consecutive_errors += 1
                 with self._lock:
                     self._last_error = str(e)
+                if consecutive_errors >= MAX_CONSECUTIVE_TICK_ERRORS:
+                    # A persistent fault (dead arm handle, broken guard) would
+                    # otherwise retry at 20 Hz forever, session "running" the
+                    # whole time. Stop it the same way the WS grace does —
+                    # from another thread, since stop() joins this one.
+                    logger.error("human teleop loop failed %d ticks in a row; "
+                                 "stopping session", consecutive_errors)
+                    threading.Thread(target=self.stop, daemon=True).start()
+                    break
                 time.sleep(0.05)
                 continue
             elapsed = time.perf_counter() - tick_start

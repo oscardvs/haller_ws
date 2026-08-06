@@ -1329,3 +1329,54 @@ def test_the_acquire_block_says_why_a_side_is_not_driving():
         assert sess.status()["acquire"]["left"]["reason"] == "driving"
     finally:
         sess.stop()
+
+
+# ---- commit-loop circuit breaker --------------------------------------------
+#
+# A tick that keeps failing must not spin the loop forever with the session
+# nominally "running": after MAX_CONSECUTIVE_TICK_ERRORS the session stops
+# itself. Intermittent faults reset the counter and never trip it.
+
+def test_persistent_tick_fault_stops_the_session(monkeypatch):
+    import haller_hmi.human_teleop as ht
+    monkeypatch.setattr(ht, "MAX_CONSECUTIVE_TICK_ERRORS", 5)
+    mgr, arms = _fake_arm_manager()
+    arms["left"].send_goal.side_effect = RuntimeError("bus melted")
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(lambda: not sess.status()["running"], timeout=5.0), (
+            "a permanently failing loop must stop the session, not spin"
+        )
+        assert sess.status()["last_error"] is not None
+    finally:
+        sess.stop()
+
+
+def test_intermittent_tick_faults_do_not_stop_the_session(monkeypatch):
+    import haller_hmi.human_teleop as ht
+    monkeypatch.setattr(ht, "MAX_CONSECUTIVE_TICK_ERRORS", 5)
+    mgr, arms = _fake_arm_manager()
+    calls = {"n": 0}
+
+    def _flaky(goal):
+        calls["n"] += 1
+        if calls["n"] % 4 < 2:      # two failures, two successes, alternating
+            raise RuntimeError("transient glitch")
+        return goal                 # send_goal echoes what it actually sent
+
+    arms["left"].send_goal.side_effect = _flaky
+    arms["right"].send_goal.side_effect = lambda goal: goal
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        deadline = _time.monotonic() + 1.0
+        while _time.monotonic() < deadline:
+            sess.ingest_frame(_kp_frame(dead_man=True))
+            assert sess.status()["running"], "intermittent faults tripped the breaker"
+            _time.sleep(0.05)
+        assert calls["n"] > 4, "the loop should have ticked (and faulted) repeatedly"
+    finally:
+        sess.stop()
