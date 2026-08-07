@@ -18,6 +18,15 @@ shape the Quest browser sends), and asserts the full safety chain behaves:
                     mode re-arms
   8. ws-drop        killing the socket mid-session auto-stops the backend
                     after its grace window
+  9. pose mode      anchor-on-squeeze position tracking (server default)
+ 10. recording      a scripted take lands on disk with BOTH sim camera
+                    channels and every frame the recorder counted
+ 11. estop mid-take the recorder notices the teleop session dying and saves
+                    the take itself, instead of appending a corrupted tail
+ 12. starvation     ~1 s of socket silence (under the 2 s idle timeout)
+                    holds both sides and freezes their goals
+ 13. tracking blip  one controller reporting tracked:false releases only
+                    that side; the other keeps driving; re-track re-acquires
 
 Run it against a sim backend (never against real arms unattended):
 
@@ -33,10 +42,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import ssl
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 import websockets
 
@@ -92,19 +104,20 @@ TRIGGER = 0.0
 
 
 def controller(side: str, *, dx: float = 0.0, squeeze: bool = True,
-               trigger: float = TRIGGER) -> dict:
+               trigger: float = TRIGGER, tracked: bool = True) -> dict:
     x = (0.19 if side == "right" else -0.19) + dx
     return {
         "position": [x, SHOULDER_Y, REACH_Z],
         "orientation": IDENT if side == "right" else FLIP_Z,
         "trigger": trigger,
         "squeeze": squeeze,
-        "tracked": True,
+        "tracked": tracked,
     }
 
 
 def frame(*, left_dx: float = 0.0, right_dx: float = 0.0,
-          left_squeeze: bool = True, right_squeeze: bool = True) -> str:
+          left_squeeze: bool = True, right_squeeze: bool = True,
+          left_tracked: bool = True, right_tracked: bool = True) -> str:
     return json.dumps({
         "type": "vr_keypoints",
         "ts_ms": int(time.time() * 1000),
@@ -113,8 +126,10 @@ def frame(*, left_dx: float = 0.0, right_dx: float = 0.0,
         "vr_mode": "joints",
         "dead_man": left_squeeze or right_squeeze,
         "head": HEAD,
-        "left": controller("left", dx=left_dx, squeeze=left_squeeze),
-        "right": controller("right", dx=right_dx, squeeze=right_squeeze),
+        "left": controller("left", dx=left_dx, squeeze=left_squeeze,
+                           tracked=left_tracked),
+        "right": controller("right", dx=right_dx, squeeze=right_squeeze,
+                            tracked=right_tracked),
     })
 
 
@@ -289,6 +304,237 @@ async def pose_mode_section(base: str, ws_url: str) -> None:
     req(base, "/teleop/human/stop", {})
 
 
+# Unique per run: a previous run's dataset directory may still be held open
+# by the backend under test (the recorder keeps the dataset hot for the next
+# take), so reusing one fixed repo would either resume a half-deleted tree or
+# write into deleted inodes. The run's own directory is removed in `finally`.
+SMOKE_REPO = f"smoke/haller_vr_smoke_{int(time.time())}"
+
+
+def _smoke_dataset_root() -> Path:
+    """Where the recorder will put the smoke dataset — the same resolution
+    `DatasetRecorder._dataset_root` does when no explicit root is set."""
+    home = os.environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
+    return Path(os.path.expanduser(home)) / SMOKE_REPO
+
+
+def _dataset_disk_facts(root: Path) -> "dict | None":
+    """Facts about the take on disk, read straight from the files.
+
+    NOT `LeRobotDataset(repo_id, root=...)`: a live backend keeps the dataset
+    open for the next take, and the episode-metadata parquet footers only
+    land at `finalize()` (backend shutdown), so the constructor's local load
+    fails and falls back to the Hub — slow, and wrong for a smoke dataset.
+    Returns None when the take is missing entirely (checks then fail with a
+    useful detail string instead of a traceback).
+    """
+    info_path = root / "meta" / "info.json"
+    if not info_path.exists():
+        return None
+    info = json.loads(info_path.read_text())
+    features = info.get("features", {})
+    img_keys = sorted(k for k in features if k.startswith("observation.images."))
+    # LeRobot 0.5.x layout: videos/<key>/chunk-000/file-000.mp4,
+    # data/chunk-000/file-000.parquet (batched files, not per-episode names).
+    # On a LIVE backend the mp4s are complete (the streaming encoder closes
+    # each episode file at save_episode) while the data parquet's footer only
+    # lands at finalize() — so video frames can be counted here but parquet
+    # rows cannot.
+    videos = {}
+    for k in img_keys:
+        mp4s = sorted(p for p in (root / "videos" / k).rglob("*.mp4")
+                      if p.stat().st_size > 1024)
+        frames = 0
+        try:
+            import av
+            for p in mp4s:
+                with av.open(str(p)) as container:
+                    frames += container.streams.video[0].frames
+        except ImportError:
+            frames = None  # PyAV unavailable here — the check soft-skips
+        videos[k] = {"mp4s": len(mp4s), "frames": frames}
+    parquet_bytes = sum(p.stat().st_size
+                        for p in (root / "data").rglob("*.parquet"))
+    return {"img_keys": img_keys, "videos": videos,
+            "parquet_bytes": parquet_bytes}
+
+
+async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
+    """The dataset recorder, end to end: a take must land on disk with both
+    sim camera channels (the regression test for SimCamera.latest_rgb — sim
+    takes used to record ZERO image channels while the UI said "in take"),
+    and an E-STOP mid-take must make the recorder save the take itself."""
+    root = _smoke_dataset_root()
+    start_body = {"left_arm": "left", "right_arm": "right", "swap": False,
+                  "clutch_source": "vr_grip"}
+    try:
+        print("\n-- 10: recording round trip --")
+        # A crashed earlier run leaves a partial dataset behind; resume would
+        # happily append to it, so start from nothing.
+        shutil.rmtree(root, ignore_errors=True)
+        req(base, "/teleop/human/stop", {})
+        req(base, "/teleop/human/start", start_body)
+        async with ws_connect(ws_url) as ws:
+            s = await wait_for(
+                base, lambda st: authorities(st) == ("driving", "driving"),
+                8.0, ws=ws)
+            check("both sides driving for the recorded take", s is not None)
+
+            req(base, "/record/start",
+                {"repo_id": SMOKE_REPO, "task": "smoke: scripted drive"})
+            check("recorder rolling after /record/start",
+                  req(base, "/record/status").get("recording") is True)
+
+            # ~4 s of scripted motion so state, action and images all vary.
+            await stream_sweep(ws, 2.0, "left_dx", 0.0, 0.15)
+            await stream_sweep(ws, 2.0, "right_dx", 0.0, -0.15)
+            st = req(base, "/record/status")
+            frames = int(st.get("episode_frames", 0))
+            check("frames accumulate during the drive",
+                  frames >= 60,
+                  f"{frames} frames, {st.get('skipped_frames')} skipped")
+
+            out = req(base, "/record/stop", {"save": True})
+            check("stop-and-save ends the take with its frames",
+                  out.get("recording") is False
+                  and int(out.get("episode_frames", -1)) == frames,
+                  f"frames={out.get('episode_frames')}")
+        req(base, "/teleop/human/stop", {})
+
+        facts = _dataset_disk_facts(root)
+        if facts is None:
+            check("dataset on disk for the take", False, f"nothing at {root}")
+        else:
+            check("dataset carries both sim camera channels",
+                  len(facts["img_keys"]) >= 2, ", ".join(facts["img_keys"]))
+            vids = facts["videos"]
+            check("every camera channel wrote a non-empty episode video",
+                  bool(vids) and all(v["mp4s"] > 0 for v in vids.values()),
+                  str({k.split(".")[-1]: v["mp4s"] for k, v in vids.items()}))
+            if all(v["frames"] is not None for v in vids.values()):
+                check("every camera video holds every recorded frame",
+                      all(v["frames"] == frames for v in vids.values()),
+                      str({k.split(".")[-1]: v["frames"]
+                           for k, v in vids.items()})
+                      + f" recorder={frames}")
+            check("episode parquet is on disk",
+                  facts["parquet_bytes"] > 1024,
+                  f"{facts['parquet_bytes']} bytes")
+
+        print("\n-- 11: E-STOP mid-take auto-saves --")
+        for arm in arm_ids:
+            req(base, f"/arm/{arm}/mode", {"mode": "manual"})
+        req(base, "/teleop/human/stop", {})
+        req(base, "/teleop/human/start", start_body)
+        async with ws_connect(ws_url) as ws:
+            s = await wait_for(
+                base, lambda st: authorities(st) == ("driving", "driving"),
+                8.0, ws=ws)
+            check("both sides driving for the estop take", s is not None)
+            req(base, "/record/start",
+                {"repo_id": SMOKE_REPO, "task": "smoke: estop mid-take"})
+            await stream(ws, 1.0)
+            frames_before = int(req(base, "/record/status")
+                                .get("episode_frames", 0))
+
+            req(base, "/estop", {})
+            # Nobody calls /record/stop: the record loop itself must see the
+            # teleop session stop and finish (save) the episode.
+            deadline = time.monotonic() + 3.0
+            st = {}
+            while time.monotonic() < deadline:
+                st = req(base, "/record/status")
+                if not st.get("recording"):
+                    break
+                await asyncio.sleep(0.1)
+            frames_after = int(st.get("episode_frames", 0))
+            check("E-STOP makes the recorder save the take on its own",
+                  st.get("recording") is False
+                  and frames_after >= frames_before > 0,
+                  f"frames={frames_after} (at estop: {frames_before})")
+        for arm in arm_ids:
+            req(base, f"/arm/{arm}/mode", {"mode": "manual"})
+    finally:
+        # The smoke dataset is throwaway whether the checks passed or not.
+        req(base, "/teleop/human/stop", {})
+        shutil.rmtree(root, ignore_errors=True)
+
+
+async def robustness_section(base: str, ws_url: str) -> None:
+    """Input-path failures the safety chain must absorb: a socket that goes
+    quiet without dying, and a controller that drops tracking mid-drive."""
+    start_body = {"left_arm": "left", "right_arm": "right", "swap": False,
+                  "clutch_source": "vr_grip"}
+
+    print("\n-- 12: frame starvation holds both sides --")
+    req(base, "/teleop/human/stop", {})
+    req(base, "/teleop/human/start", start_body)
+    async with ws_connect(ws_url) as ws:
+        s = await wait_for(
+            base, lambda st: authorities(st) == ("driving", "driving"),
+            8.0, ws=ws)
+        check("both sides driving before the gap", s is not None)
+        # Let the commit loop finish converging on the (static) hand pose —
+        # authority flips to DRIVING at the match tolerance, not at zero
+        # error, so the first beats of a fresh session are still moving.
+        await stream(ws, 1.5)
+
+        # ~1.1 s of silence: long enough to blow the 300 ms staleness budget,
+        # short enough that the 2 s socket idle timeout must NOT fire — the
+        # connection is alive, the operator's headset is just not talking.
+        t0 = time.monotonic()
+        st = None
+        g_mid = None
+        while time.monotonic() - t0 < 1.1:
+            st = req(base, "/teleop/human")
+            if g_mid is None and time.monotonic() - t0 > 0.6:
+                # Well past the staleness gate: the HELD transition has done
+                # its one-time committed-pose reseed (the arms re-read
+                # themselves, which in sim includes a little gravity droop),
+                # so anything after this is motion that must not happen.
+                g_mid = st["goal_deg"]
+            await asyncio.sleep(0.1)
+        check("silence holds both sides",
+              authorities(st or {}) == ("held", "held"),
+              f"authorities={st and authorities(st)}")
+        g1 = req(base, "/teleop/human")["goal_deg"]
+        drift = max(abs(g1[s_].get(j, 0.0) - g_mid[s_].get(j, 0.0))
+                    for s_ in ("left", "right") for j in g_mid[s_])
+        check("starved goals freeze in place", drift < 0.5,
+              f"max drift {drift:.2f} deg once held")
+
+        # The socket survived the gap: talking again re-acquires both sides.
+        s = await wait_for(
+            base, lambda st: authorities(st) == ("driving", "driving"),
+            8.0, ws=ws)
+        check("both sides re-acquire when frames resume", s is not None)
+    req(base, "/teleop/human/stop", {})
+
+    print("\n-- 13: tracking blip releases only the lost side --")
+    req(base, "/teleop/human/stop", {})
+    req(base, "/teleop/human/start", start_body)
+    async with ws_connect(ws_url) as ws:
+        s = await wait_for(
+            base, lambda st: authorities(st) == ("driving", "driving"),
+            8.0, ws=ws)
+        check("both sides driving before the blip", s is not None)
+
+        # Left controller drops tracking while both grips stay squeezed:
+        # that side must release WITHOUT touching the side still tracked.
+        s = await wait_for(
+            base, lambda st: authorities(st) == ("held", "driving"),
+            3.0, ws=ws, left_tracked=False)
+        check("left tracking loss holds only the left arm",
+              s is not None, f"authorities={s and authorities(s)}")
+
+        s = await wait_for(
+            base, lambda st: authorities(st) == ("driving", "driving"),
+            8.0, ws=ws)
+        check("re-track re-acquires the left arm", s is not None,
+              f"authorities={s and authorities(s)}")
+    req(base, "/teleop/human/stop", {})
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:8077")
@@ -440,6 +686,8 @@ async def main() -> int:
           stopped)
 
     await pose_mode_section(base, ws_url)
+    await recording_section(base, ws_url, arm_ids)
+    await robustness_section(base, ws_url)
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{'=' * 60}\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")
