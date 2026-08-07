@@ -1,11 +1,24 @@
 <mujocoinclude>
-  <!-- Flat workbench: a thin box at z=0 with a neutral grey surface. -->
+  <!-- Flat workbench: a thin box at z=0 with a neutral grey surface.
+       1.2 x 0.9 m — wide enough that both arms at +/-0.20 m get their own
+       half plus a contested middle, deep enough to stage cubes in front of
+       the bases and still have a place-zone clear of the reach-in path. -->
   <worldbody>
     <geom name="workbench"
           type="box"
-          size="0.4 0.4 0.01"
+          size="0.6 0.45 0.01"
           pos="0 0 -0.01"
           rgba="0.35 0.35 0.35 1"
+          friction="1 0.005 0.0001"/>
+    <!-- Place zone: the task's target. Sits on the midline toward the front,
+         reachable by either arm, bright enough to read in the overhead cam.
+         Thin enough (2 mm proud) that a cube resting on it is a stable,
+         unambiguous "placed" state. -->
+    <geom name="place_zone"
+          type="box"
+          size="0.06 0.06 0.001"
+          pos="0 -0.25 0.001"
+          rgba="0.2 0.4 0.9 1"
           friction="1 0.005 0.0001"/>
     <light name="overhead_light" pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
   </worldbody>

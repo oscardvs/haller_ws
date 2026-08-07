@@ -163,6 +163,27 @@ def _load_arm_subtree(prefix: str, x_offset: float) -> _ArmSubtree:
 
 Vec3 = tuple[float, float, float]
 
+#: Where cubes are dealt on the bench (x, y), metres. y<0 is in front of the
+#: bases — the arms' reach direction. Each sits 0.23-0.35 m from the arm that
+#: owns it: closer in and the arm must fold steeper than its elbow branch
+#: allows, further out and it runs out of reach. One "home" cube per arm, a
+#: contested midline cube by the place zone, then a back row for staging.
+#: 4 cm cubes, one colour each, so tasks can name them.
+_CUBE_SLOTS: list[tuple[float, float]] = [
+    (-0.28, -0.22),  # left arm's home cube
+    ( 0.28, -0.22),  # right arm's home cube
+    ( 0.00, -0.08),  # contested midline cube, back between the bases
+    (-0.12, -0.30),
+    ( 0.12, -0.30),
+]
+_CUBE_COLORS: list[str] = [
+    "0.85 0.20 0.20 1",  # red
+    "0.20 0.70 0.25 1",  # green
+    "0.95 0.75 0.15 1",  # amber
+    "0.60 0.30 0.80 1",  # violet
+    "0.20 0.60 0.80 1",  # teal
+]
+
 
 def _normalise(v: Vec3) -> Vec3:
     n = math.sqrt(sum(c * c for c in v))
@@ -202,7 +223,8 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
     """Compose a scene MJCF.
 
     `arms`: list of arm ids (e.g. ["right"] or ["left", "right"]).
-    `cubes`: number of 4cm cubes on the workbench.
+    `cubes`: number of 4cm cubes dealt onto the workbench, in _CUBE_SLOTS
+    order (front of the bases, spread across both arms' halves of the bench).
 
     Returns (mjcf_xml_string, arm_joint_map). arm_joint_map maps each arm id to
     its list of prefixed joint names — what `MuJoCoWorld` consumes.
@@ -228,7 +250,7 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
         subtrees.append(sub)
         arm_joint_map[arm_id] = sub.joint_names
 
-    # Workbench (always) + cubes.
+    # Workbench (always: bench + place zone) + cubes.
     workbench_inner = _extract_worldbody_inner(SCENES_DIR / "workbench.xml")
     cube_chunks: list[str] = []
     cube_template = (SCENES_DIR / "cube.xml").read_text()
@@ -236,11 +258,16 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
     cube_body_re = re.compile(
         r'<body\s+name="cube"(?:\s+pos="[^"]*")?', re.M
     )
+    cube_rgba_re = re.compile(r'rgba="[^"]*"')
     for i in range(cubes):
-        x = -0.10 + 0.10 * i
+        slot = _CUBE_SLOTS[i % len(_CUBE_SLOTS)]
+        lap = i // len(_CUBE_SLOTS)  # more cubes than slots: deal a second row
+        x, y, z = slot[0], slot[1] - 0.12 * lap, 0.025 + 0.05 * lap
         per_cube = cube_body_re.sub(
-            f'<body name="cube_{i}" pos="{x} 0 0.05"', cube_template
+            f'<body name="cube_{i}" pos="{x} {y} {z}"', cube_template
         )
+        per_cube = cube_rgba_re.sub(
+            f'rgba="{_CUBE_COLORS[i % len(_CUBE_COLORS)]}"', per_cube, count=1)
         cube_chunks.append(_extract_worldbody_inner_from_string(per_cube))
 
     # <compiler> — meshdir is relative to the MJCF on disk. We're producing an

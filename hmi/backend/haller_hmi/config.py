@@ -185,6 +185,9 @@ class Config:
     motion: MotionConfig = field(default_factory=MotionConfig)
     collision: CollisionConfig = field(default_factory=CollisionConfig)
     sim_leader: SimLeaderConfig | None = None
+    # Cubes dealt onto the sim workbench at world build; ignored unless at
+    # least one arm is source: sim.
+    sim_cubes: int = 0
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -199,6 +202,7 @@ def load_config(path: Path | None = None) -> Config:
         motion=MotionConfig(**raw.get("motion", {})),
         collision=_collision_from(raw.get("collision")),
         sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
+        sim_cubes=int(raw.get("sim_cubes", 0)),
     )
 
 

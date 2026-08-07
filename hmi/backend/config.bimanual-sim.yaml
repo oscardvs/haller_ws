@@ -1,4 +1,15 @@
-# Bimanual sim: two SO-101 followers facing the same workbench, two cubes.
+# Bimanual sim: two SO-101 followers facing the same workbench, three cubes
+# and a place zone — the default teleop playground.
+sim_cubes: 3
+collision:
+  # Tuned for sim, 2026-08-08: the defaults were written conservative for the
+  # real tower. margin 25 -> 15 mm (min tip-to-tip 115 -> 105 mm; a direct
+  # cube hand-off still needs set-down-regrasp — the 45 mm hand capsules, not
+  # the margin, are the binding constraint there), wrist floor 30 -> 15 mm so
+  # a level hand can actually reach a 4 cm cube resting on the bench. Real
+  # configs keep the conservative values until the tower mounts are measured.
+  margin_m: 0.015
+  wrist_min_m: 0.015
 arms:
   - id: left
     model: so101_follower

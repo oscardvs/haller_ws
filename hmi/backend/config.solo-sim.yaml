@@ -1,4 +1,10 @@
-# Solo SO-101 sim: one follower, workbench + one cube + overhead camera.
+# Solo SO-101 sim: one follower, workbench + two cubes + place zone.
+sim_cubes: 2
+collision:
+  # Same sim tuning as config.bimanual-sim.yaml: the wrist floor at the
+  # default 30 mm blocks level-hand grasps of a 4 cm bench cube.
+  margin_m: 0.015
+  wrist_min_m: 0.015
 arms:
   - id: right
     model: so101_follower
