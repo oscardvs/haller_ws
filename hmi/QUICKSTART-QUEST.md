@@ -74,7 +74,10 @@ after any backend change that could touch recording.
 
 ```bash
 # desktop, repo root
-scripts/quest-teleop/up.sh
+scripts/quest-teleop/up.sh          # backend on the Jetson
+scripts/quest-teleop/up.sh --local  # backend on THIS desktop — arms plugged
+                                    # straight in, no Jetson (see
+                                    # docs/setup/desktop-real-weekend.md)
 ```
 
 That checks/starts the backend on the Jetson (over `ssh jetson`), starts the

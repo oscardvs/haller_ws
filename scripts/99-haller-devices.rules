@@ -31,6 +31,17 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{seria
 # in USB mode nothing is wired to these pins and the symlink is inert.
 KERNEL=="ttyTHS1", SUBSYSTEM=="tty", SYMLINK+="haller_arm_uart", MODE="0666"
 
+# USB-UART module on a servo board's UART header -> /dev/haller_arm_uart_usb
+#
+# The desktop answer to the Jetson's ttyTHS1 path above: one servo board's
+# USB-C is burnt (2026-08), so that arm's bus is reached through the board's
+# UART header (jumper on UART) via a generic USB-UART module, exactly the
+# wiring pins 6/8/10 provided. Fill in the module's own idVendor/idProduct —
+# `lsusb` with it plugged in — then install + reload as at the top of this
+# file. CH340 is typically 1a86:7523, CP2102 10c4:ea60 (clashes with the
+# lidar rule: use ATTRS{serial} too if both are ever attached), FTDI 0403:6001.
+# SUBSYSTEM=="tty", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="XXXX", SYMLINK+="haller_arm_uart_usb", MODE="0666"
+
 # RealSense D455 RGB node (mast camera) -> /dev/haller_cam_mast
 #
 # The D455 presents six /dev/video* nodes across two USB interfaces: interface

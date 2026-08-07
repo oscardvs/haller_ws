@@ -1,0 +1,76 @@
+# hmi/backend/config.desktop-real.yaml
+# Real arms driven from the DESKTOP, no Jetson. Brought up by
+# `scripts/quest-teleop/up.sh --local`. Written 2026-08-07 for the post-DC-DC
+# rig state: one servo board's USB-C is burnt, so only one board can go over
+# USB; the other arm reaches its board over the UART header through a generic
+# USB-UART module (the same path the Jetson's 40-pin UART used, which is
+# proven on these boards at 1 Mbaud). See docs/setup/desktop-real-weekend.md.
+motion:
+  max_speed_deg_s: 60.0
+  large_move_deg: 30.0
+  ramp_hz: 50.0
+# Same guard as config.yaml — and the mounts are still the sim scene's
+# PLACEHOLDER ±0.20 m. Measure base-bolt to base-bolt on the tower and set x
+# to ±half that BEFORE driving for real (QUICKSTART-QUEST.md, first-run
+# checklist step 2).
+collision:
+  enabled: true
+  margin_m: 0.025
+  self_margin_m: 0.008
+  table_z_m: 0.0
+  mounts:
+    left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
+    right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
+arms:
+  - id: left
+    model: so101_follower
+    # The board whose USB-C still works (CH343, serial 5B14030445), jumper on
+    # USB-SERVO, straight into a desktop USB port.
+    port: /dev/haller_arm_leader
+    calibration_id: haller_leader
+    enabled: true
+  - id: right
+    model: so101_follower
+    # The board with the burnt USB-C. Jumper moves to UART, and a generic
+    # USB-UART module wires to the board's UART header (GND/TX/RX — the same
+    # straight-through TX->TX convention the Jetson's 40-pin UART used). The
+    # symlink comes from the 99-haller-devices.rules template block — fill in
+    # the module's vid:pid from lsusb, install the rule, replug. If the OTHER
+    # board is the burnt one, swap the two port lines and jumper settings.
+    port: /dev/haller_arm_uart_usb
+    calibration_id: haller_follower
+    enabled: true
+    # If the UART-USB module can't be made to work: don't edit this file —
+    # use the one-real-arm + one-sim-arm hybrid described in
+    # docs/setup/desktop-real-weekend.md, which keeps bimanual VR teleop
+    # (and dataset recording) alive with a single physical arm.
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+telemetry:
+  # 20 Hz, not the sim's 30: the half-duplex Feetech bus interleaves 60 Hz
+  # writes with these reads. The recorded dataset's fps follows this number.
+  hz: 20
+cameras:
+  - id: base_front
+    role: base
+    source: opencv
+    # RealSense D455 colour node, tower-mounted. The udev symlink pins the
+    # colour interface regardless of /dev/videoN numbering.
+    index_or_path: /dev/haller_cam_mast
+    width: 640
+    height: 480
+    fps: 30
+  - id: wrist_right
+    role: wrist
+    arm_id: right
+    # The gripper egocentric cams are IMX219 on Tegra CSI — there is no CSI
+    # on the desktop, so they stay out of the dataset schema this weekend.
+    source: placeholder
+  - id: wrist_left
+    role: wrist
+    arm_id: left
+    source: placeholder

@@ -11,6 +11,11 @@
 #                                         # The full system, driven from the
 #                                         # real headset, with nothing that
 #                                         # can break.
+#   scripts/quest-teleop/up.sh --local    # real arms, NO Jetson: the backend
+#                                         # runs here against the servo boards
+#                                         # plugged into this machine
+#                                         # (config.desktop-real.yaml, or
+#                                         # $HALLER_HMI_CONFIG).
 #   scripts/quest-teleop/down.sh          # stop the desktop half
 #
 # Overridable env (defaults = the 2026-08-01 working setup):
@@ -22,8 +27,12 @@
 set -eo pipefail
 
 SIM=0
+LOCAL=0
 if [ "${1:-}" = "--sim" ]; then
     SIM=1
+    shift
+elif [ "${1:-}" = "--local" ]; then
+    LOCAL=1
     shift
 fi
 
@@ -35,6 +44,8 @@ NEXT_PORT="${HALLER_NEXT_PORT:-3001}"
 BACKEND_PORT="${HALLER_BACKEND_PORT:-8000}"
 if [ "$SIM" = 1 ]; then
     JETSON_IP=127.0.0.1   # the "Jetson" is this machine in sim mode
+elif [ "$LOCAL" = 1 ]; then
+    JETSON_IP=127.0.0.1   # real arms, but the backend runs on this machine
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -46,15 +57,21 @@ say() { printf '\033[1m[quest-up]\033[0m %s\n' "$*"; }
 # ---- 1. backend ---------------------------------------------------------------
 if curl -sm 2 "http://$JETSON_IP:$BACKEND_PORT/health" | grep -q '"ok"'; then
     say "backend already up at http://$JETSON_IP:$BACKEND_PORT"
-elif [ "$SIM" = 1 ]; then
-    say "starting SIM backend on :$BACKEND_PORT (MuJoCo bimanual, no hardware)"
+elif [ "$SIM" = 1 ] || [ "$LOCAL" = 1 ]; then
+    if [ "$SIM" = 1 ]; then
+        BACKEND_CFG="config.bimanual-sim.yaml"
+        say "starting SIM backend on :$BACKEND_PORT (MuJoCo bimanual, no hardware)"
+    else
+        BACKEND_CFG="${HALLER_HMI_CONFIG:-config.desktop-real.yaml}"
+        say "starting LOCAL backend on :$BACKEND_PORT ($BACKEND_CFG — real arms, no Jetson)"
+    fi
     (
       cd "$REPO/hmi/backend"
-      # shellcheck disable=SC1091 — not `activate-haller-hmi`: the sim needs
-      # no ROS overlay, and MUJOCO_GL=egl renders headless (works with or
-      # without a display; GLFW through a stale X session does not).
+      # shellcheck disable=SC1091 — not `activate-haller-hmi`: the ROS overlay
+      # is not needed (the bridge degrades to a dead base channel without it),
+      # and MUJOCO_GL=egl renders headless if the config has sim cameras.
       source "$HOME/venvs/haller-hmi/bin/activate"
-      HALLER_HMI_CONFIG="$PWD/config.bimanual-sim.yaml" \
+      HALLER_HMI_CONFIG="$PWD/$BACKEND_CFG" \
       MUJOCO_GL="${MUJOCO_GL:-egl}" \
         nohup python -m uvicorn haller_hmi.server:app \
           --host 0.0.0.0 --port "$BACKEND_PORT" \
@@ -66,9 +83,9 @@ elif [ "$SIM" = 1 ]; then
         curl -sm 2 "http://127.0.0.1:$BACKEND_PORT/health" | grep -q '"ok"' && break
     done
     if curl -sm 2 "http://127.0.0.1:$BACKEND_PORT/health" | grep -q '"ok"'; then
-        say "sim backend up (log: $RUN_DIR/sim-backend.log)"
+        say "backend up (log: $RUN_DIR/sim-backend.log)"
     else
-        say "sim backend failed to start — check $RUN_DIR/sim-backend.log"
+        say "backend failed to start — check $RUN_DIR/sim-backend.log"
         exit 1
     fi
 else
@@ -152,6 +169,8 @@ curl -ksm 4 "https://$DESKTOP_IP:$HTTPS_PORT/teleop/vr" -o /dev/null || ok=0
 if [ "$ok" = 1 ]; then
     if [ "$SIM" = 1 ]; then
         say "READY (SIM — MuJoCo arms, nothing physical can move)."
+    elif [ "$LOCAL" = 1 ]; then
+        say "READY (REAL ARMS on this desktop — no Jetson)."
     else
         say "READY (REAL ARMS on the Jetson)."
     fi

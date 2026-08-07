@@ -1,0 +1,75 @@
+# hmi/backend/config.hybrid-real-sim.yaml
+# Weekend fallback: ONE real arm (the servo board whose USB-C still works)
+# plus one MuJoCo arm standing in for the side that has no working bus
+# adapter. Bimanual VR teleop needs two enabled arms — this keeps the full
+# chain (Quest -> backend -> collision guard -> recorder) alive with a single
+# physical arm, and every take still records the real side's true state and
+# commanded action.
+#
+# Bring up with:  HALLER_HMI_CONFIG=config.hybrid-real-sim.yaml \
+#                 scripts/quest-teleop/up.sh --local
+#
+# Honest caveats:
+#   - The sim side's state/action in the dataset is synthetic. Fine for
+#     pipeline work and single-arm policy data (slice the real side's 6 dims
+#     out, or just treat the sim side as padding); it is NOT bimanual
+#     training data.
+#   - The collision guard protects both arms in its model, but the sim arm
+#     has no mass to hurt anything. Clearances against the REAL arm are the
+#     ones that matter — still measure the mounts before trusting mm margins.
+motion:
+  max_speed_deg_s: 60.0
+  large_move_deg: 30.0
+  ramp_hz: 50.0
+collision:
+  enabled: true
+  margin_m: 0.025
+  self_margin_m: 0.008
+  table_z_m: 0.0
+  mounts:
+    left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
+    right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
+arms:
+  - id: left
+    model: so101_follower
+    # The board with the working USB-C (CH343, serial 5B14030445), jumper on
+    # USB-SERVO, into a desktop USB port. Backend startup refuses to come up
+    # without it — that is deliberate, a silently missing real arm is worse.
+    port: /dev/haller_arm_leader
+    calibration_id: haller_leader
+    enabled: true
+  - id: right
+    model: so101_follower
+    port: "(sim)"
+    calibration_id: "(sim)"
+    source: sim
+    sim_arm_name: right
+    enabled: true
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+telemetry:
+  # 20 Hz: paced by the real arm's half-duplex Feetech bus (the sim side has
+  # no budget problem, it just follows).
+  hz: 20
+cameras:
+  - id: base_front
+    role: base
+    source: opencv
+    # RealSense D455 colour node, tower-mounted, via the udev symlink.
+    index_or_path: /dev/haller_cam_mast
+    width: 640
+    height: 480
+    fps: 30
+  - id: wrist_right
+    role: wrist
+    arm_id: right
+    # IMX219 egocentric cams are Tegra-CSI only — no CSI on the desktop.
+    source: placeholder
+  - id: wrist_left
+    role: wrist
+    arm_id: left
+    source: placeholder
