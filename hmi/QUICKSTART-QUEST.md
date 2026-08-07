@@ -6,7 +6,7 @@ model of both arms runs inside the 60 Hz loop so you cannot command them into
 each other or through the bench.
 
 The whole pipeline is exercised end-to-end in sim by `scripts/vr_smoke.py`
-(15 checks, run against a live backend). What has **not** happened yet is a
+(38 checks, run against a live backend). What has **not** happened yet is a
 human driving the real arms from the headset — do the *first hardware run*
 checklist below before trusting it.
 
@@ -29,6 +29,46 @@ a sim render — passthrough shows your room, and the sim arms live only in
 that tile; `Cam off` hides it). The desktop cockpit (`/`) shows the same
 view. This is the recommended way to learn the controls and check your
 limb-length settings before the first hardware run.
+
+## Collecting datasets in sim
+
+The sim chain records the same LeRobot datasets the real rig will — same
+recorder, same schema — so headset hours produce training data even with no
+arms powered.
+
+1. **Draft the take on the desktop cockpit** (`/` → Dataset tab): type the
+   task (one instruction per dataset, e.g. *"pick the red cube, hand it to
+   the other arm, place it in the box"*) and your HF username. The draft
+   persists in the browser, so the headset can start takes from it.
+2. **Bring the sim up**: `scripts/quest-teleop/up.sh --sim`, open the printed
+   URL in the Quest browser, **Enter Passthrough**.
+3. **Record from inside the headset**: hold **A or X ~0.5 s** to start the
+   take — both controllers buzz and the HUD shows `● REC <frames>`. Drive the
+   task. Hold A/X again to stop **and save**. Repeat per episode; the draft
+   stays put. (Discard stays a cockpit-only action on purpose: a thumb brush
+   must never be able to throw a take away.)
+4. Takes land in `~/.cache/huggingface/lerobot/<hf_user>/<task-slug>` —
+   **30 fps, h264**, with `observation.state` + `action` (12-dim, left-then-
+   right SO-101 order), `observation.base`, `observation.wall_clock` (real
+   capture time — LeRobot's own `timestamp` column is synthetic), and both
+   sim camera channels. The cockpit's `skipped` counter next to the frame
+   count tells you a take had gaps; the wall-clock deltas tell you where.
+   An **E-STOP mid-take is fine**: the recorder sees the session die and
+   saves up to that frame instead of appending a torque-off tail.
+5. **Replay a take onto the sim arms** to eyeball what you actually drove
+   (loops until stopped):
+
+   ```bash
+   curl -X POST http://localhost:8000/teleop/sim/start \
+     -H 'Content-Type: application/json' \
+     -d '{"follower": "left", "leader": {"source": "replay",
+          "dataset_path": "~/.cache/huggingface/lerobot/<hf_user>/<task-slug>"}}'
+   # ...and "follower": "right" for the other arm; /teleop/sim/stop to end.
+   ```
+
+`scripts/vr_smoke.py` covers this whole path headlessly — including the
+record→save→files-on-disk round trip and the E-STOP-mid-take save — run it
+after any backend change that could touch recording.
 
 ## Start everything (each session, real arms)
 
@@ -69,6 +109,7 @@ ssh jetson 'cd ~/haller_ws && git fetch origin && git checkout feat/quest-bimanu
 | **right grip** | dead-man for the **right arm** only |
 | **trigger** (analog) | that arm's gripper — 0 open, 1 closed |
 | **B or Y** (either controller) | **E-STOP**: torque off both arms, session stops |
+| **hold A or X** (~0.5 s) | start / stop-and-save a dataset take — REC state + frame count show in the HUD |
 | release a grip | that arm freezes exactly where it is |
 | take off headset / open Quest menu | frames force-disengage; arms freeze |
 
@@ -86,8 +127,8 @@ position mode exists.) All motion rides the same rate limiter (60 °/s
 ceiling at the handle, less during the first 1.5 s ramp).
 
 The HUD floats over passthrough: per-side authority + countdown, grip state,
-live collision clearance, an E-STOP button you can click with the controller
-ray, and any backend error.
+live collision clearance, a red `● REC <frames>` line while a take rolls, an
+E-STOP button you can click with the controller ray, and any backend error.
 
 ## The collision guard
 
