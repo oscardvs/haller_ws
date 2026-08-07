@@ -48,6 +48,14 @@ _IK_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex")
 _POSE_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex",
                 "wrist_flex", "wrist_roll")
 
+#: Orientation gains on the controller→wrist mapping, applied to the delta
+#: from the anchored attitude. A human wrist holding a controller rolls
+#: comfortably through maybe ±90°, while the SO-101's wrist_roll spans far
+#: more — at 1:1 the arm's roll extremes are unreachable without re-anchoring,
+#: so roll is exaggerated: a small twist of the wrist tilts the gripper a lot.
+WRIST_ROLL_GAIN = 2.0
+WRIST_PITCH_GAIN = 1.0
+
 
 def _wpr(joints: dict[str, float]) -> np.ndarray:
     """Wrist-point (Wrist_Pitch_Roll origin) in the arm's own base frame."""
@@ -268,13 +276,17 @@ class VRPoseMode:
         # anchored attitude, so however the controller was held at the
         # squeeze reads as "keep the wrist where it is". Signs: positive
         # wrist_flex pitches the hand DOWN (tests/sim pin this against FK),
-        # so controller pitch-up subtracts.
+        # so controller pitch-up subtracts. Roll is gained up (see the
+        # constants above): the operator's wrist physically cannot match
+        # the arm's range.
         wf_lo, wf_hi = limits.get("wrist_flex", (-180.0, 180.0))
         wr_lo, wr_hi = limits.get("wrist_roll", (-180.0, 180.0))
         goal = dict(solved)
         goal["wrist_flex"] = min(wf_hi, max(wf_lo,
-            anchor.joints.get("wrist_flex", 0.0) - (pitch - anchor.pitch_deg)))
+            anchor.joints.get("wrist_flex", 0.0)
+            - WRIST_PITCH_GAIN * (pitch - anchor.pitch_deg)))
         goal["wrist_roll"] = min(wr_hi, max(wr_lo,
-            anchor.joints.get("wrist_roll", 0.0) + (roll - anchor.roll_deg)))
+            anchor.joints.get("wrist_roll", 0.0)
+            + WRIST_ROLL_GAIN * (roll - anchor.roll_deg)))
         goal["gripper"] = max(0.0, min(1.0, 1.0 - trigger))
         return {"joint_goal": goal, "confidence": 1.0}

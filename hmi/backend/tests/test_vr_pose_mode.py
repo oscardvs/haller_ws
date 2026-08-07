@@ -181,6 +181,19 @@ def test_controller_pitch_up_raises_the_hand():
     assert out["right"]["joint_goal"]["wrist_flex"] < PARKED["wrist_flex"]
 
 
+def test_wrist_roll_is_exaggerated_not_one_to_one():
+    """A human wrist cannot cover the SO-101's roll range, so the mapping
+    gains the twist up (WRIST_ROLL_GAIN): 15° of controller roll about the
+    forward axis must drive 30° of wrist_roll."""
+    mode, _ = _mode()
+    mode.convert(_frame(right=_ctrl(HAND, squeeze=True)))  # anchor at identity
+    rolled = [0.0, 0.0, np.sin(np.deg2rad(7.5)), np.cos(np.deg2rad(7.5))]
+    out = mode.convert(_frame(right=_ctrl(HAND, squeeze=True,
+                                          orientation=rolled)))
+    assert out["right"]["joint_goal"]["wrist_roll"] == pytest.approx(
+        PARKED["wrist_roll"] + 30.0, abs=2.0)
+
+
 def test_trigger_is_the_gripper_absolute():
     mode, _ = _mode()
     mode.convert(_frame(left=_ctrl(HAND, squeeze=True)))
