@@ -20,6 +20,29 @@ import { api, type RecordStatus } from "./api";
 
 const POLL_MS = 1000;
 
+// The take draft persists so a take can be started from inside the headset
+// (VRTeleopPanel's A/X hold) with whatever the operator last typed into the
+// cockpit, instead of forcing them out of VR to re-draft it.
+const TASK_LS_KEY = "haller.recorder.task.v1";
+const HFUSER_LS_KEY = "haller.recorder.hfUser.v1";
+
+function readLS(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeLS(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* storage full / blocked — the draft just won't survive a reload */
+  }
+}
+
 type Store = {
   status: RecordStatus | null;
   busy: boolean;
@@ -39,11 +62,17 @@ let subscribers = 0;
 export const useRecorder = create<Store>((set, get) => ({
   status: null,
   busy: false,
-  task: "Pick the red cube and place it in the box",
-  hfUser: "",
+  task: readLS(TASK_LS_KEY) ?? "Pick the red cube and place it in the box",
+  hfUser: readLS(HFUSER_LS_KEY) ?? "",
 
-  setTask: (v) => set({ task: v }),
-  setHfUser: (v) => set({ hfUser: v }),
+  setTask: (v) => {
+    set({ task: v });
+    writeLS(TASK_LS_KEY, v);
+  },
+  setHfUser: (v) => {
+    set({ hfUser: v });
+    writeLS(HFUSER_LS_KEY, v);
+  },
 
   refresh: async () => {
     try {

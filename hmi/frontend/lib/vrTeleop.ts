@@ -364,6 +364,9 @@ export type HudStatusLike = {
   }>>;
 } | null;
 
+/** The slice of recorder status the in-scene HUD shows. */
+export type RecorderHudLike = { recording: boolean; episode_frames: number } | null;
+
 /**
  * Repaint the in-scene HUD. Layout: workspace camera on top (when a frame is
  * available), status strip below. Pure canvas 2D so it can run anywhere;
@@ -374,6 +377,7 @@ export function paintHud(
   ctx: CanvasRenderingContext2D,
   status: HudStatusLike,
   cam: HTMLImageElement | null,
+  rec: RecorderHudLike = null,
 ): void {
   const W = ctx.canvas.width;
   const H = ctx.canvas.height;
@@ -414,6 +418,14 @@ export function paintHud(
         ? `COLLISION HOLD ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`
         : `clearance ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`,
       300, y);
+  }
+  if (rec?.recording) {
+    // Right-aligned so it can never collide with the clearance text: the
+    // one line in the HUD that must be readable at a glance while driving.
+    ctx.fillStyle = "#f28b82";
+    ctx.textAlign = "right";
+    ctx.fillText(`● REC ${rec.episode_frames}`, W - 24, y);
+    ctx.textAlign = "left";
   }
   ctx.font = "28px monospace";
   for (const side of ["left", "right"] as const) {
@@ -562,6 +574,54 @@ export function estopPressed(session: XRSessionLike): boolean {
     if (src.gamepad?.buttons[BUTTON_BY]?.pressed) return true;
   }
   return false;
+}
+
+/** True while A (right) or X (left) is down on any controller — the record
+ *  toggle. Deliberately NOT edge-detected here: the panel runs it through
+ *  `holdToggle` so a brush of the thumb cannot start or end a take. */
+export function axPressed(session: XRSessionLike): boolean {
+  for (const src of session.inputSources) {
+    if (src.handedness !== "left" && src.handedness !== "right") continue;
+    if (src.gamepad?.buttons[BUTTON_AX]?.pressed) return true;
+  }
+  return false;
+}
+
+/** How long A/X must stay down before the record toggle fires. The thumb
+ *  rests near A/X while gripping; a plain press would toggle takes by
+ *  accident, and an accidental take boundary is corrupted data. */
+export const RECORD_HOLD_MS = 500;
+
+export type HoldToggleState = {
+  down: boolean;
+  /** When the current press started (frame time, ms); null while released. */
+  since: number | null;
+  /** True for exactly one update: the moment the hold threshold is crossed. */
+  toggled: boolean;
+};
+
+export function holdToggleInit(): HoldToggleState {
+  return { down: false, since: null, toggled: false };
+}
+
+/**
+ * Edge-AND-hold detection for a button that must fire once per deliberate
+ * press, and only after `holdMs` of continuous hold. Pure: feed it the raw
+ * button state and the frame timestamp, act when the returned state's
+ * `toggled` is true. Release resets; re-pressing is required to fire again.
+ */
+export function holdToggle(
+  prev: HoldToggleState,
+  isDown: boolean,
+  now: number,
+  holdMs: number,
+): HoldToggleState {
+  if (!isDown) return { down: false, since: null, toggled: false };
+  if (!prev.down) return { down: true, since: now, toggled: false };
+  if (!prev.toggled && prev.since !== null && now - prev.since >= holdMs) {
+    return { down: true, since: prev.since, toggled: true };
+  }
+  return { down: true, since: prev.since, toggled: false };
 }
 
 /** Fire a haptic pulse on one hand's controller, where supported. Best

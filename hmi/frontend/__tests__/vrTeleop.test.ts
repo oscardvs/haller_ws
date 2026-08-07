@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  BUTTON_BY, BUTTON_SQUEEZE, BUTTON_TRIGGER,
-  disengagedFrame, estopPressed, hapticCues, pulse, sampleVRFrame,
+  BUTTON_AX, BUTTON_BY, BUTTON_SQUEEZE, BUTTON_TRIGGER,
+  axPressed, disengagedFrame, estopPressed, hapticCues, holdToggle,
+  holdToggleInit, pulse, RECORD_HOLD_MS, sampleVRFrame,
   type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
 } from "../lib/vrTeleop";
 
@@ -10,7 +11,7 @@ const IDENT = { x: 0, y: 0, z: 0, w: 1 };
 
 function controller(
   handedness: "left" | "right",
-  opts: { squeeze?: boolean; trigger?: number; estop?: boolean;
+  opts: { squeeze?: boolean; trigger?: number; estop?: boolean; ax?: boolean;
           pose?: boolean;
           pulse?: (intensity: number, durationMs: number) => unknown } = {},
 ): XRInputSourceLike {
@@ -18,6 +19,7 @@ function controller(
   buttons[BUTTON_TRIGGER] = { pressed: false, value: opts.trigger ?? 0 };
   buttons[BUTTON_SQUEEZE] = { pressed: opts.squeeze ?? false, value: 0 };
   buttons[BUTTON_BY] = { pressed: opts.estop ?? false, value: 0 };
+  buttons[BUTTON_AX] = { pressed: opts.ax ?? false, value: 0 };
   return {
     handedness,
     gripSpace: opts.pose === false ? undefined : { space: handedness },
@@ -105,6 +107,55 @@ describe("estopPressed", () => {
       controller("right", { squeeze: true, trigger: 1 }),
     ]);
     expect(estopPressed(s)).toBe(false);
+  });
+});
+
+describe("axPressed", () => {
+  it("fires on A/X from either controller", () => {
+    expect(axPressed(session([controller("left", { ax: true })]))).toBe(true);
+    expect(axPressed(session([controller("right", { ax: true })]))).toBe(true);
+  });
+
+  it("stays quiet for grips, triggers and the E-STOP button", () => {
+    const s = session([
+      controller("left", { squeeze: true, trigger: 1, estop: true }),
+      controller("right", { squeeze: true, trigger: 1 }),
+    ]);
+    expect(axPressed(s)).toBe(false);
+  });
+});
+
+describe("holdToggle", () => {
+  const HOLD = RECORD_HOLD_MS;
+
+  it("does not fire until the hold threshold is crossed", () => {
+    let st = holdToggleInit();
+    st = holdToggle(st, true, 0, HOLD);       // press starts
+    expect(st.toggled).toBe(false);
+    st = holdToggle(st, true, HOLD - 1, HOLD); // still short
+    expect(st.toggled).toBe(false);
+  });
+
+  it("fires exactly once at the threshold while held", () => {
+    let st = holdToggleInit();
+    st = holdToggle(st, true, 0, HOLD);
+    st = holdToggle(st, true, HOLD, HOLD);
+    expect(st.toggled).toBe(true);
+    // Holding longer must not re-fire.
+    st = holdToggle(st, true, HOLD + 500, HOLD);
+    expect(st.toggled).toBe(false);
+  });
+
+  it("releasing before the threshold never fires, and re-pressing restarts", () => {
+    let st = holdToggleInit();
+    st = holdToggle(st, true, 0, HOLD);
+    st = holdToggle(st, false, 100, HOLD);    // let go early
+    expect(st.toggled).toBe(false);
+    // A fresh press gets a fresh clock: the earlier partial hold doesn't count.
+    st = holdToggle(st, true, 1000, HOLD);
+    expect(st.toggled).toBe(false);
+    st = holdToggle(st, true, 1000 + HOLD, HOLD);
+    expect(st.toggled).toBe(true);
   });
 });
 
@@ -220,6 +271,16 @@ describe("paintHud", () => {
     const { ctx, texts } = stubCtx();
     expect(() => paintHud(ctx, null, null)).not.toThrow();
     expect(texts.join(" ")).toContain("E-STOP");
+  });
+
+  it("shows the REC badge and frame count while recording, and hides it otherwise", () => {
+    const on = stubCtx();
+    paintHud(on.ctx, { state: "driving" }, null, { recording: true, episode_frames: 612 });
+    expect(on.texts.join(" | ")).toContain("● REC 612");
+
+    const off = stubCtx();
+    paintHud(off.ctx, { state: "driving" }, null, null);
+    expect(off.texts.join(" | ")).not.toContain("● REC");
   });
 });
 

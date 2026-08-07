@@ -8,12 +8,14 @@
  * shipped unmodified; the backend applies the acquisition countdown, the
  * confidence floor, the staleness budget, every joint clamp and the bimanual
  * collision guard. Same contract the MediaPipe panel has — see
- * HumanTeleopPanel. The two decisions this file DOES own are input-shaped,
- * not safety-shaped: B/Y on either controller fires POST /estop (one press,
- * one post), and while the session is not fully visible (Quest system menu
- * open) every published frame is forced disengaged — the page keeps receiving
- * the last input state in that menu, so a grip held when it opened would
- * otherwise stay held forever.
+ * HumanTeleopPanel. The decisions this file DOES own are input-shaped, not
+ * safety-shaped: B/Y on either controller fires POST /estop (one press, one
+ * post); a half-second hold of A/X on either controller starts or stops the
+ * dataset recorder (hold-gated so a thumb brush cannot toggle a take); and
+ * while the session is not fully visible (Quest system menu open) every
+ * published frame is forced disengaged — the page keeps receiving the last
+ * input state in that menu, so a grip held when it opened would otherwise
+ * stay held forever.
  *
  * The session asks for **passthrough AR first** (the operator must watch the
  * REAL arms, not a void) with the HUD div as a dom-overlay, falling back to
@@ -29,15 +31,19 @@ import { toast } from "sonner";
 
 import {
   api, cameraStreamUrl, type CameraInfo, type HumanTeleopStatus,
+  type RecordStatus,
 } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
+import { useRecorder } from "@/lib/recorder";
 import {
-  attachRenderScene, disengagedFrame, estopPressed, hapticCues, paintHud,
-  pulse, requestTeleopSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
-  type BodyOverride, type SideAuthorityLike, type TeleopXRSession,
-  type VRFrame, type XRFrameLike, type XRSessionLike,
+  attachRenderScene, axPressed, disengagedFrame, estopPressed, hapticCues,
+  holdToggle, holdToggleInit, paintHud, pulse, RECORD_HOLD_MS,
+  requestTeleopSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
+  type BodyOverride, type HoldToggleState, type SideAuthorityLike,
+  type TeleopXRSession, type VRFrame, type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
+import { repoIdFor } from "./cockpit/CommandBar";
 import { DeadManIndicator } from "./DeadManIndicator";
 
 const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/vr/in`;
@@ -70,6 +76,9 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   // and defaults on. On the real rig the same toggle shows the mast camera.
   const [baseCam, setBaseCam] = useState<CameraInfo | null>(null);
   const [showCam, setShowCam] = useState(false);
+  // Recorder status, polled alongside teleop status so the HUD (in-scene or
+  // dom-overlay) can show whether a take is rolling and how long it is.
+  const [recStatus, setRecStatus] = useState<RecordStatus | null>(null);
 
   const sessionRef = useRef<XRSessionLike | null>(null);
   const refSpaceRef = useRef<unknown>(null);
@@ -87,6 +96,8 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const showCamRef = useRef(false);
   const camImgRef = useRef<HTMLImageElement | null>(null);
   const hudPaintRef = useRef(0);
+  const recStatusRef = useRef<RecordStatus | null>(null);
+  const axToggleRef = useRef<HoldToggleState>(holdToggleInit());
 
   bodyRef.current = body;
   mirrorModeRef.current = mirrorMode;
@@ -94,6 +105,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   statusRef.current = status;
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
+  recStatusRef.current = recStatus;
 
   useEffect(() => {
     void xrSupported().then(setSupported);
@@ -122,6 +134,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   useEffect(() => {
     let alive = true;
     const t = setInterval(() => {
+      // Recorder status rides the same poll: the HUD's REC line is the only
+      // way an operator inside the headset can see a take rolling.
+      api.recordStatus()
+        .then((rs) => { if (alive) setRecStatus(rs); })
+        .catch(() => { /* recorder not ready; the badge just stays hidden */ });
       api.humanTeleopStatus()
         .then((s) => {
           if (!alive) return;
@@ -219,6 +236,41 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   }, [armIds]);
 
+  /** Start or stop the dataset take. Invoked from inside the XR loop by a
+   *  deliberate half-second A/X hold — see `holdToggle`. The task/HF-user
+   *  draft comes from the cockpit's Dataset tab (persisted), so a solo
+   *  operator never has to leave the headset between takes. */
+  const toggleRecording = useCallback(async () => {
+    const rec = useRecorder.getState();
+    const session = sessionRef.current;
+    try {
+      if (rec.status?.recording) {
+        const s = await rec.stop(true);   // always save; discard lives in the cockpit
+        if (session) {
+          pulse(session, "left", 0.5, 150);
+          pulse(session, "right", 0.5, 150);
+        }
+        toast.success(`take saved — ${s.episode_frames} frames`);
+      } else {
+        const task = rec.task.trim();
+        if (!task) {
+          toast.error("no task drafted — set one in the cockpit's Dataset tab first");
+          return;
+        }
+        const repoId = repoIdFor(rec.hfUser, task);
+        await rec.start(repoId, task);
+        if (session) {
+          pulse(session, "left", 0.7, 200);
+          pulse(session, "right", 0.7, 200);
+        }
+        toast.success(`recording → ${repoId}`);
+      }
+      await rec.refresh();
+    } catch (e) {
+      toast.error(`record toggle failed: ${(e as Error).message}`);
+    }
+  }, []);
+
   const enterVR = useCallback(async () => {
     if (armIds.length < 2) {
       // Checked here rather than letting the backend 400, because the reason is
@@ -306,7 +358,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       let hudDirty = false;
       if (hudCanvas && hudCtx && t - hudPaintRef.current > 100) {
         hudPaintRef.current = t;
-        paintHud(hudCtx, statusRef.current, camImgRef.current);
+        paintHud(hudCtx, statusRef.current, camImgRef.current, recStatusRef.current);
         hudDirty = true;
       }
       scene.render(frame, refSpaceRef.current, hudCanvas, hudDirty);
@@ -317,6 +369,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       const down = estopPressed(live);
       if (down && !estopDownRef.current) void fireEstop();
       estopDownRef.current = down;
+
+      // Record toggle: same display-rate scan, but hold-gated — a brush of
+      // the thumb near A/X must not start or end a take.
+      const ax = holdToggle(axToggleRef.current, axPressed(live), t, RECORD_HOLD_MS);
+      axToggleRef.current = ax;
+      if (ax.toggled) void toggleRecording();
 
       if (t - lastPubRef.current < PUBLISH_MS) return;
       lastPubRef.current = t;
@@ -333,7 +391,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown, fireEstop]);
+  }, [armIds, teardown, fireEstop, toggleRecording]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
   // be left mounted-but-hidden: an immersive session already owns the display,
@@ -432,6 +490,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           ) : (
             <span className="text-amber-400">no collision guard</span>
           )}
+          {recStatus?.recording && (
+            <span className="text-red-400 font-bold animate-haller-rec">
+              ● REC {recStatus.episode_frames}
+            </span>
+          )}
         </div>
         {sideRow("left")}
         {sideRow("right")}
@@ -439,7 +502,8 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           <div className="text-red-400 truncate">{status.last_error}</div>
         )}
         <div className="text-neutral-400">
-          grip = drive · trigger = gripper · <b>B / Y = E-STOP</b>
+          grip = drive · trigger = gripper · <b>B / Y = E-STOP</b> ·{" "}
+          <b>A / X hold = record</b>
         </div>
       </div>
       {inSession && (
@@ -531,6 +595,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         <div>
           <b>B or Y</b> (either controller) is the E-STOP: torque drops on both
           arms instantly.
+        </div>
+        <div>
+          <b>Hold A or X</b> (either controller, ~0.5 s) starts or stops the
+          dataset take. Draft the task in the cockpit&apos;s Dataset tab first —
+          the recorder shows <span className="font-bold">● REC</span> in the HUD
+          while it rolls.
         </div>
         {vrMode === "pose" ? (
           <div>
