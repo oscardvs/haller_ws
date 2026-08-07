@@ -113,6 +113,18 @@ class SimLeaderTeleop:
             try:
                 goal = source.read()
                 trimmed = {j: v for j, v in goal.items() if j in follower.joint_limits_deg}
+                if not trimmed:
+                    # A bimanual dataset names its joints `left_shoulder_pan` /
+                    # `right_shoulder_pan` (see DatasetRecorder._state_names):
+                    # replaying such a take onto ONE arm means stripping the
+                    # follower's own side prefix, else every tick sends an
+                    # empty goal and the replay silently moves nothing.
+                    prefix = f"{follower_id}_"
+                    trimmed = {
+                        j[len(prefix):]: v for j, v in goal.items()
+                        if j.startswith(prefix)
+                        and j[len(prefix):] in follower.joint_limits_deg
+                    }
                 follower.send_goal(trimmed)
                 with self._lock:
                     self._state.tick_count += 1

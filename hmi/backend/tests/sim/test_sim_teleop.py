@@ -48,6 +48,37 @@ def test_sim_teleop_status_shape():
     assert set(out) >= {"running", "follower", "hz", "tick_count", "last_error"}
 
 
+def test_sim_teleop_replays_side_prefixed_dataset_joints():
+    """A haller bimanual take names joints `right_shoulder_pan`, ... — replaying
+    it onto the right arm must strip that side's prefix, or every goal trims
+    to {} and the replay moves nothing."""
+    cfg = ArmConfig(id="right", model="so101_follower", port="(sim)",
+                    calibration_id="(sim)", source="sim", sim_arm_name="right")
+    mgr = ArmManager([cfg])
+    mgr.connect_all(teleop_peers=[])
+    try:
+        fake_source = MagicMock()
+        fake_source.read.return_value = {
+            "left_shoulder_pan": -99.0,   # the other side: never forwarded
+            "right_shoulder_pan": 12.0,
+            "right_gripper": 45.0,
+        }
+        follower = mgr["right"]
+        sent = []
+        follower.send_goal = MagicMock(side_effect=lambda g: sent.append(g) or g)
+
+        session = SimLeaderTeleop(arms=mgr)
+        session.start(follower_id="right", source=fake_source, hz=120.0)
+        time.sleep(0.1)
+        session.stop()
+
+        assert sent, "no goal ever reached the follower"
+        assert all(set(g) == {"shoulder_pan", "gripper"} for g in sent)
+        assert all(g["shoulder_pan"] == 12.0 for g in sent)
+    finally:
+        mgr.disconnect_all()
+
+
 def test_sim_teleop_blocks_when_peer_running():
     """Session lock: if a peer (e.g. real TeleopSession or HumanTeleopSession) is
     already running, sim teleop must refuse to start."""
