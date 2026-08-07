@@ -137,6 +137,13 @@ class DatasetRecorder:
         features = self._build_features(cam_specs)
         fps = int(round(1.0 / self.telemetry._period))  # telemetry emits at this rate
 
+        if self._dataset is not None and self._dataset.repo_id != repo_id:
+            # A different repo than the open dataset (the operator drafted a
+            # new task in the cockpit): without this, the take would silently
+            # append to the FIRST dataset this process ever opened, under the
+            # new task's string. Close the old one out, then open the new.
+            self._dataset.finalize()
+            self._dataset = None
         if self._dataset is None:
             self._dataset = self._open_dataset(repo_id, fps, features)
 

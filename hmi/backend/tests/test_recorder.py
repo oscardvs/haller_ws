@@ -414,6 +414,30 @@ async def test_existing_dataset_that_cannot_resume_refuses_loudly(tmp_path):
     assert rec._dataset is None  # nothing half-open left behind
 
 
+async def test_repo_switch_closes_out_the_first_dataset(tmp_path, monkeypatch):
+    """A new task draft in the cockpit is a new repo_id: the next take must
+    open THAT dataset — not silently append to whichever one this process
+    opened first."""
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    rec = DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=_FakeCameras([]),
+    )  # root=None, like the server: repos resolve under HF_LEROBOT_HOME
+    await rec.start_episode("smoke/task_a", "task a")
+    first = rec._dataset
+    await rec.stop_episode(save=True)
+
+    await rec.start_episode("smoke/task_b", "task b")
+    assert rec._dataset is not first
+    assert rec._dataset.repo_id == "smoke/task_b"
+    await rec.stop_episode(save=True)
+
+    assert (tmp_path / "smoke" / "task_a" / "meta" / "info.json").exists()
+    assert (tmp_path / "smoke" / "task_b" / "meta" / "info.json").exists()
+
+
 async def test_video_take_streams_h264_and_reloads(tmp_path):
     """The sim-collection path: a camera in the schema means video features,
     which means the streaming h264 encoder. Drive a short take, save, and read
