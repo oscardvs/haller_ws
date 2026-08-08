@@ -271,15 +271,32 @@ class VRPoseMode:
             self._anchors[side] = anchor
 
         # Hand delta in the operator's anchored heading frame → arm base
-        # frame. Operator right → +x, forward → −y (the arm reaches −y at
-        # zero pan), up → +z. Same mapping for both arms: the mounts are
-        # identical and side correspondence is world-direction based, which
-        # is what the mirror_mode=none smoke test pinned.
+        # frame. Operator right → +x, forward → +y, up → +z. Same mapping for
+        # both arms: the mounts are identical and side correspondence is
+        # world-direction based, which is what the mirror_mode=none smoke test
+        # pinned.
+        #
+        # Forward maps to +y, and the sign matters more than it looks. The
+        # operator — real or watching the sim camera — stands in FRONT of the
+        # bench facing the mounts, so their forward is +y and, with up = +z,
+        # their right is cross(forward, up) = +x. Those two together are a
+        # rotation: det[+x, +y, +z] = +1, so every axis reads true.
+        #
+        # This used to be −y, on the reasoning that the arm reaches −y at zero
+        # pan and so "push your hand away" ought to extend the arm. But paired
+        # with right → +x that is a REFLECTION (det[+x, −y, +z] = −1), and a
+        # reflection cannot be fixed by moving the camera: whichever side you
+        # view it from, exactly one axis comes out inverted. From the front it
+        # left/right-agreed and depth-inverted — push away, and the gripper
+        # travelled toward you and down the frame, which is what made the view
+        # read as mirrored and the arm hard to aim. Spatial truth beats the
+        # kinematic intuition here: the operator is position-controlling a
+        # gripper, not reasoning about which way the elbow folds.
         d = pos - anchor.hand
         fwd_amt = float(np.dot(d, anchor.fwd))
         right_amt = float(np.dot(d, anchor.right))
         up_amt = float(d[1])
-        delta_robot = np.array([right_amt, -fwd_amt, up_amt])
+        delta_robot = np.array([right_amt, fwd_amt, up_amt])
 
         target = _wpr(anchor.joints) + delta_robot
         # Never ask for a wrist point below the guard's floor band. Without

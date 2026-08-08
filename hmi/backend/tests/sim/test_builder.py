@@ -157,6 +157,34 @@ def test_threequarter_camera_frames_the_whole_task():
     assert not out_of_frame, f"outside the threequarter frame: {out_of_frame}"
 
 
+def test_threequarter_camera_agrees_with_the_operator_frame():
+    """The operator watches this camera and moves their hand; the two have to
+    agree or the view reads mirrored.
+
+    vr_pose_mode maps operator right → robot +x and operator forward → robot
+    +y. So this camera must see +x to the RIGHT of frame and must look ALONG
+    +y — i.e. stand in front of the bench facing the mounts, where the operator
+    stands. Viewing the same scene from behind (+y, looking −y) would flip
+    left/right on screen while the mapping stayed put, which is the mirrored
+    view in its other guise.
+    """
+    import numpy as np
+
+    mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=3)
+    model = mujoco.MjModel.from_xml_string(mjcf_xml)
+    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "threequarter")
+    rot = np.array(model.cam_mat0[cid]).reshape(3, 3)
+
+    image_right = rot[:, 0]
+    view_dir = -rot[:, 2]
+    assert float(image_right @ np.array([1.0, 0.0, 0.0])) > 0.9, (
+        f"image-right is {image_right.round(3)}, which does not agree with "
+        f"robot +x — the view is left/right mirrored w.r.t. the hand mapping")
+    assert float(view_dir @ np.array([0.0, 1.0, 0.0])) > 0.3, (
+        f"view direction is {view_dir.round(3)}; the camera must look along "
+        f"+y (operator forward), not back down it")
+
+
 def test_threequarter_camera_looks_down_at_the_bench():
     """Pins the fix for the near-eye-level framing this camera used to have:
     aimed almost along the bench, it spent most of its pixels on empty space

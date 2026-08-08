@@ -133,10 +133,12 @@ def test_squeezing_without_moving_holds_the_anchor_pose():
 
 @pytest.mark.parametrize("axis,delta,expect", [
     # Operator right (+x XR) → arm +x; up (+y XR) → arm +z;
-    # forward (−z XR) → arm −y (the reach direction at zero pan).
+    # forward (−z XR) → arm +y. The operator stands in front of the bench
+    # facing the mounts, so forward is +y — see the handedness test below for
+    # why this sign is not free to choose.
     (0, +0.08, np.array([+0.08, 0.0, 0.0])),
     (1, +0.08, np.array([0.0, 0.0, +0.08])),
-    (2, -0.08, np.array([0.0, -0.08, 0.0])),
+    (2, -0.08, np.array([0.0, +0.08, 0.0])),
 ])
 def test_hand_deltas_move_the_wrist_point_the_same_way(axis, delta, expect):
     mode, _ = _mode()
@@ -150,7 +152,7 @@ def test_hand_deltas_move_the_wrist_point_the_same_way(axis, delta, expect):
 
 def test_heading_at_anchor_defines_forward():
     """Operator facing +x XR (yaw -90°): pushing along +x is 'forward' and
-    must land on arm −y, not arm +x."""
+    must land on arm +y, not arm +x."""
     yaw90 = [0.0, -np.sin(np.pi / 4), 0.0, np.cos(np.pi / 4)]
     mode, _ = _mode()
     head = {"position": [0, 1.6, 0], "orientation": yaw90}
@@ -162,7 +164,45 @@ def test_heading_at_anchor_defines_forward():
     f2["head"] = head
     out = mode.convert(f2)
     got = _wpr_of(out["left"]["joint_goal"]) - _wpr_of(PARKED)
-    assert got == pytest.approx(np.array([0.0, -0.08, 0.0]), abs=6e-3)
+    assert got == pytest.approx(np.array([0.0, +0.08, 0.0]), abs=6e-3)
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_the_mapping_is_a_rotation_not_a_reflection(side):
+    """The one property no camera placement can rescue.
+
+    Operator (right, forward, up) is a right-handed frame. If it maps onto a
+    LEFT-handed triple of robot axes, the transform is a reflection and exactly
+    one axis reads inverted from every viewpoint — which is what "the view is
+    mirrored" actually is. Measured as the determinant of the realised basis,
+    so it holds whatever the individual signs happen to be.
+    """
+    step = 0.06
+    # Column ORDER is the whole test: the determinant is of (right, forward,
+    # up) specifically. Probing XR axes 0,1,2 would order them right, up,
+    # forward — and swapping two columns flips the sign, which reports a
+    # perfectly good mapping as mirrored.
+    probes = {
+        "right": (0, +step),      # XR +x
+        "forward": (2, -step),     # XR −z is forward
+        "up": (1, +step),          # XR +y
+    }
+    cols = []
+    for axis, delta in probes.values():
+        # Fresh anchor per probe: three probes off one anchor would compound
+        # the previous probe's IK solution into the next.
+        mode, _ = _mode(min_z=-10.0, min_tip=-10.0)
+        base = mode.convert(_frame(**{side: _ctrl(HAND, squeeze=True)}))
+        w0 = _wpr_of(base[side]["joint_goal"])
+        moved = list(HAND)
+        moved[axis] += delta
+        out = mode.convert(_frame(**{side: _ctrl(moved, squeeze=True)}))
+        cols.append((_wpr_of(out[side]["joint_goal"]) - w0) / abs(delta))
+
+    det = float(np.linalg.det(np.column_stack(cols)))
+    assert det > 0.9, (
+        f"operator→robot basis has det={det:+.3f}; a non-positive determinant "
+        f"is a mirrored mapping")
 
 
 def test_release_and_resqueeze_reanchors_without_a_jump():
