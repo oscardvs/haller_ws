@@ -52,8 +52,12 @@ Accept the self-signed cert once, then press **Enter Passthrough**.
 | **trigger** (analog) | that arm's gripper — 0 open, 1 closed |
 | **B or Y** (either controller) | **E-STOP** — torque off both arms, session stops |
 | **hold A or X** (~0.5 s) | start, then stop-and-save, a dataset take |
+| **left thumbstick click** | next camera view in the tile |
+| **right thumbstick click** | next tile size (S → M → L) |
 | release a grip | that arm freezes exactly where it is |
 | headset off / Quest menu open | frames force-disengage; both arms freeze |
+
+The menu bindings had to land on the thumbstick clicks: trigger, grip, A/X and B/Y are all spoken for, and every one of them is either a dead-man or a safety action, so none can be shared with a menu. They are edge-detected on press rather than hold-gated like A/X — picking a view is harmless, where a stray take boundary is corrupted data.
 
 Discarding a take is deliberately **cockpit-only**: a thumb brush must never be able to throw away an episode you just drove.
 
@@ -122,10 +126,20 @@ The delta is taken in the operator's **anchored heading frame** — the directio
 | operator axis | arm base axis |
 |---|---|
 | right | `+x` |
-| forward | `−y` (the arm reaches −y at zero pan) |
+| forward | `+y` |
 | up | `+z` |
 
 Both arms use the **same** mapping, because the mounts are identical and side-by-side rather than mirrored.
+
+<Callout type="warn">
+**Why these signs are not free to choose.** The operator frame `(right, forward, up)` is right-handed, so the robot axes it maps onto must form a right-handed triple too. `det[+x, +y, +z] = +1` — a rotation. Every axis reads true.
+
+Forward used to map to `−y`, on the reasoning that the arm reaches `−y` at zero pan, so pushing your hand away ought to extend it. Paired with right → `+x` that is a **reflection**: `det[+x, −y, +z] = −1`. And a reflection cannot be fixed by moving the camera — from any viewpoint, exactly one axis comes out inverted. Viewed from the front it agreed on left/right and inverted *depth*: push your hand away and the gripper travelled toward you and down the frame. That is what "the view is mirrored" actually was, and it stayed hidden while the camera sat near eye level, because depth was too ambiguous there to read.
+
+The operator — real, or watching the sim camera — stands in **front** of the bench facing the mounts. So their forward is `+y`, and their right is `cross(forward, up) = +x`. Spatial truth beats the kinematic intuition: the operator is position-controlling a gripper, not reasoning about which way the elbow folds.
+
+Pinned by a determinant test, not by per-axis sign assertions, so it survives future rewrites of the individual signs. A second test requires the `threequarter` camera to see `+x` to frame-right and to look along `+y` — viewing the same scene from behind would flip left/right on screen while the mapping stayed put, which is the same bug wearing a different hat.
+</Callout>
 
 <Callout type="info">
 **Do not mirror twice.** Frames from this mode carry `mirror_mode: "none"`. The joint goals are already in robot joint space, so letting the downstream handedness step run again applies mirroring twice — an arm that moves opposite your hand, or the wrong arm moving, with everything else looking correct.
@@ -270,6 +284,33 @@ The HUD floats over passthrough: per-side authority and countdown, grip state, l
 
 In sim the **camera tile floats in the HUD** and defaults on whenever the backend's base camera is a sim render — passthrough shows your room, and the sim arms live only in that tile. `Cam off` hides it. The desktop cockpit (`/`) shows the same view.
 
+### The view menu
+
+The HUD carries a menu block listing every camera the backend advertises, with the active one marked, the tile size, and the record command beside its live frame count. It is generic over `/cameras`: in sim that is the MuJoCo views, and on the real rig it is the mast plus the egocentric gripper cams, with no further work.
+
+Both the chosen view and the tile size persist in `localStorage`, so a session resumes where the last one left off.
+
+Tile size is the real lever on "the view is too small". The tile is a **quad in the world**, so apparent size is width ÷ distance, not pixels:
+
+| size | width | ≈ horizontal field at the HUD's 1.15 m |
+|---|---|---|
+| S | 1.1 m | 51° |
+| M | 1.6 m | 70° |
+| L | 2.2 m | 76° |
+
+Changing it rewrites the quad's model matrix in place — no pipeline rebuild, no reallocation.
+
+<Callout type="info">
+**Why the tile is soft, and the fix that is not in yet.** The Meta Quest Browser refuses the `dom-overlay` module on-device (it only works in Meta's desktop emulator), so the HUD falls back to a world-locked quad painted from a single 1024×768 canvas at ~10 Hz — with the camera image composited into the *same* canvas as all the status text, then resampled a second time through the eye framebuffer.
+
+The right fix is **WebXR Layers**. An `XRQuadLayer` is composited by the runtime at its own resolution, so each pixel is sampled once; Meta measure GPU bus-busy dropping from 50.2% to 23.9% with quality preserved, and cite 8K@90fps video layers on a Quest 2. Two routes:
+
+- `new XRWebGLBinding(session, gl).createQuadLayer({ space, viewPixelWidth, viewPixelHeight, transform, width, height })` — you render into it, which suits an MJPEG `<img>` uploaded as a texture.
+- `new XRMediaBinding(session).createQuadLayer(videoEl, { space, layout })` — the runtime owns the decode, but it needs a real `HTMLVideoElement`, which our MJPEG stream is not.
+
+The catch, and why it is not in this change: `layers` and `baseLayer` are mutually exclusive in `updateRenderState`, so adopting layers means moving the primary scene onto an `XRProjectionLayer` as well. That is not a refactor to land untested against a headset. Request it as an optional feature and keep the present quad as the fallback.
+</Callout>
+
 | authority | meaning |
 |---|---|
 | `driving` | Grip held, anchor live, goals flowing. |
@@ -326,6 +367,7 @@ Ten minutes, in this order. Do not skip to step 7.
 | Enter does nothing / start refused | Another teleop session holds the arms — stop it. Needs **2 enabled arms**. |
 | Countdown will not finish | The HUD `match:` line lists the blocking joints. In position mode this should be instant; if it is not, the anchor did not take — release and re-squeeze. |
 | Arm moves opposite the hand | Mirroring applied twice, or wrong arm-mounting parity. See step 4 and the `mirror_mode` callout. |
+| The whole view feels mirrored — one axis fights you | A handedness fault, not a camera placement one. Check `det` of the operator→robot basis is `+1` (there is a test) and that the camera looks along `+y` with `+x` to frame-right. |
 | An arm "randomly" freezes | Its controller left the tracking volume (HUD: `no tracking`), or the grip slipped below the press threshold. Re-squeeze. |
 | Arm goes **completely** solid, lateral motion included | The floor-clamp failure mode. Your hand is far below the bench and the guard is scaling the whole step. Fixed by the target clamps above — if it recurs, check `table_z_m` matches the real bench. |
 | `COLLISION HOLD` where nothing is close | `mounts` do not match the real plate. Measure (steps 2–3). |
