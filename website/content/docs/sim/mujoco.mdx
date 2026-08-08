@@ -8,7 +8,7 @@ The HMI can drive a simulated SO-101 instead of a physical one. The browser surf
 Three preset configs ship in `hmi/backend/`: **solo follower**, **bimanual**, and **leader+follower**. Each is a single yaml.
 
 <Callout type="info">
-**Status (2026-05-23).** Shipped on `main`. `SimArmHandle` is a drop-in replacement for `SO101Follower`; the existing teleop loops, dataset recorder, and HMI panels work against sim without code changes. The MuJoCo physics + a vendored [trs_so_arm100](https://github.com/AlexanderKoch-Koch/trs_so_arm100) MJCF for the arm are the new pieces.
+**Status (2026-08-08).** Shipped on `main`. `SimArmHandle` is a drop-in replacement for `SO101Follower`; the existing teleop loops, dataset recorder, and HMI panels work against sim without code changes. The MuJoCo physics + a vendored [trs_so_arm100](https://github.com/AlexanderKoch-Koch/trs_so_arm100) MJCF for the arm are the new pieces. The bimanual preset has since grown a full [pick-and-place arena](#the-arena) with two framed cameras and tuned grasp friction, and is driven from a Meta Quest via [Quest VR teleop](/docs/hmi/quest-vr-teleop) — headset hours produce LeRobot datasets with no arms powered.
 </Callout>
 
 ## Architecture
@@ -62,7 +62,7 @@ export MUJOCO_GL=osmesa   # or 'egl' (default), or 'glfw' for the interactive vi
 | Preset | Config | Arms | Scene |
 |---|---|---|---|
 | Solo follower | `hmi/backend/config.solo-sim.yaml` | 1 sim follower (right) | workbench + 1 cube |
-| Bimanual | `hmi/backend/config.bimanual-sim.yaml` | 2 sim followers (left + right) | workbench + 2 cubes |
+| Bimanual | `hmi/backend/config.bimanual-sim.yaml` | 2 sim followers (left + right) | [teleop arena](#whats-in-the-mjcf) — bench, place zone, 3 cubes |
 | Leader+follower | `hmi/backend/config.leader-follower-sim.yaml` | 2 sim arms (one drives, one mirrors) | workbench |
 
 Bring any one up with the `--config` flag (see [HMI overview](/docs/hmi/overview#choosing-a-config) for the flag itself):
@@ -79,7 +79,7 @@ Two options:
 
 ### Headless (default) — watch through the HMI camera
 
-The HMI's overhead camera streams the sim's scene at 15 fps to the browser, same as a real `opencv` camera. Good for desktop dev and for any flow that uses the dataset recorder (which needs a camera in `config.yaml` either way).
+The HMI's sim cameras stream the scene to the browser exactly like a real `opencv` camera. The bimanual preset renders both at 640×480, and its `fps` is set to match `telemetry.hz` (30) so every recorded frame carries a fresh render. Good for desktop dev and for any flow that uses the dataset recorder (which needs a camera in the config either way).
 
 ### Interactive MuJoCo viewer
 
@@ -148,11 +148,41 @@ This is one direction: real → sim. The opposite (sim leader → real follower)
 
 Each preset's world is composed at boot from three pieces:
 
-- `sim/assets/scenes/workbench.xml` — workbench geometry, lighting, an "overhead" camera pointed at the work surface.
+- `sim/assets/scenes/workbench.xml` — the arena: bench, floor, backdrop, place zone and lighting.
 - The vendored `trs_so_arm100` MJCF for each arm, instanced once per `arms:` entry with `source: sim`.
-- One or more cubes for solo and bimanual.
+- Cubes, dealt from `sim/assets/scenes/cube.xml` into measured slots (`sim_cubes`).
 
-`hmi/backend/haller_hmi/sim/builder.py` is the composer. CamelCase ↔ snake_case translation between MJCF joint names and HMI joint names lives in `hmi/backend/haller_hmi/sim/arm.py`.
+`hmi/backend/haller_hmi/sim/builder.py` is the composer, and it also emits the two cameras. CamelCase ↔ snake_case translation between MJCF joint names and HMI joint names lives in `hmi/backend/haller_hmi/sim/arm.py`.
+
+### The arena
+
+| element | geometry |
+|---|---|
+| workbench | 1.2 × 0.9 m box, top at `z=0` |
+| arena floor | plane flush with the bench underside (`z=-0.02`), darker — catches a cube swept off the edge instead of letting it accelerate away forever |
+| backdrop | 2.4 × 0.45 m at `y=+0.5`. **Visual only** — `contype`/`conaffinity` 0, so it can never become a surface an arm leans on or that the collision guard would have to know about |
+| place zone | 0.12 × 0.12 m blue pad at `(0, -0.21)`, 2 mm proud |
+| cubes | 4 cm, one colour each, up to 5 slots sized to each arm's folded-elbow reach band |
+| lights | overhead at `(0,0,1.5)`, plus a **shadowless** operator-side fill — the overhead light keeps sole ownership of shadows, which are the cue for how high a gripper is |
+
+### The cameras
+
+| camera | pose | fovy | reads well |
+|---|---|---|---|
+| `overhead` | `(0, 0, 1.0)` straight down | 60 | `shoulder_pan`, plan-view cube positions |
+| `threequarter` | `(0, -0.88, 0.62)` → `(0, -0.12, 0.045)`, ~37° down | 50 | hand pitch, jaw-vs-cube alignment, height via shadow |
+
+`camera_xyaxes(pos, target)` derives the MJCF basis from *where the camera is* and *what it looks at*, so a viewpoint stays readable instead of being six magic numbers nobody can adjust later. `threequarter` is listed first in the configs, making it the cockpit BASE tile, the headset HUD view, and the dataset's base camera; tests pin every cube slot, the place zone and both mounts inside its frustum.
+
+### Grasp friction
+
+The finger pads run **slide friction 2.0** where the vendored MJCF ships 1.0 — upstream tuned for bare PLA, the real pads are rubber TPU, and at 1.0 a pinched 4 cm cube slips out mid-transport. MuJoCo combines a contact pair by `max`, so this one value governs pad-cube friction on its own.
+
+<Callout type="warn">
+That friction value lives in the **vendored** `sim/assets/so101/so_arm100.xml`. Re-vendoring `trs_so_arm100` silently reverts it, and the symptom is subtle: picks still work, transports drop.
+</Callout>
+
+Driving this arena from a headset is [Quest VR teleop](/docs/hmi/quest-vr-teleop) — including the collision guard's sim margins and why the place zone sits where it does.
 
 ## REST surface (sim-only)
 
@@ -173,7 +203,6 @@ Everything else (arm goals, mode, calibration, leader/follower, human teleop, da
 ## Out of scope (for now)
 
 - Wrist cameras in sim.
-- Gripper / cube friction tuning for reliable picks (default MJCF likely needs work for real pick-and-place).
 - Domain randomization (textures, lighting, object pose).
 - A closed-loop policy-eval CLI (belongs on RunPod alongside `scripts/runpod/`).
 
