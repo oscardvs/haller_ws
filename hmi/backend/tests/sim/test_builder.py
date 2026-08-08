@@ -9,7 +9,9 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 import mujoco
 import pytest
 
-from haller_hmi.sim.builder import build_scene, camera_xyaxes, SO101_JOINTS
+from haller_hmi.sim.builder import (
+    build_scene, camera_xyaxes, SO101_JOINTS, _CUBE_SLOTS,
+)
 
 PRESETS = {
     "solo":              {"arms": ["right"], "cubes": 1},
@@ -89,3 +91,84 @@ def test_build_scene_cubes_have_unique_names():
 def test_duplicate_arm_ids_raises():
     with pytest.raises(ValueError, match="duplicate arm ids"):
         build_scene(arms=["left", "left"], cubes=0)
+
+
+def test_backdrop_is_visible_but_not_physical():
+    """The backdrop exists to fill the operator camera's frame above the bench's
+    far edge. If it ever gained collision geometry it would become a wall an arm
+    could lean on — and one the collision guard, which knows only the floors in
+    its config, has no idea about."""
+    mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=3)
+    model = mujoco.MjModel.from_xml_string(mjcf_xml)
+    gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "backdrop")
+    assert gid >= 0, "backdrop geom missing"
+    assert model.geom_contype[gid] == 0
+    assert model.geom_conaffinity[gid] == 0
+
+
+def _in_frame(model, cam_name, point, aspect):
+    """Is `point` inside `cam_name`'s frustum? Returns (bool, ndc_x, ndc_y).
+
+    A MuJoCo camera looks down its local -Z with +X right and +Y up, so the
+    camera-frame coordinates come from R^T (p - eye) and the depth is -z.
+    """
+    import numpy as np
+
+    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
+    assert cid >= 0, cam_name
+    eye = np.array(model.cam_pos[cid])
+    rot = np.array(model.cam_mat0[cid]).reshape(3, 3)
+    v = rot.T @ (np.asarray(point, dtype=float) - eye)
+    depth = -v[2]
+    assert depth > 0, f"{point} is behind {cam_name}"
+    half_v = np.tan(np.deg2rad(model.cam_fovy[cid]) / 2.0)
+    ndc_y = v[1] / (depth * half_v)
+    ndc_x = v[0] / (depth * half_v * aspect)
+    return abs(ndc_x) <= 1.0 and abs(ndc_y) <= 1.0, ndc_x, ndc_y
+
+
+def test_threequarter_camera_frames_the_whole_task():
+    """The three-quarter view is what the operator teleops from AND what the
+    recorder saves as the dataset's base camera. Every object the task names has
+    to be inside it — a cube framed out is a cube the policy never sees.
+
+    Aspect is 4:3, matching the 640x480 the sim camera configs render at.
+    """
+    mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=len(_CUBE_SLOTS))
+    model = mujoco.MjModel.from_xml_string(mjcf_xml)
+    aspect = 640 / 480
+
+    targets = {f"cube_{i}": (x, y, 0.02) for i, (x, y) in enumerate(_CUBE_SLOTS)}
+    # Read the zone's position out of the model rather than restating it, so
+    # moving it in workbench.xml cannot leave this test checking thin air.
+    zid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "place_zone")
+    assert zid >= 0, "place_zone geom missing"
+    targets["place_zone"] = tuple(model.geom_pos[zid])
+    # Both arm mounts, at roughly shoulder height.
+    targets["left_base"] = (-0.20, 0.0, 0.10)
+    targets["right_base"] = (0.20, 0.0, 0.10)
+
+    out_of_frame = {
+        name: (round(nx, 3), round(ny, 3))
+        for name, p in targets.items()
+        for ok, nx, ny in [_in_frame(model, "threequarter", p, aspect)]
+        if not ok
+    }
+    assert not out_of_frame, f"outside the threequarter frame: {out_of_frame}"
+
+
+def test_threequarter_camera_looks_down_at_the_bench():
+    """Pins the fix for the near-eye-level framing this camera used to have:
+    aimed almost along the bench, it spent most of its pixels on empty space
+    above the far edge. It has to look DOWN into the workspace."""
+    import numpy as np
+
+    mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=3)
+    model = mujoco.MjModel.from_xml_string(mjcf_xml)
+    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "threequarter")
+    rot = np.array(model.cam_mat0[cid]).reshape(3, 3)
+    # View ray is the camera's -Z axis, the third column of R.
+    ray = -rot[:, 2]
+    pitch_down_deg = np.rad2deg(np.arcsin(-ray[2] / np.linalg.norm(ray)))
+    assert 25.0 <= pitch_down_deg <= 55.0, pitch_down_deg
+    assert model.cam_pos[cid][2] >= 0.5, "camera must sit above the bench"

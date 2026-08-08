@@ -306,17 +306,25 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
         f'<camera name="overhead" pos="0 0 1.0" '
         f'xyaxes="{camera_xyaxes((0, 0, 1.0), (0, 0, 0))}" fovy="60"/>'
     )
-    # Three-quarter view from the front-right: the arms reach toward -Y, so a
-    # camera off the -Y side sees the whole linkage in profile.
+    # Three-quarter operator view: centred, from the front, raised enough to
+    # look down INTO the bench. This is the view you teleop from and the one
+    # the recorder saves, so it is framed on the workspace, not on the arms'
+    # extremes.
     #
-    # Framing is set by the *worst* case, not the resting pose. Bases sit at
-    # x = +/-0.20 and the arm reaches ~0.35 m, so a fully-extended pair spans
-    # about +/-0.55 m — wider than the 0.8 m workbench. At this distance
-    # (~1.25 m) fovy=50 gives ~1.55 m of horizontal coverage, which keeps both
-    # arms in frame at full extension instead of clipping them exactly when
-    # you most need to see where they are.
-    _tq_pos: Vec3 = (0.75, -0.9, 0.55)
-    _tq_target: Vec3 = (0.0, 0.0, 0.12)
+    # It used to sit at z=0.35 with fovy 55 — nearly eye-level, aimed almost
+    # horizontally. That kept both arms in frame with a ±45° outward pan, but
+    # such a pose holds the gripper off the bench entirely, over the void; it
+    # is not a pose the pick-and-place task passes through. Paying for it cost
+    # ~60% of the frame in every pose the task DOES use: empty space above the
+    # bench's far edge and in front of its near one. Raising the camera and
+    # aiming down spends those pixels on the bench instead — both arms read
+    # bigger, and all three cubes clear the arms that used to hide them.
+    #
+    # Coverage now: |x| <= ~0.44 m across the working depth band, against
+    # cubes at ±0.28 m and the place zone on the midline. A wide lateral swing
+    # past that clips at the frame edge — the trade above, made on purpose.
+    _tq_pos: Vec3 = (0.0, -0.88, 0.62)
+    _tq_target: Vec3 = (0.0, -0.12, 0.045)
     parts.append(
         f'<camera name="threequarter" pos="{" ".join(str(c) for c in _tq_pos)}" '
         f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="50"/>'

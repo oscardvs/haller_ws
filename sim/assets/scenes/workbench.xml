@@ -4,22 +4,66 @@
        half plus a contested middle, deep enough to stage cubes in front of
        the bases and still have a place-zone clear of the reach-in path. -->
   <worldbody>
+    <!-- Arena floor, flush with the underside of the bench. Two jobs: a cube
+         swept off the edge lands instead of falling forever (an escaping body
+         accelerating without bound is a bad frame to record and a bad state to
+         reset from), and the operator camera sees a floor where it used to see
+         black void. Darker than the bench so the bench edge still reads. -->
+    <geom name="arena_floor"
+          type="plane"
+          size="2 2 0.05"
+          pos="0 0 -0.02"
+          rgba="0.16 0.16 0.18 1"
+          friction="1 0.005 0.0001"/>
     <geom name="workbench"
           type="box"
           size="0.6 0.45 0.01"
           pos="0 0 -0.01"
           rgba="0.35 0.35 0.35 1"
           friction="1 0.005 0.0001"/>
+    <!-- Backdrop behind the bench. The operator camera stands in front of the
+         bench looking back at it, so the top of its frame always clears the
+         0.9 m-deep bench and used to land on nothing. VISUAL ONLY —
+         contype/conaffinity 0, so it is invisible to physics and cannot
+         become a surface an arm rests against or the guard has to know
+         about. Height is set by the camera: 0.45 m fills the frame above the
+         bench's far edge from the threequarter viewpoint. -->
+    <geom name="backdrop"
+          type="box"
+          size="1.2 0.005 0.225"
+          pos="0 0.5 0.225"
+          rgba="0.2 0.21 0.24 1"
+          contype="0"
+          conaffinity="0"/>
     <!-- Place zone: the task's target. Sits on the midline toward the front,
          reachable by either arm, bright enough to read in the overhead cam.
          Thin enough (2 mm proud) that a cube resting on it is a stable,
-         unambiguous "placed" state. -->
+         unambiguous "placed" state.
+
+         y = -0.21, not -0.25. Setting a cube down here means landing the
+         FINGERTIP at bench level, and the depth band -0.24..-0.27 is the worst
+         one on the whole midline for that: it needs wrist_flex at or past its
+         +95° hard limit (swept, both arms), so touchdown had no margin at all
+         and the arm read as "constrained" right where the task ends. -0.21 sits
+         at ~83% of reach and needs ~75°, leaving the wrist somewhere to go.
+         Still clear of the reach-in path and of the midline cube at y=-0.08. -->
     <geom name="place_zone"
           type="box"
           size="0.06 0.06 0.001"
-          pos="0 -0.25 0.001"
+          pos="0 -0.21 0.001"
           rgba="0.2 0.4 0.9 1"
           friction="1 0.005 0.0001"/>
     <light name="overhead_light" pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+    <!-- Fill from the operator's side. The overhead light alone leaves every
+         surface facing the operator camera in its own shadow, which is exactly
+         the surface you need to read: the jaw faces and the near face of a
+         cube. No shadow of its own, so the overhead light still owns the one
+         set of shadows that tell you how high off the bench a gripper is. -->
+    <light name="operator_fill"
+           pos="0 -1.1 0.75"
+           dir="0 0.82 -0.57"
+           diffuse="0.32 0.32 0.34"
+           specular="0.05 0.05 0.05"
+           castshadow="false"/>
   </worldbody>
 </mujocoinclude>
