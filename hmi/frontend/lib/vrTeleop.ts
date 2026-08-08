@@ -68,6 +68,9 @@ export const BUTTON_TRIGGER = 0;
 export const BUTTON_SQUEEZE = 1;
 /** A on the right controller, X on the left. */
 export const BUTTON_AX = 4;
+/** xr-standard thumbstick click. Free on both controllers — see
+ *  `thumbstickPressed` for why the menu had to land here. */
+export const BUTTON_THUMBSTICK = 3;
 /** B on the right controller, Y on the left — the E-STOP. Chosen over A/X
  *  because the thumb rests ON A/X while gripping; B/Y takes a deliberate
  *  reach, and an E-STOP that fires by accident teaches people to disable it. */
@@ -215,9 +218,11 @@ type XRViewLike = {
 export type XRScene = {
   /** Clear both eyes; when `hud` is given, draw it as a world-locked quad.
    *  `hudDirty` re-uploads the canvas texture (skip it on unchanged frames —
-   *  a texture upload per display frame is the whole cost of this HUD). */
+   *  a texture upload per display frame is the whole cost of this HUD).
+   *  `widthM` sizes the quad; changing it rescales in place, no reallocation. */
   render(frame: XRFrameLike, refSpace: unknown,
-         hud: HTMLCanvasElement | null, hudDirty: boolean): void;
+         hud: HTMLCanvasElement | null, hudDirty: boolean,
+         widthM?: number): void;
 };
 
 const _NOOP_SCENE: XRScene = { render: () => {} };
@@ -251,6 +256,21 @@ export function attachRenderScene(
   let uMVP: WebGLUniformLocation | null = null;
   let tex: WebGLTexture | null = null;
   let model: Float32Array | null = null;
+  let modelWidth = 0;
+
+  /** Column-major scale + translate: the unit quad's extents become metres.
+   *  Rebuilt whenever the requested width changes, so the size control is a
+   *  matrix write rather than a pipeline rebuild. */
+  function setModel(widthM: number, hud: HTMLCanvasElement): void {
+    const h = widthM * (hud.height / hud.width);
+    model = new Float32Array([
+      widthM, 0, 0, 0,
+      0, h, 0, 0,
+      0, 0, 1, 0,
+      HUD_POS[0], HUD_POS[1], HUD_POS[2], 1,
+    ]);
+    modelWidth = widthM;
+  }
 
   function ensurePipeline(hud: HTMLCanvasElement): boolean {
     if (prog) return true;
@@ -300,25 +320,19 @@ export function attachRenderScene(
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const hudH = HUD_W * (hud.height / hud.width);
-    // Column-major scale + translate: the quad's unit extents become metres.
-    model = new Float32Array([
-      HUD_W, 0, 0, 0,
-      0, hudH, 0, 0,
-      0, 0, 1, 0,
-      HUD_POS[0], HUD_POS[1], HUD_POS[2], 1,
-    ]);
+    setModel(HUD_W, hud);
     prog = p;
     return true;
   }
 
   return {
-    render(frame, refSpace, hud, hudDirty) {
+    render(frame, refSpace, hud, hudDirty, widthM) {
       const fb = (session.renderState?.baseLayer ?? layer).framebuffer;
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb as WebGLFramebuffer | null);
       gl.clearColor(r, g, b, a);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       if (!hud || !ensurePipeline(hud)) return;
+      if (widthM && widthM > 0 && widthM !== modelWidth) setModel(widthM, hud);
       const pose = frame.getViewerPose(refSpace) as unknown as
         { views?: XRViewLike[] } | null | undefined;
       const views = pose?.views;
@@ -373,11 +387,21 @@ export type RecorderHudLike = { recording: boolean; episode_frames: number } | n
  * failures to draw the camera (stream warming up, no camera) degrade to the
  * text strip alone, never to an exception — this runs inside the XR loop.
  */
+/** The view menu, as the HUD needs it. `views` is whatever the backend
+ *  advertises — in sim that is the MuJoCo cameras, on the real rig it is the
+ *  mast and the egocentric gripper cams, and the menu does not care which. */
+export type VrMenuLike = {
+  views: readonly { id: string; label: string }[];
+  activeViewId: string | null;
+  tileSize: string;
+} | null;
+
 export function paintHud(
   ctx: CanvasRenderingContext2D,
   status: HudStatusLike,
   cam: HTMLImageElement | null,
   rec: RecorderHudLike = null,
+  menu: VrMenuLike = null,
 ): void {
   const W = ctx.canvas.width;
   const H = ctx.canvas.height;
@@ -461,6 +485,69 @@ export function paintHud(
     ctx.fillStyle = "#9aa0a6";
     ctx.fillText("grips = drive · trigger = gripper · B/Y = E-STOP", 24, y);
   }
+
+  if (menu) paintMenu(ctx, menu, rec, camH);
+}
+
+/** The view menu, bottom-right of the HUD.
+ *
+ *  It states the bindings rather than only reflecting state, because in a
+ *  headset there is nowhere else to look them up: the record command in
+ *  particular was previously documented only in a markdown file, which is no
+ *  use with a headset on and both hands clutched.
+ */
+function paintMenu(
+  ctx: CanvasRenderingContext2D,
+  menu: NonNullable<VrMenuLike>,
+  rec: RecorderHudLike,
+  camH: number,
+): void {
+  const W = ctx.canvas.width;
+  const pad = 18;
+  const lineH = 30;
+  const rows = menu.views.length + 3;
+  const boxW = Math.round(W * 0.42);
+  const boxH = rows * lineH + pad * 2;
+  const x = W - boxW - 24;
+  const yTop = camH - boxH - 24;
+
+  ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
+  ctx.fillRect(x, yTop, boxW, boxH);
+  ctx.strokeStyle = "rgba(154, 160, 166, 0.45)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x, yTop, boxW, boxH);
+
+  ctx.textAlign = "left";
+  let y = yTop + pad + 22;
+  ctx.font = "bold 24px monospace";
+  ctx.fillStyle = "#e8eaed";
+  ctx.fillText(`VIEW  (L stick = next)`, x + pad, y);
+  y += lineH;
+
+  ctx.font = "22px monospace";
+  for (const v of menu.views) {
+    const on = v.id === menu.activeViewId;
+    ctx.fillStyle = on ? "#8ab4f8" : "#9aa0a6";
+    ctx.fillText(`${on ? "▸" : " "} ${v.label}`, x + pad, y);
+    y += lineH;
+  }
+  if (!menu.views.length) {
+    ctx.fillStyle = "#9aa0a6";
+    ctx.fillText("  (no cameras)", x + pad, y);
+    y += lineH;
+  }
+
+  ctx.fillStyle = "#9aa0a6";
+  ctx.fillText(`SIZE  ${menu.tileSize}  (R stick = next)`, x + pad, y);
+  y += lineH;
+
+  const recording = Boolean(rec?.recording);
+  ctx.fillStyle = recording ? "#f28b82" : "#9aa0a6";
+  ctx.fillText(
+    recording
+      ? `● REC ${rec?.episode_frames ?? 0} — hold A/X to STOP + save`
+      : "hold A/X to START a take",
+    x + pad, y);
 }
 
 function poseToPair(pose: XRPose | null | undefined) {
@@ -586,6 +673,44 @@ export function axPressed(session: XRSessionLike): boolean {
   }
   return false;
 }
+
+/** True while ONE named controller's thumbstick is clicked in.
+ *
+ *  Per-hand, unlike the others: the two sticks drive different menu axes (left
+ *  cycles the view, right cycles the tile size), which is what makes a menu
+ *  possible at all without stealing an input that already means something.
+ *  Trigger, grip, A/X and B/Y are all spoken for, and every one of them is
+ *  either a dead-man or a safety action — none can be shared with a menu.
+ */
+export function thumbstickPressed(
+  session: XRSessionLike, hand: "left" | "right",
+): boolean {
+  for (const src of session.inputSources) {
+    if (src.handedness !== hand) continue;
+    if (src.gamepad?.buttons[BUTTON_THUMBSTICK]?.pressed) return true;
+  }
+  return false;
+}
+
+/** Step an index around a ring, guarding against an empty list (which would
+ *  otherwise produce NaN and paint an undefined selection). */
+export function cycleIndex(len: number, i: number, dir = 1): number {
+  if (len <= 0) return 0;
+  return ((i + dir) % len + len) % len;
+}
+
+/** How wide the workspace-camera quad hangs, in metres, at HUD_DIST.
+ *
+ *  "Small" was the complaint, and the fix is mostly this number: the tile is a
+ *  quad in the world, so apparent size is width/distance, not pixels. L spans
+ *  roughly 76° of view at the HUD's 1.15 m — about as wide as you can put a
+ *  panel before the edges leave the sweet spot of the optics.
+ */
+export const CAM_TILE_SIZES: readonly { name: string; widthM: number }[] = [
+  { name: "S", widthM: 1.1 },
+  { name: "M", widthM: 1.6 },
+  { name: "L", widthM: 2.2 },
+];
 
 /** How long A/X must stay down before the record toggle fires. The thumb
  *  rests near A/X while gripping; a plain press would toggle takes by

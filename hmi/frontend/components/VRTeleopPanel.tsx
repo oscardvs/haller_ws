@@ -37,11 +37,13 @@ import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
 import {
-  attachRenderScene, axPressed, disengagedFrame, estopPressed, hapticCues,
-  holdToggle, holdToggleInit, paintHud, pulse, RECORD_HOLD_MS,
-  requestTeleopSession, sampleVRFrame, xrAvailableAtAll, xrSupported,
+  attachRenderScene, axPressed, CAM_TILE_SIZES, cycleIndex, disengagedFrame,
+  estopPressed, hapticCues, holdToggle, holdToggleInit, paintHud, pulse,
+  RECORD_HOLD_MS, requestTeleopSession, sampleVRFrame, thumbstickPressed,
+  xrAvailableAtAll, xrSupported,
   type BodyOverride, type HoldToggleState, type SideAuthorityLike,
-  type TeleopXRSession, type VRFrame, type XRFrameLike, type XRSessionLike,
+  type TeleopXRSession, type VRFrame, type VrMenuLike, type XRFrameLike,
+  type XRSessionLike,
 } from "@/lib/vrTeleop";
 import { repoIdFor } from "./cockpit/CommandBar";
 import { DeadManIndicator } from "./DeadManIndicator";
@@ -57,8 +59,19 @@ const BODY_LS_KEY = "haller.vrTeleop.body.v1";
 const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
 const VRMODE_LS_KEY = "haller.vrTeleop.mode.v1";
 
+const TILE_LS_KEY = "haller.vrTeleop.tile.v1";
+const VIEW_LS_KEY = "haller.vrTeleop.view.v1";
+
 function fmtMm(m: number | undefined): string {
   return m === undefined ? "—" : `${(m * 1000).toFixed(0)} mm`;
+}
+
+/** Menu label for a camera. Ids are backend-shaped (`threequarter_sim`); this
+ *  is what an operator reads at arm's length through a headset, so it drops the
+ *  `_sim` suffix and says which arm a wrist cam belongs to. */
+export function viewLabel(c: CameraInfo): string {
+  const base = c.id.replace(/_sim$/, "").replace(/_/g, " ");
+  return c.arm_id ? `${base} (${c.arm_id})` : base;
 }
 
 export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
@@ -79,6 +92,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   // Recorder status, polled alongside teleop status so the HUD (in-scene or
   // dom-overlay) can show whether a take is rolling and how long it is.
   const [recStatus, setRecStatus] = useState<RecordStatus | null>(null);
+  // Every camera the backend advertises, in menu order. Sim serves the MuJoCo
+  // views; the real rig serves the mast and the egocentric gripper cams. The
+  // menu is deliberately generic over whatever comes back.
+  const [views, setViews] = useState<CameraInfo[]>([]);
+  const [tileIdx, setTileIdx] = useState(0);
 
   const sessionRef = useRef<XRSessionLike | null>(null);
   const refSpaceRef = useRef<unknown>(null);
@@ -98,6 +116,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const hudPaintRef = useRef(0);
   const recStatusRef = useRef<RecordStatus | null>(null);
   const axToggleRef = useRef<HoldToggleState>(holdToggleInit());
+  const viewsRef = useRef<CameraInfo[]>([]);
+  const tileIdxRef = useRef(0);
+  const lStickDownRef = useRef(false);
+  const rStickDownRef = useRef(false);
+  const menuRef = useRef<VrMenuLike>(null);
 
   bodyRef.current = body;
   mirrorModeRef.current = mirrorMode;
@@ -106,13 +129,32 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
   recStatusRef.current = recStatus;
+  viewsRef.current = views;
+  tileIdxRef.current = tileIdx;
+  menuRef.current = {
+    views: views.map((c) => ({ id: c.id, label: viewLabel(c) })),
+    activeViewId: baseCam?.id ?? null,
+    tileSize: CAM_TILE_SIZES[tileIdx]?.name ?? "S",
+  };
 
   useEffect(() => {
     void xrSupported().then(setSupported);
     api.cameras()
       .then(({ cameras }) => {
-        const base = cameras.filter((c) => c.role === "base" && c.active);
-        const cam = base.find((c) => c.source === "sim_camera") ?? base[0] ?? null;
+        // Base views first, then wrist: the menu should open on something you
+        // can judge a whole pose from, with the close-ups after it.
+        const active = cameras.filter((c) => c.active);
+        const ordered = [...active.filter((c) => c.role === "base"),
+                         ...active.filter((c) => c.role !== "base")];
+        setViews(ordered);
+        const base = ordered.filter((c) => c.role === "base");
+        let remembered: CameraInfo | undefined;
+        try {
+          const id = localStorage.getItem(VIEW_LS_KEY);
+          remembered = ordered.find((c) => c.id === id);
+        } catch { /* private mode: fall through to the default pick */ }
+        const cam = remembered
+          ?? base.find((c) => c.source === "sim_camera") ?? base[0] ?? null;
         setBaseCam(cam);
         if (cam?.source === "sim_camera") setShowCam(true);
       })
@@ -123,6 +165,8 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       const mm = localStorage.getItem(MIRROR_LS_KEY);
       if (mm === "both") setMirrorMode("both");
       if (localStorage.getItem(VRMODE_LS_KEY) === "joints") setVrMode("joints");
+      const t = Number(localStorage.getItem(TILE_LS_KEY));
+      if (Number.isInteger(t) && t >= 0 && t < CAM_TILE_SIZES.length) setTileIdx(t);
     } catch {
       /* a corrupt override must not block entering VR; defaults are fine */
     }
@@ -167,6 +211,33 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         .catch(() => { /* transient; the next tick retries */ });
     }, 250);
     return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  /** Next camera into the tile. Repoints the live MJPEG <img> in place — the
+   *  in-scene HUD paints whatever that element currently holds, so swapping
+   *  `src` is the whole switch. */
+  const cycleView = useCallback(() => {
+    const list = viewsRef.current;
+    if (list.length < 2) return;
+    const here = list.findIndex((c) => c.id === baseCamRef.current?.id);
+    const next = list[cycleIndex(list.length, here < 0 ? -1 : here, 1)];
+    if (!next) return;
+    setBaseCam(next);
+    baseCamRef.current = next;
+    try { localStorage.setItem(VIEW_LS_KEY, next.id); } catch { /* fine */ }
+    if (camImgRef.current) camImgRef.current.src = cameraStreamUrl(next.id);
+    const s = sessionRef.current;
+    if (s) pulse(s, "left", 0.15, 40);
+  }, []);
+
+  /** Next tile size. The quad rescales on the following rendered frame. */
+  const cycleTile = useCallback(() => {
+    const next = cycleIndex(CAM_TILE_SIZES.length, tileIdxRef.current, 1);
+    setTileIdx(next);
+    tileIdxRef.current = next;
+    try { localStorage.setItem(TILE_LS_KEY, String(next)); } catch { /* fine */ }
+    const s = sessionRef.current;
+    if (s) pulse(s, "right", 0.15, 40);
   }, []);
 
   const teardown = useCallback(async (opts: { stopBackend: boolean }) => {
@@ -355,13 +426,25 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       const live = sessionRef.current;
       if (!live) return;
       live.requestAnimationFrame(onXRFrame);
+      // View menu, on the two inputs nothing else claims. Edge-detected: a
+      // stick click is a discrete choice, and unlike the record toggle it is
+      // harmless enough to fire on press rather than on a hold.
+      const lStick = thumbstickPressed(live, "left");
+      if (lStick && !lStickDownRef.current) cycleView();
+      lStickDownRef.current = lStick;
+      const rStick = thumbstickPressed(live, "right");
+      if (rStick && !rStickDownRef.current) cycleTile();
+      rStickDownRef.current = rStick;
+
       let hudDirty = false;
       if (hudCanvas && hudCtx && t - hudPaintRef.current > 100) {
         hudPaintRef.current = t;
-        paintHud(hudCtx, statusRef.current, camImgRef.current, recStatusRef.current);
+        paintHud(hudCtx, statusRef.current, camImgRef.current,
+                 recStatusRef.current, menuRef.current);
         hudDirty = true;
       }
-      scene.render(frame, refSpaceRef.current, hudCanvas, hudDirty);
+      scene.render(frame, refSpaceRef.current, hudCanvas, hudDirty,
+                   CAM_TILE_SIZES[tileIdxRef.current]?.widthM);
 
       // E-STOP scan runs at display rate, not publish rate: 33 ms of extra
       // latency on a stop button is 33 ms too many. Edge-detected so one
@@ -391,7 +474,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown, fireEstop, toggleRecording]);
+  }, [armIds, teardown, fireEstop, toggleRecording, cycleView, cycleTile]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
   // be left mounted-but-hidden: an immersive session already owns the display,

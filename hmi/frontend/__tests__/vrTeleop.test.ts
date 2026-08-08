@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   BUTTON_AX, BUTTON_BY, BUTTON_SQUEEZE, BUTTON_TRIGGER,
+  BUTTON_THUMBSTICK, CAM_TILE_SIZES, cycleIndex, thumbstickPressed,
   axPressed, disengagedFrame, estopPressed, hapticCues, holdToggle,
   holdToggleInit, pulse, RECORD_HOLD_MS, sampleVRFrame,
   type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
@@ -321,5 +322,122 @@ describe("sampleVRFrame orientation source", () => {
     };
     const out = sampleVRFrame(session([src]), frame, {}, { tsMs: 1 });
     expect(out.left?.orientation).toEqual([0, 0, 0, 1]);
+  });
+});
+
+// ---- view menu ---------------------------------------------------------------
+
+describe("thumbstickPressed", () => {
+  function stick(hand: "left" | "right", down: boolean): XRInputSourceLike {
+    const buttons: { pressed: boolean; value: number }[] = [];
+    buttons[BUTTON_THUMBSTICK] = { pressed: down, value: 0 };
+    return { handedness: hand, gripSpace: { space: hand }, gamepad: { buttons } };
+  }
+
+  it("is per-hand, so the two sticks can mean different things", () => {
+    const s = session([stick("left", true), stick("right", false)]);
+    expect(thumbstickPressed(s, "left")).toBe(true);
+    expect(thumbstickPressed(s, "right")).toBe(false);
+  });
+
+  it("is false when a controller reports no gamepad at all", () => {
+    const s = session([{ handedness: "left", gripSpace: {}, gamepad: null }]);
+    expect(thumbstickPressed(s, "left")).toBe(false);
+  });
+
+  it("does not collide with the record button", () => {
+    // A/X held must not read as a stick click: they are different actions and
+    // the thumb rests near both.
+    const s = session([controller("right", { ax: true })]);
+    expect(axPressed(s)).toBe(true);
+    expect(thumbstickPressed(s, "right")).toBe(false);
+  });
+});
+
+describe("cycleIndex", () => {
+  it("wraps forward and backward", () => {
+    expect(cycleIndex(3, 0, 1)).toBe(1);
+    expect(cycleIndex(3, 2, 1)).toBe(0);
+    expect(cycleIndex(3, 0, -1)).toBe(2);
+  });
+
+  it("returns 0 for an empty list instead of NaN", () => {
+    // A NaN index paints an undefined selection rather than failing loudly.
+    expect(cycleIndex(0, 0, 1)).toBe(0);
+    expect(Number.isNaN(cycleIndex(0, 5, 1))).toBe(false);
+  });
+});
+
+describe("CAM_TILE_SIZES", () => {
+  it("is strictly ascending, so 'next size' always visibly grows", () => {
+    const w = CAM_TILE_SIZES.map((s) => s.widthM);
+    expect(w.length).toBeGreaterThan(1);
+    for (let i = 1; i < w.length; i++) expect(w[i]).toBeGreaterThan(w[i - 1]);
+  });
+});
+
+describe("paintHud view menu", () => {
+  function stubCtx() {
+    const texts: string[] = [];
+    const ctx = {
+      canvas: { width: 1024, height: 768 },
+      clearRect: () => {}, fillRect: () => {}, drawImage: () => {},
+      strokeRect: () => {},
+      fillText: (t: string) => { texts.push(t); },
+      set fillStyle(_v: string) {}, set font(_v: string) {},
+      set textAlign(_v: string) {}, set strokeStyle(_v: string) {},
+      set lineWidth(_v: number) {},
+    };
+    return { ctx: ctx as unknown as CanvasRenderingContext2D, texts };
+  }
+
+  const menu = {
+    views: [{ id: "threequarter_sim", label: "threequarter" },
+            { id: "overhead_sim", label: "overhead" }],
+    activeViewId: "overhead_sim",
+    tileSize: "M",
+  };
+
+  it("lists every view and marks the active one", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, null, null, menu);
+    const all = texts.join(" | ");
+    expect(all).toContain("threequarter");
+    expect(all).toContain("▸ overhead");
+    expect(all).not.toContain("▸ threequarter");
+  });
+
+  it("states both bindings and the tile size", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, null, null, menu);
+    const all = texts.join(" | ");
+    expect(all).toContain("L stick");
+    expect(all).toContain("R stick");
+    expect(all).toContain("SIZE  M");
+  });
+
+  it("shows the record command, and the frame count while rolling", () => {
+    const idle = stubCtx();
+    paintHud(idle.ctx, {}, null, { recording: false, episode_frames: 0 }, menu);
+    expect(idle.texts.join(" | ")).toContain("hold A/X to START");
+
+    const live = stubCtx();
+    paintHud(live.ctx, {}, null, { recording: true, episode_frames: 42 }, menu);
+    const all = live.texts.join(" | ");
+    expect(all).toContain("REC 42");
+    expect(all).toContain("hold A/X to STOP");
+  });
+
+  it("is omitted entirely when no menu is passed", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, null, null);
+    expect(texts.join(" | ")).not.toContain("stick");
+  });
+
+  it("says so rather than drawing an empty box when there are no cameras", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, null, null,
+             { views: [], activeViewId: null, tileSize: "S" });
+    expect(texts.join(" | ")).toContain("(no cameras)");
   });
 });
