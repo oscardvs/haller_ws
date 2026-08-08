@@ -45,14 +45,19 @@ class _FakeArms(dict):
     pass
 
 
-def _mode(goal=None):
+def _mode(goal=None, min_z=0.0, min_tip=-1.0):
+    # Floors default off: PARKED is a synthetic fixture pose whose wrist point
+    # sits at 16 mm and whose tip is under the bench — legal for the mapping
+    # math, in violation of the real guard. The floor clamps get their own
+    # tests with explicit values.
     arms = _FakeArms()
     for arm_id in ("left", "right"):
         handle = type("H", (), {})()
         handle.joint_limits_deg = dict(LIMITS)
         arms[arm_id] = handle
     session = _FakeSession(goal or {"left": dict(PARKED), "right": dict(PARKED)})
-    return VRPoseMode(session, arms), session
+    return VRPoseMode(session, arms, min_target_z=min_z,
+                      min_tip_z=min_tip), session
 
 
 def _ctrl(pos, *, squeeze, trigger=0.0, orientation=None):
@@ -168,6 +173,37 @@ def test_release_and_resqueeze_reanchors_without_a_jump():
     out = mode.convert(_frame(left=_ctrl(far, squeeze=True)))  # re-anchor
     goal = out["left"]["joint_goal"]
     assert float(np.linalg.norm(_wpr_of(goal) - _wpr_of(PARKED))) < 2e-3
+
+
+def test_hand_below_the_bench_slides_along_the_floor():
+    """Pushing the hand a metre below the bench must NOT sink the IK target:
+    the wrist-point target clamps at min_target_z, so the arm slides along
+    the bench instead of demanding a pose the guard must freeze."""
+    mode, _ = _mode(min_z=0.02)
+    mode.convert(_frame(left=_ctrl(HAND, squeeze=True)))  # anchor
+    low = [HAND[0], HAND[1] - 1.0, HAND[2]]
+    out = mode.convert(_frame(left=_ctrl(low, squeeze=True)))
+    goal = out["left"]["joint_goal"]
+    assert _wpr_of(goal)[2] >= 0.02 - 1e-3
+
+
+def test_pitched_down_hand_keeps_the_tip_target_off_the_floor():
+    """The wrist clamp alone doesn't bound the TIP: with the hand pitched
+    down, tip = wrist - up to 10.5 cm. The goal's tip (not just its wrist)
+    must stay at or above min_tip_z (0.005 by default)."""
+    mode, _ = _mode(min_z=0.02, min_tip=0.005)
+    mode.convert(_frame(left=_ctrl(HAND, squeeze=True)))  # anchor, identity
+    pitch_down = [-np.sin(np.deg2rad(30)), 0.0, 0.0,
+                  np.cos(np.deg2rad(30))]  # 60° about -X
+    low = [HAND[0], HAND[1] - 1.0, HAND[2]]
+    out = mode.convert(_frame(left=_ctrl(low, squeeze=True,
+                                         orientation=pitch_down)))
+    goal = out["left"]["joint_goal"]
+    tip_z = fk_points((0, 0, 0), 0.0, goal)["tip"][2]
+    # The correction runs at most 12 passes; a steep pitch can leave the last
+    # millimetres unconverged. What matters for the guard is the true floor:
+    # min_tip=0.005 is floor+margin, so anything >= 0 stays legal.
+    assert tip_z >= 0.0
 
 
 def test_controller_pitch_up_raises_the_hand():

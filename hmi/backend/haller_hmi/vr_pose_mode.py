@@ -54,7 +54,17 @@ _POSE_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex",
 #: more — at 1:1 the arm's roll extremes are unreachable without re-anchoring,
 #: so roll is exaggerated: a small twist of the wrist tilts the gripper a lot.
 WRIST_ROLL_GAIN = 2.0
-WRIST_PITCH_GAIN = 1.0
+#: Pitch needs the same treatment, for a sharper reason than comfort: setting a
+#: cube down on the place zone is only reachable with wrist_flex at or near its
+#: +95° limit (measured — the zone sits at ~91% of full reach, so the wrist has
+#: to fold the tip down the last few centimetres). From the parked +10°, at 1:1
+#: that asks the operator for 85° of hand pitch, past what a hand holding a
+#: controller will do; the arm simply stops short of the bench and reads as "the
+#: joint is constrained". At 1.6 a ~53° hand pitch covers the same travel, which
+#: is a motion people actually make. Kept below the roll gain because pitch also
+#: drives the tip toward the floor clamp below, and every degree of jitter here
+#: becomes 1.6° of gripper pitch.
+WRIST_PITCH_GAIN = 1.6
 
 
 def _wpr(joints: dict[str, float]) -> np.ndarray:
@@ -142,9 +152,12 @@ class _SideAnchor:
 class VRPoseMode:
     """One per websocket connection — the anchors are conversation state."""
 
-    def __init__(self, session, arms) -> None:
+    def __init__(self, session, arms, min_target_z: float = 0.02,
+                 min_tip_z: float = 0.005) -> None:
         self._session = session
         self._arms = arms
+        self._min_target_z = min_target_z
+        self._min_tip_z = min_tip_z
         self._anchors: dict[str, _SideAnchor | None] = {"left": None, "right": None}
 
     # ---- helpers -----------------------------------------------------------
@@ -269,8 +282,15 @@ class VRPoseMode:
         delta_robot = np.array([right_amt, -fwd_amt, up_amt])
 
         target = _wpr(anchor.joints) + delta_robot
-        solved = solve_wrist_point(anchor.last_solution, target, limits)
-        anchor.last_solution = dict(solved)
+        # Never ask for a wrist point below the guard's floor band. Without
+        # this, a hand pushed under the bench sinks the IK target into a
+        # region every step toward which worsens the tip/wrist floor slack —
+        # and the guard, which scales the WHOLE step, then freezes the arm
+        # solid, lateral motion included. Clamping the target turns "push too
+        # low" into "slide along the bench", and the guard's own floors stay
+        # the precise backstop. (The guard as caller knows the exact floor;
+        # server.py passes table_z + wrist_min + a little slack.)
+        target[2] = max(target[2], self._min_target_z)
 
         # Wrist joints track the controller's attitude RELATIVE to its
         # anchored attitude, so however the controller was held at the
@@ -281,12 +301,34 @@ class VRPoseMode:
         # the arm's range.
         wf_lo, wf_hi = limits.get("wrist_flex", (-180.0, 180.0))
         wr_lo, wr_hi = limits.get("wrist_roll", (-180.0, 180.0))
-        goal = dict(solved)
-        goal["wrist_flex"] = min(wf_hi, max(wf_lo,
+        wf = min(wf_hi, max(wf_lo,
             anchor.joints.get("wrist_flex", 0.0)
             - WRIST_PITCH_GAIN * (pitch - anchor.pitch_deg)))
-        goal["wrist_roll"] = min(wr_hi, max(wr_lo,
+        wr = min(wr_hi, max(wr_lo,
             anchor.joints.get("wrist_roll", 0.0)
             + WRIST_ROLL_GAIN * (roll - anchor.roll_deg)))
+
+        solved = solve_wrist_point(anchor.last_solution, target, limits)
+        # The wrist clamp alone doesn't bound the TIP: with the hand pitched
+        # down, tip = wrist - up-to-10.5 cm. A below-floor tip target
+        # re-creates the freeze the wrist clamp was meant to prevent, so
+        # raise the wrist target by the measured tip deficit and re-solve
+        # (the solve only moves pan/lift/elbow; the wrist joints ride the
+        # controller regardless). Iterated because raising the wrist also
+        # changes the forearm's pitch, which moves the tip a little less
+        # than the correction — a few passes converge.
+        for _ in range(12):
+            tip_z = float(fk_points((0.0, 0.0, 0.0), 0.0,
+                                    {**solved, "wrist_flex": wf,
+                                     "wrist_roll": wr})["tip"][2])
+            if tip_z >= self._min_tip_z:
+                break
+            target[2] += self._min_tip_z - tip_z
+            solved = solve_wrist_point(solved, target, limits)
+        anchor.last_solution = dict(solved)
+
+        goal = dict(solved)
+        goal["wrist_flex"] = wf
+        goal["wrist_roll"] = wr
         goal["gripper"] = max(0.0, min(1.0, 1.0 - trigger))
         return {"joint_goal": goal, "confidence": 1.0}

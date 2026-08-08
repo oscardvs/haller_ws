@@ -58,7 +58,11 @@
       <default class="collision">
         <geom group="3" type="mesh" material="white"/>
         <default class="finger_collision">
-          <geom type="box" solimp="2 1 0.01" solref="0.01 1" friction="1 0.005 0.0001"/>
+          <!-- haller: slide friction 1 -> 2 (upstream ships 1). The physical
+               pads are rubber TPU, not bare PLA; at 1.0 a pinched 4 cm cube
+               slips out during transport. MuJoCo combines a contact pair by
+               max, so this governs pad-cube friction on its own. -->
+          <geom type="box" solimp="2 1 0.01" solref="0.01 1" friction="2 0.005 0.0001"/>
         </default>
       </default>
     </default>

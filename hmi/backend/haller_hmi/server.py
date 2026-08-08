@@ -807,7 +807,18 @@ async def ws_vr_teleop_in(ws: WebSocket):
     """
     await ws.accept()
     from .vr_pose_mode import VRPoseMode
-    pose_mode = VRPoseMode(human_teleop, arms)
+    # Floor for IK wrist-point targets: the guard's own wrist floor plus a
+    # little slack, so teleop demands stay in the region the guard passes
+    # without clamping (see vr_pose_mode's comment at the clamp site). Same
+    # for the fingertip floor — a pitched-down hand otherwise sinks the tip
+    # target under the bench and the guard freezes the whole step.
+    _floor = 0.02
+    _tip_floor = 0.005
+    if cfg.collision.table_z_m is not None:
+        _floor = cfg.collision.table_z_m + cfg.collision.wrist_min_m + 0.005
+        _tip_floor = cfg.collision.table_z_m + cfg.collision.tip_min_m + 0.005
+    pose_mode = VRPoseMode(human_teleop, arms, min_target_z=_floor,
+                           min_tip_z=_tip_floor)
     try:
         while True:
             frame = await _receive_or_idle_timeout(ws)
