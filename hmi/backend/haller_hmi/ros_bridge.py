@@ -19,7 +19,7 @@ from typing import Any
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
@@ -100,12 +100,35 @@ class RosBridge:
             self._exec.shutdown()
         if self._node is not None:
             self._node.destroy_node()
-        rclpy.shutdown()
+        # Idempotent on purpose. rclpy installs its own SIGINT/SIGTERM handlers
+        # and shuts the global context down itself, so on a signalled exit
+        # rcl_shutdown has usually already run by the time the FastAPI lifespan
+        # reaches here, and a second call raises:
+        #
+        #   RCLError: failed to shutdown: rcl_shutdown already called
+        #
+        # Uncaught, that turns every normal Ctrl-C/SIGTERM shutdown into
+        # "ERROR: Application shutdown failed" — which is not just noise, it
+        # makes a REAL shutdown failure (one that skipped closing the dataset
+        # or de-energising the arms) indistinguishable from the routine case.
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except RuntimeError as e:  # RCLError subclasses RuntimeError
+            logger.debug("rclpy already shut down: %s", e)
 
     def _spin(self) -> None:
         assert self._exec is not None
         while not self._stop.is_set():
-            self._exec.spin_once(timeout_sec=0.1)
+            try:
+                self._exec.spin_once(timeout_sec=0.1)
+            except ExternalShutdownException:
+                # rclpy's signal handler tore the global context down out from
+                # under this thread. That is the normal way a signalled exit
+                # looks from in here, not a fault — returning quietly beats
+                # dumping a traceback into every shutdown log.
+                logger.debug("ROS context shut down externally; spin thread exiting")
+                return
 
     # public API used by FastAPI routes / telemetry
 

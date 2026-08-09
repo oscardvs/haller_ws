@@ -71,10 +71,24 @@ elif [ "$SIM" = 1 ] || [ "$LOCAL" = 1 ]; then
       # is not needed (the bridge degrades to a dead base channel without it),
       # and MUJOCO_GL=egl renders headless if the config has sim cameras.
       source "$HOME/venvs/haller-hmi/bin/activate"
+      # --timeout-graceful-shutdown: uvicorn otherwise waits FOREVER for open
+      # connections before running the lifespan shutdown, and a headset parked
+      # on /teleop/vr holds a websocket indefinitely. That shutdown is what
+      # finalises a recorded dataset (parquet footers, videos, episode
+      # metadata), so "waiting politely" turns into "the take is unreadable
+      # until someone force-quits past the finalize". 10s is longer than any
+      # honest connection needs to drain; after it uvicorn closes them and
+      # proceeds to the shutdown that actually matters.
+      #
+      # This comment lives ABOVE the assignments, not between them and the
+      # command: a `\` continuation followed by a comment line silently ends
+      # the continuation, which would leave HALLER_HMI_CONFIG and MUJOCO_GL
+      # unset while `bash -n` still reports the file as fine.
       HALLER_HMI_CONFIG="$PWD/$BACKEND_CFG" \
       MUJOCO_GL="${MUJOCO_GL:-egl}" \
         nohup python -m uvicorn haller_hmi.server:app \
           --host 0.0.0.0 --port "$BACKEND_PORT" \
+          --timeout-graceful-shutdown 10 \
           >"$RUN_DIR/sim-backend.log" 2>&1 &
       echo $! >"$RUN_DIR/sim-backend.pid"
     )

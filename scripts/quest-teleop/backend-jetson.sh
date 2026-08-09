@@ -13,5 +13,12 @@ PORT="${BACKEND_PORT:-8000}"
 LOG="${HALLER_BACKEND_LOG:-$HOME/haller-backend.log}"
 
 echo "haller-hmi backend: :$PORT, config ${HALLER_HMI_CONFIG:-config.yaml}, log $LOG"
+# --timeout-graceful-shutdown: without it uvicorn waits forever for open
+# connections before running the lifespan shutdown, and a headset parked on
+# /teleop/vr holds a websocket indefinitely. That shutdown is what finalises a
+# recorded dataset (parquet footers, videos, episode metadata), so an unbounded
+# wait means the only way to stop the backend is to force-quit past the
+# finalize and lose the take. See quest-teleop/down.sh for the full story.
 exec python -m uvicorn haller_hmi.server:app \
-    --host 0.0.0.0 --port "$PORT" >>"$LOG" 2>&1
+    --host 0.0.0.0 --port "$PORT" \
+    --timeout-graceful-shutdown 10 >>"$LOG" 2>&1
