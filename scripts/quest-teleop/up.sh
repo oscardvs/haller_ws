@@ -5,6 +5,9 @@
 #   - starts Caddy as the single HTTPS origin the headset needs
 #
 #   scripts/quest-teleop/up.sh            # start everything (real arms, Jetson)
+#   scripts/quest-teleop/up.sh --insertion  # the bimanual insertion task: steel
+#                                         # fixture + pin instead of cubes.
+#                                         # Same chain, config.bimanual-insertion.
 #   scripts/quest-teleop/up.sh --sim      # desktop rehearsal: same chain, but
 #                                         # the backend runs HERE on MuJoCo
 #                                         # arms (config.bimanual-sim.yaml).
@@ -28,8 +31,13 @@ set -eo pipefail
 
 SIM=0
 LOCAL=0
+SIM_CFG="config.bimanual-sim.yaml"
 if [ "${1:-}" = "--sim" ]; then
     SIM=1
+    shift
+elif [ "${1:-}" = "--insertion" ]; then
+    SIM=1
+    SIM_CFG="config.bimanual-insertion.yaml"
     shift
 elif [ "${1:-}" = "--local" ]; then
     LOCAL=1
@@ -59,8 +67,8 @@ if curl -sm 2 "http://$JETSON_IP:$BACKEND_PORT/health" | grep -q '"ok"'; then
     say "backend already up at http://$JETSON_IP:$BACKEND_PORT"
 elif [ "$SIM" = 1 ] || [ "$LOCAL" = 1 ]; then
     if [ "$SIM" = 1 ]; then
-        BACKEND_CFG="config.bimanual-sim.yaml"
-        say "starting SIM backend on :$BACKEND_PORT (MuJoCo bimanual, no hardware)"
+        BACKEND_CFG="$SIM_CFG"
+        say "starting SIM backend on :$BACKEND_PORT ($BACKEND_CFG — MuJoCo bimanual, no hardware)"
     else
         BACKEND_CFG="${HALLER_HMI_CONFIG:-config.desktop-real.yaml}"
         say "starting LOCAL backend on :$BACKEND_PORT ($BACKEND_CFG — real arms, no Jetson)"

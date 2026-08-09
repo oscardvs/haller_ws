@@ -34,7 +34,7 @@ from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
 from .recorder import DatasetRecorder
 from .sim.scene import SceneController
-from .sim.task import TaskMonitor
+from .sim.task import InsertionMonitor, TaskMonitor
 from .sim.teleop import SimLeaderTeleop
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,8 @@ VERSION = "0.1.0"
 
 # Globals — wired in lifespan
 cfg = load_config()
-arms = ArmManager(cfg.arms, motion=cfg.motion, sim_cubes=cfg.sim_cubes)
+arms = ArmManager(cfg.arms, motion=cfg.motion, sim_cubes=cfg.sim_cubes,
+                  sim_task=cfg.sim_task)
 cameras: CameraManager | None = None   # constructed in lifespan, after arms.connect_all()
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
@@ -215,7 +216,12 @@ async def _lifespan(app: FastAPI):
     _world = arms.world()
     if _world is not None:
         scene = SceneController(_world)
-        task = TaskMonitor(_world)
+        # The monitor follows the scene, from the one config key. Wiring the
+        # cube predicate to an insertion scene would score every episode a
+        # failure and the dataset would look like a operator problem rather
+        # than a config one, so these are never chosen independently.
+        task = (InsertionMonitor(_world) if cfg.sim_task == "insertion"
+                else TaskMonitor(_world))
         if cfg.sim_seed is not None:
             scene.reset(seed=cfg.sim_seed)
             logger.info("sim scene seeded from config: sim_seed=%d", cfg.sim_seed)

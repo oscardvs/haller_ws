@@ -1,0 +1,127 @@
+<mujocoinclude>
+  <!-- ==========================================================================
+       fixture.xml — steel bracket with a vertical through-bore. The arm that is
+       NOT inserting holds this steady; it is a loose free body with no jig, so
+       an unheld fixture just gets pushed across the bench. That is the whole
+       reason the task is bimanual.
+
+       Body frame: origin ON THE BORE AXIS, at the underside of the base plate.
+       A resting fixture therefore has body z = 0 (the bench top) and the bore
+       sits directly over (x, y).
+
+       MuJoCo primitives cannot have holes, so the bore is an octagonal ring of
+       8 thin boxes, each radial-x / tangential-y / vertical-z and rotated k*45
+       degrees about z. The tangential half-width (8 mm) is far larger than the
+       octagon's half-side (3.73 mm), so neighbours interpenetrate heavily and
+       the bore cannot leak. Geoms in one body never self-collide, so all that
+       overlap is free.
+
+         bore aperture   regular octagon, inscribed radius 0.009 (18 mm across
+                         flats), circumscribed 0.009742
+         guided depth    z = 0.000 -> 0.026 (26 mm), 20 mm of it raised collar
+         capture radius  4.0 mm, measured: a pin released within 4 mm of the
+                         axis enters, at 5 mm it does not
+
+       The bore runs CLEAR THROUGH plate and collar. Standing on the bench, the
+       bench closes the bottom, so a pin bottoms out at 26 mm of travel — a
+       hard, repeatable insertion stop rather than a soft one on the head.
+
+       Colour is plain rgba on every geom, not material=. Both work under
+       domain randomization in MuJoCo 3.10 (geom_rgba overrides a material's
+       colour whenever it differs from the compiler default 0.5 0.5 0.5 1), but
+       never write material= AND rgba= on the same geom: the compiler bakes the
+       rgba into geom_rgba and permanently masks the material.
+
+       Use quat, never axisangle, in an include file: the angle unit depends on
+       the PARENT scene's <compiler angle=...>, which an include cannot see.
+       ========================================================================== -->
+  <worldbody>
+    <!-- Home slot: bore near the midline so either arm can reach it, grip tab
+         out on the left arm's side. `SceneController` jitters this per seed. -->
+    <body name="fixture" pos="-0.04 -0.20 0">
+      <freejoint/>
+
+      <!-- Base plate, 80 x 50 x 6 mm, built as a frame of four boxes so the
+           bore passes through it. The inner opening is +/-0.010: outside the
+           aperture (whose max |x| is 0.009) and inside the ring's outer
+           envelope, so there is material everywhere and no gap. At +/-0.016
+           the octagon's 45-degree flats leave four corner gaps that read as a
+           modelling defect from the top-down camera.
+
+           The -x half is long: it carries the grip tab and pushes the support
+           polygon out underneath it, which is what keeps the fixture from
+           tipping when an arm pinches the tab. -->
+      <geom name="fixture_plate_xn" type="box" size="0.020 0.025 0.003" pos="-0.030 0 0.003"
+            mass="0.030" rgba="0.58 0.60 0.63 1" friction="1 0.005 0.0001"/>
+      <geom name="fixture_plate_xp" type="box" size="0.010 0.025 0.003" pos="0.020 0 0.003"
+            mass="0.015" rgba="0.58 0.60 0.63 1" friction="1 0.005 0.0001"/>
+      <geom name="fixture_plate_yn" type="box" size="0.010 0.0075 0.003" pos="0 -0.0175 0.003"
+            mass="0.005" rgba="0.58 0.60 0.63 1" friction="1 0.005 0.0001"/>
+      <geom name="fixture_plate_yp" type="box" size="0.010 0.0075 0.003" pos="0 0.0175 0.003"
+            mass="0.005" rgba="0.58 0.60 0.63 1" friction="1 0.005 0.0001"/>
+
+      <!-- Bore / collar. Each box spans radius 0.009 -> 0.017 and z 0 -> 0.026.
+
+           friction 0.4, lower than the plate, so the pin does not jam in the
+           bore. MuJoCo mixes friction as the elementwise MAX of the pair, so
+           the SHAFT carries 0.4 as well — one low side achieves nothing. The
+           gripper pads are 2.0, so the max still resolves to 2.0 there and the
+           grasp is unaffected.
+
+           solref="0.005 1" is REQUIRED; do not drop it. With the default, a
+           12 mm head striking this 18 mm aperture at ~1.1 m/s punches straight
+           through: it buries itself past the boxes' 13 mm half-height, the box
+           contact normal FLIPS, and the collar then drives the head downward
+           and out. Stiffer contact arrests it in the first millimetres so the
+           normal never flips. Measured 7/7 held up to 2.8 m/s with it, 0/7
+           without. Reducing the timestep does not help — this is normal-flip,
+           not tunnelling. MuJoCo solmix-AVERAGES solref across a contacting
+           pair, so pin.xml must carry the same value or the fix does nothing. -->
+      <geom name="fixture_bore_0" type="box" size="0.004 0.008 0.013"
+            pos="0.013000 0.000000 0.013" quat="1 0 0 0"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_1" type="box" size="0.004 0.008 0.013"
+            pos="0.009192 0.009192 0.013" quat="0.9238795 0 0 0.3826834"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_2" type="box" size="0.004 0.008 0.013"
+            pos="0.000000 0.013000 0.013" quat="0.7071068 0 0 0.7071068"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_3" type="box" size="0.004 0.008 0.013"
+            pos="-0.009192 0.009192 0.013" quat="0.3826834 0 0 0.9238795"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_4" type="box" size="0.004 0.008 0.013"
+            pos="-0.013000 0.000000 0.013" quat="1 0 0 0"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_5" type="box" size="0.004 0.008 0.013"
+            pos="-0.009192 -0.009192 0.013" quat="0.9238795 0 0 0.3826834"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_6" type="box" size="0.004 0.008 0.013"
+            pos="0.000000 -0.013000 0.013" quat="0.7071068 0 0 0.7071068"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="fixture_bore_7" type="box" size="0.004 0.008 0.013"
+            pos="0.009192 -0.009192 0.013" quat="0.3826834 0 0 0.9238795"
+            mass="0.006" rgba="0.66 0.68 0.71 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+
+      <!-- Grip tab: a vertical fin at the -x end, 10 mm thick (the jaws close
+           along local x and span ~30 mm), 24 mm wide, standing z 0.006 ->
+           0.040. Its inner jaw face lands at x ~= -0.031, a clear 14 mm from
+           the collar's outer face at x = -0.017, so the fingers never foul the
+           collar while holding. -->
+      <geom name="fixture_grip_tab" type="box" size="0.005 0.012 0.017" pos="-0.041 0 0.023"
+            mass="0.024" rgba="0.50 0.52 0.56 1" friction="1 0.005 0.0001"/>
+
+      <!-- THE BORE REFERENCE FRAME, and the single most load-bearing line in
+           this file: `sim/task.py::pin_inserted` measures depth, lateral
+           offset and tilt in this site's frame.
+             position     centre of the bore ENTRANCE (top opening), z = 0.026
+             orientation  quat 0 1 0 0 = 180 degrees about local x, so the
+                          site's local +z points DOWN THE BORE — the direction
+                          a pin travels while being inserted
+           Depth is 0 at the entrance and +0.026 fully home. Because the site
+           rides the body, all of it stays correct while the fixture is held in
+           mid-air, which is the normal case for this task. -->
+      <site name="hole_axis" pos="0 0 0.026" quat="0 1 0 0" size="0.002"
+            rgba="0.1 0.9 0.3 1"/>
+    </body>
+  </worldbody>
+</mujocoinclude>

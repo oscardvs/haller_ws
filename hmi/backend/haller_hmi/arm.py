@@ -484,10 +484,11 @@ class ArmManager:
 
     def __init__(self, arm_configs: list[ArmConfig],
                  motion: MotionConfig | None = None,
-                 sim_cubes: int = 0):
+                 sim_cubes: int = 0, sim_task: str = "cubes"):
         self._configs = [c for c in arm_configs if c.enabled]
         self._motion = motion or MotionConfig()
         self._sim_cubes = sim_cubes
+        self._sim_task = sim_task
         self._handles: dict[str, "ArmHandle | SimArmHandle"] = {}
         self._world = None  # lazily constructed if any sim arm/camera needs it
 
@@ -500,7 +501,8 @@ class ArmManager:
         sim_arm_names = [c.sim_arm_name for c in self._configs
                          if c.source == "sim" and c.sim_arm_name is not None]
         mjcf_xml, arm_joint_map = build_scene(arms=sim_arm_names,
-                                              cubes=self._sim_cubes)
+                                              cubes=self._sim_cubes,
+                                              task=self._sim_task)
         self._world = MuJoCoWorld(mjcf_xml, arm_joint_map=arm_joint_map)
         self._world.start()
         return self._world

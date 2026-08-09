@@ -254,6 +254,13 @@ class Config:
     # exactly as it did before this existed. Per-episode resets pass their own
     # seed to POST /sim/scene/reset and ignore this.
     sim_seed: int | None = None
+    # Which props the sim scene deals, and therefore which success predicate
+    # scores the episodes: "cubes" (pick-and-place, the historical default) or
+    # "insertion" (the bimanual steel fixture + pin). It selects the scene AND
+    # the monitor together on purpose — a scene with a bore scored by the
+    # cube predicate would label every episode a failure, and the two knobs
+    # would eventually be set inconsistently if they were separate.
+    sim_task: str = "cubes"
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -269,6 +276,7 @@ def load_config(path: Path | None = None) -> Config:
         collision=_collision_from(raw.get("collision")),
         sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
         sim_cubes=int(raw.get("sim_cubes", 0)),
+        sim_task=str(raw.get("sim_task", "cubes")),
         sim_seed=(None if raw.get("sim_seed") is None
                   else int(raw["sim_seed"])),
     )

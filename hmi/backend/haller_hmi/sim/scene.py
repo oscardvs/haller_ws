@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 
 #: Body-name prefix the scene builder gives each dealt cube (`sim/builder.py`).
 CUBE_BODY_PREFIX = "cube_"
+
+#: The bimanual insertion task's two loose parts, by body name. Absent from a
+#: pick-and-place scene, which is why every lookup of them is optional. Kept
+#: here rather than in `task.py` because this module is what MOVES them; the
+#: names are duplicated as `task.FIXTURE_BODY`/`task.PIN_BODY` for the
+#: predicate side, and `test_insertion.py` pins the two spellings together.
+INSERTION_BODY_NAMES = ("fixture", "pin")
 #: Named geoms in `sim/assets/scenes/workbench.xml`.
 PLACE_ZONE_GEOM_NAME = "place_zone"
 BENCH_GEOM_NAME = "workbench"
@@ -101,6 +108,44 @@ def index_cubes(model: mujoco.MjModel) -> list[CubeIndex]:
             vadr=int(model.jnt_dofadr[jadr]),
         ))
     out.sort(key=lambda c: _cube_sort_key(c.name))
+    return out
+
+
+def index_loose_bodies(model: mujoco.MjModel) -> list[CubeIndex]:
+    """Every free body the scene controller is allowed to move.
+
+    The cubes, plus the insertion task's `fixture` and `pin` when the scene has
+    them. Both tasks want the same treatment — jitter the start pose, respect
+    the bench, keep parts apart — and the sampler is already written and
+    tested, so the parts join the same list rather than growing a parallel one.
+
+    They are NOT included in the colour shuffle: a steel bracket that comes up
+    cube-red every third seed is not domain randomization, it is a bug that
+    looks like one. `SceneController` keeps that distinction.
+    """
+    out = list(index_cubes(model))
+    for name in INSERTION_BODY_NAMES:
+        bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if bid < 0:
+            continue                      # not an insertion scene
+        if int(model.body_jntnum[bid]) != 1:
+            raise ValueError(
+                f"body {name!r} has {int(model.body_jntnum[bid])} joints; "
+                "expected exactly one freejoint")
+        jadr = int(model.body_jntadr[bid])
+        if int(model.jnt_type[jadr]) != int(mujoco.mjtJoint.mjJNT_FREE):
+            raise ValueError(f"body {name!r} is not free-jointed")
+        out.append(CubeIndex(
+            name=name,
+            body_id=bid,
+            # First geom only. For the multi-geom fixture that is the base
+            # plate, which is the right footprint for the separation and
+            # bench-margin tests and is never colour-shuffled, so the usual
+            # one-geom assumption does no harm here.
+            geom_id=int(model.body_geomadr[bid]),
+            qadr=int(model.jnt_qposadr[jadr]),
+            vadr=int(model.jnt_dofadr[jadr]),
+        ))
     return out
 
 
@@ -169,7 +214,13 @@ class SceneController:
         self.world = world
         self.spec = spec or RandomSpec()
         model = world.model
-        self.cubes = index_cubes(model)
+        #: Everything loose on the bench: cubes, and the insertion parts when
+        #: the scene has them. Named `cubes` for continuity with the callers
+        #: and tests that predate the insertion task.
+        self.cubes = index_loose_bodies(model)
+        #: Only the actual cubes take part in the colour shuffle — see
+        #: `index_loose_bodies`.
+        self._colour_names = [c.name for c in index_cubes(model)]
 
         # ---- baseline, captured before anything has been randomized ----
         # qpos0 is the compiled initial configuration; for a free joint it is
@@ -247,7 +298,8 @@ class SceneController:
                 # episode ended, or it slides off the fresh slot the moment
                 # the stepper resumes.
                 data.qvel[c.vadr:c.vadr + 6] = 0.0
-                model.geom_rgba[c.geom_id] = rgba[c.name]
+                if c.name in rgba:      # cubes only; the steel parts keep theirs
+                    model.geom_rgba[c.geom_id] = rgba[c.name]
             # Warm-start accelerations are a solver hint carried across steps;
             # left in place, two runs from the same seed take measurably
             # different first steps. Zeroing both is what makes "same seed,
@@ -314,11 +366,22 @@ class SceneController:
             xy = self._sample_cube_xy(rng, c, placed)
             yaw = float(rng.uniform(-self.spec.yaw_jitter_rad,
                                     self.spec.yaw_jitter_rad))
-            # Yaw about world +z. Normalised explicitly even though
-            # (cos, 0, 0, sin) is unit by construction: an unnormalised
-            # quaternion in qpos is exactly the failure this whole module is
-            # careful about, and the cost is one sqrt per cube per episode.
-            quat = np.array([math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)])
+            # Yaw about world +z, COMPOSED ONTO the part's home orientation
+            # rather than replacing it. For a cube the two are the same thing —
+            # cubes are authored axis-aligned, so the home quat is identity —
+            # but the insertion pin is authored LYING FLAT on the bench, and
+            # overwriting its quat with a pure yaw would stand it on its tip
+            # at the start of every randomised episode. Pre-multiplying keeps
+            # the rotation in the world frame, which is what "yaw jitter"
+            # means, while preserving how the part rests.
+            #
+            # Normalised explicitly even though the product of two unit
+            # quaternions is unit: an unnormalised quaternion in qpos is
+            # exactly the failure this module is careful about, and the cost
+            # is one sqrt per part per episode.
+            spin = np.array([math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)])
+            quat = np.empty(4)
+            mujoco.mju_mulQuat(quat, spin, home[3:7])
             quat /= np.linalg.norm(quat)
             pose = np.empty(7)
             pose[0:2] = xy
@@ -381,7 +444,7 @@ class SceneController:
         return True
 
     def _plan_cube_rgba(self, rng, randomize: bool) -> dict[str, np.ndarray]:
-        names = [c.name for c in self.cubes]
+        names = self._colour_names
         if randomize and self.spec.shuffle_colors and len(names) > 1:
             order = [names[i] for i in rng.permutation(len(names))]
         else:

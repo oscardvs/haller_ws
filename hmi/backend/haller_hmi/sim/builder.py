@@ -210,7 +210,24 @@ _SCENE_ASSETS = (
     'rgb1="0.38 0.38 0.39" rgb2="0.32 0.32 0.33" width="256" height="256"/>'
     '<material name="bench_mat" texture="bench_tex" texrepeat="24 18" '
     'texuniform="false" reflectance="0.05"/>'
+    # No steel material: fixture.xml and pin.xml colour their geoms with plain
+    # rgba instead. Both approaches survive domain randomization in MuJoCo 3.10
+    # (geom_rgba overrides a material's colour whenever it differs from the
+    # compiler default 0.5 0.5 0.5 1), but plain rgba keeps the parts on the
+    # same footing as the cubes, and a declared-but-unused material is a
+    # standing invitation to write material= and rgba= on the same geom, which
+    # silently bakes the rgba in and masks the material forever.
 )
+
+#: The prop sets `build_scene` knows how to deal.
+_TASKS = ("cubes", "insertion")
+
+#: Matches the whole `place_zone` geom element so the insertion scene can drop
+#: it. Deliberately a regex over the extracted worldbody string rather than an
+#: XML edit: `_extract_worldbody_inner` already hands back a string, and the
+#: caller re-checks that the name is gone afterwards, so a formatting change
+#: upstream fails loudly instead of silently leaving the pad in.
+_PLACE_ZONE_RE = re.compile(r'<geom\s+name="place_zone".*?/>', re.S)
 
 #: Per-arm gripper camera, injected inside the Fixed_Jaw body so it rides the
 #: wrist exactly like the real rig's CSI wrist cams. This is the
@@ -264,18 +281,34 @@ def camera_xyaxes(pos: Vec3, target: Vec3) -> str:
     return "  ".join(" ".join(f"{c:.6g}" for c in axis) for axis in (x, y))
 
 
-def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]:
+def build_scene(arms: list[str], cubes: int,
+                task: str = "cubes") -> tuple[str, dict[str, list[str]]]:
     """Compose a scene MJCF.
 
     `arms`: list of arm ids (e.g. ["right"] or ["left", "right"]).
     `cubes`: number of 4cm cubes dealt onto the workbench, in _CUBE_SLOTS
     order (front of the bases, spread across both arms' halves of the bench).
+    `task`: which props to deal.
+        "cubes"     — pick-and-place: cubes and the place zone (the default,
+                      and what every pre-insertion config and test expects).
+        "insertion" — bimanual construction: adds the steel `fixture` and
+                      `pin`. Cubes are still honoured, but the insertion
+                      configs pass 0; the bore, not a pad, is the target.
+
+    The insertion scene also DROPS the pick-and-place pad — see the call site.
+    A consequence worth knowing: `TaskMonitor` cannot be constructed against an
+    insertion scene, because `place_zone_geom` will not resolve. That is the
+    right failure. Scoring insertion with the cube predicate would mark every
+    episode a failure, and a loud KeyError at startup beats a dataset of
+    silent zeros.
 
     Returns (mjcf_xml_string, arm_joint_map). arm_joint_map maps each arm id to
     its list of prefixed joint names — what `MuJoCoWorld` consumes.
     """
     if not arms:
         raise ValueError("scene needs at least one arm")
+    if task not in _TASKS:
+        raise ValueError(f"unknown task {task!r}; expected one of {sorted(_TASKS)}")
     if len(set(arms)) != len(arms):
         raise ValueError(f"duplicate arm ids in {arms!r}")
 
@@ -295,8 +328,22 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
         subtrees.append(sub)
         arm_joint_map[arm_id] = sub.joint_names
 
-    # Workbench (always: bench + place zone) + cubes.
+    # Workbench (bench, backdrop, lights, and the pick-and-place pad) + props.
     workbench_inner = _extract_worldbody_inner(SCENES_DIR / "workbench.xml")
+    if task == "insertion":
+        # Drop the pick-and-place pad. It is the pad's own task's target and
+        # means nothing here, but it is a large, saturated, perfectly flat
+        # region sitting directly under the fixture's home slot — the single
+        # most salient thing in the base camera after the arms. A VLA attends
+        # to it and learns nothing, and the operator reads it as a target it
+        # is not. Removing it also puts the pin's bottoming-out surface back
+        # on the bench where the geometry was validated.
+        workbench_inner = _PLACE_ZONE_RE.sub("", workbench_inner, count=1)
+        if 'name="place_zone"' in workbench_inner:
+            raise RuntimeError(
+                "failed to strip place_zone from workbench.xml for the "
+                "insertion scene — the geom's formatting changed and the "
+                "regex no longer matches it")
     cube_chunks: list[str] = []
     cube_template = (SCENES_DIR / "cube.xml").read_text()
     # Match the full opening tag of the cube body, including any existing pos attr.
@@ -314,6 +361,16 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
         per_cube = cube_rgba_re.sub(
             f'rgba="{_CUBE_COLORS[i % len(_CUBE_COLORS)]}"', per_cube, count=1)
         cube_chunks.append(_extract_worldbody_inner_from_string(per_cube))
+
+    # Insertion props. Their home poses live in the XML rather than being
+    # computed here, unlike the cubes': there are exactly two of them and where
+    # they start is a task-design decision (the fixture in front of the left
+    # arm, the pin in front of the right, so the demonstration begins with one
+    # part per hand), not a slot to be dealt from a table.
+    if task == "insertion":
+        for part in ("fixture", "pin"):
+            cube_chunks.append(
+                _extract_worldbody_inner(SCENES_DIR / f"{part}.xml"))
 
     # <compiler> — meshdir is relative to the MJCF on disk. We're producing an
     # in-memory string, so resolve meshdir to an absolute path so meshes load.

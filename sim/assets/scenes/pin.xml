@@ -1,0 +1,71 @@
+<mujocoinclude>
+  <!-- ==========================================================================
+       pin.xml — the bolt that goes into fixture.xml's bore.
+
+       Body frame: origin AT THE SHAFT TIP, the end that enters first, with
+       local +z running along the shaft from tip up towards the head. So
+       qpos[0:3] IS the tip position and the reset path needs no offset maths.
+       `sim/task.py::PIN_SHAFT_AXIS` is 2 because of this line — change the
+       orientation here and that constant has to move with it.
+
+         shaft   r = 0.005, length 0.060 (local z 0.000 -> 0.060)
+         head    r = 0.012, height 0.012 (local z 0.060 -> 0.072)
+
+       The head's 12 mm radius exceeds the bore's 9 mm inscribed radius, so it
+       cannot pass through. In practice it never gets the chance: the 60 mm
+       shaft bottoms out on the BENCH through the fixture's through-hole after
+       26 mm of travel, 34 mm before the head would reach the collar. That is
+       deliberate — it gives a hard repeatable insertion stop and leaves 34 mm
+       of bare shaft above the collar, so the fingers never foul it.
+
+       Colour is plain rgba, not material= — see the note in fixture.xml.
+       A BRIGHT shaft and a near-black head, chosen for legibility rather than
+       realism: the bench renders around 122/255 and the pin is a 10 mm-diameter
+       object the operator has to find and grasp precisely through a camera
+       tile. The original mid-grey-blue disappeared into the bench. The dark
+       head also gives the eye an unambiguous "which end is up" cue, which
+       matters because only one end goes in.
+       ========================================================================== -->
+  <worldbody>
+    <!-- Home slot: lying flat OUTBOARD of the right arm, on the same (x, y)
+         the cube scene uses for that arm's home cube. Not directly in front of
+         it: at x = 0.18 the pin sits underneath the arm's own rest silhouette
+         and is invisible from both the overhead and the three-quarter camera,
+         which is a poor start for a task whose first move is to find and grasp
+         it. Rendered and checked, both cameras, at the home pose and under
+         seeded jitter.
+
+         The orientation is the SETTLED one, measured after dropping the pin
+         and letting it come to rest, so an episode does not open with it
+         rolling. `SceneController` jitters xy and yaw per seed, composing the
+         yaw onto this quaternion rather than replacing it — replacing would
+         stand the pin on its tip. -->
+    <body name="pin" pos="0.28 -0.24 0.00491"
+          quat="0.74556 -0.66261 -0.05325 -0.04745">
+      <freejoint/>
+
+      <!-- friction 0.4 matches the bore walls. MuJoCo mixes friction as the
+           elementwise MAX of the pair, so BOTH sides must be low or the bore
+           is sticky; against the gripper's 2.0 pads the max still resolves to
+           2.0, so the grasp is unaffected.
+
+           solref="0.005 1" must match fixture.xml's bore geoms. MuJoCo
+           solmix-AVERAGES solref across a contacting pair, so stiffening only
+           one side does nothing at all — measured 0/7 either-side-only, 7/7
+           both. Without it the head punches clean through the collar at
+           ~1.1 m/s; the full explanation is in fixture.xml. -->
+      <geom name="pin_shaft" type="cylinder" size="0.005" fromto="0 0 0 0 0 0.060"
+            mass="0.030" rgba="0.78 0.80 0.84 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+      <geom name="pin_head" type="cylinder" size="0.012 0.006" pos="0 0 0.066"
+            mass="0.012" rgba="0.16 0.18 0.24 1" friction="1 0.005 0.0001" solref="0.005 1"/>
+
+      <!-- THE TIP REFERENCE FRAME. Position: the very tip of the shaft, which
+           is the body origin. Orientation: quat 0 1 0 0 = 180 degrees about
+           local x, so the site's local +z points OUT OF THE TIP, along the
+           insertion travel direction — the SAME convention as `hole_axis`.
+           Aligned insertion therefore reads as dot(pin_tip.z, hole_axis.z) ~= +1. -->
+      <site name="pin_tip" pos="0 0 0" quat="0 1 0 0" size="0.002"
+            rgba="0.95 0.6 0.1 1"/>
+    </body>
+  </worldbody>
+</mujocoinclude>
