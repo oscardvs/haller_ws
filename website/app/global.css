@@ -210,9 +210,18 @@ body {
   color: inherit;
 }
 
-.prose pre {
-  border: 1px solid var(--color-fd-border);
+/* Code blocks. Fumadocs already wraps every block in a bordered <figure>, and
+   the scroll container inside it carries the vertical padding. Putting a border
+   on the inner <pre> therefore draws a second box inside the first, inset by
+   that padding — so style the figure and leave the <pre> bare. */
+figure.shiki {
   border-radius: 6px;
+  border-color: var(--color-fd-border);
+}
+.prose pre {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 /* tables: schematic look */
