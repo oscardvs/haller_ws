@@ -7,7 +7,7 @@ This guide takes you from "I have a bimanual Haller dataset on Hugging Face" to 
 
 You don't need this guide for ACT or any small policy that fits on a laptop GPU — train those locally. Use RunPod when the model needs ≥10 GB VRAM, which is every interesting generalist VLA (π0, π0.5, π0-FAST, SmolVLA-450M, Wall-X, X-VLA, NVIDIA GR00T).
 
-Everything here is verified against **lerobot 0.5.1**, the version this repo pins in `hmi/backend/pyproject.toml`. lerobot's CLI surface moves fast; if you bump the pin, re-check the flags in `finetune_pi05_lora.sh` before trusting this page.
+Everything here is verified against **lerobot 0.5.1**, the version this repo pins in `hmi/backend/pyproject.toml`. lerobot's CLI surface moves fast; if you bump the pin, re-check the flags in `finetune_pi05.sh` before trusting this page.
 
 <Callout type="info">
 Companion guide: [Dataset collection](/docs/data/dataset-collection) — how to record the bimanual dataset you'll evaluate against. All the scripts referenced below live in [`scripts/runpod/`](https://github.com/oscardvs/haller_ws/tree/main/scripts/runpod), and each one carries the reasoning for its flags in its header. They are the source of truth; this page is the walkthrough.
@@ -226,7 +226,7 @@ There is also a fourth, in the same family: an older version called `policy.sele
 When replay eval confirms the pipeline works end to end, finetune:
 
 ```bash
-scripts/runpod/finetune_pi05_lora.sh $HF_USER/haller_bimanual_pick_red_cube 5000
+scripts/runpod/finetune_pi05.sh $HF_USER/haller_bimanual_pick_red_cube 20000
 ```
 
 Defaults the wrapper passes to `lerobot-train`:
@@ -249,7 +249,7 @@ Output goes to `outputs/train/pi05_<dataset-slug>_lora/checkpoints/` and the fin
 HF_USER=myteam \
 POLICY_REPO=myteam/pi05_pickplace_v2 \
 BATCH_SIZE=1 \
-scripts/runpod/finetune_pi05_lora.sh myteam/haller_bimanual_pickplace 8000
+scripts/runpod/finetune_pi05.sh myteam/haller_bimanual_pickplace 20000
 ```
 
 Wall-clock time and cost for a full run have **not been measured here** — they depend on episode count, camera count, and which memory levers you pulled. Watch the first few hundred steps and extrapolate rather than trusting a number.

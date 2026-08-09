@@ -525,7 +525,7 @@ and saves, `←` ends it and discards for a re-record, `ESC` stops the run.
 |---|---|
 | Train ACT from scratch (single task, ≥50 episodes) | `lerobot-train --policy.type=act --dataset.repo_id=...` — fits on a laptop GPU. |
 | LoRA-finetune SmolVLA-base | `--policy.path=lerobot/smolvla_base --policy.peft_config.use_peft=true` on a 16 GB+ cloud GPU. |
-| LoRA-finetune π0.5 (recommended VLA path) | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/finetune_pi05_lora.sh <your-dataset>`. |
+| Finetune π0.5 (recommended VLA path) | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/finetune_pi05.sh <your-dataset>`. Full fine-tune by default: lerobot 0.5.1's default π0.5 LoRA targets freeze the vision tower, which is the one configuration measured as catastrophic for a new embodiment. |
 | Replay-eval an existing policy on your data | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/replay_eval.py` runs π0.5 / pi0 against your dataset and dumps per-joint error + plots. |
 | Finetune NVIDIA GR00T N1.7 | [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning) — official guide, ports cleanly to N1.7. |
 | Bootstrap before you have your own data | [Public datasets](./public-datasets.md) — which SO-101 sets are usable, which are licence- or action-space-disqualified, and in what order. |

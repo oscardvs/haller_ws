@@ -214,7 +214,7 @@ Your dataset's camera key names don't match what the policy expects. For replay-
 
 ### `torch.cuda.OutOfMemoryError` during finetune
 
-Try in order: drop batch size (`BATCH_SIZE=2 scripts/runpod/finetune_pi05_lora.sh ...`); confirm `--policy.gradient_checkpointing=true` is set; move to a larger GPU (A100 40 GB).
+Try in order: drop batch size (`BATCH_SIZE=8 scripts/runpod/finetune_pi05.sh ...`); confirm `--policy.gradient_checkpointing=true` is set; move to a larger GPU (A100 40 GB).
 
 ### π0.5 weights take forever to download
 

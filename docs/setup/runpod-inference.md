@@ -11,7 +11,7 @@ Wall-X, X-VLA, NVIDIA GR00T).
 
 Everything here is verified against **lerobot 0.5.1**, the version this repo
 pins in `hmi/backend/pyproject.toml`. lerobot's CLI surface moves fast; if you
-bump the pin, re-check the flags in `scripts/runpod/finetune_pi05_lora.sh`
+bump the pin, re-check the flags in `scripts/runpod/finetune_pi05.sh`
 before trusting this page.
 
 > Companion guides:
@@ -368,7 +368,7 @@ Always build the observation through the processors.
 When replay eval confirms the pipeline works end to end, finetune:
 
 ```bash
-scripts/runpod/finetune_pi05_lora.sh $HF_USER/haller_bimanual_pick_red_cube 5000
+scripts/runpod/finetune_pi05.sh $HF_USER/haller_bimanual_pick_red_cube 5000
 ```
 
 Defaults the wrapper passes to `lerobot-train`:
@@ -393,7 +393,7 @@ push target, batch size or learning rate with env vars:
 HF_USER=myteam \
 POLICY_REPO=myteam/pi05_pickplace_v2 \
 BATCH_SIZE=1 \
-scripts/runpod/finetune_pi05_lora.sh myteam/haller_bimanual_pickplace 8000
+scripts/runpod/finetune_pi05.sh myteam/haller_bimanual_pickplace 8000
 ```
 
 Wall-clock time and cost for a full run have **not been measured here** — they

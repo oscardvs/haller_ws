@@ -8,14 +8,14 @@ anywhere with a CUDA GPU and Python 3.12+ will work.
 
 Verified against **lerobot 0.5.1** (the version this repo pins in
 `hmi/backend/pyproject.toml`). CLI surfaces in lerobot move fast; if you bump the
-pin, re-check the flags in `finetune_pi05_lora.sh` first.
+pin, re-check the flags in `finetune_pi05.sh` first.
 
 | File | Purpose |
 |------|---------|
 | [`setup.sh`](./setup.sh) | First-boot setup on a fresh pod: apt deps, `lerobot[pi,peft]`, GPU sanity, and the two Hub gates you must clear. Idempotent. |
 | [`policy_smoke_test.py`](./policy_smoke_test.py) | Load `lerobot/pi05_base`, push one synthetic 12-dim bimanual observation through the real preprocessor, and probe how many cameras the model will take. Fail-fast check that the pod is correctly provisioned. |
 | [`replay_eval.py`](./replay_eval.py) | Replay one episode of a recorded `LeRobotDataset` through a policy; output per-joint and per-arm MAE/RMSE plus a left-arm/right-arm plot of predicted vs ground-truth traces. Hardware-free way to ask "would this policy have done something reasonable?". |
-| [`finetune_pi05_lora.sh`](./finetune_pi05_lora.sh) | Wrapper around `lerobot-train` that attaches a fresh LoRA adapter to `pi05_base`. See the memory section below before you rent a card. |
+| [`finetune_pi05.sh`](./finetune_pi05.sh) | Wrapper around `lerobot-train`. **Full fine-tune by default** — lerobot 0.5.1's default π0.5 LoRA targets freeze the vision tower and the LLM, which is the one configuration measured as catastrophic for a new embodiment. `MODE=hybrid` gets openpi's actual LoRA recipe (vision tower trainable). Read the script header before you rent a card. |
 
 Full end-to-end guide: [`docs/setup/runpod-inference.md`](../../docs/setup/runpod-inference.md).
 
@@ -65,7 +65,7 @@ python scripts/runpod/policy_smoke_test.py
 python scripts/runpod/replay_eval.py --dataset-repo $HF_USER/haller_bimanual_<your_task>
 
 # Once replay-eval shows the model is at least reacting to your data:
-scripts/runpod/finetune_pi05_lora.sh $HF_USER/haller_bimanual_<your_task> 5000
+scripts/runpod/finetune_pi05.sh $HF_USER/haller_bimanual_<your_task> 20000
 ```
 
 ## Two Hub gates, not one
@@ -131,7 +131,7 @@ Memory levers, least to most damaging to quality:
 
 Also worth knowing: **LoRA is not part of LeRobot's official π0.5 workflow.** It
 is a library feature (`--peft.*` on `lerobot-train`) that the guide does not walk
-through. `finetune_pi05_lora.sh` documents the exact flag surface, including the
+through. `finetune_pi05.sh` documents the exact flag surface, including the
 trap that `--policy.use_peft` means *resume an existing adapter*, not *start a new
 one*.
 

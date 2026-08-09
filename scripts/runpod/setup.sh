@@ -17,7 +17,7 @@
 # Tunables (env vars):
 #     LEROBOT_EXTRAS  Extras to install with lerobot. Default: "pi,peft".
 #                     "pi"   -> pi0 / pi0-fast / pi05  (resolves to transformers-dep + scipy-dep only)
-#                     "peft" -> transformers-dep + peft>=0.18  — REQUIRED for finetune_pi05_lora.sh.
+#                     "peft" -> transformers-dep + peft>=0.18  — REQUIRED for finetune_pi05.sh.
 #                     `lerobot[pi]` alone does NOT pull peft in, so a LoRA run would
 #                     ImportError deep inside lerobot (policies/pretrained.py, `from peft import
 #                     get_peft_model`). Verified against lerobot 0.5.1 package metadata.
@@ -91,7 +91,7 @@ try:
     import peft
     print(f"  peft    {peft.__version__}")
 except ImportError:
-    print("  peft    MISSING — finetune_pi05_lora.sh will fail. "
+    print("  peft    MISSING — finetune_pi05.sh will fail. "
           "Re-run with LEROBOT_EXTRAS='pi,peft'.")
 PY
 
