@@ -1,0 +1,140 @@
+# Public datasets to bootstrap from
+
+Haller does not need to wait for its own episodes to start exercising the
+training pipeline. This page is the shortlist of public LeRobot datasets that are
+actually usable on this embodiment, the ones that look usable and are not, and
+the order to pick them up in.
+
+Everything in the first table has been verified — licence, embodiment, size,
+camera keys and dataset format all checked against the repo itself, not against
+a blog post about it.
+
+---
+
+## The shortlist
+
+| repo | licence | embodiment | size | camera keys | fmt |
+|---|---|---|---|---|---|
+| `lerobot/svla_so101_pickplace` | Apache-2.0 | **uni**-manual SO-100/101, 6-dim | 50 ep / 11,939 frames / 86 MB | `observation.images.up`, `.side` | v2.1 |
+| `armnet/armnetbench_v01_lerobot_bimanual_so101` | Apache-2.0 | bimanual SO-101, 12-dim | 1,219 ep / 743,964 frames / ~10.3 h / 43.3 GB | `left_wrist`, `right_wrist`, `top` | v3.0 |
+| `Elvinky/bi-so101-insert-screw-562ep` | Apache-2.0 | bimanual SO-101, 12-dim | 562 ep / 2,070,776 frames / ~21 GB | `left_wrist`, `right_wrist`, `right_front` | v3.0 |
+| `ChihHanShen/bimanual-so101-pickvials-sim` | Apache-2.0 | bimanual SO-101, 12-dim, **simulated** | 263 ep / 259,417 frames / 3.97 GB | `wrist_left`, `wrist_right`, `center` | v3.0 |
+
+```bash
+hf download armnet/armnetbench_v01_lerobot_bimanual_so101 --repo-type=dataset
+```
+
+Haller records `top` / `left_wrist` / `right_wrist` — see
+[dataset collection](./dataset-collection.md#the-camera-set-is-3-of-5-deliberately)
+for why those exact names. So `armnetbench` needs no camera remapping at all;
+`Elvinky` matches on both wrists and has `right_front` where Haller has `top`;
+`ChihHanShen` needs all three renamed.
+
+---
+
+## The order to pick them up in
+
+### 1. `lerobot/svla_so101_pickplace` — today, as a pipeline smoke test
+
+86 MB. Download it, train something small on it, and find out that your
+environment, your dataloader and your visualiser all work, before a 43 GB
+download is involved.
+
+Two things make it the right first pick rather than a compromise:
+
+- **It is v2.1, not v3.0.** That is useful, not a defect: it forces you to
+  confirm your version handling early, on a dataset small enough that being
+  wrong costs a minute. Discovering a format assumption on a 43 GB set is worse
+  in every way.
+- **The 6-dim mismatch does not matter here.** It is uni-manual, so it cannot
+  validate anything about a 12-dim head — but a smoke test does not need the
+  final shape. It needs to prove the pipeline moves data.
+
+### 2. `armnet/armnetbench_v01_lerobot_bimanual_so101` — this week
+
+The important one. **Its 12 joint names are character-identical to Haller's
+left-then-right layout**, and its camera keys are the three Haller records. So it
+validates **12-dim bimanual training before Haller has a single episode of its
+own** — the model, the head shape, the camera stack, the whole run.
+
+1,219 real bimanual SO-101 episodes, ~10.3 hours, Apache-2.0. It is also the
+dataset Haller's `dataset_key` choices were made to match, so if you ever want to
+co-train against it the mapping is a rename, not a re-record.
+
+### 3. `Elvinky/bi-so101-insert-screw-562ep` — as a co-training partner, later
+
+Once you have **50–200 of your own episodes**, mix Haller data with this at
+roughly **1:3 to 1:5 (yours : theirs)**. Enough of theirs to carry general
+bimanual SO-101 manipulation; enough of yours that your task is not drowned in a
+2-million-frame screw-insertion set.
+
+Before you have your own episodes there is nothing to mix, so this is genuinely a
+later step and not an optional one you skipped.
+
+`ChihHanShen/bimanual-so101-pickvials-sim` is the fourth of these: 12-dim
+bimanual SO-101 like the two above, but **simulated**, which makes it the closest
+public match to what Haller's own sim rig produces. Its camera keys need
+renaming (`wrist_left`/`wrist_right`/`center` → `left_wrist`/`right_wrist`/`top`).
+
+---
+
+## Ruled out, and why
+
+### 🚨 AgiBot World — licence
+
+**CC-BY-NC-SA-4.0.** Non-commercial **and** share-alike. Either clause alone
+would be a problem; together they disqualify it outright for anything that might
+become a product. If a spinoff stays possible, do not train on it — a share-alike
+obligation on a model's training data is not something you can quietly unwind
+later.
+
+### DROID / BridgeData V2 / Open-X — wrong action space
+
+They use **end-effector pose** action spaces. This is not a units problem or a
+dimensionality problem you can rescale around: a 6-DoF Cartesian pose and a
+12-dim joint vector describe different things, and no affine map connects them
+without the robot's inverse kinematics *and* its exact geometry.
+
+They cannot co-train with Haller's action vector at all. They remain useful in
+exactly two ways: through a VLA with a shared action head that already speaks
+both, or as **vision-encoder pretraining**, where the action space is irrelevant
+because you are only using the images.
+
+### RoboTwin `lerobot/robotwin_unified` — unverifiable licence, wrong embodiment
+
+27,500 episodes, and genuinely tempting at that size. Two problems:
+
+- **The licence could not be verified on the repo itself.** The LeRobot docs
+  claim Apache-2.0; the repo states nothing. An unstated licence is not a
+  permissive one.
+- **It is ALOHA, 14-dim, sim-only.** Wrong embodiment and wrong action
+  dimensionality — see [12 dims, not
+  14](./dataset-collection.md#12-dims-not-14).
+
+### AIST bimanual — right data, wrong container
+
+**CC-BY-4.0** (clean) and **real** (not sim), 10,705 episodes across **112**
+tasks — not the 119 sometimes quoted. On the merits it belongs on the shortlist.
+
+It ships as **HDF5 on Dropbox**, not as a LeRobot dataset. That is a converter's
+worth of work before a single training step, so it is parked rather than
+rejected: if 112 real bimanual tasks becomes the thing you need, the cost is
+known and bounded.
+
+---
+
+## The units caveat, which applies to all of them
+
+Every public SO-101 dataset above stores joint values **normalised to
+[-100, 100]** (gripper 0–100). **Haller stores degrees.** Co-training therefore
+needs a per-joint affine rescale in one direction or the other — the map, and the
+`haller_joint_calibration` block that makes it recoverable, are documented in
+[dataset collection](./dataset-collection.md#units-are-degrees).
+
+The part worth internalising: **this mismatch is inherent, not an artifact of
+Haller's choice of degrees.** Normalisation on an SO-101 is defined against *that
+particular arm's* calibrated tick range, and two physical SO-101 rigs do not have
+the same ranges. So "-40.0" in `armnetbench` and "-40.0" in a dataset you
+recorded would not mean the same joint angle even if Haller stored normalised
+values too. Any cross-rig co-train needs per-joint calibration metadata on both
+sides; degrees at least make the Haller side's units unambiguous on inspection.

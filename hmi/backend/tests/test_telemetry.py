@@ -38,6 +38,36 @@ async def test_broadcaster_emits_frames():
 
 
 @pytest.mark.asyncio
+async def test_effort_passes_through_the_frame_verbatim():
+    """The broadcaster owns no part of the per-joint dict — it stores whatever
+    `state_snapshot()` returned. This pins that: a new key inside `joints`
+    reaches subscribers untouched, sign and all, with no telemetry-side edit."""
+    arm = MagicMock()
+    arm.state_snapshot.return_value = {
+        "mode": "manual",
+        "torque": True,
+        "joints": {"gripper": {"pos": 0.0, "min": 0.0, "max": 100.0,
+                               "torque": True, "effort": -0.42}},
+    }
+    arms = MagicMock()
+    arms.keys.return_value = ["right"]
+    arms.__getitem__.return_value = arm
+
+    ros = MagicMock()
+    ros.snapshot.return_value = MagicMock(linear=0.0, angular=0.0, odom={},
+                                          scan_min_range=None)
+
+    bcast = TelemetryBroadcaster(arms, ros, hz=200.0)
+    bcast.start()
+    try:
+        sub = bcast.subscribe()
+        frame = await asyncio.wait_for(sub.__anext__(), timeout=0.2)
+    finally:
+        await bcast.stop()
+    assert frame["arms"]["right"]["joints"]["gripper"]["effort"] == -0.42
+
+
+@pytest.mark.asyncio
 async def test_multiple_subscribers_get_same_frame():
     arms = MagicMock()
     arms.keys.return_value = []

@@ -46,6 +46,24 @@ cameras:
   # views run 960x720 — they are what you teleop from; overhead and the
   # wrist close-ups stay 640x480. fps matches telemetry.hz so every recorded
   # frame has a fresh render.
+  #
+  # FIVE render, THREE are recorded (`record: true` + a `dataset_key`), and
+  # the split is a training decision, not a plumbing one:
+  #   - π0.5's pretrained camera slots are base_0_rgb + left_wrist_0_rgb +
+  #     right_wrist_0_rgb — ONE base plus two wrists. Three keeps us in
+  #     distribution; five is territory with no published run behind it.
+  #   - armnet/armnetbench_v01_lerobot_bimanual_so101 (1,219 real bimanual
+  #     SO-101 episodes) uses exactly top / left_wrist / right_wrist, so
+  #     matching those dataset_keys turns co-training into a rename instead
+  #     of a re-record.
+  #   - Every recorded camera is a REQUIRED camera: recorder._build_frame
+  #     drops the whole tick when ANY of them has no fresh image, so fewer
+  #     channels means fewer dropped ticks.
+  # threequarter is the base view rather than overhead (which flattens
+  # lift/elbow and destroys the height cue grasping needs) or overshoulder
+  # (egocentric — it puts the arms between the camera and the work, so the
+  # policy would inherit the operator's self-occlusion). Both of those keep
+  # rendering, so A/B-ing the choice later costs a config edit, not a rebuild.
   - id: overshoulder_sim
     role: base
     source: sim_camera
@@ -53,6 +71,7 @@ cameras:
     width: 960
     height: 720
     fps: 30
+    record: false     # teleop eye only — egocentric, self-occluding
   - id: threequarter_sim
     role: base
     source: sim_camera
@@ -60,6 +79,8 @@ cameras:
     width: 960
     height: 720
     fps: 30
+    record: true
+    dataset_key: top          # π0.5 base_0_rgb / armnetbench "top"
   - id: overhead_sim
     role: base
     source: sim_camera
@@ -67,6 +88,7 @@ cameras:
     width: 640
     height: 480
     fps: 30
+    record: false     # flattens lift/elbow — no height cue for grasping
   - id: wrist_left_sim
     role: wrist
     arm_id: left
@@ -75,6 +97,8 @@ cameras:
     width: 640
     height: 480
     fps: 30
+    record: true
+    dataset_key: left_wrist   # π0.5 left_wrist_0_rgb
   - id: wrist_right_sim
     role: wrist
     arm_id: right
@@ -83,3 +107,5 @@ cameras:
     width: 640
     height: 480
     fps: 30
+    record: true
+    dataset_key: right_wrist  # π0.5 right_wrist_0_rgb

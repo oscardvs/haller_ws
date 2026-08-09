@@ -469,3 +469,140 @@ def test_teleop_sim_start_prepares_a_replay_source_then_claims_the_arm(app_with_
         assert r.json()["running"] is True
     finally:
         srv_mod.sim_teleop.stop()
+
+
+# ---- sim scene reset + task success --------------------------------------
+
+def _wire_a_real_sim_world(srv_mod, *, cubes: int = 2):
+    """Give the mocked ArmManager a genuine MuJoCoWorld, plus the SceneController
+    and TaskMonitor that `_lifespan` would have built for it.
+
+    A real world rather than a mock: these routes exist to move physics state,
+    and the mock rig `app_with_mocks` builds never runs the lifespan (it does
+    not use TestClient as a context manager), so nothing else would construct
+    them. No GL is needed — MuJoCoWorld only steps; rendering lives in
+    SimCamera.
+    """
+    import os
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    from haller_hmi.sim.builder import build_scene
+    from haller_hmi.sim.scene import SceneController
+    from haller_hmi.sim.task import TaskMonitor
+    from haller_hmi.sim.world import MuJoCoWorld
+
+    xml, joint_map = build_scene(arms=["right"], cubes=cubes)
+    world = MuJoCoWorld(xml, arm_joint_map=joint_map)
+    srv_mod.arms.world.return_value = world
+    srv_mod.scene = SceneController(world)
+    srv_mod.task = TaskMonitor(world)
+    return world
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/sim/scene/reset"),
+    ("get", "/sim/scene"),
+    ("get", "/sim/task/status"),
+])
+def test_sim_routes_409_when_there_is_no_world(app_with_mocks, method, path):
+    """There is no global "sim mode" flag — the world exists iff some arm is
+    source: sim — so `arms.world() is None` is the only honest test, and every
+    /sim/* route has to make it."""
+    import haller_hmi.server as srv_mod
+    srv_mod.arms.world.return_value = None
+
+    r = (app_with_mocks.post(path, json={}) if method == "post"
+         else app_with_mocks.get(path))
+
+    assert r.status_code == 409
+    assert "sim world not active" in r.json()["detail"]
+
+
+def test_sim_scene_reset_returns_a_snapshot_and_records_the_seed(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=2)
+
+    r = app_with_mocks.post("/sim/scene/reset", json={"seed": 11})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["last_seed"] == 11
+    assert body["randomized"] is True
+    assert [c["name"] for c in body["cubes"]] == ["cube_0", "cube_1"]
+
+    again = app_with_mocks.get("/sim/scene")
+    assert again.status_code == 200
+    assert again.json()["last_seed"] == 11
+    assert again.json()["reset_count"] == 1
+
+
+def test_sim_scene_reset_is_reproducible_over_http(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=2)
+
+    first = app_with_mocks.post("/sim/scene/reset", json={"seed": 7}).json()
+    app_with_mocks.post("/sim/scene/reset", json={"seed": 8})
+    second = app_with_mocks.post("/sim/scene/reset", json={"seed": 7}).json()
+
+    assert [c["pos"] for c in first["cubes"]] == [c["pos"] for c in second["cubes"]]
+    assert [c["rgba"] for c in first["cubes"]] == [c["rgba"] for c in second["cubes"]]
+
+
+def test_sim_task_status_polls_the_monitor(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=2)
+
+    r = app_with_mocks.get("/sim/task/status")
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is False
+    assert set(body["per_cube"]) == {"cube_0", "cube_1"}
+
+
+def test_sim_scene_reset_home_arms_ramps_the_arms_and_waits(app_with_mocks):
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=1)
+    arm = srv_mod.arms["right"]
+    # Off home, but inside the 30° large-move limit: home() must actually plan
+    # a ramp. At 0° it would plan nothing and this test would pass vacuously.
+    arm.read_joints_deg.return_value = {"shoulder_pan": 20.0}
+
+    r = app_with_mocks.post("/sim/scene/reset", json={"home_arms": True})
+
+    assert r.status_code == 200
+    arm.executor.run.assert_called()
+    # home() only SCHEDULES the ramp; without the wait the cubes get dealt
+    # under an arm still swinging through them.
+    arm.executor.wait.assert_called_with(timeout=srv_mod._HOME_WAIT_S)
+
+
+def test_sim_scene_reset_refuses_home_arms_during_an_open_episode(app_with_mocks):
+    """Moving the bench mid-episode only corrupts the observation; sending the
+    arms home mid-episode splices a move nobody demonstrated into the ACTION
+    column too."""
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=1)
+    srv_mod.recorder = MagicMock()
+    srv_mod.recorder.status.return_value = {"recording": True}
+    arm = srv_mod.arms["right"]
+    arm.executor.run.reset_mock()
+
+    r = app_with_mocks.post("/sim/scene/reset", json={"home_arms": True})
+
+    assert r.status_code == 409
+    assert "recording" in r.json()["detail"]
+    arm.executor.run.assert_not_called()
+
+
+def test_sim_scene_reset_allows_a_cube_reset_during_an_open_episode(app_with_mocks):
+    """Only home_arms is blocked. Re-dealing cubes between takes without
+    stopping the recorder is a normal thing to want."""
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=1)
+    srv_mod.recorder = MagicMock()
+    srv_mod.recorder.status.return_value = {"recording": True}
+
+    r = app_with_mocks.post("/sim/scene/reset", json={"seed": 1})
+
+    assert r.status_code == 200

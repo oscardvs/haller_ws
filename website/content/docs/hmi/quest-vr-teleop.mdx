@@ -267,12 +267,14 @@ Takes land in `~/.cache/huggingface/lerobot/<hf_user>/<task-slug>` at **30 fps, 
 | column | contents |
 |---|---|
 | `observation.state` / `action` | 12-dim, left-then-right SO-101 joint order |
+| `observation.effort` | 12-dim signed fraction of each joint's torque limit — the contact/grasp signal |
 | `observation.base` | base channel |
 | `observation.wall_clock` | **real** capture time — LeRobot's own `timestamp` is synthetic |
-| `observation.images.overshoulder_sim` | operator view, from the mount side (the default teleop view) |
-| `observation.images.threequarter_sim` | operator view, face-to-face |
-| `observation.images.overhead_sim` | plan view |
-| `observation.images.wrist_left_sim` / `wrist_right_sim` | per-arm gripper close-ups, riding the wrist |
+| `next.reward` / `next.done` | sparse auto-score from the sim success predicate (sim only — see below) |
+| `observation.images.top` | the `threequarter_sim` camera — the recorded scene view |
+| `observation.images.left_wrist` / `right_wrist` | the wrist cameras, per-arm gripper close-ups |
+
+**The headset renders five cameras but the dataset carries three.** `overshoulder_sim` (your default teleop view) and `overhead_sim` are operator aids with `record: false` — they never reach the dataset. The three that are recorded are keyed `top` / `left_wrist` / `right_wrist` to match π0.5's pretraining slots and the public bimanual SO-101 datasets. See [dataset collection](/docs/data/dataset-collection) for the full schema and the reasoning.
 
 The `skipped` counter beside the frame count tells you a take had gaps; the wall-clock deltas tell you where. An **E-STOP mid-take is fine** — the recorder notices the session die and saves up to that frame instead of appending a torque-off tail.
 

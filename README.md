@@ -2,7 +2,7 @@
 
 Haller is an open-source mobile-manipulation robot: a three-wheeled differential-drive base (two driven front wheels + a rear caster) that carries **two SO-101 arms** for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, scripts for deployment, and documentation for reproducing the build.
 
-> **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms running through the unified HMI (FastAPI + Next.js + shadcn) on main. Per-arm controls (joint sliders, home, free-drive, pose presets), a leader↔follower teleop launcher at 60 Hz, and an in-browser calibration wizard (homing + range-of-motion sweep + save, with automatic backup) are live. Live MJPEG camera streams in the HMI and a CLI-driven dataset collection pipeline are now wired — see [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md). Next: HMI-integrated recorder. Three MuJoCo sim presets (solo, bimanual, leader+follower) drop into the same HMI surface; see [`docs/setup/sim.md`](./docs/setup/sim.md).
+> **Status (May 2026):** mobile base operational under ROS 2. Both SO-101 arms running through the unified HMI (FastAPI + Next.js + shadcn) on main. Per-arm controls (joint sliders, home, free-drive, pose presets), a leader↔follower teleop launcher at 60 Hz, and an in-browser calibration wizard (homing + range-of-motion sweep + save, with automatic backup) are live. Live MJPEG camera streams and an **HMI-integrated bimanual dataset recorder** are wired — the recorder runs inside the HMI (start/stop from the cockpit or by holding A/X in the Quest headset), because Haller's two arms are both *followers* and stock `lerobot-record` structurally cannot capture a two-arm demo on this hardware. See [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md). Three MuJoCo sim presets (solo, bimanual, leader+follower) drop into the same HMI surface, and the bimanual sim now supports seeded per-episode scene reset, domain randomization and an automatic task-success predicate — so closed-loop policy success is machine-scorable; see [`docs/setup/sim.md`](./docs/setup/sim.md). Public datasets to bootstrap from: [`docs/setup/public-datasets.md`](./docs/setup/public-datasets.md).
 
 ## Hardware overview
 
@@ -27,7 +27,8 @@ haller_ws/
 │   ├── setup/
 │   │   ├── lerobot-environment.md   ← Python/conda env for the arms
 │   │   ├── so101-arm.md             ← SO-101 motor configuration + calibration
-│   │   ├── dataset-collection.md    ← record SO-101 datasets + push to HF Hub
+│   │   ├── dataset-collection.md    ← record bimanual datasets + push to HF Hub
+│   │   ├── public-datasets.md       ← public SO-101 datasets to bootstrap from
 │   │   └── runpod-inference.md      ← cloud-GPU inference + LoRA finetune (π0.5, GR00T, …)
 │   └── *.pdf                        ← LK-TECH MF5010 manuals (drive motors)
 ├── scripts/                         ← provisioning, services, udev rules
@@ -79,7 +80,7 @@ Two guides, run them in order:
 1. **[`docs/setup/lerobot-environment.md`](./docs/setup/lerobot-environment.md)** — install Miniforge, create the `lerobot` conda env, install LeRobot with the Feetech extra, and patch the env so it isn't poisoned by ROS's `PYTHONPATH` or the user-site directory.
 2. **[`docs/setup/so101-arm.md`](./docs/setup/so101-arm.md)** — find the bus servo adapter's serial port, configure each motor's ID and baud rate one-by-one, wire the arm, calibrate, and run a smoke test.
 3. **[`hmi/README.md`](./hmi/README.md)** — bring up the unified HMI (FastAPI backend + Next.js + shadcn frontend) that replaces the legacy `web_teleop.py`.
-4. **[`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md)** — wire your cameras, record an SO-101 teleop dataset with `scripts/record_dataset.sh`, push to the Hugging Face Hub. Prerequisite for training or finetuning a policy on your own task.
+4. **[`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md)** — wire your cameras, record a 12-dim bimanual teleop dataset with the HMI recorder, push to the Hugging Face Hub. Prerequisite for training or finetuning a policy on your own task. See also [`docs/setup/public-datasets.md`](./docs/setup/public-datasets.md) for public SO-101 datasets you can train on before you have your own.
 5. **[`docs/setup/runpod-inference.md`](./docs/setup/runpod-inference.md)** — rent a cloud GPU on RunPod, run π0.5 / GR00T inference against your dataset, and LoRA-finetune on top. The whole "see what a generalist VLA does on my data" flow.
 
 ## License

@@ -1,4 +1,4 @@
 {
   "title": "Data and policies",
-  "pages": ["dataset-collection", "runpod-inference"]
+  "pages": ["dataset-collection", "public-datasets", "runpod-inference"]
 }

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 os.environ.setdefault("MUJOCO_GL", "egl")
 
+import mujoco
 import pytest
 
 from haller_hmi.config import ArmConfig, MotionConfig
@@ -34,11 +35,19 @@ TINY_XML = """
     </body>
   </worldbody>
   <actuator>
-    <position name="a1" joint="right_Rotation" kp="50" ctrlrange="-180 180"/>
-    <position name="a2" joint="right_Jaw"      kp="50" ctrlrange="-90 90"/>
+    <!-- forcerange mirrors the real SO-101 MJCF's <default> (-3.5 3.5 N·m).
+         It is the divisor read_effort_norm normalises against, so without it
+         the effort column here would exercise nothing. -->
+    <position name="a1" joint="right_Rotation" kp="50" ctrlrange="-180 180"
+              forcerange="-3.5 3.5"/>
+    <position name="a2" joint="right_Jaw"      kp="50" ctrlrange="-90 90"
+              forcerange="-3.5 3.5"/>
   </actuator>
 </mujoco>
 """
+
+#: The forcerange above, i.e. what a normalised effort of 1.0 means here.
+FORCE_LIMIT_NM = 3.5
 
 # Map of HMI/LeRobot joint names to the MJCF names in TINY_XML.
 ARM_JOINT_MAP = {"right": ["right_Rotation", "right_Jaw"]}
@@ -118,7 +127,89 @@ def test_state_snapshot_shape_matches_real_arm():
     assert "torque" in snap and "joints" in snap
     assert set(snap["joints"]) == {"shoulder_pan", "gripper"}
     for j, info in snap["joints"].items():
-        assert set(info) == {"pos", "min", "max", "torque"}
+        # "effort" is a dimensionless signed fraction of the joint's torque
+        # limit. The real ArmHandle publishes the same key with the same
+        # meaning (normalised against Present_Load's ±1023 PWM duty instead of
+        # against N·m) so the recorder gets ONE column whichever rig is
+        # driving — the two quantities cannot be unit-matched, so neither side
+        # reports raw units.
+        assert set(info) == {"pos", "min", "max", "torque", "effort"}
+        assert isinstance(info["effort"], float)
+
+
+def test_effort_norm_saturates_at_the_actuator_force_limit():
+    """A position actuator commanded far from where the joint is asks for far
+    more than its forcerange allows, so the normalised reading pins at ±1."""
+    world, handle = _make_world_and_handle()
+    handle.connect()
+
+    world.write_ctrl_deg("right", {"right_Jaw": 90.0})
+    for _ in range(10):
+        mujoco.mj_step(world.model, world.data)
+    assert world.read_effort_norm("right")["right_Jaw"] == pytest.approx(1.0)
+    assert handle.read_effort_norm()["gripper"] == pytest.approx(1.0)
+
+    world.write_ctrl_deg("right", {"right_Jaw": -90.0})
+    for _ in range(10):
+        mujoco.mj_step(world.model, world.data)
+    assert world.read_effort_norm("right")["right_Jaw"] == pytest.approx(-1.0)
+
+    # Once it arrives, the actuator is no longer fighting: the reading comes off
+    # the rail and stays inside the band.
+    world.write_ctrl_deg("right", {"right_Jaw": 45.0})
+    for _ in range(4000):
+        mujoco.mj_step(world.model, world.data)
+    settled = world.read_effort_norm("right")["right_Jaw"]
+    assert -1.0 < settled < 1.0
+    assert abs(settled) == pytest.approx(
+        abs(float(world.data.actuator_force[1])) / FORCE_LIMIT_NM, abs=1e-9)
+
+
+def test_effort_norm_uses_lerobot_keys_on_the_handle():
+    world, handle = _make_world_and_handle()
+    handle.connect()
+    assert set(handle.read_effort_norm()) == {"shoulder_pan", "gripper"}
+
+
+def test_effort_with_torque_off_saturates_negative_and_is_reported_as_zero():
+    """KNOWN CAVEAT, pinned so it cannot change silently.
+
+    `set_arm_torque(enabled=False)` zeroes gainprm[0] but leaves biasprm at
+    [0, -kp, -kv], so a torque-off position actuator still applies
+    -kp*qpos - kv*qvel and saturates at the NEGATIVE force limit the moment the
+    joint is anywhere but zero. Raw, that reads as "straining hard" on an arm
+    that is in fact limp — so state_snapshot reports 0.0 while torque is off,
+    which is what a real arm with its torque disabled is doing anyway.
+    """
+    world, handle = _make_world_and_handle()
+    handle.connect()
+    world.write_ctrl_deg("right", {"right_Jaw": 45.0})
+    for _ in range(4000):
+        mujoco.mj_step(world.model, world.data)
+
+    handle.disable_torque()
+    for _ in range(20):
+        mujoco.mj_step(world.model, world.data)
+
+    assert world.actuator_kp_for_joint("right_Jaw") == 0.0
+    assert world.read_effort_norm("right")["right_Jaw"] == pytest.approx(-1.0)
+    assert handle.state_snapshot()["joints"]["gripper"]["effort"] == 0.0
+    assert handle.state_snapshot()["joints"]["gripper"]["torque"] is False
+
+
+def test_effort_norm_reports_zero_when_no_forcerange_is_declared(caplog):
+    """An actuator with no forcerange has no saturation limit to be a fraction
+    OF. Report 0.0 and warn at construction rather than inventing a divisor —
+    and never divide by zero."""
+    xml = TINY_XML.replace(' forcerange="-3.5 3.5"', "")
+    with caplog.at_level("WARNING"):
+        world = MuJoCoWorld(xml, arm_joint_map=ARM_JOINT_MAP)
+    assert any("forcerange" in r.getMessage() for r in caplog.records)
+
+    world.write_ctrl_deg("right", {"right_Jaw": 90.0})
+    for _ in range(10):
+        mujoco.mj_step(world.model, world.data)
+    assert world.read_effort_norm("right") == {"right_Rotation": 0.0, "right_Jaw": 0.0}
 
 
 def test_disable_torque_zeros_kp():

@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from lerobot.motors.encoding_utils import encode_sign_magnitude
 
 from haller_hmi.arm import ArmManager, ArmHandle
 from haller_hmi.config import ArmConfig, MotionConfig
@@ -404,3 +405,245 @@ def test_send_goal_recovers_a_dropped_joint_once_a_read_succeeds(monkeypatch):
     second = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
 
     assert second["shoulder_pan"] == pytest.approx(11.2)
+
+
+# ---- effort (Present_Load) -------------------------------------------------
+#
+# The effort channel reads a register lerobot has no public accessor for, via
+# a block read that shares `bus.sync_reader` with the 60 Hz teleop thread. Two
+# things in there are silently wrong rather than loudly broken if they drift —
+# the block GEOMETRY (a window that doesn't reach Present_Load returns 0, i.e.
+# "no contact", not an error) and WHO decodes the sign (`getData` hands back
+# the raw register, `sync_read` has already decoded it) — so both are pinned
+# here against a bus fake with the real GroupSyncRead's semantics.
+
+EFFORT_JOINTS = ["shoulder_pan", "gripper"]
+EFFORT_IDS = {"shoulder_pan": 1, "gripper": 6}
+
+
+class _FakeSyncReader:
+    """`scservo_sdk.GroupSyncRead`, reduced to what `_read_block` touches.
+
+    The window check in `getData` is the real `isAvailable()` arithmetic
+    verbatim (group_sync_read.py): a register outside the requested block
+    yields 0 rather than raising — which is exactly why a wrong block geometry
+    would look like a servo under no load instead of like a bug.
+    """
+
+    def __init__(self, blocks: dict[int, dict[int, int]]):
+        self.blocks = blocks              # motor id -> {register address: value}
+        self.start_address = 0
+        self.data_length = 0
+        self.ids: list[int] = []
+        self.comm_result = 0              # COMM_SUCCESS
+
+    def clearParam(self):
+        self.ids = []
+
+    def addParam(self, id_):
+        self.ids.append(id_)
+
+    def txRxPacket(self):
+        return self.comm_result
+
+    def getData(self, id_, addr, length):
+        if addr < self.start_address or \
+           self.start_address + self.data_length - length < addr:
+            return 0
+        return self.blocks[id_][addr]
+
+
+def _effort_handle(load_counts: dict[str, int], pos_ticks: int = 2048) -> ArmHandle:
+    """An ArmHandle whose bus serves `load_counts` from the load register.
+
+    Values are stored ENCODED (sign-magnitude, bit 10) because that is what the
+    wire carries and what `getData` hands back untouched.
+    """
+    robot = MagicMock()
+    robot.bus.motors = {j: MagicMock(id=EFFORT_IDS[j]) for j in EFFORT_JOINTS}
+    reader = _FakeSyncReader({
+        EFFORT_IDS[j]: {
+            ArmHandle._POS_ADDR: pos_ticks,
+            ArmHandle._LOAD_ADDR: encode_sign_magnitude(
+                load_counts[j], ArmHandle._LOAD_SIGN_BIT),
+        }
+        for j in EFFORT_JOINTS
+    })
+    robot.bus.sync_reader = reader
+
+    def _setup(ids, addr, length):
+        reader.clearParam()
+        reader.start_address = addr
+        reader.data_length = length
+        for i in ids:
+            reader.addParam(i)
+
+    robot.bus._setup_sync_reader = _setup
+    robot.bus._is_comm_success = lambda c: c == 0
+    robot.bus._decode_sign = lambda name, vals: vals   # position: no-op at 2048
+    robot.bus._normalize = lambda vals: {i: 0.0 for i in vals}
+    robot.bus._id_to_name = lambda i: {v: k for k, v in EFFORT_IDS.items()}[i]
+
+    cfg = ArmConfig(id="right", model="so101_follower", port="/dev/null",
+                    calibration_id="haller_follower")
+    handle = ArmHandle(cfg, joint_limits_deg={j: (-90.0, 90.0) for j in EFFORT_JOINTS})
+    handle.robot = robot
+    return handle
+
+
+def test_block_read_window_reaches_present_load_and_stops_at_present_current():
+    """The geometry claim in `_read_block`'s docstring, as arithmetic:
+    Present_Position(56,2) .. Present_Current(69,2) are contiguous, so one
+    15-byte read at 56 covers both. isAvailable's bound is
+    start + len - width >= addr, i.e. 56 + 15 - 2 = 69 — exactly Present_Current,
+    and comfortably past Present_Load at 60. One byte short and the load
+    register would quietly read 0 on every tick: a flat, believable, wrong
+    'no contact' column."""
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 0})
+    handle._effort_mode = "block"
+    handle._read_block()
+
+    reader = handle.robot.bus.sync_reader
+    assert (ArmHandle._BLOCK_ADDR, ArmHandle._BLOCK_LEN) == (56, 15)
+    assert (reader.start_address, reader.data_length) == (56, 15)
+    # 56 + 15 - 2 = 69, the last 2-byte register the block covers, which is
+    # Present_Current — so Present_Load at 60 sits comfortably inside it.
+    assert reader.start_address + reader.data_length - 2 == 69
+    assert ArmHandle._LOAD_ADDR == 60
+    assert reader.getData(EFFORT_IDS["shoulder_pan"], ArmHandle._LOAD_ADDR, 2) != 0
+    # And the bound is real, not decorative: one register past the end reads
+    # back 0 — the same value a servo under no load reports.
+    reader.blocks[EFFORT_IDS["shoulder_pan"]][70] = 999
+    assert reader.getData(EFFORT_IDS["shoulder_pan"], 70, 2) == 0
+    # Every motor is in the read, not just the first.
+    assert reader.ids == [1, 6]
+
+
+def test_block_read_decodes_sign_magnitude_and_normalises_to_a_fraction():
+    """Present_Load is a 10-bit magnitude with the direction in bit 10, in
+    per-mille of max torque. -250 counts must survive as -0.25 (a direction,
+    not |0.25|), and 1023 — which is 1.023 of 'full torque' — clips to 1.0,
+    keeping the column inside the [-1, 1] contract the sim side also honours."""
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 1023})
+    handle._effort_mode = handle._probe_effort_path()
+
+    assert handle._effort_mode == "block"
+    _, effort = handle._read_block()
+    assert effort == {"shoulder_pan": -0.25, "gripper": 1.0}
+
+
+def test_state_snapshot_carries_the_effort_fraction_per_joint():
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 1023})
+    handle._effort_mode = "block"
+
+    joints = handle.state_snapshot()["joints"]
+
+    assert joints["shoulder_pan"]["effort"] == -0.25
+    assert joints["gripper"]["effort"] == 1.0
+
+
+def test_sync_read_fallback_must_not_decode_the_sign_a_second_time():
+    """The subtle one. `sync_read` runs lerobot's `_decode_sign` itself and
+    Present_Load is in the sign-magnitude table, so those values arrive ALREADY
+    SIGNED — while `getData` on the block path returns the raw register with
+    bit 10 still set. Decoding twice on this path would not raise; it would
+    return a plausible-looking number of the wrong magnitude and, for a
+    negative load, the wrong direction."""
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    handle.robot.bus.sync_read = lambda name, normalize=True: {
+        "shoulder_pan": -300, "gripper": 42,
+    }
+
+    assert handle._read_load_registers() == {"shoulder_pan": -0.3, "gripper": 0.042}
+
+
+def test_sync_read_fallback_reads_present_load_unnormalised():
+    """`normalize=False` because Present_Load is not in lerobot's
+    NORMALIZED_DATA: asking for normalisation would push load counts through
+    the POSITION calibration."""
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    seen = {}
+
+    def _sync_read(name, normalize=True):
+        seen["name"], seen["normalize"] = name, normalize
+        return {"shoulder_pan": 0, "gripper": 0}
+
+    handle.robot.bus.sync_read = _sync_read
+    handle._read_load_registers()
+
+    assert seen == {"name": "Present_Load", "normalize": False}
+
+
+def test_probe_walks_down_to_sync_read_then_to_none_without_raising():
+    """The path is decided ONCE at connect so the telemetry tick never pays for
+    probing — and an arm that cannot report load at all must still teleop, so
+    the ladder ends at 'none' rather than at an exception."""
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    handle.robot.bus.sync_reader.comm_result = -1000          # block read dead
+    handle.robot.bus.sync_read = lambda name, normalize=True: {"shoulder_pan": 0,
+                                                               "gripper": 0}
+    assert handle._probe_effort_path() == "sync_read"
+
+    def _boom(name, normalize=True):
+        raise ConnectionError("no response")
+
+    handle.robot.bus.sync_read = _boom
+    assert handle._probe_effort_path() == "none"
+
+
+def test_block_read_failures_demote_after_three_ticks_and_keep_position():
+    """A transient comm error must not permanently cost an extra round trip per
+    tick, and a bus that genuinely cannot serve the block read must not be
+    retried forever. Either way POSITION — the channel telemetry actually needs
+    — keeps being read on every one of those ticks: effort is the optional
+    column, and losing it must never cost the arm's state."""
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    handle._effort_mode = "block"
+    handle.robot.bus.sync_reader.comm_result = -1000          # every block read fails
+    handle.robot.bus.sync_read = lambda name, normalize=True: {"shoulder_pan": 100,
+                                                               "gripper": 0}
+    handle.robot.get_observation.return_value = {"shoulder_pan.pos": 1.0,
+                                                 "gripper.pos": 2.0}
+
+    for _ in range(ArmHandle._EFFORT_DEMOTE_AFTER):
+        pos, effort = handle._read_state_and_effort()
+        assert effort == {}                    # no effort this tick, deliberately
+        assert pos["shoulder_pan"] == 1.0      # position still read
+
+    assert handle._effort_mode == "sync_read"
+    pos, effort = handle._read_state_and_effort()
+    assert effort == {"shoulder_pan": 0.1, "gripper": 0.0}
+    assert pos["shoulder_pan"] == 1.0
+
+
+def test_one_good_block_read_resets_the_demotion_streak():
+    """Two transient failures a minute apart must not add up to a demotion —
+    `_EFFORT_DEMOTE_AFTER` counts CONSECUTIVE failures."""
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 0})
+    handle._effort_mode = "block"
+    reader = handle.robot.bus.sync_reader
+
+    reader.comm_result = -1000
+    handle.robot.get_observation.return_value = {"shoulder_pan.pos": 0.0,
+                                                 "gripper.pos": 0.0}
+    for _ in range(ArmHandle._EFFORT_DEMOTE_AFTER - 1):
+        handle._read_state_and_effort()
+    assert handle._effort_fail_streak == ArmHandle._EFFORT_DEMOTE_AFTER - 1
+
+    reader.comm_result = 0
+    _, effort = handle._read_state_and_effort()
+
+    assert effort["shoulder_pan"] == -0.25
+    assert handle._effort_fail_streak == 0
+    assert handle._effort_mode == "block"
+
+
+def test_read_effort_norm_returns_empty_rather_than_raising_when_unreadable():
+    """Callers substitute 0.0. An effort channel must never be the reason
+    telemetry drops an arm or teleop stops."""
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    handle._effort_mode = "none"
+    assert handle.read_effort_norm() == {}
+
+    handle.robot = None
+    assert handle.read_effort_norm() == {}
