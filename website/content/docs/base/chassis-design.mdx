@@ -1,0 +1,490 @@
+---
+title: Chassis geometry and weight distribution
+description: First-principles sizing of the three-wheel base — where the arms, the battery, the caster and the camera mast go so that a fully extended arm can't tip the robot over.
+---
+
+<Callout type="warn">
+**This is a paper design, not a build log.** Nothing on this page has been cut,
+printed or bolted. It fixes the numbers that the rest of the mechanical work
+depends on — longitudinal length, caster position, battery position, mast height —
+so that the first chassis is sized against arithmetic rather than against a guess.
+Every figure is either traced to a datasheet or flagged as an assumption.
+</Callout>
+
+The base is a triangle seen from above: two driven wheels on the **motor axis
+line** at the front, one swivel caster behind. The two SO-101 arms sit on a line
+**parallel to the motor axis**, and they reach forward — out past the front
+wheels, over the only tipping edge that matters. The whole design problem is
+that one sentence.
+
+## Frame and sign conventions
+
+Origin on the ground at the midpoint of the drive-wheel axle.
+
+- **x** — forward, perpendicular to the motor axis. Positive is the direction the arms reach.
+- **y** — left, *along* the motor axis.
+- **z** — up.
+
+So the forward tipping edge is the line **x = 0**, and the whole of the
+weight-distribution problem is "keep the centre of mass at negative x".
+
+<div style={{ overflowX: 'auto' }}>
+<svg viewBox="0 0 790 440" width="100%" role="img" aria-label="Top view of the Haller base showing the support triangle, wheels, arm mounts, battery, caster and mast">
+  <title>Haller base — top view</title>
+
+  {/* deck */}
+  <rect x="120" y="70" width="322" height="210" rx="10"
+        fill="#1f6feb18" stroke="#1f6feb" strokeWidth="1.5"/>
+
+  {/* support triangle */}
+  <polygon points="400,56 400,294 148,175"
+           fill="#3fb95014" stroke="#3fb950" strokeWidth="2" strokeDasharray="7 5"/>
+
+  {/* motor axis / tipping edge */}
+  <line x1="400" y1="26" x2="400" y2="324" stroke="#f85129" strokeWidth="2.5"/>
+  <text x="392" y="36" fontSize="12" fontWeight="600" fill="#f85129" textAnchor="end">motor axis = tipping edge (x = 0)</text>
+
+  {/* drive wheels */}
+  <rect x="365" y="47" width="70" height="18" rx="3" fill="#1f6feb55" stroke="currentColor" strokeWidth="1.2"/>
+  <rect x="365" y="285" width="70" height="18" rx="3" fill="#1f6feb55" stroke="currentColor" strokeWidth="1.2"/>
+  <text x="446" y="42" fontSize="11" fill="currentColor">MF5010 + ⌀100 wheel</text>
+
+  {/* caster */}
+  <circle cx="148" cy="175" r="13" fill="#f8512955" stroke="currentColor" strokeWidth="1.2"/>
+  <text x="112" y="150" fontSize="11" fill="currentColor" textAnchor="middle">caster</text>
+
+  {/* mast */}
+  <rect x="169" y="154" width="42" height="42" rx="4" fill="#a371f755" stroke="currentColor" strokeWidth="1.2"/>
+  <text x="190" y="220" fontSize="11" fill="currentColor" textAnchor="middle">mast</text>
+
+  {/* battery */}
+  <rect x="215" y="147" width="91" height="56" rx="4" fill="#a371f733" stroke="#a371f7" strokeWidth="1.5"/>
+  <text x="260" y="171" fontSize="11" fill="currentColor" textAnchor="middle">Hilti B 22-195</text>
+  <text x="260" y="185" fontSize="11" fill="currentColor" textAnchor="middle">1.33 kg</text>
+
+  {/* arm mounts + reach */}
+  <circle cx="274" cy="82" r="21" fill="#3fb95044" stroke="#3fb950" strokeWidth="1.8"/>
+  <circle cx="274" cy="268" r="21" fill="#3fb95044" stroke="#3fb950" strokeWidth="1.8"/>
+  <text x="274" y="86" fontSize="11" fill="currentColor" textAnchor="middle">L</text>
+  <text x="274" y="272" fontSize="11" fill="currentColor" textAnchor="middle">R</text>
+  <line x1="295" y1="82" x2="600" y2="82" stroke="#3fb950" strokeWidth="1.3" strokeDasharray="5 4"/>
+  <line x1="295" y1="268" x2="600" y2="268" stroke="#3fb950" strokeWidth="1.3" strokeDasharray="5 4"/>
+  <line x1="607" y1="60" x2="607" y2="290" stroke="#3fb950" strokeWidth="1.3" strokeDasharray="5 4"/>
+  <text x="500" y="76" fontSize="11" fill="#3fb950">476 mm max reach</text>
+  <text x="500" y="262" fontSize="11" fill="#3fb950">476 mm max reach</text>
+
+  {/* arm separation dimension */}
+  <line x1="330" y1="82" x2="330" y2="268" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="325" y1="82" x2="335" y2="82" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="325" y1="268" x2="335" y2="268" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <text x="336" y="178" fontSize="11" fill="currentColor">266 mm arm separation</text>
+
+  {/* track dimension */}
+  <line x1="648" y1="56" x2="648" y2="294" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="643" y1="56" x2="653" y2="56" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="643" y1="294" x2="653" y2="294" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <text x="658" y="178" fontSize="11" fill="currentColor">340 mm track</text>
+
+  {/* longitudinal dimensions */}
+  <line x1="274" y1="345" x2="400" y2="345" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="274" y1="340" x2="274" y2="350" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="400" y1="340" x2="400" y2="350" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <text x="337" y="338" fontSize="11" fill="currentColor" textAnchor="middle">180 arm line</text>
+
+  <line x1="260" y1="375" x2="400" y2="375" stroke="#a371f7" strokeWidth="1"/>
+  <line x1="260" y1="370" x2="260" y2="380" stroke="#a371f7" strokeWidth="1"/>
+  <line x1="400" y1="370" x2="400" y2="380" stroke="#a371f7" strokeWidth="1"/>
+  <text x="330" y="368" fontSize="11" fill="#a371f7" textAnchor="middle">200 battery</text>
+
+  <line x1="190" y1="400" x2="400" y2="400" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="190" y1="395" x2="190" y2="405" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="400" y1="395" x2="400" y2="405" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <text x="295" y="393" fontSize="11" fill="currentColor" textAnchor="middle">300 mast</text>
+
+  <line x1="148" y1="425" x2="400" y2="425" stroke="#f85129" strokeWidth="1"/>
+  <line x1="148" y1="420" x2="148" y2="430" stroke="#f85129" strokeWidth="1"/>
+  <line x1="400" y1="420" x2="400" y2="430" stroke="#f85129" strokeWidth="1"/>
+  <text x="274" y="418" fontSize="11" fill="#f85129" textAnchor="middle">360 caster (L)</text>
+
+  <text x="700" y="330" fontSize="12" fill="currentColor" textAnchor="middle">forward →</text>
+</svg>
+</div>
+
+## What is already fixed
+
+These are not design choices left to make — they are already in the repo or in a
+datasheet, and the rest of the geometry has to live with them.
+
+| Quantity | Value | Where it comes from |
+|---|---|---|
+| Wheel track | **340 mm** | `motor_params.yaml` + URDF. Changing it breaks odometry. |
+| Wheel radius | **50 mm** (⌀100) | Same. |
+| Drive motors | 2× MF5010, **0.26 N·m** rated / 0.40 N·m peak (10T), **137 g**, ⌀49 mm | [`MF5010_Specs.pdf`](https://github.com/oscardvs/haller_ws/blob/main/MF5010_Specs.pdf). Direct drive, no gearbox. |
+| Motor bearing rated load | **153 N** | Same. The wheel cantilevers off the rotor, so this is a real limit. |
+| Arm separation | **266 mm** | XLeRobot `arm_base_joint` at y = ±0.133 m in [`xlerobot.urdf`](https://github.com/Vector-Wangel/XLeRobot/blob/main/simulation/Maniskill/assets/xlerobot/xlerobot.urdf). |
+| Shoulder torque | **1.863 N·m** stall | STS3215 C001, 19 kg·cm at 7.4 V. One servo per joint — no doubling. |
+| Battery | Hilti B 22-195 Nuron, **1.33 kg** | [`power_system.md`](https://github.com/oscardvs/haller_ws/blob/main/docs/power_system.md). |
+
+<Callout type="info">
+The sim currently places the two arms at **±200 mm** (`sim/builder.py`, "so arms
+don't overlap"). That is an arbitrary number, not the XLeRobot one. If the real
+base is built at 266 mm, the sim offsets should move to ±133 mm or every policy
+trained in sim inherits a 34 mm per-side geometry error.
+</Callout>
+
+## Mass budget
+
+Only the parts that matter for balance. Everything else — LiDAR, converters,
+wiring, fuses, hub — is deliberately excluded, and gets a reserve line instead.
+
+| Item | Qty | Unit | Total | Source |
+|---|---|---|---|---|
+| SO-101 arm, moving links | 2 | 609 g | 1218 g | Sum of `<inertial>` masses in [`so_arm100.xml`](https://github.com/oscardvs/haller_ws/blob/main/sim/assets/so101/so_arm100.xml) |
+| SO-101 base link (servo + printed shell) | 2 | ~150 g | 300 g | 55 g STS3215 + estimated shell — **assumption** |
+| MF5010 motor | 2 | 137 g | 274 g | Datasheet |
+| Drive wheel, ⌀100 metal hub + neoprene | 2 | ~300 g | 600 g | Vendor listings — **weigh these** |
+| Swivel caster | 1 | 200 g | 200 g | Given |
+| Hilti B 22-195 Nuron | 1 | 1330 g | 1330 g | `power_system.md` |
+| Jetson Orin Nano dev kit | 1 | 176 g | 176 g | NVIDIA |
+| RealSense D455 | 1 | 103 g | 103 g | Intel community measurement (Intel publishes no figure) |
+| Mast + pedestal + arm plate | 1 | ~600 g | 600 g | Printed — **assumption** |
+| Chassis plate + motor mounts | 1 | ~1500 g | 1500 g | Design allowance — **assumption** |
+| **Dry total** | | | **6.30 kg** | |
+| Payload, 2 × 500 g | | | 1.00 kg | Design case |
+| **Loaded total** | | | **7.30 kg** | |
+
+Four of those eleven lines are assumptions, and they are 3.0 kg of the 6.3 —
+so treat the absolute numbers as provisional and the *ratios* as the real
+output. `hardware_inventory.md` has recorded "total robot mass is not measured"
+as an open item for months; this table is the first estimate to close against.
+
+## What the arms can actually lift
+
+This sets the disturbance the base has to survive, so it comes first.
+
+The shoulder (`Pitch`) is a single STS3215 at **1.863 N·m** stall. Holding the
+arm out horizontally already costs most of that: at full extension the unloaded
+gravity torque at the shoulder is **0.956 N·m**, just over half the budget,
+before anything is in the gripper.
+
+Solving `τ_shoulder(m_payload) ≤ 1.863 N·m` across the workspace, using the MJCF
+link masses and centres of mass:
+
+| Reach from arm mount | Payload at stall | Realisable? |
+|---|---|---|
+| 150 mm | 2643 g | ✗ torque says yes, the gripper and wrist say no |
+| 200 mm | 1510 g | ✗ |
+| 250 mm | 1020 g | ~ |
+| 300 mm | 731 g | ✓ |
+| 350 mm | 546 g | ✓ |
+| 400 mm | 403 g | ✓ |
+| 450 mm | 290 g | ✓ |
+| **476 mm (max reach)** | **231 g** | ✓ |
+
+Max reach is **476 mm** from the arm mount to the grip point, at 120 mm above
+the mount plane. At 50% of stall — a sane continuous rating — the payload at
+full extension is **zero**: the arm can just barely hold itself up.
+
+<Callout type="info">
+**The useful result: the forward moment an arm can apply is capped, and the cap
+barely moves with the payload assumption.** Because the shoulder axis is
+parallel to the tipping edge, the arm's moment about that edge is
+`τ_shoulder + g · x_mount · (m_arm + m_payload)`, and `τ_shoulder` can never
+exceed stall. Searching every pose:
+
+- payload capped at 250 g → worst moment about the arm mount is **2.50 N·m**
+- payload capped at 500 g → worst moment is **2.69 N·m**
+
+Doubling the assumed payload moves the design load by 7%, because a heavier
+payload forces a shorter reach. **The base can be sized against a torque, not
+against a workspace** — which means this analysis survives changing the gripper.
+</Callout>
+
+## Tipping: the only equation that matters
+
+The support polygon is the triangle with vertices at the two wheel contacts
+`(0, ±170)` and the caster contact `(−L, 0)`.
+
+For **forward** tip-over the edge is the front axle, and the caster's *position*
+is irrelevant — only the centre of mass matters:
+
+```
+tips forward  ⟺  x_cm > 0
+```
+
+Write `d = −x_cm`, the distance the CoM sits **behind** the axle. Then the
+static load split follows from one moment balance about the front contact line:
+
+```
+N_caster = W · d / L        N_drive = W · (1 − d / L)
+```
+
+That is the whole trade in two symbols. **`d` buys tip-over safety; `d/L` costs
+traction.** Push the CoM back to stop the arms tipping the robot and you unload
+the drive wheels; the only way to have both is to make `L` — the longitudinal
+length — longer.
+
+Two more disturbances eat into `d`, and both scale with CoM *height*:
+
+```
+braking:   d_used = a · z_cm / g          slope θ:  d_used = z_cm · tan θ
+```
+
+This is where the arm mount height bites, and it is why the mast is not free.
+
+<div style={{ overflowX: 'auto' }}>
+<svg viewBox="0 0 620 470" width="100%" role="img" aria-label="Side view of the Haller base showing lever arms, centre of mass and the forward tipping edge">
+  <title>Haller base — side view, lever arms</title>
+
+  {/* ground */}
+  <line x1="80" y1="410" x2="600" y2="410" stroke="currentColor" strokeWidth="2"/>
+
+  {/* tipping edge */}
+  <line x1="240" y1="40" x2="240" y2="432" stroke="#f85129" strokeWidth="2" strokeDasharray="7 5"/>
+  <text x="246" y="52" fontSize="12" fontWeight="600" fill="#f85129">tipping edge</text>
+
+  {/* deck */}
+  <rect x="96" y="372" width="166" height="5" fill="#1f6feb" opacity="0.8"/>
+  {/* pedestal + arm plate + mast */}
+  <rect x="121" y="248" width="22" height="124" fill="#1f6feb44" stroke="#1f6feb" strokeWidth="1.2"/>
+  <rect x="121" y="244" width="72" height="5" fill="#1f6feb" opacity="0.8"/>
+  <rect x="127" y="68" width="11" height="176" fill="#1f6feb44" stroke="#1f6feb" strokeWidth="1.2"/>
+
+  {/* battery */}
+  <rect x="145" y="329" width="46" height="43" rx="3" fill="#a371f733" stroke="#a371f7" strokeWidth="1.5"/>
+
+  {/* wheels */}
+  <circle cx="240" cy="392" r="18" fill="#1f6feb55" stroke="currentColor" strokeWidth="1.5"/>
+  <rect x="103" y="372" width="15" height="24" fill="none" stroke="currentColor" strokeWidth="1"/>
+  <circle cx="110" cy="396" r="14" fill="#f8512955" stroke="currentColor" strokeWidth="1.5"/>
+
+  {/* D455 + view cone */}
+  <rect x="118" y="58" width="34" height="13" rx="2" fill="#3fb95055" stroke="#3fb950" strokeWidth="1.3"/>
+  <line x1="132" y1="72" x2="193" y2="248" stroke="#3fb950" strokeWidth="1" strokeDasharray="4 4"/>
+  <line x1="132" y1="72" x2="348" y2="248" stroke="#3fb950" strokeWidth="1" strokeDasharray="4 4"/>
+  <line x1="193" y1="248" x2="348" y2="248" stroke="#3fb950" strokeWidth="2.5"/>
+  <text x="270" y="266" fontSize="11" fill="#3fb950" textAnchor="middle">workspace seen by the D455</text>
+  <text x="118" y="44" fontSize="11" fill="#3fb950">D455 · 57° down</text>
+
+  {/* arm at max reach */}
+  <polyline points="175,248 191,242 202,205 244,205 293,206 347,205"
+            fill="none" stroke="#3fb950" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/>
+  <circle cx="347" cy="205" r="6" fill="#3fb950"/>
+  <text x="356" y="200" fontSize="11" fill="#3fb950">grip, 476 mm out</text>
+  <text x="356" y="214" fontSize="11" fill="#3fb950">≤ 231 g here</text>
+
+  {/* centre of mass */}
+  <circle cx="203" cy="293" r="9" fill="none" stroke="currentColor" strokeWidth="1.5"/>
+  <path d="M203 284 A9 9 0 0 1 212 293 L203 293 Z" fill="currentColor"/>
+  <path d="M203 302 A9 9 0 0 1 194 293 L203 293 Z" fill="currentColor"/>
+  <line x1="203" y1="302" x2="203" y2="425" stroke="currentColor" strokeWidth="1" strokeDasharray="3 3"/>
+  <text x="203" y="286" fontSize="11" fill="currentColor" textAnchor="middle">CoM 7.30 kg</text>
+
+  {/* d dimension */}
+  <line x1="203" y1="432" x2="240" y2="432" stroke="#f85129" strokeWidth="1.5"/>
+  <line x1="203" y1="427" x2="203" y2="437" stroke="#f85129" strokeWidth="1.5"/>
+  <line x1="240" y1="427" x2="240" y2="437" stroke="#f85129" strokeWidth="1.5"/>
+  <text x="150" y="450" fontSize="12" fontWeight="600" fill="#f85129">d = 104 mm</text>
+
+  {/* heights */}
+  <line x1="430" y1="410" x2="430" y2="248" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1"/>
+  <line x1="425" y1="248" x2="435" y2="248" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1"/>
+  <line x1="425" y1="410" x2="435" y2="410" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1"/>
+  <text x="440" y="252" fontSize="11" fill="currentColor">arm plate 450 mm</text>
+  <line x1="470" y1="410" x2="470" y2="64" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1"/>
+  <line x1="465" y1="64" x2="475" y2="64" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1"/>
+  <text x="480" y="68" fontSize="11" fill="currentColor">camera 950 mm</text>
+  <text x="440" y="380" fontSize="11" fill="currentColor">deck 100 mm</text>
+  <line x1="248" y1="293" x2="420" y2="293" stroke="currentColor" strokeOpacity="0.35" strokeWidth="1" strokeDasharray="3 3"/>
+  <text x="424" y="297" fontSize="11" fill="currentColor">z_cm 325 mm</text>
+</svg>
+</div>
+
+### Where the arms have to go
+
+Run the CoM sum for the worst arm pose while sliding the arm mount line along x
+(battery and caster fixed):
+
+| Arm line vs axle | `d` | Caster load | Tips at |
+|---|---|---|---|
+| +50 mm (ahead) | **−3 mm** | — | **already over** |
+| 0 (on the axle) | 19 mm | 6% | 2.9° |
+| −100 mm | 63 mm | 21% | 9.7° |
+| **−180 mm** | **104 mm** | **29%** | **17.7°** |
+| −250 mm | 129 mm | 43% | 19.3° |
+
+Mounting the arms over the wheel axle — the intuitive choice — leaves 19 mm of
+margin and a robot that tips at 2.9°. Mounting them *ahead* of the axle tips it
+standing still. **The arms have to sit ~180 mm behind the motor axis**, reaching
+forward over the drive wheels rather than out beyond a cantilever.
+
+Moving the battery cannot substitute for this. To reach `d = 90 mm` with the
+arms on the axle, the 1.33 kg pack would have to sit **600 mm behind the axle** —
+well outside any sane footprint. The battery is a 1.33 kg trim adjustment on a
+7.3 kg robot; the arm position is the actual control.
+
+## The design point
+
+| Parameter | Value | Why |
+|---|---|---|
+| Wheel track | 340 mm | fixed |
+| Arm separation | 266 mm | XLeRobot |
+| **Arm mount line** | **180 mm behind the axle** | tipping — see above |
+| **Arm plate height** | **450 mm** | height trade — see below |
+| **Caster** | **360 mm behind the axle** (`L`) | caster load ≤ 30% loaded |
+| **Battery centre** | **200 mm behind the axle**, on the deck | trims `d`, keeps `z_cm` low |
+| **Mast** | **300 mm behind the axle** | behind the arms, over the caster |
+| **Camera** | **950 mm** above ground, 57° down | D455 min-Z — see below |
+| Deck | 460 × 300 mm at 100 mm | clears wheels, matches caster height |
+| Overall | 448 × 365 mm, ~1.0 m tall | |
+
+Which gives:
+
+| | Stowed | Arms extended + 2 × 500 g |
+|---|---|---|
+| Mass | 6.30 kg | 7.30 kg |
+| CoM behind axle (`d`) | 167 mm | **104 mm** |
+| CoM height | 278 mm | 325 mm |
+| Caster load | 46.3% | 28.9% |
+| Tips forward at | 31.3° | **17.7°** |
+| Tips sideways at | 16.3° | 18.6° |
+| Tips under braking at | 5.97 m/s² | **3.14 m/s²** |
+
+Forward and sideways tip angles land within 1° of each other in the loaded case
+(17.7° vs 18.6°), which is the sign that `L` is correctly matched to the track —
+neither axis is the weak one.
+
+### The margin budget
+
+104 mm of static margin sounds generous. It is almost entirely spoken for:
+
+<div style={{ overflowX: 'auto' }}>
+<svg viewBox="0 0 700 130" width="100%" role="img" aria-label="Stability margin budget: braking consumes 72.6mm, a 5 degree slope 28.4mm, leaving 2.9mm of 104mm">
+  <title>Stability margin budget</title>
+  <rect x="60" y="30" width="419" height="34" fill="#f8512955" stroke="#f85129" strokeWidth="1.5"/>
+  <rect x="479" y="30" width="164" height="34" fill="#a371f755" stroke="#a371f7" strokeWidth="1.5"/>
+  <rect x="643" y="30" width="17" height="34" fill="#3fb95077" stroke="#3fb950" strokeWidth="1.5"/>
+  <text x="269" y="52" fontSize="12" fill="currentColor" textAnchor="middle">braking at motor peak · 72.6 mm</text>
+  <text x="561" y="52" fontSize="12" fill="currentColor" textAnchor="middle">5° downslope · 28.4 mm</text>
+  <line x1="60" y1="80" x2="660" y2="80" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="60" y1="75" x2="60" y2="85" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <line x1="660" y1="75" x2="660" y2="85" stroke="currentColor" strokeOpacity="0.6" strokeWidth="1"/>
+  <text x="360" y="98" fontSize="12" fill="currentColor" textAnchor="middle">total static margin d = 104 mm</text>
+  <text x="660" y="20" fontSize="11" fill="#3fb950" textAnchor="end">2.9 mm spare</text>
+  <line x1="651" y1="24" x2="651" y2="30" stroke="#3fb950" strokeWidth="1"/>
+</svg>
+</div>
+
+Braking at the motors' peak thrust costs 72.6 mm; a 5° downslope costs another
+28.4 mm. **Doing both at once leaves 3 mm.** The robot is stable, but it is
+stable *by design*, not by accident — which means two rules follow:
+
+- **Cap deceleration in software**, or accept that a hard stop on a wheelchair ramp is the tip-over case. The limit falls from 3.14 m/s² on the flat to **2.27 m/s² on a 5° downslope** — below the motors' 2.19 m/s² peak by only 4%.
+- **Any mass added high up spends this budget.** Every 10 mm of `z_cm` costs about 3 mm of margin.
+
+### Arm mount height is stability-limited
+
+`d` doesn't change with arm height, but `z_cm` does, and the braking term scales
+with it:
+
+| Arm plate height | `z_cm` | Tips at | Braking limit | vs motor peak 2.19 m/s² |
+|---|---|---|---|---|
+| 350 mm | 281 mm | 20.7° | 3.70 m/s² | 1.69× |
+| **450 mm** | **325 mm** | **17.7°** | **3.14 m/s²** | **1.43×** |
+| 550 mm | 369 mm | 16.0° | 2.82 m/s² | 1.29× |
+| 650 mm | 413 mm | 14.4° | 2.52 m/s² | 1.15× |
+| 750 mm | 458 mm | 13.1° | 2.28 m/s² | **1.04×** |
+
+<Callout type="warn">
+**The arms cannot go to table height on this chassis.** At a 750 mm arm plate —
+roughly where XLeRobot puts its arms, on a 760 mm cart top — the robot tips
+within 4% of the deceleration its own motors can produce. Working at 450 mm means
+Haller works on low surfaces, its own bench, or the floor. Raising it to bench
+height needs one of: low ballast at the back, a longer `L`, a wider track, or a
+hard software cap on deceleration. That is a real constraint, and it should be
+decided before anything is printed.
+</Callout>
+
+## Traction and the caster load
+
+Direct drive means thrust comes straight from motor torque with no gearbox
+multiplication — `F = 2τ/r`:
+
+| | Torque | Thrust | Accel at 7.3 kg | Grade |
+|---|---|---|---|---|
+| Rated | 0.26 N·m | 10.4 N | 1.42 m/s² | 8.4° |
+| Peak (10T) | 0.40 N·m | 16.0 N | 2.19 m/s² | 12.9° |
+| Peak (35T) | 0.53 N·m | 21.2 N | 2.90 m/s² | 17.2° |
+
+Available traction is `μ · N_drive`:
+
+| Surface (μ) | Loaded (50.9 N on drives) | Stowed (33.2 N on drives) |
+|---|---|---|
+| 0.4 — polished concrete | 20.4 N ✓ | 13.3 N — **slips at peak** |
+| 0.5 | 25.5 N ✓ | 16.6 N ✓ |
+| 0.6 — typical rubber on floor | 30.5 N ✓ | 19.9 N ✓ |
+
+The awkward case is **stowed**: folding the arms back moves the CoM to 167 mm
+behind the axle and hands 46% of the weight to the caster. On slick floors the
+wheels break traction before the motors stall. That is a benign failure — slip,
+not fall — and current-limiting fixes it, but it is worth knowing that the
+robot has *less* grip when it is not carrying anything.
+
+Per-wheel load peaks at ~25 N against the MF5010's 153 N bearing rating, so the
+cantilevered wheel mount is not a concern.
+
+<Callout type="info">
+**Caster swivel shrinks the support triangle.** A swivel caster's contact point
+trails its pivot. Right after a direction reversal the contact swings through
+`2 × trail` before it settles — with 40 mm of trail, `L` is momentarily 280 mm
+rather than 360 mm, pushing the caster load from 29% to 37% and the sideways tip
+angle from 18.6° down to about 15°. Size `L` against `L − 2 × trail`, and prefer
+a short-trail caster.
+</Callout>
+
+## Where the camera mast goes
+
+The D455 sits behind the arms so its mass helps the balance instead of hurting
+it, and so it looks *over* the arms rather than through them. The mast at 300 mm
+behind the axle puts it 120 mm behind the arm line.
+
+The constraint that sets its height is not field of view — it is **minimum depth
+range**. The D455's wide 95 mm baseline buys it 20 m of range at the cost of a
+min-Z around **0.52 m**; anything nearer returns no depth. The nearest point of
+the workspace is only 150 mm forward of the mast horizontally, so:
+
+```
+√(0.15² + Δz²) ≥ 0.52   →   Δz ≥ 0.50 m
+```
+
+**The camera must sit 500 mm above the arm plane** — 950 mm above ground —
+purely so the near edge of the workspace is outside its blind zone. Field of
+view is not close to binding: the workspace spans 32.6° vertically against the
+D455's 58°, and 300 mm of half-width against the 745 mm it sees at the far edge.
+Depression angles run 73° (near) to 41° (far), so the mount wants **~57° down**.
+
+For comparison, XLeRobot puts its head camera 438 mm above its arm plane. Same
+ballpark, arrived at independently.
+
+## Ride height and caster sizing
+
+The deck sits at **100 mm**, which is set by the caster, not by the wheels: a
+3-inch swivel caster with a top plate is ~100 mm from floor to mounting face.
+The drive axle has to be at 50 mm — the wheel radius — so **the motors hang 50 mm
+below the deck** on drop brackets. Get this wrong and the robot rocks on two
+wheels.
+
+The BOM already has 4× 3-inch swivel casters on hand for a layout that needs
+one, so there is nothing to buy here.
+
+## What to measure before cutting anything
+
+1. **Weigh the two drive wheels.** 300 g each is a vendor listing, and 600 g is 10% of the dry mass.
+2. **Weigh an assembled SO-101.** The 760 g figure is 609 g of MJCF inertials plus a 150 g guess for the base link.
+3. **Measure the XLeRobot plate's actual arm spacing** and confirm the 266 mm from the URDF matches the physical part.
+4. **Measure the caster's trail** — it sets how much of `L` is real.
+5. **Confirm the MF5010 winding (10T vs 35T).** It changes peak thrust by a third, which changes the braking term, which is 70% of the stability budget. This is already flagged unrecorded in the BOM.
+6. **Decide the arm height** before printing the pedestal. 450 mm and 750 mm are different robots.
+
+Then fix the sim: move the arm offsets from ±200 mm to ±133 mm, and add the base
+so that policies see the same geometry they will be deployed onto.
