@@ -204,7 +204,7 @@ The HMI is holding the arm bus or a camera. Stop it first: `Ctrl-C` the dev scri
 
 ### Recorded dataset has flat joint traces
 
-The leader wasn't being driven (you started recording without moving it), or the follower was stuck in `STOP` mode. Use `lerobot-visualize-dataset --episode-index=0` to verify the joint state/action arrays before training.
+The leader wasn't being driven (you started recording without moving it), or the follower was stuck in `STOP` mode. Use `lerobot-dataset-viz --repo-id <ds> --episode-index=0` to verify the joint state/action arrays before training. (In lerobot 0.5.x this command is `lerobot-dataset-viz`; older docs call it `lerobot-visualize-dataset`, which no longer exists.)
 
 ### `lerobot-record` errors with an unknown observation key
 
