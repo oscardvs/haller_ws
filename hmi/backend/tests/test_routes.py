@@ -548,6 +548,27 @@ def test_sim_scene_reset_is_reproducible_over_http(app_with_mocks):
     assert [c["rgba"] for c in first["cubes"]] == [c["rgba"] for c in second["cubes"]]
 
 
+def test_sim_scene_reset_mirrors_the_bench_on_request(app_with_mocks):
+    """Block B of the insertion collection plan is the reversed arm assignment,
+    which is out of reach without this flag — see
+    `tests/sim/test_insertion.py`. Here it is only the plumbing that is under
+    test: the flag reaches SceneController and the state comes back out."""
+    import haller_hmi.server as srv_mod
+    _wire_a_real_sim_world(srv_mod, cubes=2)
+
+    plain = app_with_mocks.post("/sim/scene/reset", json={"seed": 21}).json()
+    mirrored = app_with_mocks.post(
+        "/sim/scene/reset", json={"seed": 21, "mirror": True}).json()
+
+    assert plain["mirrored"] is False, "mirror must default off"
+    assert mirrored["mirrored"] is True
+    for a, b in zip(plain["cubes"], mirrored["cubes"]):
+        assert abs(a["pos"][0]) > 1e-3, f"{a['name']} is on the mirror plane"
+        assert b["pos"][0] == pytest.approx(-a["pos"][0])
+        assert b["pos"][1:] == pytest.approx(a["pos"][1:])
+    assert app_with_mocks.get("/sim/scene").json()["mirrored"] is True
+
+
 def test_sim_task_status_polls_the_monitor(app_with_mocks):
     import haller_hmi.server as srv_mod
     _wire_a_real_sim_world(srv_mod, cubes=2)

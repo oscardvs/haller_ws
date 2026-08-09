@@ -21,6 +21,7 @@ from haller_hmi.sim.builder import build_scene  # noqa: E402
 from haller_hmi.sim.scene import (  # noqa: E402
     INSERTION_BODY_NAMES,
     SceneController,
+    mirror_pose_x,
 )
 from haller_hmi.sim.task import (  # noqa: E402
     FIXTURE_BODY,
@@ -327,6 +328,201 @@ def test_steel_parts_keep_their_colour_through_a_shuffle():
     for name, rgba in before.items():
         gid = min(index_part(model, name).geom_ids)
         np.testing.assert_allclose(model.geom_rgba[gid], rgba)
+
+
+# ---- the x-mirror: what makes block B of the collection plan drivable ------
+#
+# The parts' home slots are NOT symmetric about the bench. The pin lies
+# outboard of the right arm, so "left holds the fixture, right inserts the pin"
+# is reachable and the reverse is not — measured below. `mirror=True` reflects
+# the layout about x = 0, the plane between the two arm mounts, and hands the
+# roles to the other arm.
+
+#: The reach band `scene.RandomSpec` says the home slots were chosen for. It
+#: lives in prose there, so it is restated rather than imported.
+REACH_MIN_M, REACH_MAX_M = 0.23, 0.35
+
+#: Reflection about the YZ plane, i.e. about x = 0.
+MIRROR_M = np.diag([-1.0, 1.0, 1.0])
+
+
+def _quat_to_mat(quat) -> np.ndarray:
+    m = np.zeros(9)
+    mujoco.mju_quat2Mat(m, np.asarray(quat, dtype=float))
+    return m.reshape(3, 3)
+
+
+def _arm_base_xy(model, arm: str) -> np.ndarray:
+    """Where `sim/builder.py` bolted this arm down, read out of the model so
+    the reach numbers below cannot drift away from the builder's offsets."""
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{arm}_root")
+    assert bid >= 0, f"no {arm}_root body — the builder's wrapper was renamed"
+    return np.array(model.body_pos[bid], dtype=float)[:2]
+
+
+def _reach(model, snap, arm: str, part: str) -> float:
+    """Planar base-to-part distance, which is what the reach band is quoted in
+    (both parts rest on the bench, at the bases' own height)."""
+    entry = next(c for c in snap["cubes"] if c["name"] == part)
+    return float(np.hypot(*(np.array(entry["pos"][:2]) - _arm_base_xy(model, arm))))
+
+
+def _part(snap, name: str) -> dict:
+    return next(c for c in snap["cubes"] if c["name"] == name)
+
+
+def test_the_mirrored_orientation_is_the_rotation_M_R_M_and_nothing_else():
+    """THE derivation, checked instead of trusted.
+
+    A reflection M = diag(-1, 1, 1) is improper and no quaternion represents
+    it. The mirrored body's orientation is the proper rotation M R M, and
+    because the rotation axis is a pseudovector it maps to (n_x, -n_y, -n_z)
+    with the angle unchanged — on quaternions, (w, x, y, z) -> (w, x, -y, -z).
+    Checked against MuJoCo's own matrix-to-quaternion of M R M over random
+    orientations, up to the double cover (q and -q are the same rotation).
+    """
+    rng = np.random.default_rng(0)
+    for _ in range(500):
+        q = rng.normal(size=4)
+        q /= np.linalg.norm(q)
+        pose = np.concatenate([rng.normal(size=3), q])
+        original = pose.copy()
+
+        got = mirror_pose_x(pose)
+
+        want_mat = MIRROR_M @ _quat_to_mat(q) @ MIRROR_M
+        assert float(np.linalg.det(want_mat)) == pytest.approx(1.0), \
+            "M R M must be a proper rotation or no quaternion exists for it"
+        want = np.zeros(4)
+        mujoco.mju_mat2Quat(want, want_mat.reshape(9))
+        assert min(float(np.linalg.norm(got[3:7] - want)),
+                   float(np.linalg.norm(got[3:7] + want))) < 1e-9
+        # Position is the easy half: x flips, y and z are untouched.
+        np.testing.assert_allclose(got[:3], pose[:3] * [-1, 1, 1], atol=1e-15)
+        # And the caller's array is not edited underneath it — `reset` mirrors
+        # the planner's dict in place and would otherwise corrupt the baseline.
+        np.testing.assert_array_equal(pose, original)
+
+
+def test_mirror_is_the_exact_mirror_image_of_the_same_seed():
+    """Same seed, reflected bench — not a different draw. The mirror is applied
+    after pose planning and never touches the rng, which is what keeps a seed
+    list meaningful across both arm assignments."""
+    world = make_world()
+    ctl = SceneController(world)
+
+    plain = ctl.reset(seed=2001, randomize=True)
+    mirrored = ctl.reset(seed=2001, randomize=True, mirror=True)
+    again = ctl.reset(seed=2001, randomize=True, mirror=True)
+
+    for name in (FIXTURE_BODY, PIN_BODY):
+        a, b = _part(plain, name), _part(mirrored, name)
+        assert abs(a["pos"][0]) > 1e-3, \
+            f"{name} sits on the mirror plane; this test would pass vacuously"
+        assert b["pos"][0] == pytest.approx(-a["pos"][0], abs=1e-12)
+        np.testing.assert_allclose(b["pos"][1:], a["pos"][1:], atol=1e-12)
+        np.testing.assert_allclose(b["quat"],
+                                   np.array(a["quat"]) * [1, 1, -1, -1],
+                                   atol=1e-9)
+        np.testing.assert_allclose(_part(again, name)["pos"], b["pos"], atol=0,
+                                   err_msg=f"{name} mirrored was not reproducible")
+
+    # The rest of the draw is untouched, which is the evidence that the mirror
+    # consumed no entropy of its own rather than merely looking symmetric.
+    assert [lt["pos"] for lt in mirrored["lights"]] == \
+        [lt["pos"] for lt in plain["lights"]]
+
+
+def test_the_mirrored_pin_still_lies_flat_and_does_not_stand_on_its_tip():
+    """The other half of the guard. The test above catches a mirror that gets
+    the SIGNS wrong; this one catches a mirror that gets the whole approach
+    wrong — an implementation that rebuilds the orientation instead of
+    transforming it.
+
+    The pin is authored lying flat, its home quat carrying the shaft from local
+    +z to world +y, so any rebuild (identity, or a fresh yaw-only quaternion)
+    puts the shaft back along world +z and stands the pin on its point. It
+    still renders as a pin, it still lands in the right place, and it quietly
+    ruins every episode of the block. `_plan_cube_poses` made exactly this
+    mistake once.
+
+    The claim is exact rather than approximate: the yaw jitter is a rotation
+    about world +z and the mirror is a reflection in x, and both preserve a
+    vector's z component — so the shaft's tilt out of horizontal is the
+    authored one for every seed and either handedness.
+    """
+    world = make_world()
+    ctl = SceneController(world)
+
+    home_tilt = abs(_quat_to_mat(
+        _part(ctl.reset(randomize=False), PIN_BODY)["quat"])[2, PIN_SHAFT_AXIS])
+    assert home_tilt < 0.25, "precondition: the authored pin lies flat"
+
+    for seed, randomize in ((None, False), (2001, True), (2007, True), (2019, True)):
+        snap = ctl.reset(seed=seed, randomize=randomize, mirror=True)
+        quat = np.array(_part(snap, PIN_BODY)["quat"])
+        assert float(np.linalg.norm(quat)) == pytest.approx(1.0, abs=1e-9), \
+            f"seed {seed}: mirrored quaternion is not unit"
+        shaft = _quat_to_mat(quat)[:, PIN_SHAFT_AXIS]
+        assert abs(shaft[2]) == pytest.approx(home_tilt, abs=1e-9), \
+            f"seed {seed}: the mirrored pin is standing up ({shaft})"
+
+
+def test_mirror_is_what_makes_the_reversed_arm_assignment_reachable():
+    """Block B of `docs/setup/insertion-collection.md` is "right holds, left
+    inserts". Unmirrored it cannot be driven at all — the pin's home slot is
+    0.54 m from the left arm's base — and mirrored, both roles land back inside
+    the 0.23-0.35 m band the slots were chosen for."""
+    world = make_world()
+    model = world.model
+    ctl = SceneController(world)
+
+    plain = ctl.reset(randomize=False)
+    assert _reach(model, plain, "left", PIN_BODY) > 0.5, \
+        "the defect this flag exists for has moved; re-derive the plan"
+    for arm, part in (("left", FIXTURE_BODY), ("right", PIN_BODY)):
+        d = _reach(model, plain, arm, part)
+        assert REACH_MIN_M <= d <= REACH_MAX_M, \
+            f"block A: {arm} -> {part} at {d:.3f} m is outside the reach band"
+
+    mirrored = ctl.reset(randomize=False, mirror=True)
+    for arm, part in (("left", PIN_BODY), ("right", FIXTURE_BODY)):
+        d = _reach(model, mirrored, arm, part)
+        assert REACH_MIN_M <= d <= REACH_MAX_M, \
+            f"block B: {arm} -> {part} at {d:.3f} m is outside the reach band"
+
+
+def test_mirrored_seeds_are_exactly_as_reachable_as_the_ones_already_collected():
+    """Under jitter a slot can drift a centimetre or two outside the band —
+    which is equally true of block A and is not a mirror problem. What has to
+    hold is that mirroring costs nothing: because the arm mounts are symmetric
+    about the very plane the bench is reflected in, the mirrored left-arm reach
+    to a part IS the unmirrored right-arm reach to it, exactly."""
+    world = make_world()
+    model = world.model
+    ctl = SceneController(world)
+    for seed in range(2001, 2021):          # the collection plan's block B
+        m = ctl.reset(seed=seed, randomize=True, mirror=True)
+        u = ctl.reset(seed=seed, randomize=True)
+        assert _reach(model, m, "left", PIN_BODY) == pytest.approx(
+            _reach(model, u, "right", PIN_BODY), abs=1e-12), f"seed {seed}"
+        assert _reach(model, m, "right", FIXTURE_BODY) == pytest.approx(
+            _reach(model, u, "left", FIXTURE_BODY), abs=1e-12), f"seed {seed}"
+
+
+def test_mirror_defaults_off_and_is_reported_alongside_the_seed():
+    """A seed list is only recoverable if the handedness is recorded next to
+    the seed — seed N and seed N mirrored are two different benches."""
+    world = make_world()
+    ctl = SceneController(world)
+
+    assert ctl.reset(seed=1001, randomize=True)["mirrored"] is False
+    snap = ctl.reset(seed=2001, randomize=True, mirror=True)
+    assert snap["mirrored"] is True
+    assert snap["last_seed"] == 2001
+    # ...and it survives into a bare snapshot, which is what GET /sim/scene
+    # serves between resets.
+    assert ctl.snapshot()["mirrored"] is True
 
 
 def test_insertion_scene_drops_the_pick_and_place_pad():

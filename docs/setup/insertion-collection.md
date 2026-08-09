@@ -54,14 +54,22 @@ takes of one bench layout teach a policy one bench layout, very confidently.
 
 So collection is a **list of seeds**, worked through once each:
 
-| block | seeds | arm assignment | why |
-|---|---|---|---|
-| A | 1001–1030 | left holds, right inserts | the primary assignment, 30 layouts |
-| B | 2001–2020 | right holds, left inserts | breaks the handedness shortcut |
-| C | 3001–3010 | left holds, right inserts | **held out — never train on these** |
+| block | seeds | arm assignment | reset flag | why |
+|---|---|---|---|---|
+| A | 1001–1030 | left holds, right inserts | `"mirror": false` | the primary assignment, 30 layouts |
+| B | 2001–2020 | right holds, left inserts | `"mirror": true` | breaks the handedness shortcut |
+| C | 3001–3010 | left holds, right inserts | `"mirror": false` | **held out — never train on these** |
 
 70 seeds, one episode each. At roughly 40 s a take plus reset and re-grip, that
 is about two hours of teleop, which is one honest session.
+
+Block B's `"mirror": true` is not optional. The parts are authored for block
+A's assignment — the pin lies outboard of the right arm, 0.25 m from that arm's
+base and 0.54 m from the left's, which an SO-101 does not reach — so the flag
+reflects the bench about the midline between the two mounts, putting the pin
+0.25 m from the left arm and the bracket 0.26 m from the right, both back
+inside the 0.23–0.35 m band the slots were chosen for. Same seed, mirrored
+layout: seed 2001 mirrored is the exact mirror image of seed 2001.
 
 Block C is the evaluation set. Keep it in a separate `repo_id` so it cannot
 leak into training by accident — an eval split inside the same dataset gets
@@ -70,18 +78,26 @@ trained on the first time someone forgets the flag.
 Before each take:
 
 ```bash
+# blocks A and C
 curl -sX POST localhost:8000/sim/scene/reset \
   -H 'content-type: application/json' \
-  -d '{"seed": 1001, "randomize": true, "home_arms": true}'
+  -d '{"seed": 1001, "randomize": true, "home_arms": true, "mirror": false}'
+
+# block B — same call, mirrored bench
+curl -sX POST localhost:8000/sim/scene/reset \
+  -H 'content-type: application/json' \
+  -d '{"seed": 2001, "randomize": true, "home_arms": true, "mirror": true}'
 ```
 
 `home_arms: true` puts the arms back to a known start so the demonstrations
 begin from the same configuration. It is refused while an episode is open —
 reset first, then start recording.
 
-Record the seed you used against the episode index as you go. LeRobot v3.0 has
-no per-episode metadata slot, so the mapping lives in your notes, not in the
-dataset. Working through the list in order is what makes that recoverable.
+Record the seed **and the mirror flag** against the episode index as you go —
+seed 2001 and seed 2001 mirrored are two different benches. The reset response
+echoes both, as `last_seed` and `mirrored`. LeRobot v3.0 has no per-episode
+metadata slot, so the mapping lives in your notes, not in the dataset. Working
+through the list in order is what makes that recoverable.
 
 ## What counts as a good take
 

@@ -149,6 +149,62 @@ def index_loose_bodies(model: mujoco.MjModel) -> list[CubeIndex]:
     return out
 
 
+def mirror_pose_x(pose: np.ndarray) -> np.ndarray:
+    """Reflect one free-joint pose `[x y z qw qx qy qz]` about the x = 0 plane.
+
+    That plane sits midway between the two arm mounts — `sim/builder.py` puts
+    them at x = -0.20 and x = +0.20 — so this is precisely "put the part in
+    front of the OTHER arm", and it is what makes the mirrored arm assignment
+    ("right holds the fixture, left inserts the pin") physically reachable. The
+    parts' authored home slots are not symmetric: the pin lies outboard of the
+    right arm at 0.253 m from that arm's base and 0.537 m from the left's, and
+    0.537 m is not a distance an SO-101 reaches.
+
+    Position is the easy half: x -> -x, y and z untouched.
+
+    ORIENTATION IS NOT. The reflection M = diag(-1, 1, 1) is improper
+    (det = -1), so no quaternion represents it and none can be asked to. What
+    the mirrored body needs is the proper rotation carrying mirrored body-frame
+    points to mirrored world points: R' (M q) = M (R q) for every q, hence
+    R' = M R M since M is its own inverse. That one IS proper —
+    det(M R M) = det(M)^2 det(R) = +1 — so a quaternion for it exists.
+
+    Which quaternion: for any orthogonal Q the cross-product matrix transforms
+    as Q [n]x Q^T = det(Q) [Q n]x, so pushing Rodrigues' formula through
+    M R(n, θ) M gives R(-M n, θ) = R((n_x, -n_y, -n_z), θ). The rotation AXIS
+    is a pseudovector and picks up the reflection's sign flip; the ANGLE is
+    unchanged. With q = (cos(θ/2), sin(θ/2)·n) that is simply
+
+        (w, x, y, z) -> (w, x, -y, -z)
+
+    `tests/sim/test_insertion.py` checks that against `mju_mat2Quat(M R M)`
+    rather than taking it on trust. Nothing here fails loudly: a sign error
+    leaves a perfectly valid unit quaternion that simply points the part the
+    wrong way — measured, the plausible variants leave the pin lying flat and
+    yawed 180 degrees off, so it looks like a plausible bench and only the
+    teleoperator ever finds out.
+
+    The other family — TRANSFORM the orientation, never REBUILD it — is why
+    this returns a mapped quaternion rather than composing a fresh one. The pin
+    is authored LYING FLAT, its home quat carrying the shaft from local +z to
+    world +y; any implementation that rebuilds the orientation (identity, or a
+    pure yaw) puts the shaft back along world +z and stands the pin on its tip
+    at the start of every mirrored episode. That is exactly the bug the
+    `mju_mulQuat` yaw composition in `_plan_cube_poses` exists to avoid, and it
+    has cost this scene once already.
+
+    The quaternion is renormalised on the way out for the reason given in
+    `_plan_cube_poses`: an unnormalised quaternion in qpos is exactly the
+    failure this module is careful about, and the cost is one sqrt.
+    """
+    out = np.array(pose, dtype=float)
+    out[0] = -out[0]
+    out[5] = -out[5]      # qy
+    out[6] = -out[6]      # qz
+    out[3:7] /= np.linalg.norm(out[3:7])
+    return out
+
+
 def place_zone_geom(model: mujoco.MjModel) -> int:
     """Geom id of the task's target pad. Unlike the cubes, this one IS named."""
     gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, PLACE_ZONE_GEOM_NAME)
@@ -263,11 +319,13 @@ class SceneController:
 
         self.last_seed: int | None = None
         self.last_randomized: bool = False
+        self.last_mirrored: bool = False
         self.reset_count: int = 0
 
     # ---- public API ----
 
-    def reset(self, *, seed: int | None = None, randomize: bool = True) -> dict:
+    def reset(self, *, seed: int | None = None, randomize: bool = True,
+              mirror: bool = False) -> dict:
         """Put the scene back to episode-start. Returns `snapshot()`.
 
         `seed` makes the result reproducible: the same seed and the same
@@ -278,6 +336,19 @@ class SceneController:
         builder's palette, the authored lighting — which also means it UNDOES a
         previous randomization rather than layering on top of it.
 
+        `mirror=True` reflects the whole loose-body layout about x = 0, the
+        plane between the two arm mounts, so the part that was in front of the
+        left arm is now in front of the right and vice versa. It exists because
+        the insertion parts' home slots are NOT symmetric — the pin lies
+        outboard of the right arm, 0.537 m from the left arm's base, which is
+        beyond reach — so the mirrored arm assignment cannot be demonstrated
+        without it. See `mirror_pose_x` for what happens to the orientations,
+        which is the part that is not obvious.
+
+        The mirror is applied AFTER planning and never feeds back into `rng`,
+        so seed N mirrored is exactly the mirror image of seed N unmirrored,
+        and adding the flag changed no existing seed's layout.
+
         Safe against the running stepper: everything below is computed first,
         then written inside one `world.mutate()` block, so the stepper is held
         for a few microseconds of array assignment rather than for the sampling.
@@ -286,6 +357,8 @@ class SceneController:
 
         # --- plan (no lock held: pure computation over cached baselines) ---
         poses = self._plan_cube_poses(rng, randomize)
+        if mirror:
+            poses = {name: mirror_pose_x(p) for name, p in poses.items()}
         rgba = self._plan_cube_rgba(rng, randomize)
         light_pos, light_diffuse = self._plan_lights(rng, randomize)
         cam_pos = self._plan_cameras(rng, randomize)
@@ -316,9 +389,10 @@ class SceneController:
 
         self.last_seed = seed
         self.last_randomized = bool(randomize)
+        self.last_mirrored = bool(mirror)
         self.reset_count += 1
-        logger.info("sim scene reset: %d cube(s), seed=%r, randomize=%s",
-                    len(self.cubes), seed, randomize)
+        logger.info("sim scene reset: %d cube(s), seed=%r, randomize=%s, mirror=%s",
+                    len(self.cubes), seed, randomize, mirror)
         return self.snapshot()
 
     def snapshot(self) -> dict:
@@ -349,6 +423,10 @@ class SceneController:
             "cameras": cameras,
             "last_seed": self.last_seed,
             "randomized": self.last_randomized,
+            # Which arm assignment this layout is for. A dataset's seed list is
+            # only recoverable if the mirror flag is recorded next to the seed,
+            # because seed N and seed N mirrored are different benches.
+            "mirrored": self.last_mirrored,
             "reset_count": self.reset_count,
         }
 

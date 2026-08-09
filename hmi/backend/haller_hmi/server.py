@@ -195,6 +195,13 @@ class SimSceneResetBody(BaseModel):
     # None -> fresh entropy. Pass a seed to make an episode reproducible.
     seed: int | None = None
     randomize: bool = True
+    # Reflect the bench about x = 0, the plane between the two arm mounts, so
+    # the part that was in front of the left arm starts in front of the right.
+    # The insertion parts' home slots are not symmetric — the pin lies outboard
+    # of the right arm and is 0.537 m from the left arm's base — so the
+    # mirrored arm assignment ("right holds, left inserts") is out of reach
+    # without this. Same seed + mirror is the exact mirror image of that seed.
+    mirror: bool = False
     # Send the arms back to their calibrated home first, via the same bounded
     # motion path as /arm/{id}/home — so an oversize move is refused rather
     # than swept blind. Off by default: a reset in the middle of a teleop
@@ -733,7 +740,8 @@ async def post_sim_scene_reset(body: SimSceneResetBody):
         # once the arms have actually arrived, or they get swept off the slots
         # they were just placed on.
         await asyncio.to_thread(_wait_for_arm_ramps, _HOME_WAIT_S)
-    snapshot = ctl.reset(seed=body.seed, randomize=body.randomize)
+    snapshot = ctl.reset(seed=body.seed, randomize=body.randomize,
+                         mirror=body.mirror)
     if task is not None:
         # A cube that was still sitting on the pad when the last episode ended
         # would otherwise carry its qualifying streak into this one.
