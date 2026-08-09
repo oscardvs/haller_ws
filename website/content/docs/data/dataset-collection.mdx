@@ -51,6 +51,8 @@ curl -X POST http://localhost:8000/record/stop \
 
 One start/stop pair is **one episode**. Starting again with the same `repo_id` appends the next episode to the same dataset; a different `repo_id` closes the open dataset out and opens the new one.
 
+**A take of fewer than 2 frames is refused, not saved.** `last_error` says so. This is not tidiness: lerobot 0.5.1 cannot compute video statistics over a one-frame episode, so it omits that episode's `stats/observation.images.*` keys while every other episode has them, and the ragged result kills the metadata flush that writes `meta/episodes/` — taking the *whole dataset* with it, not just the stray take. A mis-click that opens and closes a take in the same instant is therefore dropped on the floor, loudly.
+
 `GET /record/status` reports:
 
 | field | meaning |
@@ -67,6 +69,8 @@ One start/stop pair is **one episode**. Starting again with the same `repo_id` a
 ### Where it lands, and at what rate
 
 `$HF_LEROBOT_HOME/<repo_id>`, defaulting to `~/.cache/huggingface/lerobot/<repo_id>`. Video is **h264** with streaming encoding (frames compress as they arrive, so memory stays flat over a long take and `save_episode` at stop time is near-instant). The libsvtav1 default was rejected: a software AV1 encoder cannot keep up with realtime multi-camera capture on the machines this runs on.
+
+**Every episode gets its own video file per camera** — `video_files_size_in_mb` is pinned to 0 in `meta/info.json` so lerobot rotates rather than packs. Stock lerobot 0.5.1 packs several episodes into one file, and the packer (`video_utils.concatenate_video_files`) remuxes the appended episode's packets without re-basing their timestamps, so the mp4 muxer rejects them with `av.error.ValueError: [Errno 22] Invalid argument` / `non monotonically increasing dts`. That raise lands *after* the frames are written but *before* the episode metadata is, which loses the take, freezes `total_episodes`, and leaves the next take reusing the same episode index. One file per episode is a valid v3 layout — each episode records its own chunk/file index — and it removes the broken path rather than hoping to miss it.
 
 **fps is `telemetry.hz`.** 30 in the sim config, matched to the Quest's ~30 Hz publish rate and LeRobot's SO-101 convention. The real rig stays at **20 Hz** — the half-duplex Feetech bus already interleaves 60 Hz writes with those reads.
 
@@ -103,7 +107,9 @@ shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
 
 — so `observation.state[i]`, `action[i]` and `observation.effort[i]` are the same joint, and the `names` metadata spells them out as `left_shoulder_pan … right_gripper`.
 
-`observation.base` is `(v, omega)` for the 3-wheel differential drive. `observation.wall_clock` is the **real** capture time of the frame: LeRobot's own `timestamp` is synthetic (`frame_index / fps`), so a skipped tick leaves no gap there, and this channel is the only way to see real sampling holes after the fact.
+`observation.base` is `(v, omega)` for the 3-wheel differential drive. `observation.wall_clock` is the **real** capture time of the frame, measured in **seconds since that episode started**: LeRobot's own `timestamp` is synthetic (`frame_index / fps`), so a skipped tick leaves no gap there, and this channel is the only way to see real sampling holes after the fact.
+
+It is deliberately **not** a Unix timestamp. A float32 carries 24 bits of mantissa, so one representable step at a 2026 epoch (`1.79e9`) is **128 seconds** — stored absolutely, a three-minute take collapses to two distinct values and every consecutive difference is zero, which destroys the only thing the column is for. Measured from episode start it keeps ~10 µs of resolution for any take under three hours. The absolute start time of the most recent take is in the `haller_wall_clock` block of `meta/info.json`, so real time is still recoverable via `info["haller_wall_clock"]["episode_started_unix_s"] + wall_clock`.
 
 `observation.lidar` (fixed-length `/scan`) is the one remaining v0.1 slot — an additive key, not a change to any of the above.
 

@@ -16,6 +16,7 @@ from haller_hmi.recorder import (
     DONE_FEATURE,
     REWARD_FEATURE,
     SCORING_INFO_KEY,
+    WALL_CLOCK_INFO_KEY,
     DatasetRecorder,
     SO101_JOINT_ORDER,
 )
@@ -114,9 +115,15 @@ class _FakeCamera:
 
 
 class _FakeTaskMonitor:
-    """Stands in for `sim.task.TaskMonitor`: same `poll()` contract, scripted
-    verdicts, and a REAL `SuccessSpec` so the thresholds that land in
-    info.json are the ones the sim would actually have run with."""
+    """Stands in for `sim.task.TaskMonitor`: same `poll()` and `provenance()`
+    contract, scripted verdicts, and a REAL `SuccessSpec` so the thresholds
+    that land in info.json are the ones the sim would actually have run with.
+
+    `provenance()` matters here and is not padding: the recorder now asks the
+    monitor to describe its own predicate, precisely so a second task
+    (`InsertionMonitor`) cannot be mislabelled as pick-and-place. A fake
+    without it would exercise only the "monitor did not describe itself"
+    fallback and leave the real path untested."""
 
     def __init__(self, verdicts=(), spec=None, target=None, fail=False):
         self._verdicts = list(verdicts)
@@ -138,6 +145,18 @@ class _FakeTaskMonitor:
             "success": ok, "held_s": 0.6 if ok else 0.0, "per_cube": {},
             "target": self.target, "settle_s": self.spec.settle_s,
             "sim_time_s": float(self.polls),
+        }
+
+    def provenance(self):
+        return {
+            "task": "pick_and_place",
+            "predicate": "haller_hmi.sim.task.cube_placed",
+            "predicate_note": (
+                "A frame scores 1.0 when a cube is in contact with the "
+                "place-zone geom ... held continuously for settle_s SIM "
+                "seconds (mujoco data.time, not wall clock)."
+            ),
+            "target": self.target,
         }
 
 
@@ -306,6 +325,7 @@ def test_build_frame_assembles_state_action_base_images():
     r = _recorder(status, cams=_FakeCameras([_FakeCamera("top", 64, 48)]))
     r._cam_specs = r._active_camera_specs()
     r._state.task = "pick cube"
+    r._state.started_at = 1720000000.0
     tele_frame = {
         "t": 1720000000.5,
         "arms": {"left": _joints_block(2.0), "right": _joints_block(4.0)},
@@ -317,7 +337,10 @@ def test_build_frame_assembles_state_action_base_images():
     assert frame["observation.state"].shape == (12,)
     assert frame["action"].shape == (12,)
     np.testing.assert_allclose(frame["observation.base"], [0.5, -0.25])
-    np.testing.assert_allclose(frame["observation.wall_clock"], [1720000000.5])
+    # Seconds since episode start, NOT the raw epoch: stored absolutely, a
+    # float32 rounds 1720000000.5 to 1720000064.0 and the column stops being
+    # able to show sampling gaps at all.
+    np.testing.assert_allclose(frame["observation.wall_clock"], [0.5])
     assert frame["observation.images.top"].shape == (48, 64, 3)
     assert frame["task"] == "pick cube"
     assert frame["action"][0] == 5.0    # left shoulder_pan = commanded
@@ -570,7 +593,8 @@ def test_scoring_block_carries_the_predicate_and_the_exact_thresholds():
     assert block["reward_feature"] == REWARD_FEATURE
     assert block["done_feature"] == DONE_FEATURE
     assert block["predicate"] == "haller_hmi.sim.task.cube_placed"
-    assert block["target_cube"] == "cube_1"
+    assert block["target"] == "cube_1"          # renamed from target_cube:
+    assert block["task"] == "pick_and_place"   # the block now names the task
     assert block["spec"]["zone_inset_m"] == 0.02
     assert block["spec"]["settle_s"] == 0.75
     assert block["spec"]["require_release"] is True
@@ -703,8 +727,10 @@ async def test_teleop_never_running_does_not_auto_stop():
 async def test_stop_episode_after_auto_save_is_a_noop():
     running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
     stopped = {"running": False}
-    # 1 init + 1 iteration x 3 = 4 running, then stopped on iter 2's check.
-    r, stream = _runnable_recorder([running] * 4 + [stopped])
+    # 1 init + 2 iterations x 3 = 7 running, then stopped on iter 3's check.
+    # Two frames, not one: a one-frame take is refused outright — see
+    # MIN_SAVEABLE_FRAMES — and this test is about stop being idempotent.
+    r, stream = _runnable_recorder([running] * 7 + [stopped])
     await asyncio.wait_for(r._run(), timeout=5.0)
     assert r._dataset.saved == 1
     # Operator hits /record/stop a beat later: must not save or clear again.
@@ -923,6 +949,150 @@ async def test_terminal_done_lands_on_the_last_frame_of_every_episode(tmp_path):
     ]
 
 
+def _real_recorder_with_camera(root, monitor=None):
+    """Like `_real_recorder`, but with a camera — so the dataset carries a
+    `video` feature and `save_episode` actually encodes and files a video.
+
+    Every other real-dataset test runs camera-less, which is how the bug in
+    `test_second_episode_with_video_does_not_hit_the_muxer` reached the rig:
+    with no video feature there is no video file to append to, so the whole
+    failing path was invisible to a green suite.
+    """
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    return DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=_FakeCameras([_FakeCamera("top", 64, 48)]),
+        task_monitor=monitor,
+        root=str(root),
+    )
+
+
+async def test_one_frame_take_is_discarded_and_leaves_the_dataset_usable(tmp_path):
+    """REGRESSION, 2026-08-09 — a single stray one-frame take made the whole
+    dataset unfinalisable.
+
+    lerobot 0.5.1 cannot compute video statistics over a one-frame episode, so
+    it omits that episode's `stats/observation.images.*` keys while every other
+    episode has them. The buffered episode metadata is then ragged, and the
+    flush that writes `meta/episodes/` dies:
+
+        ArrowInvalid: Column ... stats/observation.images.top/min
+                      expected length 3 but got length 2
+
+    Nothing downstream survives that: no episode metadata is ever written,
+    info.json never advances, and every later take silently reuses the same
+    episode index. The one-frame take is refused up front instead.
+
+    The 1/8/5 pattern is what the rig actually did that day — two fumbled
+    starts, then the real take.
+    """
+    root = tmp_path / "ds"
+    rec = _real_recorder_with_camera(root, monitor=_FakeTaskMonitor([]))
+    await _drive_scored(rec, "smoke/video", "place the cube", [False])
+    # Checked here, before the next take: the refusal is reported rather than
+    # silent (the operator pressed stop and got nothing), and `last_error` is
+    # per-take state that `start_episode` deliberately clears.
+    assert "discarded" in (rec.status()["last_error"] or "")
+    for n_frames in (8, 5):
+        await _drive_scored(rec, "smoke/video", "place the cube", [False] * n_frames)
+    rec.close()
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/video", root=root)
+    # 13 frames, not 14: the one-frame take was refused, the other two kept.
+    # These counters only advance if `meta.save_episode` was reached at all.
+    assert ds.meta.total_episodes == 2
+    assert ds.meta.total_frames == 13
+    assert (root / "meta" / "episodes").exists(), "episode metadata never flushed"
+    assert [int(ds[i]["episode_index"]) for i in (0, 7, 12)] == [0, 0, 1]
+
+
+async def test_every_episode_gets_its_own_video_file(tmp_path):
+    """REGRESSION — lerobot 0.5.1 packs episodes into a shared video file, and
+    its packer (`video_utils.concatenate_video_files`) remuxes the appended
+    episode's packets without re-basing their timestamps onto the end of the
+    file already there:
+
+        av.error.ValueError: [Errno 22] Invalid argument
+        [mp4] ... non monotonically increasing dts ...: 3584 >= 3584
+
+    `save_episode` raises there AFTER the frames are on disk but BEFORE
+    `meta.save_episode`, so the episode is lost, info.json never advances, and
+    the half-reset buffer kills every later add_frame with KeyError: 'size'.
+    `_one_video_file_per_episode` keeps each episode in its own file so the
+    packer is never reached.
+
+    Scope, honestly: with `MIN_SAVEABLE_FRAMES` in force, no take pattern found
+    so far actually reaches the broken packer, so this test pins the mechanism
+    (one file per episode, knob persisted) rather than reproducing the crash.
+    That is deliberate — the muxer path is removed rather than avoided by luck,
+    and this fails the moment someone re-enables packing.
+
+    All takes go through ONE recorder: the packing branch is chosen on
+    `meta.latest_episode`, which lives in memory on the dataset object. A test
+    that builds a fresh recorder per episode resumes from disk, reads
+    `latest_episode` as None, and takes the safe branch for the wrong reason.
+    """
+    import json
+
+    root = tmp_path / "ds"
+    rec = _real_recorder_with_camera(root, monitor=_FakeTaskMonitor([]))
+    for n_frames in (4, 3, 5):
+        await _drive_scored(rec, "smoke/video", "place the cube", [False] * n_frames)
+    rec.close()
+
+    files = sorted((root / "videos" / "observation.images.top").rglob("*.mp4"))
+    assert len(files) == 3, f"expected one video file per episode, got {files}"
+    assert all(f.stat().st_size > 0 for f in files)
+    # Persisted, not just in memory: `resume` rebuilds metadata from info.json,
+    # so a value kept only in RAM would let the NEXT session pack and crash.
+    assert json.loads((root / "meta" / "info.json").read_text())[
+        "video_files_size_in_mb"] == 0
+
+    # And it survives the resume path, which is how every session after the
+    # first one opens the dataset.
+    rec2 = _real_recorder_with_camera(root, monitor=_FakeTaskMonitor([]))
+    await _drive_scored(rec2, "smoke/video", "place the cube", [False] * 3)
+    rec2.close()
+    assert len(sorted((root / "videos" / "observation.images.top").rglob("*.mp4"))) == 4
+
+
+async def test_wall_clock_is_relative_and_survives_float32(tmp_path):
+    """REGRESSION — a float32 has 128 s of resolution at a 2026 epoch, so an
+    absolute wall clock made every consecutive difference zero and the column
+    could no longer show sampling gaps, which is its only job."""
+    import json
+
+    root = tmp_path / "ds"
+    rec = _real_recorder(root)
+    await rec.start_episode("smoke/clock", "place the cube")
+    start = rec._state.started_at
+    # A 200 s take: far enough into the episode that an absolute epoch would
+    # round these three ticks onto at most two distinct float32 values.
+    for dt in (0.0, 100.0, 200.0):
+        frame = rec._build_frame({"t": start + dt,
+                                  "arms": {"left": _joints_block(1.0),
+                                           "right": _joints_block(2.0)},
+                                  "base": {"linear": 0.0, "angular": 0.0}})
+        rec._dataset.add_frame(frame)
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
+    rec.close()
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/clock", root=root)
+    t = [float(ds[i]["observation.wall_clock"]) for i in range(3)]
+    assert t == [0.0, 100.0, 200.0]
+    # The gaps are the point: they must be visible, and exact.
+    assert [round(b - a, 3) for a, b in zip(t, t[1:])] == [100.0, 100.0]
+
+    block = json.loads((root / "meta" / "info.json").read_text())[WALL_CLOCK_INFO_KEY]
+    assert block["epoch"] == "episode_start"
+    # Absolute time stays recoverable for anyone lining a take up externally.
+    assert block["episode_started_unix_s"] == pytest.approx(start)
+
+
 async def test_scoring_block_round_trips_through_info_json(tmp_path):
     """Same durability requirement as the calibration block: it has to survive
     create, save_episode (which rewrites info.json), resume and finalize."""
@@ -937,13 +1107,15 @@ async def test_scoring_block_round_trips_through_info_json(tmp_path):
     block = json.loads((root / "meta" / "info.json").read_text())[SCORING_INFO_KEY]
     assert block["auto_scored"] is True
     assert block["predicate"] == "haller_hmi.sim.task.cube_placed"
-    assert block["target_cube"] == "cube_0"
+    assert block["target"] == "cube_0"
     assert block["spec"]["settle_s"] == 0.5
     assert "sim" in block["predicate_note"].lower()
 
+    # Two frames: a one-frame take is refused (MIN_SAVEABLE_FRAMES) and would
+    # never reach the second save this assertion is about.
     await _drive_scored(_real_recorder(root, monitor=_FakeTaskMonitor([], spec=spec,
                                                                      target="cube_0")),
-                        "smoke/scored", "place the cube", [False])
+                        "smoke/scored", "place the cube", [False, False])
     info2 = json.loads((root / "meta" / "info.json").read_text())
     assert info2[SCORING_INFO_KEY] == block
     assert info2["total_episodes"] == 2            # lerobot's own keys still updated
@@ -990,8 +1162,10 @@ async def test_resuming_a_scored_dataset_without_a_scorer_refuses_too(tmp_path):
     rejected for a MISSING key, and the operator would only find out at stop
     time from an empty episode."""
     root = tmp_path / "ds"
+    # Two frames: MIN_SAVEABLE_FRAMES refuses a one-frame take, and this test
+    # needs the episode to actually land so the resume below has a schema.
     await _drive_scored(_real_recorder(root, monitor=_FakeTaskMonitor([])),
-                        "smoke/scored", "place the cube", [False])
+                        "smoke/scored", "place the cube", [False, False])
 
     rec = _real_recorder(root)          # same dataset, real rig, no scorer
     with pytest.raises(RuntimeError, match="different schema"):

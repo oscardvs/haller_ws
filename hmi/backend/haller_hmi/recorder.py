@@ -25,7 +25,9 @@ one remaining v0.1 slot):
       action                   float32[N]   commanded joint deg (teleop targets), same layout
       observation.effort       float32[N]   signed per-joint load, same layout (see below)
       observation.base         float32[2]   (v, omega) — 3-wheel differential drive
-      observation.wall_clock   float32[1]   wall time the frame was captured (gap detection)
+      observation.wall_clock   float32[1]   capture time, SECONDS SINCE EPISODE START
+                                            (gap detection; not an epoch — float32
+                                            quantises a 2026 epoch to 128 s)
       observation.images.<key> video HxWx3  one per RECORDED camera (top / *_wrist)
       next.reward              float32[1]   sparse task reward — ONLY when auto-scored
       next.done                bool[1]      terminal frame flag — ONLY when auto-scored
@@ -122,6 +124,36 @@ CALIBRATION_INFO_KEY = "haller_joint_calibration"
 # Same idea for the auto-scoring provenance block: whether the episodes in this
 # dataset were machine-labelled, by what predicate, at what thresholds.
 SCORING_INFO_KEY = "haller_scoring"
+
+# Says what `observation.wall_clock` measures, and pins the absolute start of
+# the most recent take so a relative column can still be lined up against an
+# external log. See the feature's comment in `_build_features` for why the
+# column cannot hold an epoch directly.
+WALL_CLOCK_INFO_KEY = "haller_wall_clock"
+
+# Shortest take worth writing — and, much more importantly, the shortest take
+# lerobot 0.5.1 can write WITHOUT corrupting the dataset.
+#
+# A ONE-FRAME episode encodes a video its streaming encoder cannot compute
+# statistics over, so `DatasetWriter.save_episode` skips the
+# `stats/observation.images.*` keys for that episode only (the
+# `if video_stats is not None` guard). Every other episode has them. When
+# `LeRobotDatasetMetadata._flush_metadata_buffer` later builds one pyarrow table
+# out of the buffered episodes, the columns are ragged and the flush dies:
+#
+#     ArrowInvalid: Column 141 named stats/observation.images.top/min
+#                   expected length 2 but got length 1
+#
+# That flush is what writes `meta/episodes/`, so ONE stray one-frame take makes
+# the entire dataset unfinalisable — every later episode's frames and video are
+# on disk, but no episode metadata is ever written and info.json never advances.
+# It is also what left `videos/` empty and info.json claiming 2 episodes after
+# the 2026-08-09 session.
+#
+# Two frames is the measured boundary (1 -> no image stats, 2 -> stats present),
+# not a guess, and it costs nothing real: a sub-2-frame take is a mis-click, not
+# a demonstration.
+MIN_SAVEABLE_FRAMES = 2
 
 # LeRobot's OWN names for the two task-outcome columns (lerobot.utils.constants
 # REWARD/DONE). Spelled out here rather than invented, because the whole point
@@ -284,6 +316,13 @@ class DatasetRecorder:
             # success yet", as opposed to "nobody is looking".
             success=None if self.task_monitor is None else False,
         )
+        # After `self._state`, not with the other two metadata writes above:
+        # this block carries the take's start time, which does not exist yet
+        # when those run. Non-fatal for the same reason they are.
+        try:
+            self._write_wall_clock_metadata()
+        except Exception as e:
+            logger.warning("recorder: wall-clock metadata not written: %s", e)
         self._cam_specs = cam_specs
         self._episode_open = True
         self._task_handle = asyncio.get_event_loop().create_task(self._run())
@@ -326,10 +365,48 @@ class DatasetRecorder:
         self._state.recording = False
         assert self._dataset is not None
         frames = self._state.episode_frames
+        if save and 0 < frames < MIN_SAVEABLE_FRAMES:
+            # Discarded rather than saved — see MIN_SAVEABLE_FRAMES. Loud,
+            # because "I pressed stop and nothing was kept" must never be
+            # something the operator has to infer from a frame counter.
+            self._state.last_error = (
+                f"take discarded: {frames} frame(s), minimum is "
+                f"{MIN_SAVEABLE_FRAMES} (a shorter take corrupts the dataset)"
+            )
+            logger.warning("recorder: %s", self._state.last_error)
+            self._dataset.clear_episode_buffer()
+            return self.status()
         if save and frames > 0:
             self._mark_terminal_frame()
             # save_episode encodes video + writes parquet for the buffered frames.
-            self._dataset.save_episode()
+            try:
+                self._dataset.save_episode()
+            except Exception as e:
+                # A raise here leaves the writer half-reset: the episode buffer
+                # has lost its "size" key, so EVERY add_frame of the next take
+                # dies with KeyError until the process restarts, and the take
+                # after that silently reuses this episode's index because
+                # `meta.save_episode` never ran to advance info.json. One failed
+                # save would otherwise quietly poison the whole session — which
+                # is precisely how 2026-08-09 produced nine takes welded into a
+                # single unreadable episode.
+                #
+                # So: clear the buffer to give the next take a clean one, record
+                # the reason in status(), and re-raise. The operator must know
+                # this take is gone; a swallowed exception here would report a
+                # successful stop for an episode that was never written.
+                self._state.last_error = f"save_episode failed: {e}"
+                logger.exception("recorder: save_episode failed — episode LOST")
+                try:
+                    self._dataset.clear_episode_buffer()
+                except Exception:
+                    # Already broken; the next start_episode reopens the dataset
+                    # rather than leaving the operator with a recorder that
+                    # cannot record.
+                    logger.exception("recorder: episode buffer unrecoverable; "
+                                     "dropping the dataset handle")
+                    self._dataset = None
+                raise
             logger.info("recorder: saved episode (%d frames, success=%s in %d frames)",
                         frames, self._state.success, self._state.success_frames)
         else:
@@ -403,8 +480,8 @@ class DatasetRecorder:
                     "rig that can auto-score, i.e. the sim)."
                 )
             logger.info("recorder: resuming existing dataset at %s", root)
-            return ds
-        return LeRobotDataset.create(
+            return self._one_video_file_per_episode(ds)
+        return self._one_video_file_per_episode(LeRobotDataset.create(
             repo_id=repo_id,
             fps=fps,
             features=features,
@@ -414,7 +491,46 @@ class DatasetRecorder:
             image_writer_threads=self.image_writer_threads,
             vcodec=self.vcodec,
             streaming_encoding=True,
-        )
+        ))
+
+    def _one_video_file_per_episode(self, ds: LeRobotDataset) -> LeRobotDataset:
+        """Give every episode its own video file, so lerobot never concatenates.
+
+        WHY THIS EXISTS — lerobot 0.5.1 cannot append an episode to an existing
+        video file. `DatasetWriter._save_episode_video` packs episodes together
+        until the file reaches `video_files_size_in_mb`, and the packing step,
+        `video_utils.concatenate_video_files`, remuxes the second file's packets
+        WITHOUT re-basing their timestamps onto the end of the first:
+
+            av.error.ValueError: [Errno 22] Invalid argument
+            [mp4] Application provided invalid, non monotonically increasing
+                  dts to muxer in stream 0: 3584 >= 3584
+
+        So the very first time a second episode lands in a file, `save_episode`
+        raises — after the frames are already on disk but BEFORE
+        `meta.save_episode` runs. `info.json` never advances, so the next take
+        is handed the same `episode_index` and appends to the same parquet, and
+        the half-reset episode buffer makes every later `add_frame` die on
+        `KeyError: 'size'`. One upstream muxer bug, and the whole session is a
+        single unreadable episode. That is exactly what happened on 2026-08-09.
+
+        `video_files_size_in_mb = 0` makes the size test
+        (`latest + episode >= limit`) true for every episode after the first, so
+        each one takes the rotate-to-a-new-file branch — a plain `shutil.move`,
+        no concatenation, no muxer. Per-episode video files are a valid v3
+        layout: the chunk/file index of each episode is recorded in its own
+        metadata, so readers do not care. It costs one file per camera per
+        episode and buys back the entire pipeline.
+
+        Revisit if lerobot fixes the remux (it needs a per-stream dts offset
+        carried across the file boundary); until then this must stay.
+        """
+        ds.meta.info["video_files_size_in_mb"] = 0
+        # Persist it: `resume` rebuilds the metadata from info.json, so a value
+        # kept only in memory would be lost the next time the backend starts and
+        # the second episode of the NEXT session would hit the muxer again.
+        self._persist_info(ds.meta.info, root=Path(ds.meta.root))
+        return ds
 
     def _joint_order(self, arm_id: str) -> list[str]:
         """SO-101 joints present on this arm, in canonical order."""
@@ -476,10 +592,21 @@ class DatasetRecorder:
             "observation.effort": {"dtype": "float32", "shape": (n,), "names": names},
             # 3-wheel differential drive -> 2-DoF base command/velocity.
             "observation.base": {"dtype": "float32", "shape": (2,), "names": ["v", "omega"]},
-            # Real capture time of each frame. LeRobot's own `timestamp` column
-            # is synthetic (frame_index / fps), so a skipped tick leaves no gap
-            # there; this channel is what lets training code see real sampling
-            # holes after the fact.
+            # Real capture time of each frame, in SECONDS SINCE THIS EPISODE
+            # STARTED. LeRobot's own `timestamp` column is synthetic
+            # (frame_index / fps), so a skipped tick leaves no gap there; this
+            # channel is what lets training code see real sampling holes after
+            # the fact.
+            #
+            # Relative, not a Unix epoch, and that is not a style choice: a
+            # float32 has 24 bits of mantissa, so one ULP at 1.79e9 (a 2026
+            # epoch) is 128 SECONDS. Stored absolutely, a three-minute take
+            # collapses to two distinct values and every consecutive diff is
+            # zero — the column silently becomes unable to do the only job it
+            # has. Measured from episode start it holds ~1e-5 s of resolution
+            # for any take shorter than three hours. The episode's absolute
+            # start time is in `haller_wall_clock` in info.json for anyone who
+            # needs to line a take up against an external log.
             "observation.wall_clock": {"dtype": "float32", "shape": (1,), "names": ["t"]},
         }
         if self.task_monitor is not None:
@@ -586,10 +713,15 @@ class DatasetRecorder:
         logger.info("recorder: wrote %s for %d joints",
                     CALIBRATION_INFO_KEY, len(info[CALIBRATION_INFO_KEY]["joints"]))
 
-    def _persist_info(self, info: dict) -> None:
-        """Flush the dataset's in-memory `info` dict to `meta/info.json`."""
-        assert self._dataset is not None
-        root = Path(self._dataset.meta.root)
+    def _persist_info(self, info: dict, root: Path | None = None) -> None:
+        """Flush the dataset's in-memory `info` dict to `meta/info.json`.
+
+        `root` is explicit only for the one caller that runs while the dataset
+        is still being opened and `self._dataset` is not assigned yet.
+        """
+        if root is None:
+            assert self._dataset is not None
+            root = Path(self._dataset.meta.root)
         if _lerobot_write_info is not None:
             _lerobot_write_info(info, root)
         else:  # pragma: no cover - only if lerobot moves the helper
@@ -633,22 +765,33 @@ class DatasetRecorder:
                 ),
             }
         spec = getattr(mon, "spec", None)
+        # The monitor describes its own predicate. It has to: there is more
+        # than one task now (pick-and-place, bimanual insertion) and a block
+        # that hardcoded one of them would confidently mislabel the other —
+        # the single worst failure mode for a provenance record, because it is
+        # not detectable from the data.
+        prov = getattr(mon, "provenance", None)
+        described = prov() if callable(prov) else {}
+        note = described.get("predicate_note")
         return {
             "auto_scored": True,
             "reward_feature": REWARD_FEATURE,
             "done_feature": DONE_FEATURE,
             "monitor": type(mon).__name__,
-            "predicate": "haller_hmi.sim.task.cube_placed",
+            "task": described.get("task"),
+            "predicate": described.get("predicate"),
             "predicate_note": (
-                "A frame scores 1.0 when a cube is in contact with the place-zone "
-                "geom, its centre is inside the zone half-extent shrunk by "
-                "zone_inset_m, its linear and angular speeds are below "
-                "lin_vel_eps / ang_vel_eps, and (when require_release) no arm geom "
-                "is touching it — and that has held continuously for settle_s SIM "
-                f"seconds (mujoco data.time, not wall clock). {DONE_FEATURE} is "
-                "true on the final frame of each episode only."
+                f"{note} {DONE_FEATURE} is true on the final frame of each "
+                "episode only." if note else
+                # A monitor that does not describe itself is still recorded as
+                # scored — the reward column is real — but the block says the
+                # definition is unknown rather than inventing one.
+                f"This dataset was auto-scored by {type(mon).__name__}, which "
+                "did not report a predicate description, so the exact label "
+                f"definition is not recorded here. {DONE_FEATURE} is true on "
+                "the final frame of each episode only."
             ),
-            "target_cube": getattr(mon, "target", None),
+            "target": described.get("target", getattr(mon, "target", None)),
             "spec": asdict(spec) if is_dataclass(spec) else None,
             "reward_shape": "sparse",
         }
@@ -670,6 +813,34 @@ class DatasetRecorder:
         self._persist_info(info)
         logger.info("recorder: wrote %s (auto_scored=%s)",
                     SCORING_INFO_KEY, info[SCORING_INFO_KEY]["auto_scored"])
+
+    def _write_wall_clock_metadata(self) -> None:
+        """Record what `observation.wall_clock` means, and this take's absolute
+        start, so the relative column can be mapped back to real time.
+
+        Written at episode START (unlike the other two blocks, whose content is
+        take-independent) because `episode_started_unix_s` is only knowable
+        then. Same v3.0 limitation applies: there is no per-episode slot for
+        free-form metadata, so this describes the MOST RECENT take.
+        """
+        assert self._dataset is not None
+        info = self._dataset.meta.info
+        info[WALL_CLOCK_INFO_KEY] = {
+            "feature": "observation.wall_clock",
+            "unit": "s",
+            "epoch": "episode_start",
+            "note": (
+                "observation.wall_clock is seconds since the episode began, not "
+                "a Unix timestamp: float32 quantises a 2026 epoch to 128-second "
+                "steps, which would erase the sampling gaps this column exists "
+                "to expose. Add episode_started_unix_s to recover absolute time. "
+                "Unlike lerobot's synthetic `timestamp` (frame_index / fps), "
+                "consecutive differences here are real, so a gap larger than "
+                "1/fps is a genuinely skipped tick."
+            ),
+            "episode_started_unix_s": self._state.started_at,
+        }
+        self._persist_info(info)
 
     def _committed_action_for(self, arm_id: str, joints: list[str], measured: dict) -> list[float]:
         """Commanded target degrees for one arm, from the human-teleop session.
@@ -719,9 +890,11 @@ class DatasetRecorder:
             "action": np.asarray(action_vec, dtype=np.float32),
             "observation.effort": np.asarray(effort_vec, dtype=np.float32),
             "observation.base": np.asarray(base_vec, dtype=np.float32),
-            # When this telemetry frame was built — see the feature's comment.
+            # When this telemetry frame was built, relative to episode start —
+            # see the feature's comment for why it is not an absolute epoch.
             "observation.wall_clock": np.asarray(
-                [float(tele_frame.get("t", time.time()))], dtype=np.float32),
+                [float(tele_frame.get("t", time.time()))
+                 - (self._state.started_at or 0.0)], dtype=np.float32),
             "task": self._state.task,
         }
         for c in self._cam_specs:
