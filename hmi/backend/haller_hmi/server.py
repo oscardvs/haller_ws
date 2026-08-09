@@ -33,6 +33,8 @@ from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
 from .recorder import DatasetRecorder
+from .sim.scene import SceneController
+from .sim.task import TaskMonitor
 from .sim.teleop import SimLeaderTeleop
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,19 @@ sim_teleop.attach_peer(human_teleop)
 calibration = CalibrationManager()
 telemetry: TelemetryBroadcaster | None = None
 recorder: DatasetRecorder | None = None  # constructed in lifespan, after telemetry.start()
+# Both need a live MuJoCo world, which only exists once ArmManager has built one
+# for a source: sim arm — so both stay None on an all-real rig. Constructed in
+# lifespan; the /sim/* routes 409 when there is no world and 503 in the narrow
+# window before lifespan has run.
+scene: SceneController | None = None
+task: TaskMonitor | None = None
+
+#: How long POST /sim/scene/reset waits for a requested homing ramp to finish
+#: before dealing cubes. motion.home() only SCHEDULES the ramp, so without a
+#: wait the cubes land under an arm still swinging through them. Generous
+#: enough for a full-travel home at the configured 60°/s, bounded so a wedged
+#: executor can't hang the route.
+_HOME_WAIT_S = 6.0
 
 
 # ---- request schemas -----------------------------------------------------
@@ -175,22 +190,47 @@ class RecordStopBody(BaseModel):
     save: bool = True     # False -> discard the episode buffer (bad take)
 
 
+class SimSceneResetBody(BaseModel):
+    # None -> fresh entropy. Pass a seed to make an episode reproducible.
+    seed: int | None = None
+    randomize: bool = True
+    # Send the arms back to their calibrated home first, via the same bounded
+    # motion path as /arm/{id}/home — so an oversize move is refused rather
+    # than swept blind. Off by default: a reset in the middle of a teleop
+    # session should move the bench, not the robot.
+    home_arms: bool = False
+
+
 # ---- lifespan ------------------------------------------------------------
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    global telemetry, cameras, recorder
+    global telemetry, cameras, recorder, scene, task
     logger.info("haller-hmi backend starting (version %s)", VERSION)
     # Wire the ownership guard here, not as separate attach_peer calls below:
     # see ArmManager.connect_all's docstring and A6 in the plan.
     arms.connect_all(teleop_peers=[teleop, human_teleop, sim_teleop])
+    # There is no global "sim mode" flag — the world exists iff some arm is
+    # source: sim, so this is the test, here and in every /sim/* route.
+    _world = arms.world()
+    if _world is not None:
+        scene = SceneController(_world)
+        task = TaskMonitor(_world)
+        if cfg.sim_seed is not None:
+            scene.reset(seed=cfg.sim_seed)
+            logger.info("sim scene seeded from config: sim_seed=%d", cfg.sim_seed)
     cameras = CameraManager(cfg.cameras, world=arms.world())
     cameras.connect_all()
     ros.start()
     telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz,
                                      teleop=teleop, human_teleop=human_teleop, calibration=calibration)
     telemetry.start()
-    recorder = DatasetRecorder(telemetry=telemetry, human_teleop=human_teleop, cameras=cameras)
+    # `task` is None on an all-real rig, and the recorder treats that as "these
+    # episodes are unscored" rather than "these episodes failed": no
+    # next.reward/next.done columns at all, and an info.json block that says so.
+    # See recorder.py's module docstring.
+    recorder = DatasetRecorder(telemetry=telemetry, human_teleop=human_teleop,
+                               cameras=cameras, task_monitor=task)
     yield
     logger.info("haller-hmi backend shutting down")
     if recorder is not None:
@@ -630,6 +670,82 @@ def teleop_sim_stop():
 @app.get("/teleop/sim/status")
 def teleop_sim_status():
     return sim_teleop.status()
+
+
+# ---- sim scene reset + task success --------------------------------------
+
+def _require_sim_world() -> None:
+    """409 unless a MuJoCo world is live.
+
+    `arms.world()` is the only honest test: there is no global sim flag, just
+    per-arm `source: "sim"` driving ArmManager's lazy world construction.
+    """
+    if arms.world() is None:
+        raise HTTPException(status_code=409, detail="sim world not active")
+
+
+def _require_scene() -> SceneController:
+    _require_sim_world()
+    if scene is None:  # world exists but lifespan hasn't wired us yet
+        raise HTTPException(status_code=503, detail="sim scene not ready")
+    return scene
+
+
+def _wait_for_arm_ramps(timeout: float) -> None:
+    for handle in arms.values():
+        handle.executor.wait(timeout=timeout)
+
+
+@app.post("/sim/scene/reset")
+async def post_sim_scene_reset(body: SimSceneResetBody):
+    # async def for the reason spelled out at /teleop/sim/start: it keeps this
+    # body on the event loop thread, where it cannot interleave with move_to()'s
+    # read-then-run window. The one `await` below is placed AFTER homing has
+    # been claimed and before anything else, not in the middle of it.
+    ctl = _require_scene()
+    if body.home_arms:
+        # An open episode means the recorder is already writing frames. Sending
+        # the arms home underneath it would splice a move nobody demonstrated
+        # into the middle of the take — and unlike the cube reset, that lands in
+        # the action column, not just the observation.
+        #
+        # getattr rather than an import: recorder.py is being edited
+        # concurrently, and this guard must not depend on its internals.
+        _rec_status = getattr(recorder, "status", None)
+        if callable(_rec_status) and bool(_rec_status().get("recording")):
+            raise HTTPException(
+                status_code=409,
+                detail="stop the recording episode before homing the arms")
+        try:
+            for handle in arms.values():
+                motion_policy.home(handle)
+        except ModeError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except MoveRefused as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        # home() returns as soon as the ramp is scheduled. Deal the cubes only
+        # once the arms have actually arrived, or they get swept off the slots
+        # they were just placed on.
+        await asyncio.to_thread(_wait_for_arm_ramps, _HOME_WAIT_S)
+    snapshot = ctl.reset(seed=body.seed, randomize=body.randomize)
+    if task is not None:
+        # A cube that was still sitting on the pad when the last episode ended
+        # would otherwise carry its qualifying streak into this one.
+        task.reset()
+    return {"ok": True, **snapshot}
+
+
+@app.get("/sim/scene")
+async def get_sim_scene():
+    return _require_scene().snapshot()
+
+
+@app.get("/sim/task/status")
+async def get_sim_task_status():
+    _require_sim_world()
+    if task is None:
+        raise HTTPException(status_code=503, detail="sim task monitor not ready")
+    return task.poll()
 
 
 # ---- dataset recording (HMI-integrated bimanual recorder, v0) -------------

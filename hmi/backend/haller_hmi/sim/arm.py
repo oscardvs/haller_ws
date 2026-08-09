@@ -162,8 +162,37 @@ class SimArmHandle:
                 out[lerobot] = value
         return out
 
+    def read_effort_norm(self) -> dict[str, float]:
+        """Per-joint effort as a signed fraction of the joint's torque limit,
+        keyed by LeRobot snake_case names — the same translation
+        `read_joints_deg` does, for the same reason.
+
+        Dimensionless, NOT N·m: the real arm can only report a signed PWM duty
+        and the sim reports N·m, so both normalise against their own saturation
+        limit to keep one dataset column meaning one thing. See
+        `MuJoCoWorld.read_effort_norm` for the full rationale — including why
+        this number is meaningless while torque is off (the position actuator's
+        bias term keeps pulling toward zero and saturates at -1.0), which is why
+        `state_snapshot` reports 0.0 in that case rather than the raw reading.
+        """
+        raw = self.world.read_effort_norm(self.config.sim_arm_name)
+        prefix = self._prefix
+        out: dict[str, float] = {}
+        for mjcf_key, value in raw.items():
+            if not mjcf_key.startswith(prefix):
+                continue
+            lerobot = MJCF_TO_LEROBOT.get(mjcf_key[len(prefix):])
+            if lerobot is not None:
+                out[lerobot] = value
+        return out
+
     def state_snapshot(self) -> dict:
         joints_now = self.read_joints_deg()
+        # Torque off: gainprm is zeroed but the actuator's bias term is not, so
+        # the raw reading saturates at -1.0 on any joint away from zero and
+        # would report a limp arm as straining. Report 0.0 instead — the same
+        # thing a real arm with its torque disabled is doing.
+        effort_now = self.read_effort_norm() if self.torque_enabled else {}
         joints = {}
         for joint, (lo, hi) in self.joint_limits_deg.items():
             joints[joint] = {
@@ -171,6 +200,10 @@ class SimArmHandle:
                 "min": float(lo),
                 "max": float(hi),
                 "torque": self.torque_enabled,
+                # Dimensionless signed fraction of this joint's torque limit.
+                # Same key and same meaning as the real ArmHandle's, so the
+                # recorder gets one column whichever rig is driving.
+                "effort": float(effort_now.get(joint, 0.0)),
             }
         return {
             "mode": self.guard.mode.value,

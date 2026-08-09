@@ -65,6 +65,100 @@ arms:
     assert cfg.arms[0].sim_arm_name is None
 
 
+# ---- recorded camera set + dataset keys ----------------------------------
+#
+# Which cameras reach the dataset, and under what column name, is a training
+# decision the config owns: the recorder only obeys it. Two knobs, both with
+# defaults that leave every pre-existing config behaving exactly as it did.
+
+def _cam_yaml(body: str) -> str:
+    return "arms: []\ncameras:\n" + body
+
+
+def test_camera_recording_defaults_to_on_and_keyed_by_id(tmp_path: Path):
+    """The default has to preserve every config written before these fields
+    existed: recorded, under `observation.images.<id>`."""
+    p = tmp_path / "c.yaml"
+    p.write_text(_cam_yaml(
+        "  - id: overhead\n    role: base\n    source: placeholder\n"))
+    cam = load_config(p).cameras[0]
+    assert cam.record is True
+    assert cam.dataset_key is None
+    assert cam.dataset_feature_key == "overhead"
+
+
+def test_dataset_key_overrides_the_column_name_but_not_the_id(tmp_path: Path):
+    """The id is the HMI's handle (unique per rig, says where the feed comes
+    from); the dataset key is whatever the datasets we co-train with call that
+    view. They are allowed to differ, and here they must."""
+    p = tmp_path / "c.yaml"
+    p.write_text(_cam_yaml(
+        "  - id: wrist_left_sim\n    role: wrist\n    source: placeholder\n"
+        "    dataset_key: left_wrist\n"))
+    cam = load_config(p).cameras[0]
+    assert cam.id == "wrist_left_sim"
+    assert cam.dataset_feature_key == "left_wrist"
+
+
+def test_two_cameras_recording_into_one_dataset_key_are_refused(tmp_path: Path):
+    """Both would build the SAME observation.images.<key> feature and the
+    column would end up half one view and half the other — invisible in the
+    dataset afterwards, so it has to fail at load."""
+    p = tmp_path / "c.yaml"
+    p.write_text(_cam_yaml(
+        "  - id: threequarter_sim\n    role: base\n    source: placeholder\n"
+        "    dataset_key: top\n"
+        "  - id: overhead_sim\n    role: base\n    source: placeholder\n"
+        "    dataset_key: top\n"))
+    with pytest.raises(ValueError, match="observation.images.top"):
+        load_config(p)
+
+
+def test_an_id_colliding_with_another_cameras_dataset_key_is_refused(tmp_path: Path):
+    """The fallback counts too: a camera with no dataset_key records under its
+    id, which is just as capable of colliding."""
+    p = tmp_path / "c.yaml"
+    p.write_text(_cam_yaml(
+        "  - id: top\n    role: base\n    source: placeholder\n"
+        "  - id: threequarter_sim\n    role: base\n    source: placeholder\n"
+        "    dataset_key: top\n"))
+    with pytest.raises(ValueError, match="observation.images.top"):
+        load_config(p)
+
+
+def test_a_non_recorded_camera_cannot_collide(tmp_path: Path):
+    """`record: false` means the view never reaches the dataset, so it cannot
+    overwrite anything there — and demanding key uniqueness from cameras that
+    exist purely to teleop from would be a rule about nothing."""
+    p = tmp_path / "c.yaml"
+    p.write_text(_cam_yaml(
+        "  - id: top\n    role: base\n    source: placeholder\n"
+        "    record: false\n"
+        "  - id: threequarter_sim\n    role: base\n    source: placeholder\n"
+        "    dataset_key: top\n"))
+    cfg = load_config(p)
+    assert [c.record for c in cfg.cameras] == [False, True]
+
+
+def test_shipped_bimanual_sim_config_records_the_three_pretrained_slots():
+    """The shipped sim config renders five cameras and records three, keyed to
+    match π0.5's base_0_rgb + left/right_wrist_0_rgb slots and armnetbench's
+    top / left_wrist / right_wrist columns. Pinned here because the value of
+    those exact keys is that nobody quietly changes them."""
+    cfg = load_config(Path(__file__).resolve().parents[1] / "config.bimanual-sim.yaml")
+    assert len(cfg.cameras) == 5
+    recorded = {c.id: c.dataset_feature_key for c in cfg.cameras if c.record}
+    assert recorded == {
+        "threequarter_sim": "top",
+        "wrist_left_sim": "left_wrist",
+        "wrist_right_sim": "right_wrist",
+    }
+    # The two that stay rendered but unrecorded: still there, so the base-view
+    # choice is a config edit to A/B, not a scene rebuild.
+    assert {c.id for c in cfg.cameras if not c.record} == {
+        "overshoulder_sim", "overhead_sim"}
+
+
 from haller_hmi.config import ArmConfig, MotionConfig, resolve_motion
 from haller_hmi.safety import MAX_STEP_DT_S
 

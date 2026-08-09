@@ -6,11 +6,20 @@ manual Stage-0 validation). The point is to lock in the schema shape and the
 state/action assembly so a refactor can't silently corrupt recorded data.
 """
 import asyncio
+import dataclasses
 
 import numpy as np
 import pytest
 
-from haller_hmi.recorder import DatasetRecorder, SO101_JOINT_ORDER
+from haller_hmi.recorder import (
+    CALIBRATION_INFO_KEY,
+    DONE_FEATURE,
+    REWARD_FEATURE,
+    SCORING_INFO_KEY,
+    DatasetRecorder,
+    SO101_JOINT_ORDER,
+)
+from haller_hmi.sim.task import SuccessSpec
 
 SIX = list(SO101_JOINT_ORDER)  # canonical SO-101 motor order
 
@@ -18,10 +27,40 @@ SIX = list(SO101_JOINT_ORDER)  # canonical SO-101 motor order
 # ---- fakes ---------------------------------------------------------------
 
 class _FakeArm:
+    """Stands in for a real (Feetech) ArmHandle."""
+
     def __init__(self, joints):
         # joint_limits_deg keys define which joints exist (deliberately reversed
         # to prove the recorder re-imposes canonical order, not dict order).
         self.joint_limits_deg = {j: (-90.0, 90.0) for j in reversed(joints)}
+
+    def calibration_metadata(self):
+        # Shape mirrors ArmHandle.calibration_metadata: tick-domain range plus
+        # everything else the degrees<->normalized affine map needs.
+        return {
+            j: {
+                "source": "feetech_calibration",
+                "range_min_ticks": 1024,
+                "range_max_ticks": 3072,
+                "homing_offset": 0,
+                "drive_mode": 0,
+                "resolution": 4096,
+                "deg_per_tick": 360.0 / 4095,
+                "norm_mode": "range_0_100" if j == "gripper" else "degrees",
+                "min_deg": -90.0,
+                "max_deg": 90.0,
+            }
+            for j in self.joint_limits_deg
+        }
+
+
+class _FakeSimArm:
+    """Stands in for a SimArmHandle: declared joint ranges, and deliberately NO
+    `calibration_metadata` — a MuJoCo arm has no Feetech calibration to report,
+    and the recorder has to fill the same shape from the declared limits."""
+
+    def __init__(self, joints):
+        self.joint_limits_deg = {j: (-100.0, 100.0) for j in reversed(joints)}
 
 
 class _FakeArms:
@@ -55,20 +94,51 @@ class _DoneStream:
 
 
 class _FakeCfg:
-    def __init__(self, w, h):
+    def __init__(self, w, h, record=True, dataset_key=None):
         self.width = w
         self.height = h
+        self.record = record
+        self.dataset_key = dataset_key
 
 
 class _FakeCamera:
-    def __init__(self, cam_id, w=64, h=48, active=True, frame="zeros"):
+    def __init__(self, cam_id, w=64, h=48, active=True, frame="zeros",
+                 record=True, dataset_key=None):
         self.id = cam_id
-        self.cfg = _FakeCfg(w, h)
+        self.cfg = _FakeCfg(w, h, record=record, dataset_key=dataset_key)
         self.active = active
         self._frame = np.zeros((h, w, 3), dtype=np.uint8) if frame == "zeros" else frame
 
     def latest_rgb(self, max_age_ms=500):
         return self._frame
+
+
+class _FakeTaskMonitor:
+    """Stands in for `sim.task.TaskMonitor`: same `poll()` contract, scripted
+    verdicts, and a REAL `SuccessSpec` so the thresholds that land in
+    info.json are the ones the sim would actually have run with."""
+
+    def __init__(self, verdicts=(), spec=None, target=None, fail=False):
+        self._verdicts = list(verdicts)
+        self.spec = spec if spec is not None else SuccessSpec()
+        self.target = target
+        self.fail = fail
+        self.polls = 0
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def poll(self):
+        self.polls += 1
+        if self.fail:
+            raise RuntimeError("world lock is wedged")
+        ok = self._verdicts.pop(0) if self._verdicts else False
+        return {
+            "success": ok, "held_s": 0.6 if ok else 0.0, "per_cube": {},
+            "target": self.target, "settle_s": self.spec.settle_s,
+            "sim_time_s": float(self.polls),
+        }
 
 
 class _FakeCameras:
@@ -90,15 +160,20 @@ class _FakeHumanTeleop:
         return self._status
 
 
-def _recorder(human_status, cams=None):
+def _recorder(human_status, cams=None, monitor=None):
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     tele = _FakeTelemetry(arms)
     cams = cams if cams is not None else _FakeCameras([_FakeCamera("top")])
-    return DatasetRecorder(telemetry=tele, human_teleop=_FakeHumanTeleop(human_status), cameras=cams)
+    return DatasetRecorder(telemetry=tele, human_teleop=_FakeHumanTeleop(human_status),
+                           cameras=cams, task_monitor=monitor)
 
 
-def _joints_block(val):
-    return {"joints": {j: {"pos": val} for j in SIX}}
+def _joints_block(val, effort=0.0):
+    """One arm's slice of a telemetry frame. `effort` is the signed fraction of
+    the joint's torque limit that ArmHandle/SimArmHandle put in state_snapshot;
+    pass `effort=None` to model a snapshot that predates the effort channel."""
+    joint = {"pos": val} if effort is None else {"pos": val, "effort": effort}
+    return {"joints": {j: dict(joint) for j in SIX}}
 
 
 # ---- tests ---------------------------------------------------------------
@@ -125,10 +200,84 @@ def test_build_features_shapes_and_video_dtype():
     assert img["names"] == ["height", "width", "channels"]
 
 
+def test_build_features_includes_effort_with_state_layout():
+    """effort is one column per joint, in the SAME left-then-right order and
+    with the same names as state — that is what lets a consumer zip
+    state/action/effort joint-for-joint without a lookup table."""
+    r = _recorder({"running": False})
+    feats = r._build_features(r._active_camera_specs())
+    eff = feats["observation.effort"]
+    assert eff["dtype"] == "float32"
+    assert eff["shape"] == (12,)
+    assert eff["names"] == feats["observation.state"]["names"]
+
+
 def test_placeholder_camera_excluded_from_schema():
     cams = _FakeCameras([_FakeCamera("top"), _FakeCamera("dead", active=False)])
     r = _recorder({"running": False}, cams=cams)
     assert {s["id"] for s in r._active_camera_specs()} == {"top"}
+
+
+# ---- which cameras are recorded, and under what name ---------------------
+#
+# A view the operator drives from is not automatically a view the policy
+# should see: the bimanual sim renders 5 and records 3 (one base + two
+# wrists, matching π0.5's pretrained slots and armnetbench's column names).
+# Every recorded camera is also a REQUIRED one — a stale frame on any of them
+# drops the whole tick — so the count is a sample-rate decision too.
+
+def test_cameras_marked_record_false_stay_out_of_the_schema():
+    cams = _FakeCameras([
+        _FakeCamera("threequarter_sim", dataset_key="top"),
+        _FakeCamera("overshoulder_sim", record=False),   # teleop eye only
+        _FakeCamera("overhead_sim", record=False),
+    ])
+    r = _recorder({"running": False}, cams=cams)
+    specs = r._active_camera_specs()
+    assert [s["id"] for s in specs] == ["threequarter_sim"]
+    feats = r._build_features(specs)
+    assert "observation.images.top" in feats
+    assert not any(k.startswith("observation.images.overshoulder") for k in feats)
+    assert not any(k.startswith("observation.images.overhead") for k in feats)
+
+
+def test_recording_defaults_to_on_for_a_camera_config_without_the_field():
+    """A handle whose config predates `record`/`dataset_key` must behave the
+    way it always did: recorded, keyed by its id."""
+    class _OldCfg:
+        width, height = 64, 48
+
+    cam = _FakeCamera("top")
+    cam.cfg = _OldCfg()
+    r = _recorder({"running": False}, cams=_FakeCameras([cam]))
+    assert r._active_camera_specs() == [
+        {"id": "top", "key": "top", "height": 48, "width": 64}]
+
+
+def test_dataset_key_names_the_feature_and_the_frame():
+    """The id stays the HMI's handle; the dataset column is named for the
+    VIEW, so it lines up with the datasets we co-train against."""
+    cams = _FakeCameras([
+        _FakeCamera("wrist_left_sim", 64, 48, dataset_key="left_wrist"),
+        _FakeCamera("wrist_right_sim", 64, 48, dataset_key="right_wrist"),
+    ])
+    r = _recorder({"running": False}, cams=cams)
+    r._cam_specs = r._active_camera_specs()
+    feats = r._build_features(r._cam_specs)
+    assert "observation.images.left_wrist" in feats
+    assert "observation.images.right_wrist" in feats
+    assert not any("_sim" in k for k in feats)   # the id never reaches the schema
+
+    r._state.task = "t"
+    frame = r._build_frame({"arms": {"left": _joints_block(0.0),
+                                     "right": _joints_block(0.0)},
+                            "base": {}})
+    assert frame["observation.images.left_wrist"].shape == (48, 64, 3)
+    assert frame["observation.images.right_wrist"].shape == (48, 64, 3)
+    assert set(frame) - {"observation.images.left_wrist",
+                         "observation.images.right_wrist"} == {
+        "observation.state", "action", "observation.effort",
+        "observation.base", "observation.wall_clock", "task"}
 
 
 def test_committed_action_maps_side_and_falls_back_to_measured():
@@ -176,6 +325,42 @@ def test_build_frame_assembles_state_action_base_images():
     assert frame["action"][11] == 7.0   # right gripper = commanded
 
 
+def test_build_frame_carries_effort_left_then_right():
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+    frame = r._build_frame({
+        "arms": {"left": _joints_block(0.0, effort=-0.25),
+                 "right": _joints_block(0.0, effort=0.5)},
+        "base": {},
+    })
+    eff = frame["observation.effort"]
+    assert eff.dtype == np.float32
+    assert eff.shape == (12,)
+    # Signed on purpose: -0.25 must survive as a direction, not as |0.25|.
+    np.testing.assert_allclose(eff[:6], [-0.25] * 6)
+    np.testing.assert_allclose(eff[6:], [0.5] * 6)
+
+
+def test_missing_effort_key_is_zero_and_does_not_skip_the_frame():
+    """An arm that cannot read its load register (or a handle predating the
+    channel) still produced a good state/action tick. Dropping the frame would
+    trade a whole demonstration for one optional column."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+    frame = r._build_frame({
+        "arms": {"left": _joints_block(1.0, effort=None),   # no "effort" key
+                 "right": _joints_block(2.0, effort=0.75)},
+        "base": {},
+    })
+    assert frame is not None                   # NOT skipped, unlike a missing arm
+    assert r._state.skipped_frames == 0
+    np.testing.assert_allclose(frame["observation.effort"][:6], [0.0] * 6)
+    np.testing.assert_allclose(frame["observation.effort"][6:], [0.75] * 6)
+    np.testing.assert_allclose(frame["observation.state"][:6], [1.0] * 6)
+
+
 def test_build_frame_skips_when_camera_frame_missing():
     r = _recorder({"running": False}, cams=_FakeCameras([_FakeCamera("top", frame=None)]))
     r._cam_specs = r._active_camera_specs()
@@ -213,6 +398,185 @@ def test_skipped_frames_counts_dropped_ticks():
 def test_status_reports_zero_skips_before_any_drop():
     r = _recorder({"running": False})
     assert r.status()["skipped_frames"] == 0
+
+
+# ---- joint calibration metadata ------------------------------------------
+#
+# State/action are recorded in DEGREES; every public LeRobot SO-101 dataset is
+# in normalized [-100,100]/[0,100]. Nothing in a column of degrees says which
+# affine map produced it, so the calibrated tick range has to travel with the
+# dataset or the take can never be reconciled with anyone else's.
+
+def test_calibration_metadata_is_keyed_like_the_state_columns():
+    r = _recorder({"running": False})
+    cal = r._calibration_metadata()
+    assert list(cal.keys()) == r._state_names()
+    left = cal["left_shoulder_pan"]
+    assert left["source"] == "feetech_calibration"
+    assert (left["range_min_ticks"], left["range_max_ticks"]) == (1024, 3072)
+    # norm_mode has to be per-joint: on SO-101 the gripper is 0..100 while the
+    # other five are -100..100, so one dataset mixes both maps.
+    assert cal["left_gripper"]["norm_mode"] == "range_0_100"
+    assert cal["left_wrist_roll"]["norm_mode"] == "degrees"
+
+
+def test_sim_arm_gets_the_same_shape_from_its_declared_limits():
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeSimArm(SIX)})
+    r = DatasetRecorder(telemetry=_FakeTelemetry(arms),
+                        human_teleop=_FakeHumanTeleop({"running": False}),
+                        cameras=_FakeCameras([]))
+    cal = r._calibration_metadata()
+    sim = cal["right_elbow_flex"]
+    assert set(sim) == set(cal["left_elbow_flex"])   # same shape, always present
+    assert sim["source"] == "declared_joint_range"
+    assert (sim["min_deg"], sim["max_deg"]) == (-100.0, 100.0)
+    assert sim["range_min_ticks"] is None            # no Feetech ticks to report
+
+
+# ---- auto-scored task outcome --------------------------------------------
+#
+# THE TRAP these tests exist for: the real rig has no auto-scorer. If the
+# reward/done columns were always emitted, a real-rig dataset would read as
+# "reward 0 everywhere" — indistinguishable, six months later, from a dataset
+# in which every single episode failed. So the columns exist only where
+# something can actually decide the outcome, and info.json says which case a
+# given dataset is.
+
+def test_unscored_rig_emits_no_outcome_features_at_all():
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    feats = r._build_features([])
+    assert REWARD_FEATURE not in feats
+    assert DONE_FEATURE not in feats
+
+
+def test_unscored_rig_never_claims_a_score():
+    """None, not False: "nobody scored this" and "this failed" are different
+    facts, and the cockpit must not print FAILED for a rig with no opinion."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    st = r.status()
+    assert st["auto_scored"] is False
+    assert st["success"] is None
+    assert st["success_frames"] == 0
+
+    r._cam_specs = []
+    r._state.task = "t"
+    frame = r._build_frame({"arms": {"left": _joints_block(0.0),
+                                     "right": _joints_block(0.0)}, "base": {}})
+    assert REWARD_FEATURE not in frame
+    assert DONE_FEATURE not in frame
+
+
+def test_scored_rig_uses_lerobots_own_feature_names_and_dtypes():
+    """`next.reward` / `next.done` are LeRobot's names (utils.constants
+    REWARD/DONE) and armnetbench's columns — the whole compatibility argument
+    is that co-training needs no remapping."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]),
+                  monitor=_FakeTaskMonitor())
+    feats = r._build_features([])
+    assert feats[REWARD_FEATURE] == {"dtype": "float32", "shape": (1,), "names": None}
+    assert feats[DONE_FEATURE] == {"dtype": "bool", "shape": (1,), "names": None}
+
+
+def _scored_recorder(verdicts, cams=None, **kw):
+    mon = _FakeTaskMonitor(verdicts, **kw)
+    r = _recorder({"running": False},
+                  cams=cams if cams is not None else _FakeCameras([]),
+                  monitor=mon)
+    r._cam_specs = r._active_camera_specs()
+    r._state.task = "t"
+    r._state.success = False      # what start_episode seeds for a scored take
+    return r, mon
+
+
+def _tick(r):
+    return r._build_frame({"arms": {"left": _joints_block(0.0),
+                                    "right": _joints_block(0.0)}, "base": {}})
+
+
+def test_reward_is_sparse_one_on_success_zero_otherwise():
+    r, _ = _scored_recorder([False, True, False])
+    rewards = [float(_tick(r)[REWARD_FEATURE][0]) for _ in range(3)]
+    assert rewards == [0.0, 1.0, 0.0]
+
+
+def test_done_is_false_on_every_frame_the_loop_writes():
+    """The loop cannot know which frame is last while it is still running;
+    `_finish_episode` flips exactly one of these afterwards."""
+    r, _ = _scored_recorder([True, True])
+    for _ in range(2):
+        frame = _tick(r)
+        assert frame[DONE_FEATURE].dtype == np.bool_
+        assert bool(frame[DONE_FEATURE][0]) is False
+
+
+def test_status_reports_the_outcome_of_the_take():
+    r, _ = _scored_recorder([False, True, True, False])
+    for _ in range(4):
+        _tick(r)
+    st = r.status()
+    assert st["auto_scored"] is True
+    assert st["success"] is True          # latched: the take DID contain one
+    assert st["success_frames"] == 2      # ...for 2 of its 4 frames
+
+
+def test_a_scored_take_that_never_succeeds_says_so():
+    r, _ = _scored_recorder([False, False])
+    for _ in range(2):
+        _tick(r)
+    assert r.status() == {**r.status(), "auto_scored": True,
+                          "success": False, "success_frames": 0}
+
+
+def test_a_skipped_tick_is_never_scored():
+    """The monitor is polled LAST, after every reason to abandon the tick has
+    been checked: a success counted for a frame that was never written would
+    overstate the take in status() and be absent from the dataset."""
+    cams = _FakeCameras([_FakeCamera("top", frame=None)])   # camera has nothing
+    r, mon = _scored_recorder([True], cams=cams)
+    assert _tick(r) is None
+    assert mon.polls == 0
+    assert r._state.success_frames == 0
+    assert r.status()["success"] is False
+
+
+def test_a_monitor_that_raises_costs_the_score_not_the_demonstration():
+    """The scorer is an annotation on a demo the operator actually drove. A
+    wedged world lock must not throw the demo away — but it must not pass for
+    a real 0.0 either, so it lands in last_error."""
+    r, _ = _scored_recorder([], fail=True)
+    frame = _tick(r)
+    assert frame is not None
+    assert float(frame[REWARD_FEATURE][0]) == 0.0
+    assert r._state.skipped_frames == 0
+    assert "task monitor poll failed" in r.status()["last_error"]
+
+
+def test_scoring_block_for_an_unscored_rig_says_unlabelled_not_failed():
+    block = _recorder({"running": False}, cams=_FakeCameras([]))._scoring_metadata()
+    assert block["auto_scored"] is False
+    assert block["reward_feature"] is None
+    assert block["predicate"] is None
+    assert "unknown outcome" in block["note"].lower()
+
+
+def test_scoring_block_carries_the_predicate_and_the_exact_thresholds():
+    """The thresholds ARE the label definition: a success rate compared
+    against anyone else's is meaningless without them."""
+    spec = SuccessSpec(zone_inset_m=0.02, settle_s=0.75, require_release=True)
+    mon = _FakeTaskMonitor(spec=spec, target="cube_1")
+    block = _recorder({"running": False}, cams=_FakeCameras([]),
+                      monitor=mon)._scoring_metadata()
+    assert block["auto_scored"] is True
+    assert block["reward_feature"] == REWARD_FEATURE
+    assert block["done_feature"] == DONE_FEATURE
+    assert block["predicate"] == "haller_hmi.sim.task.cube_placed"
+    assert block["target_cube"] == "cube_1"
+    assert block["spec"]["zone_inset_m"] == 0.02
+    assert block["spec"]["settle_s"] == 0.75
+    assert block["spec"]["require_release"] is True
+    # Every SuccessSpec field, not a hand-picked subset — a threshold added to
+    # the spec later must not silently stop being recorded.
+    assert set(block["spec"]) == {f.name for f in dataclasses.fields(SuccessSpec)}
 
 
 # ---- mid-take auto-stop --------------------------------------------------
@@ -362,12 +726,13 @@ async def test_stop_episode_with_never_started_dataset_is_graceful():
 # path that used to be covered by "manual Stage-0 validation" only, and it is
 # the one that silently loses takes when it breaks.
 
-def _real_recorder(root):
+def _real_recorder(root, monitor=None):
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     return DatasetRecorder(
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([]),
+        task_monitor=monitor,
         root=str(root),
     )
 
@@ -376,6 +741,7 @@ def _real_frame(task: str) -> dict:
     return {
         "observation.state": np.zeros(12, dtype=np.float32),
         "action": np.zeros(12, dtype=np.float32),
+        "observation.effort": np.zeros(12, dtype=np.float32),
         "observation.base": np.zeros(2, dtype=np.float32),
         "observation.wall_clock": np.zeros(1, dtype=np.float32),
         "task": task,
@@ -399,9 +765,34 @@ async def test_create_then_resume_appends_episodes(tmp_path):
     ds = LeRobotDataset("smoke/roundtrip", root=root)
     assert ds.meta.total_episodes == 2
     assert ds.meta.total_frames == 12
-    for key in ("observation.state", "action", "observation.base"):
+    for key in ("observation.state", "action", "observation.effort",
+                "observation.base"):
         assert key in ds.features
     assert ds.meta.fps == 20
+
+
+async def test_calibration_metadata_round_trips_through_info_json(tmp_path):
+    """The block has to survive the whole write path — create, save_episode
+    (which rewrites info.json itself), finalize — and be readable with nothing
+    but json. If LeRobot ever starts pruning unknown info keys, this is the
+    test that says so."""
+    import json
+
+    root = tmp_path / "ds"
+    rec = _real_recorder(root)
+    await _drive(rec, "lift the cube", 3)
+    rec.close()
+
+    info = json.loads((root / "meta" / "info.json").read_text())
+    block = info[CALIBRATION_INFO_KEY]
+    assert block["state_unit"] == "deg"
+    assert list(block["joints"]) == rec._state_names()
+    assert block["joints"]["right_gripper"]["range_max_ticks"] == 3072
+    # And it survives a resume + a second episode, which rewrites info.json.
+    await _drive(_real_recorder(root), "lift the cube", 2)
+    info2 = json.loads((root / "meta" / "info.json").read_text())
+    assert info2[CALIBRATION_INFO_KEY] == block
+    assert info2["total_episodes"] == 2  # lerobot's own keys still updated
 
 
 async def test_existing_dataset_that_cannot_resume_refuses_loudly(tmp_path):
@@ -474,3 +865,162 @@ async def test_video_take_streams_h264_and_reloads(tmp_path):
     assert tuple(img.shape) == (3, 48, 64)
     # Frame 0 was solid grey 20; a dead stream would decode black (0.0).
     assert abs(float(img.mean()) - 20 / 255) < 0.02
+
+
+# ---- auto-scored takes, through a real dataset ---------------------------
+#
+# The mock tests above pin the per-frame logic; these pin what actually lands
+# on disk — including the one thing no mock can check, that `next.done` is
+# amended on the buffered final frame after the loop has already written it.
+
+async def _drive_scored(rec, repo_id: str, task: str, verdicts) -> None:
+    """Drive `len(verdicts)` frames through the REAL `_build_frame`, so the
+    reward/done columns under test are the ones the record loop produces."""
+    await rec.start_episode(repo_id, task)
+    for _ in verdicts:
+        frame = rec._build_frame({"arms": {"left": _joints_block(1.0),
+                                           "right": _joints_block(2.0)},
+                                  "base": {"linear": 0.0, "angular": 0.0}})
+        assert frame is not None
+        rec._dataset.add_frame(frame)
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
+
+
+async def test_scored_take_writes_sparse_reward_and_one_terminal_done(tmp_path):
+    root = tmp_path / "ds"
+    verdicts = [False, True, True, False]
+    rec = _real_recorder(root, monitor=_FakeTaskMonitor(verdicts))
+    await _drive_scored(rec, "smoke/scored", "place the cube", verdicts)
+    rec.close()
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/scored", root=root)
+    assert [float(ds[i][REWARD_FEATURE]) for i in range(4)] == [0.0, 1.0, 1.0, 0.0]
+    # done marks the END of the episode, not the success: frame 3 scored 0.0
+    # and is still the terminal frame.
+    assert [bool(ds[i][DONE_FEATURE]) for i in range(4)] == [False, False, False, True]
+    assert rec.status()["success"] is True
+    assert rec.status()["success_frames"] == 2
+
+
+async def test_terminal_done_lands_on_the_last_frame_of_every_episode(tmp_path):
+    """Two episodes in one dataset: each gets its own terminal frame, and the
+    second one's must not be inherited from (or overwrite) the first's."""
+    root = tmp_path / "ds"
+    await _drive_scored(_real_recorder(root, monitor=_FakeTaskMonitor([])),
+                        "smoke/scored", "place the cube", [False] * 3)
+    rec2 = _real_recorder(root, monitor=_FakeTaskMonitor([]))
+    await _drive_scored(rec2, "smoke/scored", "place the cube", [False] * 2)
+    rec2.close()
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/scored", root=root)
+    assert ds.meta.total_episodes == 2
+    assert [bool(ds[i][DONE_FEATURE]) for i in range(5)] == [
+        False, False, True,     # episode 0
+        False, True,            # episode 1
+    ]
+
+
+async def test_scoring_block_round_trips_through_info_json(tmp_path):
+    """Same durability requirement as the calibration block: it has to survive
+    create, save_episode (which rewrites info.json), resume and finalize."""
+    import json
+
+    root = tmp_path / "ds"
+    spec = SuccessSpec(settle_s=0.5, zone_inset_m=0.01)
+    rec = _real_recorder(root, monitor=_FakeTaskMonitor([], spec=spec, target="cube_0"))
+    await _drive_scored(rec, "smoke/scored", "place the cube", [False, True])
+    rec.close()
+
+    block = json.loads((root / "meta" / "info.json").read_text())[SCORING_INFO_KEY]
+    assert block["auto_scored"] is True
+    assert block["predicate"] == "haller_hmi.sim.task.cube_placed"
+    assert block["target_cube"] == "cube_0"
+    assert block["spec"]["settle_s"] == 0.5
+    assert "sim" in block["predicate_note"].lower()
+
+    await _drive_scored(_real_recorder(root, monitor=_FakeTaskMonitor([], spec=spec,
+                                                                     target="cube_0")),
+                        "smoke/scored", "place the cube", [False])
+    info2 = json.loads((root / "meta" / "info.json").read_text())
+    assert info2[SCORING_INFO_KEY] == block
+    assert info2["total_episodes"] == 2            # lerobot's own keys still updated
+    assert CALIBRATION_INFO_KEY in info2           # and the sibling block survives
+
+
+async def test_unscored_dataset_declares_itself_unlabelled(tmp_path):
+    """The whole trap in one test: no reward column AND an info.json block
+    saying nobody scored these episodes, so 'no labels' can never be misread
+    as 'every episode failed'."""
+    import json
+
+    root = tmp_path / "ds"
+    rec = _real_recorder(root)          # no monitor: this is the real rig
+    await _drive(rec, "lift the cube", 3)
+    rec.close()
+
+    info = json.loads((root / "meta" / "info.json").read_text())
+    assert REWARD_FEATURE not in info["features"]
+    assert DONE_FEATURE not in info["features"]
+    block = info[SCORING_INFO_KEY]
+    assert block["auto_scored"] is False
+    assert "unlabelled" in block["note"].lower()
+
+
+async def test_resuming_an_unscored_dataset_with_a_scorer_refuses_with_advice(tmp_path):
+    """Adding features invalidates resume of anything recorded before them —
+    intended, because appending would reject every frame of the new take — so
+    the error has to tell the operator what to do instead."""
+    root = tmp_path / "ds"
+    await _drive(_real_recorder(root), "lift the cube", 2)
+
+    rec = _real_recorder(root, monitor=_FakeTaskMonitor([]))
+    with pytest.raises(RuntimeError) as e:
+        await rec.start_episode("smoke/roundtrip", "lift the cube")
+    msg = str(e.value)
+    assert REWARD_FEATURE in msg
+    assert "NEW repo_id" in msg          # what to DO, not just what went wrong
+
+
+async def test_resuming_a_scored_dataset_without_a_scorer_refuses_too(tmp_path):
+    """The mirror image, and the one the one-directional check used to miss: a
+    sim dataset resumed on a rig that cannot score would have every frame
+    rejected for a MISSING key, and the operator would only find out at stop
+    time from an empty episode."""
+    root = tmp_path / "ds"
+    await _drive_scored(_real_recorder(root, monitor=_FakeTaskMonitor([])),
+                        "smoke/scored", "place the cube", [False])
+
+    rec = _real_recorder(root)          # same dataset, real rig, no scorer
+    with pytest.raises(RuntimeError, match="different schema"):
+        await rec.start_episode("smoke/scored", "place the cube")
+
+
+async def test_start_episode_clears_a_stale_qualifying_streak(tmp_path):
+    """A cube left sitting on the pad when the last take ended would otherwise
+    carry its held time into this one and score frame 0."""
+    root = tmp_path / "ds"
+    mon = _FakeTaskMonitor([])
+    rec = _real_recorder(root, monitor=mon)
+    await rec.start_episode("smoke/scored", "place the cube")
+    assert mon.resets == 1
+    await rec.stop_episode(save=False)
+
+
+async def test_an_unscored_recorder_runs_unchanged_with_no_sim_world(tmp_path):
+    """`arms.world() is None` -> task_monitor is None. That path must record a
+    perfectly good episode, and claim nothing about the outcome."""
+    root = tmp_path / "ds"
+    rec = _real_recorder(root)
+    await _drive(rec, "lift the cube", 4)
+    rec.close()
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset("smoke/roundtrip", root=root)
+    assert ds.meta.total_frames == 4
+    status = rec.status()
+    assert status["auto_scored"] is False
+    assert status["success"] is None
+    assert status["last_error"] is None

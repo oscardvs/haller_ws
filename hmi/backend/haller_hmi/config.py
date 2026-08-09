@@ -166,6 +166,21 @@ class CameraConfig:
     # rotating only the browser preview would train on one orientation and
     # display another. 0=none 1=CCW90 2=180 3=CW90 4=horiz 6=vert.
     flip_method: int = 0
+    # Does this camera go into the recorded DATASET, or is it only there for the
+    # human to drive from? True by default so every config written before this
+    # field existed keeps recording exactly the cameras it always did.
+    # `record: false` is how a view earns its place in the cockpit without
+    # earning a channel in the training data — see config.bimanual-sim.yaml,
+    # where 5 cameras render and 3 are recorded.
+    record: bool = True
+    # Feature name this camera lands under in the dataset:
+    # `observation.images.<dataset_key>`, falling back to `id`. The split
+    # exists because the two names answer to different masters — `id` is the
+    # HMI's handle (unique per rig, mentions the source: `wrist_left_sim`),
+    # while the dataset key has to match whatever the datasets we co-train with
+    # already call that view (`left_wrist`). Renaming the id instead would make
+    # the sim and real rigs' camera ids collide in the cockpit.
+    dataset_key: str | None = None
     # sim_camera-specific: which <camera name="..."> in the composed MJCF.
     mjcf_camera: str | None = None
     # "operator" when the camera looks back AT the operator (e.g. a mast cam
@@ -177,6 +192,42 @@ class CameraConfig:
     # alike): a policy must train on the true image, the operator on the
     # intuitive one.
     facing: str = "work"  # "work" | "operator"
+
+    @property
+    def dataset_feature_key(self) -> str:
+        """The `<key>` in `observation.images.<key>` for this camera."""
+        return self.dataset_key or self.id
+
+
+def _cameras_from(raw: list[dict] | None) -> list[CameraConfig]:
+    """Build the camera list and reject two cameras recording under one key.
+
+    A duplicate `dataset_key` is not a schema error LeRobot would catch: both
+    cameras would build the SAME `observation.images.<key>` feature, the second
+    one's spec would win in the dict, and every frame would then carry
+    whichever camera `_build_frame` wrote last — a dataset whose "top" column
+    is silently half one view and half another. Cheap to catch here, invisible
+    afterwards, so it is a load error.
+
+    Only cameras with `record: true` are checked: a view that never reaches the
+    dataset cannot collide inside it, and demanding uniqueness from the ones
+    that exist purely to teleop from would be a rule about nothing.
+    """
+    cams = [CameraConfig(**c) for c in (raw or [])]
+    seen: dict[str, str] = {}
+    for cam in cams:
+        if not cam.record:
+            continue
+        key = cam.dataset_feature_key
+        if key in seen:
+            raise ValueError(
+                f"cameras {seen[key]!r} and {cam.id!r} both record into "
+                f"observation.images.{key} — one would overwrite the other. "
+                "Give one a distinct `dataset_key`, or set `record: false` on "
+                "the view that only exists to teleop from."
+            )
+        seen[key] = cam.id
+    return cams
 
 
 @dataclass
@@ -197,6 +248,12 @@ class Config:
     # Cubes dealt onto the sim workbench at world build; ignored unless at
     # least one arm is source: sim.
     sim_cubes: int = 0
+    # Seed for the sim scene randomizer's FIRST reset, applied at startup so a
+    # run can be re-created from its config alone. null (the default) means
+    # "don't reset at startup" — the bench begins on the builder's home slots,
+    # exactly as it did before this existed. Per-episode resets pass their own
+    # seed to POST /sim/scene/reset and ignore this.
+    sim_seed: int | None = None
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -207,11 +264,13 @@ def load_config(path: Path | None = None) -> Config:
         arms=[ArmConfig(**a) for a in raw.get("arms", [])],
         ros=RosConfig(**raw.get("ros", {})),
         telemetry=TelemetryConfig(**raw.get("telemetry", {})),
-        cameras=[CameraConfig(**c) for c in raw.get("cameras", [])],
+        cameras=_cameras_from(raw.get("cameras", [])),
         motion=MotionConfig(**raw.get("motion", {})),
         collision=_collision_from(raw.get("collision")),
         sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
         sim_cubes=int(raw.get("sim_cubes", 0)),
+        sim_seed=(None if raw.get("sim_seed") is None
+                  else int(raw["sim_seed"])),
     )
 
 
