@@ -143,6 +143,27 @@ kill it` while that runs, and a Ctrl+C there is precisely how a session's
 takes get destroyed. (The Jetson backend is never stopped from here — it owns
 the arms.)
 
+### Over Tailscale, when the LAN won't carry it
+
+```bash
+scripts/quest-teleop/up.sh --tailscale              # composes with the rest:
+scripts/quest-teleop/up.sh --insertion --tailscale
+```
+
+Same single origin, moved off the LAN onto the tailnet, on :8445 with a real
+certificate — no interstitial to accept. It prints the URL, e.g.
+`https://odesha.tail4f2a4b.ts.net:8445/teleop/vr`.
+
+Sign the Quest into the same tailnet first (sideload the Tailscale Android
+APK); until you do, that name resolves to nothing in the headset browser.
+Nothing in `tailscale serve` is touched — Caddy just binds the tailnet address
+with a cert from `tailscale cert`.
+
+With real arms on the Jetson, only the headset's hop moves: the desktop still
+reaches the Jetson over wifi. If `/api` times out, put the Jetson on the
+tailnet too and pass `HALLER_JETSON_IP=<jetson>.<tailnet>.ts.net`.
+`--sim`/`--insertion` avoid the hop entirely.
+
 If `up.sh` cannot reach the Jetson: power the rig, then either plug the USB-C
 (device-mode ssh) or wait for wifi (192.168.0.124), and on the Jetson run
 `~/haller_ws/scripts/quest-teleop/backend-jetson.sh` by hand. To survive
@@ -281,6 +302,8 @@ cockpit records datasets while a teleop session is driving.
 | 502s on `/_next/webpack-hmr` in caddy log | Next dev hot-reload through the proxy. Cosmetic. |
 | Right arm intermittent `Incorrect status packet` | Known UART flakiness under telemetry; watch whether it worsens under teleop load. |
 | Everything up but headset can't load page | Quest must be on the same wifi (`ZTE_DEC155`); check `https://192.168.0.191:8444/api/health` from any browser. |
+| Page loads on the desktop, headset can't reach it **at all** | Router AP/client isolation. Both devices reach the router, neither reaches the other — `ip neigh` to the Quest goes `FAILED` while the router stays `REACHABLE`, and `tcpdump` here sees zero packets from the headset. Nothing on this machine can fix it. Run `up.sh --tailscale`, or fall back to a phone hotspot. |
+| Page loads, but nothing ever connects | The dev server has an old `NEXT_PUBLIC_BACKEND_URL` compiled in — Turbopack caches it in `.next/dev` and a restart alone does **not** clear it. `up.sh` detects and fixes this now; if it says the baked URL is UNKNOWN, run `down.sh` then `up.sh`. |
 
 ## What runs where
 
@@ -288,7 +311,7 @@ cockpit records datasets while a teleop session is driving.
 |---|---|---|
 | FastAPI backend (arms, guard, retarget) | Jetson | `backend-jetson.sh` / systemd unit |
 | Next.js frontend :3001 | desktop | `up.sh` |
-| Caddy single origin :8444 | desktop | `up.sh` (config: `scripts/quest-teleop/Caddyfile`) |
+| Caddy single origin :8444 LAN / :8445 tailnet | desktop | `up.sh` (config: `scripts/quest-teleop/Caddyfile`) |
 
 Deeper background: `hmi/HANDOVER-2026-08-01-jetson-rig.md` (rig state),
 `haller_hmi/collision.py` and `vr_input.py` docstrings (how and why).

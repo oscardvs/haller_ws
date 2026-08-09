@@ -15,17 +15,43 @@
 #   - `auto_https disable_redirects` because the HTTP->HTTPS redirect wants
 #     port 80, which needs root.
 #
+# ONE site block serves two different fronts, and that is deliberate:
+#   - LAN     https://192.168.0.191:8444        self-signed (`tls internal`)
+#   - tailnet https://<magicdns>.ts.net:8445    real cert (up.sh --tailscale)
+# The /api prefix strip is the whole reason this file exists, so it gets ONE
+# definition. A second site block for the tailnet would be a second place for
+# that routing to drift, and the failure it produces (page loads, sockets
+# 404) looks nothing like a routing bug from inside a headset.
+#
+# The three front-specific knobs are therefore variables, not literals:
+#   HALLER_ORIGIN_HOST  the name in the URL — must match the cert, and is what
+#                       Caddy matches the Host header against, so a request
+#                       that arrives by bare IP deliberately finds no site.
+#   HALLER_BIND_ADDRS   which interface addresses to listen on. SPACE-SEPARATED
+#                       is legal and load-bearing on the tailnet: MagicDNS
+#                       answers with both the 100.x and the fd7a:: address and
+#                       the headset may pick either, so both must be bound.
+#                       (Caddy substitutes {$VAR} on the raw file bytes before
+#                       tokenising, so one variable can expand into several
+#                       arguments — this is what makes `tls` below work too.)
+#   HALLER_TLS          `internal` on the LAN; "<cert> <key>" on the tailnet,
+#                       where the files come from `tailscale cert` and are
+#                       signed by a publicly-trusted CA. That is worth real
+#                       money here: it removes the interstitial, which per the
+#                       note above cannot be accepted for a WebSocket at all.
+#
 # Every knob is an env var with the 2026-08-01 working values as defaults:
-#   HALLER_DESKTOP_IP, HALLER_HTTPS_PORT, HALLER_BACKEND, HALLER_NEXT_PORT
+#   HALLER_ORIGIN_HOST, HALLER_BIND_ADDRS, HALLER_TLS,
+#   HALLER_HTTPS_PORT, HALLER_BACKEND, HALLER_NEXT_PORT
 
 {
 	auto_https disable_redirects
 	skip_install_trust
 }
 
-https://{$HALLER_DESKTOP_IP:192.168.0.191}:{$HALLER_HTTPS_PORT:8444} {
-	bind {$HALLER_DESKTOP_IP:192.168.0.191}
-	tls internal
+https://{$HALLER_ORIGIN_HOST:192.168.0.191}:{$HALLER_HTTPS_PORT:8444} {
+	bind {$HALLER_BIND_ADDRS:192.168.0.191}
+	tls {$HALLER_TLS:internal}
 
 	# Backend (FastAPI on the Jetson), prefix stripped: /api/health -> /health.
 	# WebSockets (/api/ws/...) proxy transparently.
