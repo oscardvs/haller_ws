@@ -106,6 +106,13 @@ export type VRFrame = {
    *  grip anchors your hand to the arm's current pose and deltas drive the
    *  gripper through IK. "joints": the original body-angle copying. */
   vr_mode?: "pose" | "joints";
+  /** How the operator's hand maps onto the gripper (position mode only).
+   *  "behind" (default): egocentric — the replica arm moves exactly like
+   *  your own (goggles on, push forward = the arm extends INTO the default
+   *  over-the-shoulder view). "mirror": face-to-face, the arm as your
+   *  reflection. "front": face-to-face but screen-true against the
+   *  threequarter tile. */
+  stance?: "behind" | "mirror" | "front";
   head: { position: Vec3; orientation: Quat } | null;
   left: ControllerSample | null;
   right: ControllerSample | null;
@@ -205,24 +212,124 @@ export function mat4Multiply(a: Float32Array, b: Float32Array): Float32Array {
   return out;
 }
 
-/** Where the HUD quad hangs in local-floor space: eye-ish height, just over a
- *  metre out — near enough to read, far enough not to crowd the workspace. */
-const HUD_POS: [number, number, number] = [0, 1.35, -1.15];
-const HUD_W = 1.1;   // metres; canvas is 4:3, height follows
+/** Where the HUD cluster spawns in local-floor space: eye-ish height, just
+ *  over a metre out — near enough to read, far enough not to crowd the
+ *  workspace. The operator can then grab it (point + trigger with the grip
+ *  open) and put it wherever they like; the placement persists. */
+export type HudAnchor = { pos: [number, number, number]; yawDeg: number };
+export const DEFAULT_HUD_ANCHOR: HudAnchor = { pos: [0, 1.35, -1.15], yawDeg: 0 };
+
+const CLUSTER_GAP_M = 0.05;   // vertical gap between camera tile and panel
+const PANEL_W_FRAC = 0.82;    // panel width as a fraction of the tile width
+
+const _rad = (d: number) => (d * Math.PI) / 180;
+
+/** Yaw (degrees) that turns the cluster to face a head at `head`. The
+ *  un-rotated quad faces +z, so we need RotY(yaw)·(0,0,1) ∥ horiz(head−pos). */
+export function yawTowardHead(
+  pos: readonly number[], head: readonly number[],
+): number {
+  return (Math.atan2(head[0] - pos[0], head[2] - pos[2]) * 180) / Math.PI;
+}
+
+/** The cluster's metric layout, shared by the renderer and the grab hit-test
+ *  so they can never disagree about where a quad actually is. The camera tile
+ *  is centred ON the anchor; the panel hangs below it. */
+export function clusterLayout(
+  camWidthM: number, camAspect: number, panelAspect: number, hasCam: boolean,
+): { camH: number; panelW: number; panelH: number; panelYOff: number } {
+  const camH = hasCam ? camWidthM * camAspect : 0;
+  const panelW = camWidthM * PANEL_W_FRAC;
+  const panelH = panelW * panelAspect;
+  const panelYOff = hasCam ? -(camH / 2 + CLUSTER_GAP_M + panelH / 2) : 0;
+  return { camH, panelW, panelH, panelYOff };
+}
+
+/** Ray vs one cluster quad (both lie in the anchor's rotated z=0 plane at a
+ *  vertical offset). Returns the ray parameter t of the hit, or null. Pure —
+ *  the grab interaction is pinned by tests, not by strapping on a headset. */
+export function rayQuadHit(
+  origin: readonly number[], dir: readonly number[],
+  anchor: HudAnchor, yOffset: number, w: number, h: number,
+): number | null {
+  const c = Math.cos(_rad(anchor.yawDeg)), s = Math.sin(_rad(anchor.yawDeg));
+  const n = [s, 0, c];                       // quad normal, RotY·(0,0,1)
+  const cx = anchor.pos[0], cy = anchor.pos[1] + yOffset, cz = anchor.pos[2];
+  const denom = dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2];
+  if (Math.abs(denom) < 1e-6) return null;
+  const t = ((cx - origin[0]) * n[0] + (cy - origin[1]) * n[1]
+    + (cz - origin[2]) * n[2]) / denom;
+  if (t < 0.05 || t > 8) return null;
+  const px = origin[0] + dir[0] * t - cx;
+  const py = origin[1] + dir[1] * t - cy;
+  const pz = origin[2] + dir[2] * t - cz;
+  const u = px * c - pz * s;                 // along the quad's x axis
+  if (Math.abs(u) > w / 2 || Math.abs(py) > h / 2) return null;
+  return t;
+}
+
+function _rotateByQuat(q: Quat, v: readonly number[]): [number, number, number] {
+  const [x, y, z, w] = q;
+  const tx = 2 * (y * v[2] - z * v[1]);
+  const ty = 2 * (z * v[0] - x * v[2]);
+  const tz = 2 * (x * v[1] - y * v[0]);
+  return [
+    v[0] + w * tx + (y * tz - z * ty),
+    v[1] + w * ty + (z * tx - x * tz),
+    v[2] + w * tz + (x * ty - y * tx),
+  ];
+}
+
+export type ControllerRay = {
+  origin: [number, number, number];
+  dir: [number, number, number];
+  trigger: boolean;
+};
+
+/** Target-ray origin/direction per hand, plus the trigger bit — everything
+ *  the grab-to-move interaction needs from a frame. */
+export function controllerRays(
+  session: XRSessionLike, frame: XRFrameLike, refSpace: unknown,
+): Partial<Record<"left" | "right", ControllerRay>> {
+  const out: Partial<Record<"left" | "right", ControllerRay>> = {};
+  for (const src of session.inputSources) {
+    if (src.handedness !== "left" && src.handedness !== "right") continue;
+    if (!src.targetRaySpace) continue;
+    const pose = poseToPair(frame.getPose(src.targetRaySpace, refSpace));
+    if (!pose) continue;
+    out[src.handedness] = {
+      origin: [...pose.position] as [number, number, number],
+      dir: _rotateByQuat(pose.orientation, [0, 0, -1]),
+      trigger: Boolean(src.gamepad?.buttons[BUTTON_TRIGGER]?.pressed),
+    };
+  }
+  return out;
+}
 
 type XRViewLike = {
   projectionMatrix: Float32Array;
   transform: { inverse: { matrix: Float32Array } };
 };
 
+export type SceneDrawOpts = {
+  /** Status/menu canvas — text only, repainted at ~10 Hz. */
+  panel: HTMLCanvasElement | null;
+  panelDirty: boolean;
+  /** Workspace camera <img> (MJPEG). Textured EVERY frame — this is what
+   *  makes the tile track at display rate instead of the panel's 10 Hz. */
+  cam: HTMLImageElement | null;
+  /** Mirror the tile horizontally (display only) — for cameras that face
+   *  the operator. */
+  camMirrored?: boolean;
+  camWidthM?: number;
+  anchor?: HudAnchor;
+};
+
 export type XRScene = {
-  /** Clear both eyes; when `hud` is given, draw it as a world-locked quad.
-   *  `hudDirty` re-uploads the canvas texture (skip it on unchanged frames —
-   *  a texture upload per display frame is the whole cost of this HUD).
-   *  `widthM` sizes the quad; changing it rescales in place, no reallocation. */
-  render(frame: XRFrameLike, refSpace: unknown,
-         hud: HTMLCanvasElement | null, hudDirty: boolean,
-         widthM?: number): void;
+  /** Clear both eyes; draw the camera tile and the status panel as two
+   *  separate world quads at `anchor` — the panel BELOW the tile, never on
+   *  top of the view it annotates. */
+  render(frame: XRFrameLike, refSpace: unknown, opts: SceneDrawOpts): void;
 };
 
 const _NOOP_SCENE: XRScene = { render: () => {} };
@@ -254,25 +361,28 @@ export function attachRenderScene(
   // the overlay-capable path never pays for it.
   let prog: WebGLProgram | null = null;
   let uMVP: WebGLUniformLocation | null = null;
-  let tex: WebGLTexture | null = null;
-  let model: Float32Array | null = null;
-  let modelWidth = 0;
+  let panelTex: WebGLTexture | null = null;
+  let camTex: WebGLTexture | null = null;
+  let camTexValid = false;
+  let lastCamUploadMs = 0;
 
-  /** Column-major scale + translate: the unit quad's extents become metres.
-   *  Rebuilt whenever the requested width changes, so the size control is a
-   *  matrix write rather than a pipeline rebuild. */
-  function setModel(widthM: number, hud: HTMLCanvasElement): void {
-    const h = widthM * (hud.height / hud.width);
-    model = new Float32Array([
-      widthM, 0, 0, 0,
+  /** Column-major T(pos+yOff) · RotY(yaw) · S(w, h, 1). `mirrorX` flips the
+   *  quad for operator-facing cameras — display only, the source pixels are
+   *  never touched. */
+  function quadModel(
+    anchor: HudAnchor, w: number, h: number, yOffset: number, mirrorX: boolean,
+  ): Float32Array {
+    const c = Math.cos(_rad(anchor.yawDeg)), s = Math.sin(_rad(anchor.yawDeg));
+    const sx = mirrorX ? -w : w;
+    return new Float32Array([
+      c * sx, 0, -s * sx, 0,
       0, h, 0, 0,
-      0, 0, 1, 0,
-      HUD_POS[0], HUD_POS[1], HUD_POS[2], 1,
+      s, 0, c, 0,
+      anchor.pos[0], anchor.pos[1] + yOffset, anchor.pos[2], 1,
     ]);
-    modelWidth = widthM;
   }
 
-  function ensurePipeline(hud: HTMLCanvasElement): boolean {
+  function ensurePipeline(): boolean {
     if (prog) return true;
     if (!gl) return false;
     const compile = (type: number, src: string) => {
@@ -314,25 +424,29 @@ export function attachRenderScene(
     gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 20, 12);
     gl.enableVertexAttribArray(aUV);
     uMVP = gl.getUniformLocation(p, "uMVP");
-    tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    setModel(HUD_W, hud);
+    const mkTex = () => {
+      const t = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return t;
+    };
+    panelTex = mkTex();
+    camTex = mkTex();
     prog = p;
     return true;
   }
 
   return {
-    render(frame, refSpace, hud, hudDirty, widthM) {
+    render(frame, refSpace, opts) {
       const fb = (session.renderState?.baseLayer ?? layer).framebuffer;
       gl.bindFramebuffer(gl.FRAMEBUFFER, fb as WebGLFramebuffer | null);
       gl.clearColor(r, g, b, a);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      if (!hud || !ensurePipeline(hud)) return;
-      if (widthM && widthM > 0 && widthM !== modelWidth) setModel(widthM, hud);
+      const panel = opts.panel;
+      if (!panel || !ensurePipeline()) return;
       const pose = frame.getViewerPose(refSpace) as unknown as
         { views?: XRViewLike[] } | null | undefined;
       const views = pose?.views;
@@ -341,21 +455,62 @@ export function attachRenderScene(
       gl.disable(gl.DEPTH_TEST);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      if (hudDirty) {
+
+      // Panel text: repainted at ~10 Hz, uploaded only when it changed.
+      gl.bindTexture(gl.TEXTURE_2D, panelTex);
+      if (opts.panelDirty) {
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, hud);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, panel);
       }
+      // Camera tile: textured straight from the MJPEG <img> — one
+      // native-resolution sampling step, no canvas composite in between.
+      // Uploads are THROTTLED to the stream's own 30 fps rather than done
+      // per display frame: a 960x720 RGBA upload at 72-90 Hz measurably
+      // stalls the Quest browser's main thread, and a stalled main thread
+      // starves the 30 Hz publish loop — which the backend correctly reads
+      // as tracking loss and answers with a re-acquire. The stream carries
+      // no new pixels between its own frames anyway.
+      const cam = opts.cam;
+      const camReady = Boolean(cam && cam.complete && cam.naturalWidth > 0);
+      const nowMs = performance.now();
+      if (cam && camReady && nowMs - lastCamUploadMs >= 33) {
+        gl.bindTexture(gl.TEXTURE_2D, camTex);
+        try {
+          gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cam);
+          camTexValid = true;
+          lastCamUploadMs = nowMs;
+        } catch {
+          /* a mid-frame MJPEG boundary can throw; keep the previous texture */
+        }
+      }
+
+      const anchor = opts.anchor ?? DEFAULT_HUD_ANCHOR;
+      const camW = opts.camWidthM && opts.camWidthM > 0 ? opts.camWidthM : 1.1;
+      const camAspect = camReady && cam
+        ? cam.naturalHeight / cam.naturalWidth : 0.75;
+      const drawCam = camTexValid && cam !== null;
+      const layout = clusterLayout(
+        camW, camAspect, panel.height / panel.width, drawCam);
+
       const active = (session.renderState?.baseLayer ?? layer) as LayerLike;
+      const camModel = quadModel(anchor, camW, layout.camH, 0,
+                                 Boolean(opts.camMirrored));
+      const panelModel = quadModel(anchor, layout.panelW, layout.panelH,
+                                   layout.panelYOff, false);
       for (const view of views) {
         const vp = active.getViewport?.(view);
         if (!vp) continue;
         gl.viewport(vp.x, vp.y, vp.width, vp.height);
-        const mvp = mat4Multiply(
-          mat4Multiply(view.projectionMatrix, view.transform.inverse.matrix),
-          model as Float32Array,
-        );
-        gl.uniformMatrix4fv(uMVP, false, mvp);
+        const pv = mat4Multiply(view.projectionMatrix,
+                                view.transform.inverse.matrix);
+        if (drawCam) {
+          gl.bindTexture(gl.TEXTURE_2D, camTex);
+          gl.uniformMatrix4fv(uMVP, false, mat4Multiply(pv, camModel));
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        gl.bindTexture(gl.TEXTURE_2D, panelTex);
+        gl.uniformMatrix4fv(uMVP, false, mat4Multiply(pv, panelModel));
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
     },
@@ -394,12 +549,22 @@ export type VrMenuLike = {
   views: readonly { id: string; label: string }[];
   activeViewId: string | null;
   tileSize: string;
+  /** Operator stance, display-only: it is chosen on the desktop panel before
+   *  entering VR (every controller button in-session is spoken for), but the
+   *  operator must be able to SEE which mapping their hands are wired to —
+   *  a wrong stance reads as "the arm goes the opposite way". */
+  stance?: "behind" | "mirror" | "front";
 } | null;
 
+/** Repaint the status/menu PANEL — text only. The workspace camera is not
+ *  composited here any more: it renders as its own quad, textured at native
+ *  resolution every display frame (see `attachRenderScene`), while this
+ *  canvas repaints at ~10 Hz. Splitting them is what stopped the
+ *  instructions from hovering on top of the view, and what let the tile
+ *  track at display rate instead of the panel's cadence. */
 export function paintHud(
   ctx: CanvasRenderingContext2D,
   status: HudStatusLike,
-  cam: HTMLImageElement | null,
   rec: RecorderHudLike = null,
   menu: VrMenuLike = null,
 ): void {
@@ -409,51 +574,64 @@ export function paintHud(
   ctx.fillStyle = "rgba(8, 10, 14, 0.82)";
   ctx.fillRect(0, 0, W, H);
 
-  const camH = Math.round(H * 0.72);
-  if (cam && cam.complete && cam.naturalWidth > 0) {
-    try {
-      const scale = Math.min(W / cam.naturalWidth, camH / cam.naturalHeight);
-      const dw = cam.naturalWidth * scale;
-      const dh = cam.naturalHeight * scale;
-      ctx.drawImage(cam, (W - dw) / 2, (camH - dh) / 2, dw, dh);
-    } catch {
-      /* a mid-frame MJPEG boundary can throw; next repaint recovers */
-    }
-  } else {
-    ctx.fillStyle = "#9aa0a6";
-    ctx.font = "28px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText("no workspace camera", W / 2, camH / 2);
-  }
+  // Two hard columns: status text on the left, the menu box on the right,
+  // and a CLIP on the status column — an acquisition line listing several
+  // blocking joints is arbitrarily long, and letting it run under the menu
+  // is exactly the overlapping-menus mess this layout replaces. Long match
+  // lines WRAP inside the column instead of being cut: which joint is off
+  // and which way is the one thing the operator needs mid-countdown.
+  const leftW = Math.round(W * 0.55) - 24;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, leftW + 24, H);
+  ctx.clip();
 
   ctx.textAlign = "left";
   ctx.font = "bold 30px monospace";
-  let y = camH + 42;
+  let y = 46;
   const state = (status?.state ?? "—").toUpperCase();
   const col = status?.collision;
   ctx.fillStyle = "#e8eaed";
   ctx.fillText(state, 24, y);
+  if (rec?.recording) {
+    // Right-aligned to the column's edge so it cannot collide with the
+    // state: the one line that must be readable at a glance while driving.
+    ctx.fillStyle = "#f28b82";
+    ctx.textAlign = "right";
+    ctx.fillText(`● REC ${rec.episode_frames}`, leftW, y);
+    ctx.textAlign = "left";
+  }
   if (col?.enabled) {
+    y += 38;
     const slack = col.slack_m;
     ctx.fillStyle = col.limited ? "#f28b82"
       : (slack ?? 1) < 0 ? "#fdd663" : "#9aa0a6";
+    ctx.font = "28px monospace";
     ctx.fillText(
       col.limited
         ? `COLLISION HOLD ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`
         : `clearance ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`,
-      300, y);
-  }
-  if (rec?.recording) {
-    // Right-aligned so it can never collide with the clearance text: the
-    // one line in the HUD that must be readable at a glance while driving.
-    ctx.fillStyle = "#f28b82";
-    ctx.textAlign = "right";
-    ctx.fillText(`● REC ${rec.episode_frames}`, W - 24, y);
-    ctx.textAlign = "left";
+      24, y);
   }
   ctx.font = "28px monospace";
+  const wrapInto = (text: string, x: number, maxW: number): string[] => {
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let cur = "";
+    for (const w of words) {
+      const cand = cur ? `${cur} ${w}` : w;
+      if (cur && ctx.measureText(cand).width > maxW - x) {
+        lines.push(cur);
+        cur = w;
+      } else {
+        cur = cand;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  };
   for (const side of ["left", "right"] as const) {
-    y += 40;
+    y += 38;
     const acq = status?.acquire?.[side];
     const grip = status?.clutch?.sides?.[side] ?? status?.clutch?.engaged;
     ctx.fillStyle = "#9aa0a6";
@@ -462,12 +640,13 @@ export function paintHud(
     ctx.fillStyle = acq.authority === "driving" ? "#81c995"
       : acq.authority === "acquiring" ? "#fdd663" : "#9aa0a6";
     let line = acq.authority;
+    let match = "";
     if (acq.authority === "acquiring") {
       if (acq.remaining_ms !== null) line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
       if (acq.blocking.length) {
         // Signed errors, so the operator knows which WAY to move, not just
         // which joint is off: "elbow_flex +61°" means reach further.
-        line += "  match: " + acq.blocking.map((j) => {
+        match = "match: " + acq.blocking.map((j) => {
           const e = acq.error_deg?.[j];
           return e === undefined ? j
             : `${j} ${e > 0 ? "+" : ""}${e.toFixed(0)}°`;
@@ -475,9 +654,15 @@ export function paintHud(
       }
     }
     if (acq.reason === "no_tracking") line += "  (no tracking)";
-    ctx.fillText(line, 140, y);
+    ctx.fillText(line, 120, y);
+    // The match list goes on its own wrapped line(s): it is the one thing
+    // the operator needs mid-countdown, and it can name several joints.
+    for (const seg of match ? wrapInto(match, 120, leftW) : []) {
+      y += 32;
+      ctx.fillText(seg, 120, y);
+    }
   }
-  y += 40;
+  y += 38;
   if (status?.last_error) {
     ctx.fillStyle = "#f28b82";
     ctx.fillText(status.last_error.slice(0, 60), 24, y);
@@ -485,8 +670,9 @@ export function paintHud(
     ctx.fillStyle = "#9aa0a6";
     ctx.fillText("grips = drive · trigger = gripper · B/Y = E-STOP", 24, y);
   }
+  ctx.restore();
 
-  if (menu) paintMenu(ctx, menu, rec, camH);
+  if (menu) paintMenu(ctx, menu, rec);
 }
 
 /** The view menu, bottom-right of the HUD.
@@ -500,18 +686,20 @@ function paintMenu(
   ctx: CanvasRenderingContext2D,
   menu: NonNullable<VrMenuLike>,
   rec: RecorderHudLike,
-  camH: number,
 ): void {
   const W = ctx.canvas.width;
   const pad = 18;
   const lineH = 30;
-  const rows = menu.views.length + 3;
+  // +1 for the reset-arms binding, +1 for the grab-to-move hint.
+  const rows = menu.views.length + 5 + (menu.stance ? 1 : 0);
   const boxW = Math.round(W * 0.42);
   const boxH = rows * lineH + pad * 2;
   const x = W - boxW - 24;
-  const yTop = camH - boxH - 24;
+  const yTop = 16;
 
-  ctx.fillStyle = "rgba(8, 10, 14, 0.78)";
+  // Fully opaque: the status column is clipped away from this box, and
+  // nothing may ghost through from behind either.
+  ctx.fillStyle = "rgb(10, 12, 16)";
   ctx.fillRect(x, yTop, boxW, boxH);
   ctx.strokeStyle = "rgba(154, 160, 166, 0.45)";
   ctx.lineWidth = 2;
@@ -521,7 +709,7 @@ function paintMenu(
   let y = yTop + pad + 22;
   ctx.font = "bold 24px monospace";
   ctx.fillStyle = "#e8eaed";
-  ctx.fillText(`VIEW  (L stick = next)`, x + pad, y);
+  ctx.fillText(`VIEW  (L stick click = next)`, x + pad, y);
   y += lineH;
 
   ctx.font = "22px monospace";
@@ -541,6 +729,12 @@ function paintMenu(
   ctx.fillText(`SIZE  ${menu.tileSize}  (R stick = next)`, x + pad, y);
   y += lineH;
 
+  if (menu.stance) {
+    const words = { behind: "egocentric", mirror: "mirror", front: "camera-true" };
+    ctx.fillText(`STANCE  ${words[menu.stance]}  (set on panel)`, x + pad, y);
+    y += lineH;
+  }
+
   const recording = Boolean(rec?.recording);
   ctx.fillStyle = recording ? "#f28b82" : "#9aa0a6";
   ctx.fillText(
@@ -548,6 +742,12 @@ function paintMenu(
       ? `● REC ${rec?.episode_frames ?? 0} — hold A/X to STOP + save`
       : "hold A/X to START a take",
     x + pad, y);
+  y += lineH;
+
+  ctx.fillStyle = "#9aa0a6";
+  ctx.fillText("hold L stick = reset arms home", x + pad, y);
+  y += lineH;
+  ctx.fillText("point + trigger (grip open) = move HUD", x + pad, y);
 }
 
 function poseToPair(pose: XRPose | null | undefined) {
@@ -580,7 +780,8 @@ export function sampleVRFrame(
   frame: XRFrameLike,
   refSpace: unknown,
   opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean;
-          mirrorMode?: "none" | "both"; vrMode?: "pose" | "joints" },
+          mirrorMode?: "none" | "both"; vrMode?: "pose" | "joints";
+          stance?: "behind" | "mirror" | "front" },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));
 
@@ -631,6 +832,7 @@ export function sampleVRFrame(
     ts_ms: opts.tsMs,
     dead_man: deadMan,
     ...(opts.vrMode ? { vr_mode: opts.vrMode } : {}),
+    ...(opts.stance ? { stance: opts.stance } : {}),
     ...(opts.mirrorMode ? { mirror_mode: opts.mirrorMode } : {}),
     head,
     left,
@@ -716,6 +918,11 @@ export const CAM_TILE_SIZES: readonly { name: string; widthM: number }[] = [
  *  rests near A/X while gripping; a plain press would toggle takes by
  *  accident, and an accidental take boundary is corrupted data. */
 export const RECORD_HOLD_MS = 500;
+
+/** How long the LEFT stick must stay clicked before the arms reset home.
+ *  Longer than a view-cycle click could ever be by accident, shorter than
+ *  feels broken. The short-click action (next view) fires on release. */
+export const RESET_HOLD_MS = 800;
 
 export type HoldToggleState = {
   down: boolean;

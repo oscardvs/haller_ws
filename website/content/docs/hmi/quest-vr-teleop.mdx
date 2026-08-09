@@ -53,11 +53,15 @@ Accept the self-signed cert once, then press **Enter Passthrough**.
 | **B or Y** (either controller) | **E-STOP** — torque off both arms, session stops |
 | **hold A or X** (~0.5 s) | start, then stop-and-save, a dataset take |
 | **left thumbstick click** | next camera view in the tile |
+| **hold left thumbstick** (~0.8 s) | **reset arms to home** — 0° joints, gripper open; held sides only, and it slews through the session's own ramp and collision guard |
 | **right thumbstick click** | next tile size (S → M → L) |
+| **point at the HUD + trigger** (grip open) | **grab and move the HUD cluster** — Quest-window semantics: it follows the ray, keeps facing you, and the placement persists |
 | release a grip | that arm freezes exactly where it is |
 | headset off / Quest menu open | frames force-disengage; both arms freeze |
 
-The menu bindings had to land on the thumbstick clicks: trigger, grip, A/X and B/Y are all spoken for, and every one of them is either a dead-man or a safety action, so none can be shared with a menu. They are edge-detected on press rather than hold-gated like A/X — picking a view is harmless, where a stray take boundary is corrupted data.
+The menu bindings had to land on the thumbstick clicks: trigger, grip, A/X and B/Y are all spoken for, and every one of them is either a dead-man or a safety action, so none can be shared with a menu. The left stick doubles up short-click/hold, so its click action fires on *release* (still instant to a human) — a hold must not cycle the view on its way to the reset. The HUD grab borrows the trigger only while that hand's arm is **not driving**: while driving, the trigger is the gripper, and the HUD refuses to move.
+
+The reset goes through `POST /teleop/human/home`, **inside** the session — the discrete `/arm/{id}/home` move is (correctly) refused while a session owns the arms, and unlike that path the in-session slew rides the LPF, the rate ramps and the bimanual collision guard. A driving side is skipped, and a pending reset self-cancels the moment its side starts driving: the operator's hand outranks a parked reset.
 
 Discarding a take is deliberately **cockpit-only**: a thumb brush must never be able to throw away an episode you just drove.
 
@@ -113,7 +117,7 @@ The SO-101 is nearly the opposite of a human arm. Its shoulder pitch **stops +10
 
 Squeezing a grip **anchors**. At that instant the arm's current pose and your hand's current pose become a shared origin:
 
-- The open-grip target is *wherever the arm already is*, so gate error is zero. The moment you squeeze, matching is already done and the 3 s countdown is the only wait — hold still, feel the buzz, drive.
+- The open-grip target is *wherever the arm already is*, so gate error is zero. The moment you squeeze, matching is already done and the countdown is the only wait — hold still, feel the buzz, drive. For `vr_grip` sessions that countdown is **1 s**, not the camera path's 3 s: the anchor makes handover zero-error by construction, so the countdown only filters accidental grips. The same reasoning stretches the per-side tracking-loss grace to **700 ms** (vs 300) — Quest controller tracking flickers, and in position mode a longer grace is safe: no new targets arrive during the gap and the next frame re-anchors at the hand, so there is nothing stale to jump to.
 - While the grip is held, hand deltas move the arm. Release **freezes** the arm where it is and drops the anchor.
 - The next squeeze re-anchors from wherever your hand is then. Big workspaces are covered by **ratcheting**: drag, release, move your hand somewhere comfortable, squeeze, drag again.
 
@@ -121,24 +125,24 @@ No limb-length calibration is involved anywhere. That is the other half of the p
 
 ### From hand delta to joint goal
 
-The delta is taken in the operator's **anchored heading frame** — the direction you were facing when you squeezed, frozen for the life of the anchor, so turning your body mid-drag does not swing the arm.
+The delta is taken in the operator's **anchored heading frame** — the direction you were facing when you squeezed, frozen for the life of the anchor, so turning your body mid-drag does not swing the arm. It then maps onto robot axes through the **operator stance**, a panel selector shipped on every frame:
 
-| operator axis | arm base axis |
-|---|---|
-| right | `+x` |
-| forward | `+y` |
-| up | `+z` |
+| stance | right | forward | up | det | when |
+|---|---|---|---|---|---|
+| `behind` *(default)* | `−x` | `−y` | `+z` | `+1` | egocentric — the arm as your **own arm**, paired with the default `overshoulder` view |
+| `mirror` | `+x` | `−y` | `+z` | `−1` | facing the arms; the arm is your **reflection** |
+| `front` | `+x` | `+y` | `+z` | `+1` | facing the arms, driving by the `threequarter` tile's screen axes |
 
-Both arms use the **same** mapping, because the mounts are identical and side-by-side rather than mirrored.
+Both arms use the **same** mapping, because the mounts are identical and side-by-side rather than mirrored. The stance also decides the **hand↔arm pairing**, applied when the session starts: in `behind`, the operator faces the same way the arms reach, so the arm under their right hand — frame-right in the overshoulder view — is the one the config names `left` (robot −x), and the frontend assigns the arms accordingly. Without this, hands-apart made the arms cross on screen, which reads as "the controls are inverted".
 
 <Callout type="warn">
-**Why these signs are not free to choose.** The operator frame `(right, forward, up)` is right-handed, so the robot axes it maps onto must form a right-handed triple too. `det[+x, +y, +z] = +1` — a rotation. Every axis reads true.
+**The handedness argument, revisited.** An earlier version hardcoded one mapping and argued its signs from geometry: the operator frame `(right, forward, up)` is right-handed, so the robot triple it maps to "must" be right-handed too — `det = +1`, a rotation, anything else is a reflection, and "a reflection cannot be fixed by moving the camera". All true as geometry. Wrong as ergonomics, and it cost a day of unusable teleop.
 
-Forward used to map to `−y`, on the reasoning that the arm reaches `−y` at zero pan, so pushing your hand away ought to extend it. Paired with right → `+x` that is a **reflection**: `det[+x, −y, +z] = −1`. And a reflection cannot be fixed by moving the camera — from any viewpoint, exactly one axis comes out inverted. Viewed from the front it agreed on left/right and inverted *depth*: push your hand away and the gripper travelled toward you and down the frame. That is what "the view is mirrored" actually was, and it stayed hidden while the camera sat near eye level, because depth was too ambiguous there to read.
+A face-to-face operator — standing at the open side of the bench, arms reaching *toward* them — does not want a rotation. They want the **mirror**: push your hand away and the arm extends (toward you); bring your hands together and the arms cross. That mapping *is* the reflection (`det −1`), deliberately, the same one every mirror-metaphor teleop rig and fitness-mirror game uses. The screen-true rotation survives as `front` (motion agrees with the camera tile, depth goes *into* the frame). The **default**, though, is `behind` — egocentric, paired with the default `overshoulder` view: goggles on, you face the tile, your arm moves and the replica moves exactly like your own, nothing to translate in your head. TeleVision-style view/control consistency, chosen after live testing found every face-to-face variant costs a mental rotation somewhere.
 
-The operator — real, or watching the sim camera — stands in **front** of the bench facing the mounts. So their forward is `+y`, and their right is `cross(forward, up) = +x`. Spatial truth beats the kinematic intuition: the operator is position-controlling a gripper, not reasoning about which way the elbow folds.
+The lesson worth keeping: the determinant of the operator→robot basis is not an invariant to enforce — it is a **choice the stance makes**. What *is* invariant: the basis must be orthonormal, each stance must realise its documented parity (there is a test per stance), and the thing that can never be fixed downstream is an **unintentional** mix of signs, which is what the original bug (right from one metaphor, forward from another) actually was.
 
-Pinned by a determinant test, not by per-axis sign assertions, so it survives future rewrites of the individual signs. A second test requires the `threequarter` camera to see `+x` to frame-right and to look along `+y` — viewing the same scene from behind would flip left/right on screen while the mapping stayed put, which is the same bug wearing a different hat.
+Camera and stance still have to agree **laterally**: the `threequarter` view must show `+x` to frame-right (it is the face-to-face eye that `mirror` and `front` share), and the `overshoulder` view must show `−x` to frame-right for `behind`. Both are pinned in the scene-builder tests.
 </Callout>
 
 <Callout type="info">
@@ -239,12 +243,16 @@ The finger pads also run **slide friction 2.0**, where the vendored MJCF ships 1
 
 | camera | pose | fovy | reads well |
 |---|---|---|---|
+| `overshoulder` | `(0, 0.44, 0.56)` → `(0, -0.16, 0.04)`, ~41° down | 48 | **the default view** — the `behind` stance's eye, from the mount side looking along the arms |
+| `threequarter` | `(0, -0.72, 0.54)` → `(0, -0.14, 0.04)`, ~41° down | 46 | the face-to-face eye (`mirror`/`front` stances) — hand pitch, jaw-vs-cube alignment |
 | `overhead` | `(0, 0, 1.0)` looking straight down | 60 | `shoulder_pan`, plan-view cube positions |
-| `threequarter` | `(0, -0.88, 0.62)` → `(0, -0.12, 0.045)`, ~37° down | 50 | hand pitch, jaw-vs-cube alignment, height via shadow |
+| `left_wristcam` / `right_wristcam` | in the `Fixed_Jaw` body — rides the wrist like the real rig's CSI cams | 70 | **millimetres**: the jaws centred, the pinch point and its shadow, the bench checker for scale |
 
-`threequarter` is listed **first** in the config, so it is what the cockpit's BASE tile and the headset HUD show, and it is the dataset's base camera. It is framed on the *workspace*, not on the arms' extremes: coverage is `|x| ≤ ~0.44 m` across the working depth band against cubes at ±0.28 m. A wide lateral swing past that clips at the frame edge — a deliberate trade, because the alternative (the near-eye-level framing it replaced) kept a 45° outward pan in frame, a pose that holds the gripper off the bench entirely, and spent ~60% of every *useful* frame on empty space.
+Both operator cameras were pulled in tight after actually rendering the old framing: the arms were ~15% of frame height, useless for fine work. The wrist-cam constants were *solved*, not hand-placed — a desired world pose at a canonical grasp (0.14 m behind the fingertip, 0.11 m above, world-up in frame) transformed into the jaw's local frame. The bench itself gained a low-contrast **5 cm checker** (a featureless grey slab gives no lateral or depth reference at all) and the shadow map went 1024 → 4096, because the gripper's shadow is the operator's main height cue.
 
-Tests pin the framing: every cube slot, the place zone read from the model rather than restated, and both arm mounts inside the frustum, plus the downward aim.
+`overshoulder` is listed **first** in the config, so it is what the cockpit's BASE tile and the headset HUD show by default — the view that matches the default `behind` stance. The operator views render at **960×720** (they are what you teleop from); overhead and the wrist close-ups stay 640×480. It is framed on the *workspace*, not on the arms' extremes: coverage is `|x| ≤ ~0.44 m` across the working depth band against cubes at ±0.28 m. A wide lateral swing past that clips at the frame edge — a deliberate trade, because the alternative (the near-eye-level framing it replaced) kept a 45° outward pan in frame, a pose that holds the gripper off the bench entirely, and spent ~60% of every *useful* frame on empty space.
+
+Tests pin the framing for **both operator cameras**: every cube slot, the place zone read from the model rather than restated, and both arm mounts inside the frustum, plus the downward aim and each camera's lateral agreement with its stance.
 
 ## Recording datasets
 
@@ -261,8 +269,10 @@ Takes land in `~/.cache/huggingface/lerobot/<hf_user>/<task-slug>` at **30 fps, 
 | `observation.state` / `action` | 12-dim, left-then-right SO-101 joint order |
 | `observation.base` | base channel |
 | `observation.wall_clock` | **real** capture time — LeRobot's own `timestamp` is synthetic |
-| `observation.images.threequarter_sim` | operator view |
+| `observation.images.overshoulder_sim` | operator view, from the mount side (the default teleop view) |
+| `observation.images.threequarter_sim` | operator view, face-to-face |
 | `observation.images.overhead_sim` | plan view |
+| `observation.images.wrist_left_sim` / `wrist_right_sim` | per-arm gripper close-ups, riding the wrist |
 
 The `skipped` counter beside the frame count tells you a take had gaps; the wall-clock deltas tell you where. An **E-STOP mid-take is fine** — the recorder notices the session die and saves up to that frame instead of appending a torque-off tail.
 
@@ -284,9 +294,17 @@ The HUD floats over passthrough: per-side authority and countdown, grip state, l
 
 In sim the **camera tile floats in the HUD** and defaults on whenever the backend's base camera is a sim render — passthrough shows your room, and the sim arms live only in that tile. `Cam off` hides it. The desktop cockpit (`/`) shows the same view.
 
+### The HUD: two panels, movable
+
+The HUD is a **cluster of two separate world quads**: the camera tile, and the status/menu panel hanging *below* it — the instructions never sit on top of the view they annotate. The tile is textured **straight from the MJPEG `<img>` at display rate, at native resolution**; the text panel repaints at ~10 Hz on its own canvas. (They used to share one 1024×768 canvas, which put the panel over the camera view, capped the tile at the panel's 10 Hz cadence, and resampled the camera twice.)
+
+The whole cluster is **grabbable**, Quest-window style: point either quad with the controller ray and hold the trigger (with that hand's grip open — while driving, the trigger is the gripper). It follows the ray at its grab distance, keeps turning to face you, and the placement persists in `localStorage`. The grab geometry (`rayQuadHit`, `clusterLayout`, `yawTowardHead`) is pure and pinned by tests, not by strapping on a headset.
+
 ### The view menu
 
-The HUD carries a menu block listing every camera the backend advertises, with the active one marked, the tile size, and the record command beside its live frame count. It is generic over `/cameras`: in sim that is the MuJoCo views, and on the real rig it is the mast plus the egocentric gripper cams, with no further work.
+The HUD carries a menu block listing every camera the backend advertises, with the active one marked, the tile size, the record command beside its live frame count, and the current **operator stance** (display-only — it is chosen on the panel before entering VR, but a wrong stance reads as "the arm fights me", so it has to be visible from inside the headset). It is generic over `/cameras`: in sim that is the MuJoCo views, and on the real rig it is the mast plus the egocentric gripper cams, with no further work.
+
+A camera whose config says `facing: operator` (the tower mast cam, which shoots back at whoever drives) gets its tile **mirrored horizontally for display** — a facing-you feed reads left/right-flipped against your own hands unless it behaves like a mirror. Recorded pixels are never touched.
 
 Both the chosen view and the tile size persist in `localStorage`, so a session resumes where the last one left off.
 
@@ -301,7 +319,7 @@ Tile size is the real lever on "the view is too small". The tile is a **quad in 
 Changing it rewrites the quad's model matrix in place — no pipeline rebuild, no reallocation.
 
 <Callout type="info">
-**Why the tile is soft, and the fix that is not in yet.** The Meta Quest Browser refuses the `dom-overlay` module on-device (it only works in Meta's desktop emulator), so the HUD falls back to a world-locked quad painted from a single 1024×768 canvas at ~10 Hz — with the camera image composited into the *same* canvas as all the status text, then resampled a second time through the eye framebuffer.
+**Remaining sharpness ceiling, and the fix that is not in yet.** The Meta Quest Browser refuses the `dom-overlay` module on-device (it only works in Meta's desktop emulator), so the HUD lives on world-locked quads. The two-quad split above already removed the worst of it (the camera is now one native-resolution texture per frame instead of a 10 Hz composite through a 1024-wide canvas), but every quad still gets resampled once through the eye framebuffer.
 
 The right fix is **WebXR Layers**. An `XRQuadLayer` is composited by the runtime at its own resolution, so each pixel is sampled once; Meta measure GPU bus-busy dropping from 50.2% to 23.9% with quality preserved, and cite 8K@90fps video layers on a Quest 2. Two routes:
 
@@ -366,8 +384,8 @@ Ten minutes, in this order. Do not skip to step 7.
 | "WebXR is not available" | Page is not HTTPS, or the cert was never accepted. `navigator.xr` is absent over http and nothing explains it. |
 | Enter does nothing / start refused | Another teleop session holds the arms — stop it. Needs **2 enabled arms**. |
 | Countdown will not finish | The HUD `match:` line lists the blocking joints. In position mode this should be instant; if it is not, the anchor did not take — release and re-squeeze. |
-| Arm moves opposite the hand | Mirroring applied twice, or wrong arm-mounting parity. See step 4 and the `mirror_mode` callout. |
-| The whole view feels mirrored — one axis fights you | A handedness fault, not a camera placement one. Check `det` of the operator→robot basis is `+1` (there is a test) and that the camera looks along `+y` with `+x` to frame-right. |
+| Arm moves opposite the hand | Wrong **operator stance** on the panel (mirror / front / behind). If only one arm is reversed: mirroring applied twice, or wrong arm-mounting parity — see step 4 and the `mirror_mode` callout. |
+| The whole view feels mirrored — one axis fights you | Stance/view disagreement, not a camera placement fault. Check the stance matches how you actually stand, and that the active camera is its counterpart (`threequarter` for mirror/front, `overshoulder` for behind). An operator-facing camera (tower mast) must carry `facing: operator` so the HUD auto-mirrors its tile. |
 | An arm "randomly" freezes | Its controller left the tracking volume (HUD: `no tracking`), or the grip slipped below the press threshold. Re-squeeze. |
 | Arm goes **completely** solid, lateral motion included | The floor-clamp failure mode. Your hand is far below the bench and the guard is scaling the whole step. Fixed by the target clamps above — if it recurs, check `table_z_m` matches the real bench. |
 | `COLLISION HOLD` where nothing is close | `mounts` do not match the real plate. Measure (steps 2–3). |

@@ -512,6 +512,20 @@ async def post_human_teleop_stop():
     return {"ok": True, **human_teleop.status()}
 
 
+@app.post("/teleop/human/home")
+async def post_human_teleop_home():
+    """Park every non-driving side at home, inside the running session.
+
+    The discrete `/arm/{id}/home` is refused while a session owns the arms;
+    this is the in-session counterpart the headset's hold-the-left-stick
+    reset uses. See HumanTeleopSession.request_home for the semantics.
+    """
+    if not human_teleop.running:
+        raise HTTPException(status_code=409, detail="no teleop session running")
+    sides = human_teleop.request_home()
+    return {"ok": True, "sides": sides}
+
+
 @app.post("/teleop/human/swap")
 async def post_human_teleop_swap(body: HumanTeleopSwapBody):
     human_teleop.set_swap(body.swap)

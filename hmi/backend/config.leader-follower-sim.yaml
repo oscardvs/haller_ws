@@ -37,17 +37,40 @@ telemetry:
   # fps (the recorder samples at telemetry rate). Camera fps follows.
   hz: 30
 cameras:
+  - id: overshoulder_sim
+    role: base
+    source: sim_camera
+    mjcf_camera: overshoulder
+    width: 960
+    height: 720
+    fps: 30
   - id: threequarter_sim
     role: base
     source: sim_camera
     mjcf_camera: threequarter
-    width: 640
-    height: 480
+    width: 960
+    height: 720
     fps: 30
   - id: overhead_sim
     role: base
     source: sim_camera
     mjcf_camera: overhead
+    width: 640
+    height: 480
+    fps: 30
+  - id: wrist_left_sim
+    role: wrist
+    arm_id: left
+    source: sim_camera
+    mjcf_camera: left_wristcam
+    width: 640
+    height: 480
+    fps: 30
+  - id: wrist_right_sim
+    role: wrist
+    arm_id: right
+    source: sim_camera
+    mjcf_camera: right_wristcam
     width: 640
     height: 480
     fps: 30

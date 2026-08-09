@@ -198,6 +198,51 @@ def _cross(a: Vec3, b: Vec3) -> Vec3:
             a[0] * b[1] - a[1] * b[0])
 
 
+#: Scene-level assets appended to the composed <asset> block. The checker on
+#: the bench top is a teleop aid, not decoration: a featureless grey slab
+#: gives the operator no lateral or depth reference at all, and fine placement
+#: through a camera tile needs BOTH. 5 cm cells (texrepeat 24x18 over the
+#: 1.2x0.9 m bench) sit near the gripper's jaw span, so "half a cell" is a
+#: readable unit of error. Contrast is kept low so the cubes and place zone
+#: still pop.
+_SCENE_ASSETS = (
+    '<texture name="bench_tex" type="2d" builtin="checker" '
+    'rgb1="0.38 0.38 0.39" rgb2="0.32 0.32 0.33" width="256" height="256"/>'
+    '<material name="bench_mat" texture="bench_tex" texrepeat="24 18" '
+    'texuniform="false" reflectance="0.05"/>'
+)
+
+#: Per-arm gripper camera, injected inside the Fixed_Jaw body so it rides the
+#: wrist exactly like the real rig's CSI wrist cams. This is the
+#: fine-manipulation view: the operator cameras give context, this one gives
+#: millimetres — the jaws centred in frame, the pinch point and its shadow in
+#: the lower half, the bench checker for scale.
+#:
+#: The numbers were SOLVED, not hand-placed (guessing them cost five blind
+#: renders): at a canonical grasp pose (Pitch -55, Elbow 85, Wrist_Pitch 55)
+#: the desired camera sits 0.14 m behind the fingertip toward the base and
+#: 0.11 m above it in WORLD frame, looking at the tip with world-up in frame;
+#: that world pose transformed into the Fixed_Jaw frame gives the constants
+#: below. Non-obvious result: "behind and above the hand" is local +x here —
+#: the jaw's local frame has -y along the fingers and closes along x. Rigid
+#: mount, so at other wrist pitches the view tilts with the hand, as a real
+#: wrist cam does.
+_WRISTCAM_FMT = (
+    '<camera name="{prefix}wristcam" pos="0.1399 0.0168 0.0" '
+    'xyaxes="0 0 -1  -0.684 0.7295 0" fovy="70"/>'
+)
+
+
+def _inject_wristcam(worldbody_inner: str, prefix: str) -> str:
+    """Insert the wrist camera just inside the arm's Fixed_Jaw body."""
+    pattern = rf'(<body name="{re.escape(prefix)}Fixed_Jaw"[^>]*>)'
+    out, n = re.subn(pattern, r"\1" + _WRISTCAM_FMT.format(prefix=prefix),
+                     worldbody_inner, count=1)
+    if n != 1:
+        raise ValueError(f"no Fixed_Jaw body found for prefix {prefix!r}")
+    return out
+
+
 def camera_xyaxes(pos: Vec3, target: Vec3) -> str:
     """MJCF `xyaxes` for a camera at `pos` aimed at `target`.
 
@@ -292,12 +337,24 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
             parts.append(f"<{tag}>\n{joined}\n</{tag}>")
 
     _wrap("default",  [s.default_inner  for s in subtrees])
-    _wrap("asset",    [s.asset_inner    for s in subtrees])
+    _wrap("asset",    [s.asset_inner    for s in subtrees] + [_SCENE_ASSETS])
+
+    # Crisper shadows: the gripper's shadow on the bench is the operator's
+    # main height cue, and at the default 1024 shadowmap it dissolves into a
+    # blur by the time the camera is tight on the work.
+    #
+    # offwidth/offheight: MuJoCo's OFFSCREEN framebuffer defaults to 640x480,
+    # and a Renderer larger than it refuses to construct — which would
+    # silently kill the 960x720 operator cameras (SimCamera catches the
+    # error and the stream just never produces a frame). Sized with headroom
+    # over the largest configured camera, and pinned by a builder test.
+    parts.append('<visual><quality shadowsize="4096"/>'
+                 '<global offwidth="1280" offheight="960"/></visual>')
 
     parts.append("<worldbody>")
     parts.append(workbench_inner)
-    for s in subtrees:
-        parts.append(s.worldbody_inner)
+    for arm_id, s in zip(arms, subtrees):
+        parts.append(_inject_wristcam(s.worldbody_inner, f"{arm_id}_"))
     parts.extend(cube_chunks)
     # Overhead camera looking straight down at the workbench. Good for reading
     # shoulder_pan; nearly useless for shoulder_lift / elbow_flex, which is why
@@ -323,11 +380,23 @@ def build_scene(arms: list[str], cubes: int) -> tuple[str, dict[str, list[str]]]
     # Coverage now: |x| <= ~0.44 m across the working depth band, against
     # cubes at ±0.28 m and the place zone on the midline. A wide lateral swing
     # past that clips at the frame edge — the trade above, made on purpose.
-    _tq_pos: Vec3 = (0.0, -0.88, 0.62)
-    _tq_target: Vec3 = (0.0, -0.12, 0.045)
+    _tq_pos: Vec3 = (0.0, -0.72, 0.54)
+    _tq_target: Vec3 = (0.0, -0.14, 0.04)
     parts.append(
         f'<camera name="threequarter" pos="{" ".join(str(c) for c in _tq_pos)}" '
-        f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="50"/>'
+        f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="46"/>'
+    )
+    # Over-the-shoulder view: behind the mounts, looking along the arms — the
+    # same geometry as the passthrough operator's own eyes (vr_pose_mode's
+    # "behind" stance, the default). In this frame the operator's right is
+    # frame-right, so hand and gripper agree on screen; the threequarter view
+    # above faces the mounts and is the "front" stance's counterpart. Pulled
+    # up and back far enough that the arm towers don't eat the work area.
+    _os_pos: Vec3 = (0.0, 0.44, 0.56)
+    _os_target: Vec3 = (0.0, -0.16, 0.04)
+    parts.append(
+        f'<camera name="overshoulder" pos="{" ".join(str(c) for c in _os_pos)}" '
+        f'xyaxes="{camera_xyaxes(_os_pos, _os_target)}" fovy="48"/>'
     )
     parts.append("</worldbody>")
 

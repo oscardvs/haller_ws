@@ -59,6 +59,9 @@ cameras:
   - id: base_front
     role: base
     source: opencv
+    # Tower-mounted, facing the operator: HUD mirrors the view for display
+    # only (see config.yaml's base_front for the full note).
+    facing: operator
     # RealSense D455 colour node, tower-mounted, via the udev symlink.
     index_or_path: /dev/haller_cam_mast
     width: 640

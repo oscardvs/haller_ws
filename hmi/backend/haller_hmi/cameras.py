@@ -28,7 +28,10 @@ from .config import CameraConfig
 logger = logging.getLogger(__name__)
 
 JPEG_QUALITY = 80
-STREAM_FPS = 15.0  # MJPEG to the browser; capture FPS is per-camera
+STREAM_FPS = 30.0  # MJPEG to the browser; capture FPS is per-camera.
+# 30, not 15: the headset HUD now textures its camera tile straight from
+# this stream at display rate, and 15 fps source material reads as lag
+# you steer against when placing a gripper on a cube.
 
 
 class CameraHandle:
@@ -168,6 +171,7 @@ class CameraManager:
                 "width": h.cfg.width,
                 "height": h.cfg.height,
                 "fps": h.cfg.fps,
+                "facing": h.cfg.facing,
             }
             for h in self._handles.values()
         ]

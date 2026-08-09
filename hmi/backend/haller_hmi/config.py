@@ -168,6 +168,15 @@ class CameraConfig:
     flip_method: int = 0
     # sim_camera-specific: which <camera name="..."> in the composed MJCF.
     mjcf_camera: str | None = None
+    # "operator" when the camera looks back AT the operator (e.g. a mast cam
+    # on the tower, shooting over the arms toward whoever drives them). The
+    # headset HUD mirrors such a view horizontally for DISPLAY ONLY — a
+    # facing-you feed reads left/right-flipped against your own hands unless
+    # it behaves like a mirror. Recorded pixels are never touched (contrast
+    # flip_method above, which corrects the source for dataset and view
+    # alike): a policy must train on the true image, the operator on the
+    # intuitive one.
+    facing: str = "work"  # "work" | "operator"
 
 
 @dataclass

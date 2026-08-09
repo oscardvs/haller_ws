@@ -44,6 +44,9 @@ export type CameraInfo = {
   width: number;
   height: number;
   fps: number;
+  // "operator" when the camera looks back at whoever drives the arms (the
+  // tower mast cam). The headset HUD mirrors such a view for display only.
+  facing?: "work" | "operator";
 };
 
 export const cameraSnapshotUrl = (id: string) =>
@@ -104,6 +107,8 @@ export const api = {
     left_arm: string; right_arm: string; swap: boolean;
     hz?: number; clutch_source?: "spacebar" | "mouth" | "vr_grip";
   }) => postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/start", body),
+  humanTeleopHome: () =>
+    postJson<{ ok: true; sides: ("left" | "right")[] }>("/teleop/human/home", {}),
   humanTeleopStop: () =>
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/stop", {}),
   humanTeleopSwap: (swap: boolean) =>

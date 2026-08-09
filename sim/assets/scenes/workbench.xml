@@ -15,11 +15,14 @@
           pos="0 0 -0.02"
           rgba="0.16 0.16 0.18 1"
           friction="1 0.005 0.0001"/>
+    <!-- bench_mat (defined by the scene builder's asset block) carries a
+         low-contrast 5 cm checker: the lateral/depth reference the operator
+         reads gripper position against. A plain grey slab gave none. -->
     <geom name="workbench"
           type="box"
           size="0.6 0.45 0.01"
           pos="0 0 -0.01"
-          rgba="0.35 0.35 0.35 1"
+          material="bench_mat"
           friction="1 0.005 0.0001"/>
     <!-- Backdrop behind the bench. The operator camera stands in front of the
          bench looking back at it, so the top of its frame always clears the

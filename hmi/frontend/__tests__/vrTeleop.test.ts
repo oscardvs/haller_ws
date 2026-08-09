@@ -94,6 +94,16 @@ describe("sampleVRFrame", () => {
     const out = sampleVRFrame(s, frame, {}, { tsMs: 1 });
     expect(out.right?.trigger).toBeCloseTo(0.62);
   });
+
+  it("ships the stance so the backend picks the matching hand rotation", () => {
+    const s = session([controller("right", {})]);
+    const out = sampleVRFrame(s, frame, {}, { tsMs: 1, stance: "front" });
+    expect(out.stance).toBe("front");
+    // No stance option → no key on the wire; the backend's default (behind,
+    // the passthrough stance) must own that case, not a frontend fallback.
+    const bare = sampleVRFrame(s, frame, {}, { tsMs: 1 });
+    expect(bare.stance).toBeUndefined();
+  });
 });
 
 describe("estopPressed", () => {
@@ -213,7 +223,7 @@ describe("disengagedFrame", () => {
   });
 });
 
-import { mat4Multiply, paintHud, type HudStatusLike } from "../lib/vrTeleop";
+import { clusterLayout, mat4Multiply, paintHud, rayQuadHit, yawTowardHead, type HudStatusLike } from "../lib/vrTeleop";
 
 describe("mat4Multiply", () => {
   it("multiplies column-major like WebXR expects", () => {
@@ -239,6 +249,9 @@ describe("paintHud", () => {
       clearRect: () => {},
       fillRect: () => {},
       drawImage: () => {},
+      save: () => {}, restore: () => {},
+      beginPath: () => {}, rect: () => {}, clip: () => {},
+      measureText: (t: string) => ({ width: t.length * 17 }),
       fillText: (t: string) => { texts.push(t); },
       set fillStyle(_v: string) {},
       set font(_v: string) {},
@@ -260,27 +273,26 @@ describe("paintHud", () => {
                  blocking: [], reason: "clutch_open" },
       },
     };
-    paintHud(ctx, status, null);
+    paintHud(ctx, status);
     const all = texts.join(" | ");
     expect(all).toContain("ACQUIRING");
     expect(all).toContain("COLLISION HOLD -4 mm");
     expect(all).toContain("match: gripper");
-    expect(all).toContain("no workspace camera");
   });
 
   it("never throws on an empty status", () => {
     const { ctx, texts } = stubCtx();
-    expect(() => paintHud(ctx, null, null)).not.toThrow();
+    expect(() => paintHud(ctx, null)).not.toThrow();
     expect(texts.join(" ")).toContain("E-STOP");
   });
 
   it("shows the REC badge and frame count while recording, and hides it otherwise", () => {
     const on = stubCtx();
-    paintHud(on.ctx, { state: "driving" }, null, { recording: true, episode_frames: 612 });
+    paintHud(on.ctx, { state: "driving" }, { recording: true, episode_frames: 612 });
     expect(on.texts.join(" | ")).toContain("● REC 612");
 
     const off = stubCtx();
-    paintHud(off.ctx, { state: "driving" }, null, null);
+    paintHud(off.ctx, { state: "driving" });
     expect(off.texts.join(" | ")).not.toContain("● REC");
   });
 });
@@ -383,6 +395,9 @@ describe("paintHud view menu", () => {
       canvas: { width: 1024, height: 768 },
       clearRect: () => {}, fillRect: () => {}, drawImage: () => {},
       strokeRect: () => {},
+      save: () => {}, restore: () => {},
+      beginPath: () => {}, rect: () => {}, clip: () => {},
+      measureText: (t: string) => ({ width: t.length * 17 }),
       fillText: (t: string) => { texts.push(t); },
       set fillStyle(_v: string) {}, set font(_v: string) {},
       set textAlign(_v: string) {}, set strokeStyle(_v: string) {},
@@ -400,7 +415,7 @@ describe("paintHud view menu", () => {
 
   it("lists every view and marks the active one", () => {
     const { ctx, texts } = stubCtx();
-    paintHud(ctx, {}, null, null, menu);
+    paintHud(ctx, {}, null, menu);
     const all = texts.join(" | ");
     expect(all).toContain("threequarter");
     expect(all).toContain("▸ overhead");
@@ -409,7 +424,7 @@ describe("paintHud view menu", () => {
 
   it("states both bindings and the tile size", () => {
     const { ctx, texts } = stubCtx();
-    paintHud(ctx, {}, null, null, menu);
+    paintHud(ctx, {}, null, menu);
     const all = texts.join(" | ");
     expect(all).toContain("L stick");
     expect(all).toContain("R stick");
@@ -418,11 +433,11 @@ describe("paintHud view menu", () => {
 
   it("shows the record command, and the frame count while rolling", () => {
     const idle = stubCtx();
-    paintHud(idle.ctx, {}, null, { recording: false, episode_frames: 0 }, menu);
+    paintHud(idle.ctx, {}, { recording: false, episode_frames: 0 }, menu);
     expect(idle.texts.join(" | ")).toContain("hold A/X to START");
 
     const live = stubCtx();
-    paintHud(live.ctx, {}, null, { recording: true, episode_frames: 42 }, menu);
+    paintHud(live.ctx, {}, { recording: true, episode_frames: 42 }, menu);
     const all = live.texts.join(" | ");
     expect(all).toContain("REC 42");
     expect(all).toContain("hold A/X to STOP");
@@ -430,14 +445,57 @@ describe("paintHud view menu", () => {
 
   it("is omitted entirely when no menu is passed", () => {
     const { ctx, texts } = stubCtx();
-    paintHud(ctx, {}, null, null);
+    paintHud(ctx, {});
     expect(texts.join(" | ")).not.toContain("stick");
   });
 
   it("says so rather than drawing an empty box when there are no cameras", () => {
     const { ctx, texts } = stubCtx();
-    paintHud(ctx, {}, null, null,
+    paintHud(ctx, {}, null,
              { views: [], activeViewId: null, tileSize: "S" });
     expect(texts.join(" | ")).toContain("(no cameras)");
+  });
+});
+
+describe("HUD cluster geometry", () => {
+  const anchor = { pos: [0, 1.35, -1.15] as [number, number, number], yawDeg: 0 };
+
+  it("hangs the panel fully below the camera tile — never on top of it", () => {
+    const l = clusterLayout(1.1, 0.75, 400 / 1024, true);
+    // Panel top edge must sit below the tile's bottom edge.
+    expect(l.panelYOff + l.panelH / 2).toBeLessThan(-l.camH / 2);
+  });
+
+  it("centres the panel on the anchor when there is no camera tile", () => {
+    const l = clusterLayout(1.1, 0.75, 400 / 1024, false);
+    expect(l.camH).toBe(0);
+    expect(l.panelYOff).toBe(0);
+  });
+
+  it("hits the tile straight ahead of the operator, and misses beside it", () => {
+    // Ray from head height at the origin, straight at the tile centre.
+    const hit = rayQuadHit([0, 1.35, 0], [0, 0, -1], anchor, 0, 1.1, 0.8);
+    expect(hit).toBeCloseTo(1.15, 5);
+    // Same ray shifted a metre sideways sails past.
+    expect(rayQuadHit([1.5, 1.35, 0], [0, 0, -1], anchor, 0, 1.1, 0.8)).toBeNull();
+    // A ray pointing away never hits (negative t is rejected).
+    expect(rayQuadHit([0, 1.35, 0], [0, 0, 1], anchor, 0, 1.1, 0.8)).toBeNull();
+  });
+
+  it("respects the anchor yaw: a cluster turned 90° is hit from its front", () => {
+    const turned = { pos: [1.15, 1.35, 0] as [number, number, number], yawDeg: 90 };
+    // yaw 90 turns the quad's normal from +z to +x, so it faces the origin.
+    const hit = rayQuadHit([0, 1.35, 0], [1, 0, 0], turned, 0, 1.1, 0.8);
+    expect(hit).toBeCloseTo(1.15, 5);
+    // Straight down the old normal now misses (edge-on plane, u out of range).
+    expect(rayQuadHit([1.15, 1.35, 2], [0, 0, -1], turned, 0, 1.1, 0.8)).toBeNull();
+  });
+
+  it("yawTowardHead turns the cluster to face the head", () => {
+    // Cluster due -z of the head: no turn needed.
+    expect(yawTowardHead([0, 1.35, -1.15], [0, 1.6, 0])).toBeCloseTo(0, 5);
+    // Cluster due +x of the head: face -x, i.e. yaw 90° puts +z toward head?
+    const yaw = yawTowardHead([1.15, 1.35, 0], [0, 1.6, 0]);
+    expect(yaw).toBeCloseTo(-90, 5);
   });
 });

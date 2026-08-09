@@ -35,7 +35,28 @@ def test_build_scene_loads_and_has_expected_arms(preset):
         assert arm_joint_map[arm_id] == [f"{arm_id}_{j}" for j in SO101_JOINTS]
 
 
-@pytest.mark.parametrize("cam_name", ["overhead", "threequarter"])
+def test_offscreen_framebuffer_fits_the_operator_cameras():
+    """MuJoCo's offscreen framebuffer defaults to 640x480 and a Renderer
+    larger than it refuses to construct — which silently kills any camera
+    configured above that (SimCamera logs and produces no frames). The
+    composed scene must declare a framebuffer at least as big as the largest
+    camera the sim configs use (960x720, with headroom)."""
+    mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=1)
+    model = mujoco.MjModel.from_xml_string(mjcf_xml)
+    assert model.vis.global_.offwidth >= 960
+    assert model.vis.global_.offheight >= 720
+    # The real proof: a 960x720 renderer actually constructs and renders.
+    renderer = mujoco.Renderer(model, 720, 960)
+    try:
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        renderer.update_scene(data, camera="overshoulder")
+        assert renderer.render().shape == (720, 960, 3)
+    finally:
+        renderer.close()
+
+
+@pytest.mark.parametrize("cam_name", ["overhead", "threequarter", "overshoulder"])
 def test_build_scene_has_camera(cam_name):
     mjcf_xml, _ = build_scene(arms=["right"], cubes=1)
     model = mujoco.MjModel.from_xml_string(mjcf_xml)
@@ -127,10 +148,11 @@ def _in_frame(model, cam_name, point, aspect):
     return abs(ndc_x) <= 1.0 and abs(ndc_y) <= 1.0, ndc_x, ndc_y
 
 
-def test_threequarter_camera_frames_the_whole_task():
-    """The three-quarter view is what the operator teleops from AND what the
-    recorder saves as the dataset's base camera. Every object the task names has
-    to be inside it — a cube framed out is a cube the policy never sees.
+@pytest.mark.parametrize("cam_name", ["threequarter", "overshoulder"])
+def test_operator_cameras_frame_the_whole_task(cam_name):
+    """Both operator views (front and over-the-shoulder) can be teleoped from
+    and get recorded. Every object the task names has to be inside them — a
+    cube framed out is a cube the policy never sees.
 
     Aspect is 4:3, matching the 640x480 the sim camera configs render at.
     """
@@ -151,49 +173,55 @@ def test_threequarter_camera_frames_the_whole_task():
     out_of_frame = {
         name: (round(nx, 3), round(ny, 3))
         for name, p in targets.items()
-        for ok, nx, ny in [_in_frame(model, "threequarter", p, aspect)]
+        for ok, nx, ny in [_in_frame(model, cam_name, p, aspect)]
         if not ok
     }
-    assert not out_of_frame, f"outside the threequarter frame: {out_of_frame}"
+    assert not out_of_frame, f"outside the {cam_name} frame: {out_of_frame}"
 
 
-def test_threequarter_camera_agrees_with_the_operator_frame():
-    """The operator watches this camera and moves their hand; the two have to
-    agree or the view reads mirrored.
-
-    vr_pose_mode maps operator right → robot +x and operator forward → robot
-    +y. So this camera must see +x to the RIGHT of frame and must look ALONG
-    +y — i.e. stand in front of the bench facing the mounts, where the operator
-    stands. Viewing the same scene from behind (+y, looking −y) would flip
-    left/right on screen while the mapping stayed put, which is the mirrored
-    view in its other guise.
-    """
+@pytest.mark.parametrize("cam_name,right_world,along_world", [
+    # Each operator camera is the eye of a stance in vr_pose_mode's
+    # _STANCE_BASES, and camera and mapping have to agree laterally or the
+    # view reads backwards. threequarter faces the mounts — the face-to-face
+    # eye that both "mirror" (default) and "front" drive against; both map
+    # operator right to robot +x, which must be frame-right here (the two
+    # stances differ only in DEPTH, which is the mirror metaphor's point).
+    # overshoulder stands where a "behind" operator stands: right is −x,
+    # forward −y. A camera paired with the wrong stance flips left/right on
+    # screen while the mapping stays put.
+    ("threequarter", (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+    ("overshoulder", (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0)),
+])
+def test_operator_cameras_agree_with_their_stance(cam_name, right_world, along_world):
     import numpy as np
 
     mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=3)
     model = mujoco.MjModel.from_xml_string(mjcf_xml)
-    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "threequarter")
+    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
     rot = np.array(model.cam_mat0[cid]).reshape(3, 3)
 
     image_right = rot[:, 0]
     view_dir = -rot[:, 2]
-    assert float(image_right @ np.array([1.0, 0.0, 0.0])) > 0.9, (
-        f"image-right is {image_right.round(3)}, which does not agree with "
-        f"robot +x — the view is left/right mirrored w.r.t. the hand mapping")
-    assert float(view_dir @ np.array([0.0, 1.0, 0.0])) > 0.3, (
-        f"view direction is {view_dir.round(3)}; the camera must look along "
-        f"+y (operator forward), not back down it")
+    assert float(image_right @ np.array(right_world)) > 0.9, (
+        f"{cam_name} image-right is {image_right.round(3)}, which does not "
+        f"agree with its stance's operator-right {right_world} — the view is "
+        f"left/right mirrored w.r.t. the hand mapping")
+    assert float(view_dir @ np.array(along_world)) > 0.3, (
+        f"{cam_name} view direction is {view_dir.round(3)}; it must look "
+        f"along its stance's forward {along_world}, not back down it")
 
 
-def test_threequarter_camera_looks_down_at_the_bench():
-    """Pins the fix for the near-eye-level framing this camera used to have:
-    aimed almost along the bench, it spent most of its pixels on empty space
-    above the far edge. It has to look DOWN into the workspace."""
+@pytest.mark.parametrize("cam_name", ["threequarter", "overshoulder"])
+def test_operator_cameras_look_down_at_the_bench(cam_name):
+    """Pins the fix for the near-eye-level framing the front camera used to
+    have: aimed almost along the bench, it spent most of its pixels on empty
+    space above the far edge. Operator views have to look DOWN into the
+    workspace."""
     import numpy as np
 
     mjcf_xml, _ = build_scene(arms=["left", "right"], cubes=3)
     model = mujoco.MjModel.from_xml_string(mjcf_xml)
-    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "threequarter")
+    cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name)
     rot = np.array(model.cam_mat0[cid]).reshape(3, 3)
     # View ray is the camera's -Z axis, the third column of R.
     ray = -rot[:, 2]

@@ -273,6 +273,54 @@ def test_commit_loop_does_not_write_when_not_driving():
         sess.stop()
 
 
+def test_request_home_slews_held_sides_through_the_commit_loop():
+    """The headset's hold-the-left-stick reset: held sides slew to home (0°,
+    gripper open) INSIDE the session — through the same smoothing and caps as
+    any teleop step — because the discrete /arm/{id}/home path is refused
+    while the session owns the arms."""
+    mgr, arms = _fake_arm_manager()
+    for a in arms.values():
+        a.read_joints_deg.return_value = {j: 25.0 for j in a.joint_limits_deg}
+    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=False))  # TRACKING, both held
+        assert sess.request_home() == ["left", "right"]
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+
+        def last_left():
+            return arms["left"].send_goal.call_args_list[-1].args[0]
+
+        # Joints head for 0°; the gripper parks OPEN (hi of its range), not
+        # closed — a reset that ends with shut jaws would fight the next grab.
+        assert _wait_until(lambda: abs(last_left()["shoulder_pan"]) < 5.0,
+                           timeout=3.0)
+        assert _wait_until(lambda: last_left()["gripper"] > 25.0, timeout=3.0)
+    finally:
+        sess.stop()
+
+
+def test_request_home_skips_driving_sides():
+    """The operator's hand outranks a parked reset: a DRIVING side is not
+    accepted, and nothing interrupts the live stream."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right", swap=False)
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(
+            lambda: sess.status()["acquire"]["left"]["authority"] == "driving")
+        assert sess.request_home() == []
+    finally:
+        sess.stop()
+
+
+def test_request_home_refused_when_no_session_runs():
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    assert sess.request_home() == []
+
+
 def test_commit_loop_clamps_to_arm_joint_limits():
     mgr, arms = _fake_arm_manager()
     # Squeeze the left arm's pan limit so retarget output gets clamped.

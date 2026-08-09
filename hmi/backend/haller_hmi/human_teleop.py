@@ -103,6 +103,22 @@ VR_ACQUIRE_TOL_DEG: dict[str, float] = {
 }
 #: Countdown from the clutch closing to the earliest possible handover.
 ACQUIRE_MS = 3000.0
+#: The same countdown for vr_grip sessions, much shorter — and not because VR
+#: operators are more trusted. In position mode the handover is ZERO-ERROR by
+#: construction (the anchor binds the hand to wherever the arm already is, so
+#: there is nothing to lurch toward), which removes the reason the countdown
+#: is 3 s everywhere else. What remains is filtering an accidental grip, and
+#: 1 s does that. This matters because every tracking blip longer than the
+#: grace window costs one full re-acquire: at 3 s a session with a few blips
+#: feels broken, at 1 s it feels like a hiccup.
+VR_ACQUIRE_MS = 1000.0
+#: Per-side tracking-loss grace for vr_grip sessions, vs the 300 ms default.
+#: Quest controller tracking flickers — hands at the FOV edge, occlusions —
+#: and in position mode a longer grace is SAFE by construction: during the
+#: gap no new targets arrive (the arm holds), and on recovery the next frame
+#: re-anchors at the hand's new position, so there is no stale-goal jump for
+#: the grace to protect against.
+VR_FRAME_AGE_MS_LOSS = 700.0
 #: How long the pose match must hold before handover. Separate from the
 #: countdown so estimator jitter across the tolerance boundary costs the
 #: operator this much, not the whole countdown — a hard reset on every flicker
@@ -248,6 +264,10 @@ class HumanTeleopSession:
         self._dead_man_sides: dict[str, bool] = {"left": False, "right": False}
         self._target_left: dict | None = None
         self._target_right: dict | None = None
+        # Sides asked to slew HOME while their clutch is open (the headset's
+        # hold-the-left-stick reset). Cleared the moment a side starts
+        # driving: the operator's hand always outranks a parked reset.
+        self._home_req: dict[str, bool] = {"left": False, "right": False}
         self._pinch_calib_left: dict = {"min_m": 0.02, "max_m": 0.18}
         self._pinch_calib_right: dict = {"min_m": 0.02, "max_m": 0.18}
         self._committed_left: dict[str, float] = {}
@@ -412,11 +432,11 @@ class HumanTeleopSession:
                 "tracking": {
                     "left":  {
                         "age_ms": left_age,
-                        "lost":   left_age is not None and left_age > self._frame_age_ms_loss,
+                        "lost":   left_age is not None and left_age > self._frame_age_ms_loss_now(),
                     },
                     "right": {
                         "age_ms": right_age,
-                        "lost":   right_age is not None and right_age > self._frame_age_ms_loss,
+                        "lost":   right_age is not None and right_age > self._frame_age_ms_loss_now(),
                     },
                 },
                 "goal_deg": {
@@ -464,7 +484,7 @@ class HumanTeleopSession:
                 # actually been handed over, and if not, what is still in the
                 # way. The two were the same event before acquisition existed.
                 "acquire": {
-                    "acquire_ms": self._acquire_ms,
+                    "acquire_ms": self._acquire_ms_now(),
                     "match_dwell_ms": self._match_dwell_ms,
                     "left":  self._acquire_status("left", now),
                     "right": self._acquire_status("right", now),
@@ -492,7 +512,7 @@ class HumanTeleopSession:
         committed = self._committed_left if side == "left" else self._committed_right
         remaining: float | None = None
         if acq.authority is SideAuthority.ACQUIRING and acq.since_perf is not None:
-            remaining = max(0.0, self._acquire_ms - (now - acq.since_perf) * 1000.0)
+            remaining = max(0.0, self._acquire_ms_now() - (now - acq.since_perf) * 1000.0)
         ramp: float | None = None
         if acq.authority is SideAuthority.DRIVING and acq.driving_since_perf is not None:
             ramp = min(1.0, (now - acq.driving_since_perf) * 1000.0
@@ -511,6 +531,19 @@ class HumanTeleopSession:
             # it BEFORE they engage, to pre-position against.
             "ghost": self._ghost(side, committed),
         }
+
+    def _acquire_ms_now(self) -> float:
+        """vr_grip sessions count down faster — see VR_ACQUIRE_MS."""
+        if self._clutch_source == "vr_grip":
+            return min(self._acquire_ms, VR_ACQUIRE_MS)
+        return self._acquire_ms
+
+    def _frame_age_ms_loss_now(self) -> float:
+        """vr_grip sessions ride out longer tracking blips — see
+        VR_FRAME_AGE_MS_LOSS."""
+        if self._clutch_source == "vr_grip":
+            return max(self._frame_age_ms_loss, VR_FRAME_AGE_MS_LOSS)
+        return self._frame_age_ms_loss
 
     def _tol_for(self, joint: str) -> float:
         """Tolerance by clutch source: vr_grip sessions get the VR set — see
@@ -615,6 +648,7 @@ class HumanTeleopSession:
             self._ws_disconnected_at_perf = None
             self._target_left = None
             self._target_right = None
+            self._home_req = {"left": False, "right": False}
             # Mirror parity belongs to the input source; the next session's
             # frames re-assert it or fall back to the swap-based default.
             self._mirror_mode = None
@@ -644,6 +678,40 @@ class HumanTeleopSession:
         self._thread.start()
         logger.info("human teleop started: left=%s right=%s swap=%s @ %.1f Hz",
                     left_arm, right_arm, swap, effective_hz)
+
+    def request_home(self) -> list[str]:
+        """Slew every non-driving side to home (0° joints, gripper open),
+        INSIDE the session.
+
+        This exists because the discrete move path (`POST /arm/{id}/home`)
+        is — correctly — refused while a session owns the arms, yet the
+        operator standing in a headset with the grips open plainly should be
+        able to park the arms between takes. Done here, the home target rides
+        the exact machinery every teleop step rides: the one-pole LPF, the
+        per-tick rate caps, and the bimanual collision guard — which the
+        discrete path never consults.
+
+        Returns the sides that accepted the request. A DRIVING side is
+        skipped, and any accepted request self-cancels the moment its side
+        starts driving: the operator's hand outranks a parked reset.
+        """
+        with self._lock:
+            if not self.running:
+                return []
+            sides = [s for s in ("left", "right")
+                     if self._acq[s].authority is not SideAuthority.DRIVING]
+            for s in sides:
+                self._home_req[s] = True
+        return sides
+
+    @staticmethod
+    def _home_target(handle) -> dict[str, float]:
+        """Home pose in target units: 0° on every joint, gripper OPEN (1.0 in
+        the retargeter's [0,1] gripper convention) — a reset that ends with
+        closed jaws would fight the very next grab."""
+        target = {j: 0.0 for j in handle.joint_limits_deg}
+        target["gripper"] = 1.0
+        return target
 
     def stop(self) -> None:
         with self._lock:
@@ -820,7 +888,7 @@ class HumanTeleopSession:
 
     def _side_trackable(self, side: str, now: float) -> bool:
         last = self._last_left_perf if side == "left" else self._last_right_perf
-        return last != 0.0 and (now - last) * 1000.0 <= self._frame_age_ms_loss
+        return last != 0.0 and (now - last) * 1000.0 <= self._frame_age_ms_loss_now()
 
     def _update_authority(self, now: float) -> None:
         """Advance both sides' authority. Caller holds the lock.
@@ -882,7 +950,7 @@ class HumanTeleopSession:
             acq.reason = "counting" if acq.matched else "matching"
 
             counted_down = (acq.since_perf is not None
-                            and (now - acq.since_perf) * 1000.0 >= self._acquire_ms)
+                            and (now - acq.since_perf) * 1000.0 >= self._acquire_ms_now())
             dwelled = (acq.matched_since_perf is not None
                        and (now - acq.matched_since_perf) * 1000.0
                        >= self._match_dwell_ms)
@@ -1125,8 +1193,19 @@ class HumanTeleopSession:
                                     is SideAuthority.DRIVING)
                     driving_right = (self._acq["right"].authority
                                      is SideAuthority.DRIVING)
-                    target_left = self._target_left if driving_left else None
-                    target_right = self._target_right if driving_right else None
+                    # A driving hand cancels a pending home request; a held
+                    # side with one keeps slewing home through the same
+                    # LPF/rate-cap/guard chain as any teleop step.
+                    if driving_left:
+                        self._home_req["left"] = False
+                    if driving_right:
+                        self._home_req["right"] = False
+                    target_left = (self._target_left if driving_left
+                                   else self._home_target(left)
+                                   if self._home_req["left"] else None)
+                    target_right = (self._target_right if driving_right
+                                    else self._home_target(right)
+                                    if self._home_req["right"] else None)
                     cap_left = self._ramp_cap("left", period, now)
                     cap_right = self._ramp_cap("right", period, now)
                     prev_left = dict(self._committed_left)
@@ -1201,9 +1280,18 @@ class HumanTeleopSession:
                 # whether an arm may move, and two of those is how they come to
                 # disagree. Losing a side now DEMOTES it rather than merely
                 # skipping the write, so recovery re-runs acquisition.
-                if driving_left:
+                #
+                # A pending home request is the one sanctioned exception: the
+                # side is HELD (no operator authority), but the target was set
+                # by request_home, not by tracking — and it has already been
+                # through the same smoothing, caps and guard as any driven
+                # step by the time it reaches here.
+                with self._lock:
+                    homing_left = self._home_req["left"]
+                    homing_right = self._home_req["right"]
+                if driving_left or homing_left:
                     sent_left = self._commit(left, self._committed_left)
-                if driving_right:
+                if driving_right or homing_right:
                     sent_right = self._commit(right, self._committed_right)
                 # `_commit` reports what send_goal ACTUALLY sent, which can be
                 # less than `_committed_left`/`_right` asked for (see
@@ -1217,9 +1305,9 @@ class HumanTeleopSession:
                 # above stay outside any lock: real hardware traffic, or a
                 # locked sim step, that status() must not block on.
                 with self._lock:
-                    if driving_left:
+                    if driving_left or homing_left:
                         self._committed_left = {**self._committed_left, **sent_left}
-                    if driving_right:
+                    if driving_right or homing_right:
                         self._committed_right = {**self._committed_right, **sent_right}
                 # WS disconnect grace window: if too much time has passed, auto-stop.
                 with self._lock:

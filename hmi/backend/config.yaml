@@ -71,6 +71,11 @@ cameras:
   - id: base_front
     role: base
     source: opencv
+    # Tower-mounted, shooting over the arms toward the operator - the headset
+    # HUD mirrors this view horizontally for display (never for recording) so
+    # it reads like a mirror instead of left/right-flipped. If the mast ever
+    # moves to the operator's side of the bench, set facing: work.
+    facing: operator
     # RealSense D455 RGB node, tower-mounted, looking at the bimanual workspace.
     # The D455 exposes plain UVC nodes, so no librealsense is needed for RGB.
     #

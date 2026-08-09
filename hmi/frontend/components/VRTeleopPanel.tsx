@@ -37,13 +37,15 @@ import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
 import {
-  attachRenderScene, axPressed, CAM_TILE_SIZES, cycleIndex, disengagedFrame,
-  estopPressed, hapticCues, holdToggle, holdToggleInit, paintHud, pulse,
-  RECORD_HOLD_MS, requestTeleopSession, sampleVRFrame, thumbstickPressed,
-  xrAvailableAtAll, xrSupported,
-  type BodyOverride, type HoldToggleState, type SideAuthorityLike,
-  type TeleopXRSession, type VRFrame, type VrMenuLike, type XRFrameLike,
-  type XRSessionLike,
+  attachRenderScene, axPressed, CAM_TILE_SIZES, clusterLayout, controllerRays,
+  cycleIndex, DEFAULT_HUD_ANCHOR, disengagedFrame, estopPressed, hapticCues,
+  holdToggle, holdToggleInit, paintHud, pulse, RECORD_HOLD_MS, rayQuadHit,
+  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame, thumbstickPressed,
+  xrAvailableAtAll,
+  xrSupported, yawTowardHead,
+  type BodyOverride, type HoldToggleState, type HudAnchor,
+  type SideAuthorityLike, type TeleopXRSession, type VRFrame, type VrMenuLike,
+  type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
 import { repoIdFor } from "./cockpit/CommandBar";
 import { DeadManIndicator } from "./DeadManIndicator";
@@ -58,9 +60,15 @@ const PUBLISH_MS = 33;
 const BODY_LS_KEY = "haller.vrTeleop.body.v1";
 const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
 const VRMODE_LS_KEY = "haller.vrTeleop.mode.v1";
+const STANCE_LS_KEY = "haller.vrTeleop.stance.v1";
 
 const TILE_LS_KEY = "haller.vrTeleop.tile.v1";
-const VIEW_LS_KEY = "haller.vrTeleop.view.v1";
+// v2, deliberately: v1 headsets remember a view from before the
+// over-the-shoulder camera existed, and the natural default is that view
+// paired with the "behind" stance. One forced re-default; the choice
+// persists again from there.
+const VIEW_LS_KEY = "haller.vrTeleop.view.v2";
+const HUD_ANCHOR_LS_KEY = "haller.vrTeleop.hudAnchor.v1";
 
 function fmtMm(m: number | undefined): string {
   return m === undefined ? "—" : `${(m * 1000).toFixed(0)} mm`;
@@ -83,6 +91,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [body, setBody] = useState<BodyOverride>({});
   const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
   const [vrMode, setVrMode] = useState<"pose" | "joints">("pose");
+  const [stance, setStance] = useState<"behind" | "mirror" | "front">("behind");
   // The workspace camera floated into the HUD. In passthrough the operator
   // normally watches the REAL arms — but against a sim backend there is
   // nothing physical to look at, so the MuJoCo camera IS the workspace view
@@ -105,6 +114,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const bodyRef = useRef<BodyOverride>({});
   const mirrorModeRef = useRef<"none" | "both">("none");
   const vrModeRef = useRef<"pose" | "joints">("pose");
+  const stanceRef = useRef<"behind" | "mirror" | "front">("behind");
   const lastPubRef = useRef(0);
   const estopDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
@@ -118,13 +128,25 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const axToggleRef = useRef<HoldToggleState>(holdToggleInit());
   const viewsRef = useRef<CameraInfo[]>([]);
   const tileIdxRef = useRef(0);
-  const lStickDownRef = useRef(false);
   const rStickDownRef = useRef(false);
   const menuRef = useRef<VrMenuLike>(null);
+  // Where the HUD cluster hangs, and the in-flight grab if the operator is
+  // currently dragging it. Refs, not state: both change inside the XR loop.
+  const anchorRef = useRef<HudAnchor>({
+    pos: [...DEFAULT_HUD_ANCHOR.pos], yawDeg: DEFAULT_HUD_ANCHOR.yawDeg });
+  const grabRef = useRef<null | {
+    hand: "left" | "right"; dist: number; offset: [number, number, number];
+  }>(null);
+  // Left-stick click doubles up: short click cycles the view, a long hold
+  // resets the arms — so the click action fires on RELEASE, gated by how
+  // long the stick was down.
+  const lStickDownAtRef = useRef<number | null>(null);
+  const lStickFiredRef = useRef(false);
 
   bodyRef.current = body;
   mirrorModeRef.current = mirrorMode;
   vrModeRef.current = vrMode;
+  stanceRef.current = stance;
   statusRef.current = status;
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
@@ -135,6 +157,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     views: views.map((c) => ({ id: c.id, label: viewLabel(c) })),
     activeViewId: baseCam?.id ?? null,
     tileSize: CAM_TILE_SIZES[tileIdx]?.name ?? "S",
+    ...(vrMode === "pose" ? { stance } : {}),
   };
 
   useEffect(() => {
@@ -165,12 +188,34 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       const mm = localStorage.getItem(MIRROR_LS_KEY);
       if (mm === "both") setMirrorMode("both");
       if (localStorage.getItem(VRMODE_LS_KEY) === "joints") setVrMode("joints");
+      const st = localStorage.getItem(STANCE_LS_KEY);
+      if (st === "front" || st === "mirror") setStance(st);
+      try {
+        const a = JSON.parse(localStorage.getItem(HUD_ANCHOR_LS_KEY) ?? "");
+        if (Array.isArray(a?.pos) && a.pos.length === 3
+            && typeof a?.yawDeg === "number") {
+          anchorRef.current = { pos: a.pos, yawDeg: a.yawDeg };
+        }
+      } catch { /* no saved placement: spawn at the default */ }
       const t = Number(localStorage.getItem(TILE_LS_KEY));
       if (Number.isInteger(t) && t >= 0 && t < CAM_TILE_SIZES.length) setTileIdx(t);
     } catch {
       /* a corrupt override must not block entering VR; defaults are fine */
     }
   }, []);
+
+  // The hand-to-arm pairing is chosen at session START from the stance
+  // (see enterVR). Changing stance mid-session re-maps the deltas on the
+  // next squeeze but cannot re-pair the arms — say so instead of silently
+  // half-applying.
+  const stancePrevRef = useRef(stance);
+  useEffect(() => {
+    const changed = stancePrevRef.current !== stance;
+    stancePrevRef.current = stance;
+    if (changed && inSession) {
+      toast.info("stance changed — exit and re-enter VR to re-pair hands to arms");
+    }
+  }, [stance, inSession]);
 
   // Status poll. Cheap, and it is what feeds the HUD — the only thing the
   // operator can see from inside the headset. Also the haptic driver: the
@@ -342,6 +387,36 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   }, []);
 
+  /** Reset both arms to their home pose from inside the headset (hold the
+   *  left stick ~0.8 s). Gated on no side driving: home is a discrete move
+   *  and must never fight a live teleop stream — with the grips open the
+   *  arms are frozen, so the move owns them cleanly. */
+  const resetArms = useCallback(async () => {
+    const st = statusRef.current;
+    const driving = (["left", "right"] as const).some(
+      (side) => st?.acquire?.[side]?.authority === "driving");
+    const session = sessionRef.current;
+    if (driving) {
+      // Refused, and the buzz says so: one weak tick instead of the firm
+      // double pulse of a completed reset.
+      if (session) pulse(session, "left", 0.2, 60);
+      return;
+    }
+    try {
+      // In-session home: the discrete /arm/{id}/home is refused while the
+      // session owns the arms, and rightly so — this one slews home through
+      // the session's own ramp and collision guard.
+      const { sides } = await api.humanTeleopHome();
+      if (session && sides.length) {
+        pulse(session, "left", 0.6, 180);
+        pulse(session, "right", 0.6, 180);
+      }
+      toast.success(`arms resetting to home (${sides.join(", ") || "none"})`);
+    } catch (e) {
+      toast.error(`arm reset failed: ${(e as Error).message}`);
+    }
+  }, []);
+
   const enterVR = useCallback(async () => {
     if (armIds.length < 2) {
       // Checked here rather than letting the backend 400, because the reason is
@@ -376,10 +451,18 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     // — another teleop already running, an unknown arm — we want to find out
     // before frames are in flight, not while the operator is already immersed
     // and squeezing a grip that does nothing.
+    // Hand↔arm pairing follows the stance. In the "behind" (egocentric)
+    // stance the operator faces the same way the arms reach, so the arm
+    // under their RIGHT hand — the one on frame-right in the overshoulder
+    // view — is the one the config names "left" (robot −x). Assigning the
+    // arms per stance keeps "my right hand drives the arm on my right" true
+    // in every stance; without this, behind-stance hands-apart made the
+    // arms cross on screen, which reads as "the controls are inverted".
+    const behind = stanceRef.current === "behind";
     try {
       await api.humanTeleopStart({
-        left_arm: armIds[0],
-        right_arm: armIds[1],
+        left_arm: behind ? armIds[1] : armIds[0],
+        right_arm: behind ? armIds[0] : armIds[1],
         swap: false,
         clutch_source: "vr_grip",
       });
@@ -412,7 +495,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     if (!overlayActive) {
       hudCanvas = document.createElement("canvas");
       hudCanvas.width = 1024;
-      hudCanvas.height = 768;
+      hudCanvas.height = 440;
       hudCtx = hudCanvas.getContext("2d");
       toast.info("browser has no dom-overlay — HUD is drawn inside the scene");
     }
@@ -426,25 +509,99 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       const live = sessionRef.current;
       if (!live) return;
       live.requestAnimationFrame(onXRFrame);
-      // View menu, on the two inputs nothing else claims. Edge-detected: a
-      // stick click is a discrete choice, and unlike the record toggle it is
-      // harmless enough to fire on press rather than on a hold.
+      // Left stick: short click = next view, ~0.8 s hold = reset arms. The
+      // click therefore fires on RELEASE (still instant to a human), so a
+      // hold cannot first cycle the view on its way to the reset.
       const lStick = thumbstickPressed(live, "left");
-      if (lStick && !lStickDownRef.current) cycleView();
-      lStickDownRef.current = lStick;
+      if (lStick) {
+        if (lStickDownAtRef.current === null) {
+          lStickDownAtRef.current = t;
+          lStickFiredRef.current = false;
+        } else if (!lStickFiredRef.current
+                   && t - lStickDownAtRef.current >= RESET_HOLD_MS) {
+          lStickFiredRef.current = true;
+          void resetArms();
+        }
+      } else {
+        if (lStickDownAtRef.current !== null && !lStickFiredRef.current
+            && t - lStickDownAtRef.current < 350) {
+          cycleView();
+        }
+        lStickDownAtRef.current = null;
+      }
       const rStick = thumbstickPressed(live, "right");
       if (rStick && !rStickDownRef.current) cycleTile();
       rStickDownRef.current = rStick;
 
+      // Grab-to-move: point at the HUD cluster and hold the trigger while
+      // that hand's arm is NOT driving (while driving, the trigger is the
+      // gripper and the HUD refuses to move). Quest-window semantics: the
+      // cluster follows the ray at its grab distance and keeps facing you.
+      const anchor = anchorRef.current;
+      if (hudCanvas) {
+        const rays = controllerRays(live, frame, refSpaceRef.current);
+        const camW = CAM_TILE_SIZES[tileIdxRef.current]?.widthM ?? 1.1;
+        const layout = clusterLayout(camW, 0.75, hudCanvas.height / hudCanvas.width,
+                                     Boolean(camImgRef.current));
+        const grab = grabRef.current;
+        if (grab) {
+          const ray = rays[grab.hand];
+          if (!ray || !ray.trigger) {
+            grabRef.current = null;
+            try {
+              localStorage.setItem(HUD_ANCHOR_LS_KEY, JSON.stringify(anchor));
+            } catch { /* private mode: placement just won't persist */ }
+          } else {
+            for (let i = 0; i < 3; i++) {
+              anchor.pos[i] = ray.origin[i] + ray.dir[i] * grab.dist
+                - grab.offset[i];
+            }
+            const head = frame.getViewerPose(refSpaceRef.current)
+              ?.transform?.position;
+            if (head) {
+              anchor.yawDeg = yawTowardHead(anchor.pos, [head.x, head.y, head.z]);
+            }
+          }
+        } else {
+          for (const hand of ["left", "right"] as const) {
+            const ray = rays[hand];
+            if (!ray?.trigger) continue;
+            const authority = statusRef.current?.acquire?.[hand]?.authority;
+            if (authority === "driving") continue;
+            const tCam = rayQuadHit(ray.origin, ray.dir, anchor, 0,
+                                    camW, layout.camH || 0.2);
+            const tPanel = rayQuadHit(ray.origin, ray.dir, anchor,
+                                      layout.panelYOff, layout.panelW,
+                                      layout.panelH);
+            const tHit = tCam ?? tPanel;
+            if (tHit === null) continue;
+            const offset: [number, number, number] = [
+              ray.origin[0] + ray.dir[0] * tHit - anchor.pos[0],
+              ray.origin[1] + ray.dir[1] * tHit - anchor.pos[1],
+              ray.origin[2] + ray.dir[2] * tHit - anchor.pos[2],
+            ];
+            grabRef.current = { hand, dist: tHit, offset };
+            pulse(live, hand, 0.3, 40);
+            break;
+          }
+        }
+      }
+
       let hudDirty = false;
       if (hudCanvas && hudCtx && t - hudPaintRef.current > 100) {
         hudPaintRef.current = t;
-        paintHud(hudCtx, statusRef.current, camImgRef.current,
-                 recStatusRef.current, menuRef.current);
+        paintHud(hudCtx, statusRef.current, recStatusRef.current,
+                 menuRef.current);
         hudDirty = true;
       }
-      scene.render(frame, refSpaceRef.current, hudCanvas, hudDirty,
-                   CAM_TILE_SIZES[tileIdxRef.current]?.widthM);
+      scene.render(frame, refSpaceRef.current, {
+        panel: hudCanvas,
+        panelDirty: hudDirty,
+        cam: camImgRef.current,
+        camMirrored: baseCamRef.current?.facing === "operator",
+        camWidthM: CAM_TILE_SIZES[tileIdxRef.current]?.widthM,
+        anchor,
+      });
 
       // E-STOP scan runs at display rate, not publish rate: 33 ms of extra
       // latency on a stop button is 33 ms too many. Edge-detected so one
@@ -469,12 +626,13 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         forceDisengaged: blurred,
         mirrorMode: mirrorModeRef.current,
         vrMode: vrModeRef.current,
+        stance: stanceRef.current,
       });
       client.queueFrame(vrFrame);
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown, fireEstop, toggleRecording, cycleView, cycleTile]);
+  }, [armIds, teardown, fireEstop, toggleRecording, resetArms, cycleView, cycleTile]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
   // be left mounted-but-hidden: an immersive session already owns the display,
@@ -721,6 +879,33 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         </span>
       </label>
 
+      {vrMode === "pose" && (
+        <label className="flex items-center gap-2 text-muted-foreground">
+          <span>operator stance</span>
+          <select
+            className="bg-transparent border rounded px-1 py-0.5"
+            value={stance}
+            onChange={(e) => {
+              const v = e.target.value === "front" ? "front"
+                : e.target.value === "mirror" ? "mirror" : "behind";
+              setStance(v);
+              try { localStorage.setItem(STANCE_LS_KEY, v); } catch { /* non-fatal */ }
+            }}
+          >
+            <option value="behind">egocentric — arms as your own (default)</option>
+            <option value="mirror">facing the arms — mirror</option>
+            <option value="front">facing the arms — match the camera tile</option>
+          </select>
+          <span>
+            — how your hand maps to the gripper. Egocentric (pairs with the
+            over-shoulder view, the default): the replica arm moves exactly
+            like your own — push forward and it goes deeper into the scene.
+            Mirror: face-to-face, the arm is your reflection. Camera tile:
+            motion matches the front view&apos;s screen axes.
+          </span>
+        </label>
+      )}
+
       <label className="flex items-center gap-2 text-muted-foreground">
         <span>arm mounting</span>
         <select
@@ -763,10 +948,14 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           ))}
         </div>
         <p className="mt-2">
-          These are not cosmetic. The elbow is synthesized from these lengths and
-          the measured shoulder-to-controller distance, so a model longer than
-          your real arm means you run out of reach before the robot&apos;s elbow
-          ever straightens.
+          <b>Legacy body-angles mode only.</b> Position mode (the default) never
+          reads these: squeezing a grip anchors your hand to the arm wherever
+          both happen to be, so limb lengths cancel out by construction — there
+          is nothing to calibrate before entering VR. In body-angles mode they
+          are not cosmetic: the elbow is synthesized from these lengths and the
+          measured shoulder-to-controller distance, so a model longer than your
+          real arm means you run out of reach before the robot&apos;s elbow ever
+          straightens.
         </p>
       </details>
     </div>

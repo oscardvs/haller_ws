@@ -65,14 +65,17 @@ def _ctrl(pos, *, squeeze, trigger=0.0, orientation=None):
             "trigger": trigger, "squeeze": squeeze, "tracked": True}
 
 
-def _frame(left=None, right=None):
-    return {
+def _frame(left=None, right=None, stance=None):
+    out = {
         "ts_ms": 0,
         "dead_man": False,
         "head": {"position": [0, 1.6, 0], "orientation": IDENT},
         "left": left,
         "right": right,
     }
+    if stance is not None:
+        out["stance"] = stance
+    return out
 
 
 HAND = [0.2, 1.2, -0.4]
@@ -131,28 +134,40 @@ def test_squeezing_without_moving_holds_the_anchor_pose():
     assert out["dead_man_sides"] == {"left": True, "right": False}
 
 
-@pytest.mark.parametrize("axis,delta,expect", [
-    # Operator right (+x XR) → arm +x; up (+y XR) → arm +z;
-    # forward (−z XR) → arm +y. The operator stands in front of the bench
-    # facing the mounts, so forward is +y — see the handedness test below for
-    # why this sign is not free to choose.
-    (0, +0.08, np.array([+0.08, 0.0, 0.0])),
-    (1, +0.08, np.array([0.0, 0.0, +0.08])),
-    (2, -0.08, np.array([0.0, +0.08, 0.0])),
+@pytest.mark.parametrize("stance,axis,delta,expect", [
+    # DEFAULT — no stance on the wire — is "behind": egocentric, the replica
+    # arm as your own. Right is robot −x, forward is −y (push away = extend
+    # into the scene, matching the overshoulder default view), up is +z.
+    (None, 0, +0.08, np.array([-0.08, 0.0, 0.0])),
+    (None, 1, +0.08, np.array([0.0, 0.0, +0.08])),
+    (None, 2, -0.08, np.array([0.0, -0.08, 0.0])),
+    # "mirror": face-to-face, the arm as your reflection. Right is +x (hands
+    # together cross the arms), forward −y (push away = extends toward you).
+    ("mirror", 0, +0.08, np.array([+0.08, 0.0, 0.0])),
+    ("mirror", 2, -0.08, np.array([0.0, -0.08, 0.0])),
+    # "front": same position, screen-true — motion matches the threequarter
+    # tile's axes. Right is +x, forward is +y (into the frame).
+    ("front", 0, +0.08, np.array([+0.08, 0.0, 0.0])),
+    ("front", 1, +0.08, np.array([0.0, 0.0, +0.08])),
+    ("front", 2, -0.08, np.array([0.0, +0.08, 0.0])),
+    # "behind": at the mount side looking along the arms — egocentric. Right
+    # is −x, forward is −y.
+    ("behind", 0, +0.08, np.array([-0.08, 0.0, 0.0])),
+    ("behind", 2, -0.08, np.array([0.0, -0.08, 0.0])),
 ])
-def test_hand_deltas_move_the_wrist_point_the_same_way(axis, delta, expect):
+def test_hand_deltas_move_the_wrist_point_per_stance(stance, axis, delta, expect):
     mode, _ = _mode()
-    mode.convert(_frame(left=_ctrl(HAND, squeeze=True)))  # anchor
+    mode.convert(_frame(left=_ctrl(HAND, squeeze=True), stance=stance))  # anchor
     moved = list(HAND)
     moved[axis] += delta
-    out = mode.convert(_frame(left=_ctrl(moved, squeeze=True)))
+    out = mode.convert(_frame(left=_ctrl(moved, squeeze=True), stance=stance))
     got = _wpr_of(out["left"]["joint_goal"]) - _wpr_of(PARKED)
     assert got == pytest.approx(expect, abs=6e-3)
 
 
 def test_heading_at_anchor_defines_forward():
     """Operator facing +x XR (yaw -90°): pushing along +x is 'forward' and
-    must land on arm +y, not arm +x."""
+    must land on arm −y (push away = extend, in the behind default), not ±x."""
     yaw90 = [0.0, -np.sin(np.pi / 4), 0.0, np.cos(np.pi / 4)]
     mode, _ = _mode()
     head = {"position": [0, 1.6, 0], "orientation": yaw90}
@@ -164,18 +179,42 @@ def test_heading_at_anchor_defines_forward():
     f2["head"] = head
     out = mode.convert(f2)
     got = _wpr_of(out["left"]["joint_goal"]) - _wpr_of(PARKED)
-    assert got == pytest.approx(np.array([0.0, +0.08, 0.0]), abs=6e-3)
+    assert got == pytest.approx(np.array([0.0, -0.08, 0.0]), abs=6e-3)
+
+
+def test_stance_change_mid_squeeze_does_not_move_the_arm():
+    """The stance is frozen into the anchor: flipping the selector while a
+    grip is held must not teleport the arm — it applies at the next squeeze."""
+    mode, _ = _mode()
+    mode.convert(_frame(left=_ctrl(HAND, squeeze=True), stance="behind"))
+    moved = [HAND[0] + 0.06, HAND[1], HAND[2]]
+    out_behind = mode.convert(
+        _frame(left=_ctrl(moved, squeeze=True), stance="behind"))
+    out_flipped = mode.convert(
+        _frame(left=_ctrl(moved, squeeze=True), stance="front"))
+    got_b = _wpr_of(out_behind["left"]["joint_goal"])
+    got_f = _wpr_of(out_flipped["left"]["joint_goal"])
+    assert got_f == pytest.approx(got_b, abs=1e-6)
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
-def test_the_mapping_is_a_rotation_not_a_reflection(side):
-    """The one property no camera placement can rescue.
+@pytest.mark.parametrize("stance,parity", [
+    (None, +1.0), ("mirror", -1.0), ("front", +1.0), ("behind", +1.0),
+])
+def test_each_stance_realises_its_documented_handedness(side, stance, parity):
+    """The determinant of the realised operator→robot basis is a CHOICE, made
+    per stance, and this pins each stance to the choice its docstring makes.
 
-    Operator (right, forward, up) is a right-handed frame. If it maps onto a
-    LEFT-handed triple of robot axes, the transform is a reflection and exactly
-    one axis reads inverted from every viewpoint — which is what "the view is
-    mirrored" actually is. Measured as the determinant of the realised basis,
-    so it holds whatever the individual signs happen to be.
+    History, because a very reasonable argument once broke teleop here: a
+    negative determinant means a reflection, and an earlier fix treated that
+    as an error category ("a reflection cannot be corrected by moving the
+    camera") and forced det +1. Geometrically true — and wrong for the
+    face-to-face operator, whose body intuition (push away = the arm extends
+    toward you, hands together = arms cross) IS the mirror reflection. The
+    invariants that actually hold for every stance: the basis is orthonormal
+    (probes come back unit-length and perpendicular), and its handedness is
+    the stance's documented parity — behind (default) +1, mirror −1,
+    front +1.
     """
     step = 0.06
     # Column ORDER is the whole test: the determinant is of (right, forward,
@@ -192,17 +231,23 @@ def test_the_mapping_is_a_rotation_not_a_reflection(side):
         # Fresh anchor per probe: three probes off one anchor would compound
         # the previous probe's IK solution into the next.
         mode, _ = _mode(min_z=-10.0, min_tip=-10.0)
-        base = mode.convert(_frame(**{side: _ctrl(HAND, squeeze=True)}))
+        base = mode.convert(
+            _frame(**{side: _ctrl(HAND, squeeze=True)}, stance=stance))
         w0 = _wpr_of(base[side]["joint_goal"])
         moved = list(HAND)
         moved[axis] += delta
-        out = mode.convert(_frame(**{side: _ctrl(moved, squeeze=True)}))
+        out = mode.convert(
+            _frame(**{side: _ctrl(moved, squeeze=True)}, stance=stance))
         cols.append((_wpr_of(out[side]["joint_goal"]) - w0) / abs(delta))
 
-    det = float(np.linalg.det(np.column_stack(cols)))
-    assert det > 0.9, (
-        f"operator→robot basis has det={det:+.3f}; a non-positive determinant "
-        f"is a mirrored mapping")
+    basis = np.column_stack(cols)
+    # Orthonormal first: a sign error masquerades as parity only if the
+    # probes stopped being a clean basis, so pin that separately.
+    assert basis.T @ basis == pytest.approx(np.eye(3), abs=0.05)
+    det = float(np.linalg.det(basis))
+    assert det == pytest.approx(parity, abs=0.1), (
+        f"operator→robot basis has det={det:+.3f}; this stance documents "
+        f"parity {parity:+.0f}")
 
 
 def test_release_and_resqueeze_reanchors_without_a_jump():

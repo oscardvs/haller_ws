@@ -138,6 +138,47 @@ def _ray_pitch_roll_deg(orientation: list[float]) -> tuple[float, float]:
     return pitch, roll
 
 
+#: Operator→robot yaw mappings, keyed by how the operator relates to the arms.
+#: Columns are the robot-frame images of operator (right, forward, up). The
+#: mounts put the arms' reach along −y; which mapping is right depends on
+#: where the operator stands AND which metaphor they drive by, and only the
+#: operator knows either, so it rides the wire:
+#:
+#:   "behind" (default): at the mount side looking along the arms — the
+#:   egocentric stance, arms as your own arms. Forward is −y, right is −x.
+#:   det = +1. Pairs with the overshoulder view, which is the headset's
+#:   default camera tile: goggles on, you face the tile, you push your hand
+#:   forward and the replica extends INTO the scene, your right is frame
+#:   right. Nothing to translate in your head — this is why it is the
+#:   default.
+#:
+#:   "mirror": face-to-face, the arm as your mirror image. The
+#:   operator stands at the open side of the bench, arms reaching TOWARD
+#:   them. Push your hand away and the arm extends (toward you); bring your
+#:   hands together and the arms cross. det = −1 — a reflection, and that is
+#:   NOT a bug: it is the one mapping where a face-to-face operator's body
+#:   intuition holds on every axis, the same reflection every mirror-metaphor
+#:   teleop rig uses. The 2026-08 "reflection, not a rotation" fix read the
+#:   negative determinant as an error to engineer away and broke exactly this
+#:   intuition; the determinant is a property to CHOOSE, per stance.
+#:   Pairs with the threequarter (face-to-face) view.
+#:
+#:   "front": same face-to-face position, but screen-true — motion agrees
+#:   with the front camera tile's axes (threequarter view): hand away = INTO
+#:   the frame, i.e. the gripper recedes toward the mounts. det = +1. Pick it
+#:   when you drive by the tile and want the tile, not your body, to be the
+#:   reference.
+_STANCE_BASES = {
+    "behind": np.array([[-1.0, 0.0, 0.0],
+                        [0.0, -1.0, 0.0],
+                        [0.0, 0.0, 1.0]]),
+    "mirror": np.array([[1.0, 0.0, 0.0],
+                        [0.0, -1.0, 0.0],
+                        [0.0, 0.0, 1.0]]),
+    "front": np.eye(3),
+}
+
+
 @dataclass
 class _SideAnchor:
     hand: np.ndarray
@@ -146,6 +187,7 @@ class _SideAnchor:
     joints: dict[str, float]
     pitch_deg: float
     roll_deg: float
+    stance: str = "behind"   # frozen at anchor, like the heading frame
     last_solution: dict[str, float] = field(default_factory=dict)
 
 
@@ -201,6 +243,9 @@ class VRPoseMode:
         head = frame.get("head")
         heading = (self._heading(head["orientation"])
                    if isinstance(head, dict) else None)
+        stance = frame.get("stance")
+        if stance not in _STANCE_BASES:
+            stance = "behind"
 
         sides: dict[str, dict | None] = {}
         squeezes: dict[str, bool] = {}
@@ -210,7 +255,7 @@ class VRPoseMode:
             squeezes[side] = squeeze
             sides[side] = self._convert_side(
                 side, raw, squeeze, heading, frame_goal.get(side) or {},
-                self._limits(status, side),
+                self._limits(status, side), stance,
             )
 
         dead_man = squeezes["left"] or squeezes["right"]
@@ -236,6 +281,7 @@ class VRPoseMode:
         heading: tuple[np.ndarray, np.ndarray] | None,
         committed: dict[str, float],
         limits: dict[str, tuple[float, float]] | None,
+        stance: str,
     ) -> dict | None:
         if (not isinstance(raw, dict) or not raw.get("tracked", False)
                 or heading is None or limits is None or not committed):
@@ -265,38 +311,25 @@ class VRPoseMode:
             anchor = _SideAnchor(
                 hand=pos.copy(), fwd=fwd, right=right,
                 joints={j: float(committed.get(j, 0.0)) for j in _POSE_JOINTS},
-                pitch_deg=pitch, roll_deg=roll,
+                pitch_deg=pitch, roll_deg=roll, stance=stance,
             )
             anchor.last_solution = dict(anchor.joints)
             self._anchors[side] = anchor
 
         # Hand delta in the operator's anchored heading frame → arm base
-        # frame. Operator right → +x, forward → +y, up → +z. Same mapping for
+        # frame, through the stance rotation (see _STANCE_BASES for the two
+        # geometries and why the choice cannot be hardcoded). Same mapping for
         # both arms: the mounts are identical and side correspondence is
         # world-direction based, which is what the mirror_mode=none smoke test
-        # pinned.
-        #
-        # Forward maps to +y, and the sign matters more than it looks. The
-        # operator — real or watching the sim camera — stands in FRONT of the
-        # bench facing the mounts, so their forward is +y and, with up = +z,
-        # their right is cross(forward, up) = +x. Those two together are a
-        # rotation: det[+x, +y, +z] = +1, so every axis reads true.
-        #
-        # This used to be −y, on the reasoning that the arm reaches −y at zero
-        # pan and so "push your hand away" ought to extend the arm. But paired
-        # with right → +x that is a REFLECTION (det[+x, −y, +z] = −1), and a
-        # reflection cannot be fixed by moving the camera: whichever side you
-        # view it from, exactly one axis comes out inverted. From the front it
-        # left/right-agreed and depth-inverted — push away, and the gripper
-        # travelled toward you and down the frame, which is what made the view
-        # read as mirrored and the arm hard to aim. Spatial truth beats the
-        # kinematic intuition here: the operator is position-controlling a
-        # gripper, not reasoning about which way the elbow folds.
+        # pinned. The stance is frozen into the anchor exactly like the
+        # heading frame, so flipping the selector mid-squeeze cannot teleport
+        # a held arm — it takes effect on the next squeeze.
         d = pos - anchor.hand
         fwd_amt = float(np.dot(d, anchor.fwd))
         right_amt = float(np.dot(d, anchor.right))
         up_amt = float(d[1])
-        delta_robot = np.array([right_amt, fwd_amt, up_amt])
+        delta_robot = _STANCE_BASES[anchor.stance] @ np.array(
+            [right_amt, fwd_amt, up_amt])
 
         target = _wpr(anchor.joints) + delta_robot
         # Never ask for a wrist point below the guard's floor band. Without

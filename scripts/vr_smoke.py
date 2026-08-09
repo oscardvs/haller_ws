@@ -244,8 +244,11 @@ async def pose_mode_section(base: str, ws_url: str) -> None:
         await hold(0.8, [L0[0] + 0.12, L0[1], L0[2]], R0)
         tip1 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
         if tip0 is not None and tip1 is not None:
-            check("hand right 12 cm drags the tip right",
-                  float(tip1[0] - tip0[0]) > 0.06,
+            # Default stance is "behind" (egocentric): operator right is robot
+            # −x. This assertion pins the DEFAULT wire behaviour — a frame
+            # with no stance key must get the egocentric mapping.
+            check("hand right 12 cm drags the tip right (egocentric: robot -x)",
+                  float(tip1[0] - tip0[0]) < -0.06,
                   f"tip dx={float(tip1[0] - tip0[0]) * 1000:.0f} mm")
 
         # The grab: hand DOWN 14 cm + trigger. This is the motion that was
@@ -271,12 +274,14 @@ async def pose_mode_section(base: str, ws_url: str) -> None:
               g.get("gripper", hi) < lo + 0.45 * (hi - lo),
               f"gripper={g.get('gripper'):.0f} deg")
 
-        # Both hands driven at each other: the guard must still bite.
+        # Both hands driven so the ARMS cross: under the egocentric default
+        # the mapping flips x, so hands sweeping OUTWARD send the arms at
+        # each other. The guard must still bite.
         limited = False
         for i in range(90):
             dx = 0.35 * (i + 1) / 90
-            await ws.send(pframe([L0[0] + dx, L0[1], L0[2]],
-                                 [R0[0] - dx, R0[1], R0[2]]))
+            await ws.send(pframe([L0[0] - dx, L0[1], L0[2]],
+                                 [R0[0] + dx, R0[1], R0[2]]))
             if i % 6 == 0 and req(base, "/teleop/human")["collision"].get("limited"):
                 limited = True
             await asyncio.sleep(1 / 30)
@@ -288,8 +293,8 @@ async def pose_mode_section(base: str, ws_url: str) -> None:
         # Drive back and release: freeze.
         for i in range(60):
             k = 1 - (i + 1) / 60
-            await ws.send(pframe([L0[0] + 0.35 * k, L0[1], L0[2]],
-                                 [R0[0] - 0.35 * k, R0[1], R0[2]]))
+            await ws.send(pframe([L0[0] - 0.35 * k, L0[1], L0[2]],
+                                 [R0[0] + 0.35 * k, R0[1], R0[2]]))
             await asyncio.sleep(1 / 30)
         await hold(0.4, L0, R0, lsq=False, rsq=False)
         g0 = req(base, "/teleop/human")["goal_deg"]
@@ -479,15 +484,16 @@ async def robustness_section(base: str, ws_url: str) -> None:
         # error, so the first beats of a fresh session are still moving.
         await stream(ws, 1.5)
 
-        # ~1.1 s of silence: long enough to blow the 300 ms staleness budget,
+        # ~1.4 s of silence: long enough to blow the vr_grip staleness budget
+        # (700 ms — VR rides out tracking flicker the webcam path doesn't),
         # short enough that the 2 s socket idle timeout must NOT fire — the
         # connection is alive, the operator's headset is just not talking.
         t0 = time.monotonic()
         st = None
         g_mid = None
-        while time.monotonic() - t0 < 1.1:
+        while time.monotonic() - t0 < 1.4:
             st = req(base, "/teleop/human")
-            if g_mid is None and time.monotonic() - t0 > 0.6:
+            if g_mid is None and time.monotonic() - t0 > 0.95:
                 # Well past the staleness gate: the HELD transition has done
                 # its one-time committed-pose reseed (the arms re-read
                 # themselves, which in sim includes a little gravity droop),
@@ -577,7 +583,11 @@ async def main() -> int:
         took = time.monotonic() - t0
         check("both sides reach DRIVING", s is not None,
               f"authorities={s and authorities(s)}")
-        check("handover served a real countdown", s is None or took > 2.0,
+        # vr_grip sessions count down 1 s, not the camera path's 3 s: the
+        # pose-mode handover is zero-error by construction, so the countdown
+        # only filters accidental grips (VR_ACQUIRE_MS). Still assert a REAL
+        # wait was served — instant handover is the bug this check exists for.
+        check("handover served a real countdown", s is None or took > 0.7,
               f"{took:.1f}s")
 
         print("\n-- 3: per-side grip --")

@@ -50,8 +50,9 @@ arms powered.
 4. Takes land in `~/.cache/huggingface/lerobot/<hf_user>/<task-slug>` —
    **30 fps, h264**, with `observation.state` + `action` (12-dim, left-then-
    right SO-101 order), `observation.base`, `observation.wall_clock` (real
-   capture time — LeRobot's own `timestamp` column is synthetic), and both
-   sim camera channels. The cockpit's `skipped` counter next to the frame
+   capture time — LeRobot's own `timestamp` column is synthetic), and all
+   five sim camera channels (overshoulder + threequarter + overhead, plus a
+   wrist close-up per arm). The cockpit's `skipped` counter next to the frame
    count tells you a take had gaps; the wall-clock deltas tell you where.
    An **E-STOP mid-take is fine**: the recorder sees the session die and
    saves up to that frame instead of appending a torque-off tail.
@@ -113,12 +114,20 @@ ssh jetson 'cd ~/haller_ws && git fetch origin && git checkout feat/quest-bimanu
 | **trigger** (analog) | that arm's gripper — 0 open, 1 closed |
 | **B or Y** (either controller) | **E-STOP**: torque off both arms, session stops |
 | **hold A or X** (~0.5 s) | start / stop-and-save a dataset take — REC state + frame count show in the HUD |
+| **left stick click** | next camera view in the HUD tile |
+| **hold left stick** (~0.8 s) | **reset arms to home** (0°, gripper open) — only sides with the grip open; a driving hand always wins |
+| **right stick click** | next tile size (S/M/L) |
+| **point at the HUD + trigger** (grip open) | **grab and move the HUD** — drag it anywhere, it faces you and the spot persists |
 | release a grip | that arm freezes exactly where it is |
 | take off headset / open Quest menu | frames force-disengage; arms freeze |
 
+The HUD is two separate floating panels: the **camera tile** (updates at
+display rate, native resolution) with the **status/menu panel below it** —
+instructions never cover the view. Grab either one to move the pair.
+
 **Position mode (default).** Squeezing a grip *anchors*: your hand's current
 position is bound to the arm's current pose, so there is nothing to match —
-hold still through the 3 s countdown, feel the buzz, and from then on your
+hold still through the 1 s countdown, feel the buzz, and from then on your
 hand's movement drives the gripper tip through IK on the robot's own
 kinematics. Release to freeze; move your hand somewhere comfortable and
 squeeze again to ratchet across the workspace. Controller pitch/roll steer
@@ -128,6 +137,30 @@ mode; expect it to fight you — the SO-101's shoulder barely pitches below
 horizontal and its elbow folds the opposite way to yours, which is why
 position mode exists.) All motion rides the same rate limiter (60 °/s
 ceiling at the handle, less during the first 1.5 s ramp).
+
+**Operator stance** (panel selector, shown in the HUD menu) picks how your
+hand maps onto the gripper AND which arm each controller drives — in the
+egocentric default your right controller drives the arm that appears on the
+right of the over-shoulder view (set when the session starts; changing
+stance mid-session needs an exit/re-enter). The default is **egocentric** and pairs with the
+default `overshoulder` view: goggles on, the tile shows the arms from behind
+— push your hand forward and the replica extends INTO the scene, move right
+and it goes frame-right. The replica arm moves exactly like your own, which
+is why it is the default. *Mirror* is for facing the real arms across the
+bench (the arm as your reflection: push away = it extends toward you, hands
+together = arms cross) and pairs with the `threequarter` view. *Match the
+camera tile* makes motion agree with the front view's screen axes. If the
+arm ever drives the opposite way from your hand, the stance is wrong — fix
+it here, not with the *arm mounting* selector (that one is for genuinely
+mirrored mounts).
+
+**No arm-length calibration exists in position mode, on purpose.** The
+squeeze anchors your hand to the arm wherever both are, and only *deltas*
+drive it, so limb lengths cancel out — the surveyed VR-teleop stacks
+(Open-Teach, MoveIt-Pro Quest, BEAVR, TeleVision) all skip it for the same
+reason. Your reach only bounds how far one drag can go before you ratchet.
+The *operator limb lengths* inputs on the panel affect the legacy body-angle
+mode only.
 
 The HUD floats over passthrough: per-side authority + countdown, grip state,
 live collision clearance, a red `● REC <frames>` line while a take rolls, an
@@ -187,7 +220,8 @@ cockpit records datasets while a teleop session is driving.
 | "WebXR is not available" | Page not HTTPS, or cert not accepted. `navigator.xr` is simply absent over http — no prompt explains it. |
 | Enter does nothing / start refused | Another teleop session (cockpit, sim) holds the arms — stop it first. Needs **2 enabled arms**. |
 | Countdown won't finish | HUD `match:` lists the blocking joints; move to the robot's pose. `match: gripper` → squeeze trigger ~90 %. |
-| Arm moves opposite the hand | Wrong *arm mounting* parity — see step 4 above. |
+| Arm moves opposite the hand | Wrong *operator stance* (egocentric / mirror / camera-tile) on the panel. If only ONE arm is reversed, it's the *arm mounting* parity — see step 4 above. |
+| Workspace tile looks left/right-flipped | The active camera faces you (tower mast cam). It should auto-mirror (`facing: operator` in config.yaml); if a camera moved, update its `facing`. |
 | An arm "randomly" freezes | Its controller left the Quest's tracking view (HUD: `no tracking`), or its grip slipped below the press threshold. Re-squeeze, re-match. |
 | `COLLISION HOLD` where nothing is close | Mounts in `config.yaml` don't match the real plate — measure (step 2/3). |
 | E-stopped, want to continue | **Re-arm arms** button on the VR page (sets MANUAL + torque), then Enter Passthrough again. |
