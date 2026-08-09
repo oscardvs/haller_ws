@@ -36,27 +36,70 @@ The sim chain records the same LeRobot datasets the real rig will — same
 recorder, same schema — so headset hours produce training data even with no
 arms powered.
 
-1. **Draft the take on the desktop cockpit** (`/` → Dataset tab): type the
-   task (one instruction per dataset, e.g. *"pick the red cube, hand it to
-   the other arm, place it in the box"*) and your HF username. The draft
-   persists in the browser, so the headset can start takes from it.
-2. **Bring the sim up**: `scripts/quest-teleop/up.sh --sim`, open the printed
-   URL in the Quest browser, **Enter Passthrough**.
-3. **Record from inside the headset**: hold **A or X ~0.5 s** to start the
+Two scenes, picked at launch:
+
+| launch | scene | scored by |
+|---|---|---|
+| `up.sh --sim` | cubes on a mat — pick, hand over, place | `cube_placed` |
+| `up.sh --insertion` | steel bracket + pin — one arm holds, one inserts | `pin_inserted` |
+
+Insertion is the task being collected now, and it is bimanual *structurally*:
+the bracket is a free body, so inserting without steadying it just shoves it
+across the bench, and the predicate refuses to score a one-handed solve. Read
+`docs/setup/insertion-collection.md` before recording it — that is where the
+**frozen** instruction string and the 70-seed list live.
+
+1. **Draft the take on the desktop cockpit** (`/` → Dataset tab): the task
+   string (one instruction per dataset) and your HF username. The draft
+   persists in the browser, so the headset can start takes from it. Paste the
+   frozen insertion string *exactly* — LeRobot keys tasks by string, so a
+   retyped variant silently splits the dataset into two conditioning groups
+   that look like one.
+2. **Bring the sim up**: `scripts/quest-teleop/up.sh --insertion` (or
+   `--sim`), open the printed URL in the Quest browser, **Enter Passthrough**.
+3. **Deal the scene before each take**, one seed per episode off the list —
+   thirty layouts teach more than thirty repeats of one:
+
+   ```bash
+   curl -sX POST localhost:8000/sim/scene/reset \
+     -H 'content-type: application/json' \
+     -d '{"seed": 1001, "randomize": true, "home_arms": true}'
+   ```
+
+   `home_arms` is refused while a take is open. Reset, *then* record.
+4. **Record from inside the headset**: hold **A or X ~0.5 s** to start the
    take — both controllers buzz and the HUD shows `● REC <frames>`. Drive the
    task. Hold A/X again to stop **and save**. Repeat per episode; the draft
    stays put. (Discard stays a cockpit-only action on purpose: a thumb brush
-   must never be able to throw a take away.)
-4. Takes land in `~/.cache/huggingface/lerobot/<hf_user>/<task-slug>` —
+   must never be able to throw a take away.) Fumbled it? Hit **discard take**
+   on the cockpit — a failure is not training data. **Takes under 2 frames
+   are refused outright**, and `last_error` says so: LeRobot cannot
+   compute video stats over a one-frame episode, and the ragged metadata that
+   leaves behind takes the *whole dataset* down with it, not just the stray
+   take.
+5. **Keep `GET /sim/task/status` in view.** On insertion it reports `depth_m`,
+   `lateral_m`, `tilt_deg`, `pin_held` and `fixture_held` — so a take that
+   looked fine but did not score tells you *which* clause missed instead of
+   leaving you guessing.
+6. Takes land in `~/.cache/huggingface/lerobot/<hf_user>/<task-slug>` —
    **30 fps, h264**, with `observation.state` + `action` (12-dim, left-then-
-   right SO-101 order), `observation.base`, `observation.wall_clock` (real
-   capture time — LeRobot's own `timestamp` column is synthetic), and all
-   five sim camera channels (overshoulder + threequarter + overhead, plus a
-   wrist close-up per arm). The cockpit's `skipped` counter next to the frame
-   count tells you a take had gaps; the wall-clock deltas tell you where.
-   An **E-STOP mid-take is fine**: the recorder sees the session die and
-   saves up to that frame instead of appending a torque-off tail.
-5. **Replay a take onto the sim arms** to eyeball what you actually drove
+   right SO-101 order), `observation.base`, `observation.wall_clock`
+   (**seconds since the episode started** — LeRobot's own `timestamp` column
+   is synthetic, and a float32 quantises a 2026 epoch to 128-second steps;
+   the absolute start is in info.json's `haller_wall_clock` block), and the
+   three recorded camera channels (`top` + a wrist close-up per arm — five
+   render, three record). Each episode gets **its own video file per
+   camera**: LeRobot 0.5.1's packer corrupts the second episode it appends to
+   a file, so it is never allowed to pack. The cockpit's `skipped` counter
+   next to the frame count tells you a take had gaps; the wall-clock deltas
+   tell you where. An **E-STOP mid-take is fine**: the recorder sees the
+   session die and saves up to that frame instead of appending a torque-off
+   tail.
+7. **End with `scripts/quest-teleop/down.sh`, and let it finish.** The dataset
+   is unreadable until the backend's shutdown has written the parquet footers
+   and `meta/episodes/`; the script waits for exactly that and prints while it
+   does. Killing it there destroys the session's takes.
+8. **Replay a take onto the sim arms** to eyeball what you actually drove
    (loops until stopped):
 
    ```bash
@@ -90,7 +133,15 @@ https://192.168.0.191:8444/teleop/vr
 ```
 
 Open it **in the Quest browser**, accept the self-signed cert once, press
-**Enter Passthrough**. `scripts/quest-teleop/down.sh` stops the desktop half.
+**Enter Passthrough**.
+
+`scripts/quest-teleop/down.sh` stops the desktop half: frontend and Caddy
+first, then — only if the backend is a local one `up.sh --sim/--insertion/
+--local` started — SIGTERM, and **it waits up to 120 s for that backend to
+finalise any recorded dataset**. Let it. It prints `still finalising — do NOT
+kill it` while that runs, and a Ctrl+C there is precisely how a session's
+takes get destroyed. (The Jetson backend is never stopped from here — it owns
+the arms.)
 
 If `up.sh` cannot reach the Jetson: power the rig, then either plug the USB-C
 (device-mode ssh) or wait for wifi (192.168.0.124), and on the Jetson run
@@ -225,6 +276,8 @@ cockpit records datasets while a teleop session is driving.
 | An arm "randomly" freezes | Its controller left the Quest's tracking view (HUD: `no tracking`), or its grip slipped below the press threshold. Re-squeeze, re-match. |
 | `COLLISION HOLD` where nothing is close | Mounts in `config.yaml` don't match the real plate — measure (step 2/3). |
 | E-stopped, want to continue | **Re-arm arms** button on the VR page (sets MANUAL + torque), then Enter Passthrough again. |
+| `down.sh` sitting on "still finalising" | It is writing the dataset — parquet footers, videos, `meta/episodes/`. **Wait** (up to 120 s). Ctrl+C there is what leaves a session's takes unreadable, which is why the script never SIGKILLs the backend. |
+| Stopped a take, nothing was saved | Under 2 frames, so the recorder refused it — `/record/status` → `last_error` says so. A one-frame episode makes the *whole dataset* unfinalisable, so it is dropped instead. |
 | 502s on `/_next/webpack-hmr` in caddy log | Next dev hot-reload through the proxy. Cosmetic. |
 | Right arm intermittent `Incorrect status packet` | Known UART flakiness under telemetry; watch whether it worsens under teleop load. |
 | Everything up but headset can't load page | Quest must be on the same wifi (`ZTE_DEC155`); check `https://192.168.0.191:8444/api/health` from any browser. |
