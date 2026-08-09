@@ -538,3 +538,60 @@ def test_insertion_scene_drops_the_pick_and_place_pad():
     cube_world = MuJoCoWorld(xml, arm_joint_map=jm)
     assert mujoco.mj_name2id(
         cube_world.model, mujoco.mjtObj.mjOBJ_GEOM, "place_zone") >= 0
+
+
+def _roll_distance(condim: int, rolling: float) -> float:
+    """Millimetres the pin travels from a gripper-sized lateral nudge."""
+    xml, jm = build_scene(arms=["left", "right"], cubes=0, task="insertion")
+    model = mujoco.MjModel.from_xml_string(xml)
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pin")
+    for g in range(model.ngeom):
+        if model.geom_bodyid[g] == bid:
+            model.geom_condim[g] = condim
+            f = model.geom_friction[g].copy()
+            f[2] = rolling
+            model.geom_friction[g] = f
+    qa = model.jnt_qposadr[model.body_jntadr[bid]]
+    va = model.jnt_dofadr[model.body_jntadr[bid]]
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    for _ in range(int(0.5 / model.opt.timestep)):     # settle
+        mujoco.mj_step(model, data)
+    start = data.qpos[qa:qa + 2].copy()
+    data.qvel[va:va + 3] = [0.20, 0.0, 0.0]            # a gripper brushing it
+    for _ in range(int(3.0 / model.opt.timestep)):
+        mujoco.mj_step(model, data)
+    return float(np.linalg.norm(data.qpos[qa:qa + 2] - start)) * 1000.0
+
+
+def test_the_pin_does_not_roll_away_when_nudged():
+    """A human could not grasp the pin because it fled the closing gripper.
+
+    condim=6 and friction[2] are ONE fix and this pins both halves. Under
+    MuJoCo's default condim=3 the rolling friction term is not merely weak, it
+    is IGNORED — which is why raising it alone looked like it did nothing.
+    """
+    xml, jm = build_scene(arms=["left", "right"], cubes=0, task="insertion")
+    model = mujoco.MjModel.from_xml_string(xml)
+    bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pin")
+    for g in range(model.ngeom):
+        if model.geom_bodyid[g] == bid:
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g)
+            assert model.geom_condim[g] == 6, f"{name} lost condim=6"
+            assert model.geom_friction[g][2] >= 0.003, (
+                f"{name} rolling friction below the measured knee")
+
+    # Behaviour, not just the constants: 3 mm is the initial slide, and the
+    # curve is flat past 0.005, so this bound has real headroom.
+    assert _roll_distance(6, 0.005) < 10.0
+
+
+def test_condim_3_is_what_let_the_pin_escape():
+    """Fault injection — the guard above is only meaningful if the unfixed
+    scene actually fails. Drop to MuJoCo's default contact dimensionality and
+    the same nudge sends the pin an order of magnitude further, no matter what
+    rolling friction claims to be set."""
+    assert _roll_distance(3, 0.005) > 40.0
+    # ...and cranking rolling friction cannot rescue condim=3, which is the
+    # whole trap: the knob looks connected and is not.
+    assert _roll_distance(3, 0.05) > 40.0

@@ -44,10 +44,35 @@
           quat="0.74556 -0.66261 -0.05325 -0.04745">
       <freejoint/>
 
-      <!-- friction 0.4 matches the bore walls. MuJoCo mixes friction as the
-           elementwise MAX of the pair, so BOTH sides must be low or the bore
-           is sticky; against the gripper's 2.0 pads the max still resolves to
-           2.0, so the grasp is unaffected.
+      <!-- condim="6" AND the third friction term are ONE fix; neither works
+           alone. A 10 mm cylinder on a flat bench under MuJoCo's default
+           condim=3 is a frictionless roller: the contact has sliding friction
+           only, so the third (rolling) friction term is not merely small, it is
+           SILENTLY IGNORED — raising it from 0.0001 to 0.05 changes nothing at
+           all. condim=6 adds the torsional and rolling dimensions the term
+           needs. MuJoCo takes the MAX condim over a contacting pair, so setting
+           it here covers pin-vs-bench, pin-vs-bore and pin-vs-fingers.
+
+           Measured, 0.20 m/s lateral nudge (a gripper brushing the pin as it
+           closes) -> distance the pin travels before stopping:
+               condim 3, any rolling value ...  59 mm, never settles
+               condim 6, rolling 0.0001 ......  84 mm, settles at 2.5 s
+               condim 6, rolling 0.001 .......   9 mm
+               condim 6, rolling 0.005 .......   3 mm  <- chosen
+           3 mm is the floor: that is the initial slide, not roll. Past 0.005
+           the curve is flat, so more buys nothing and only stiffens the bore.
+
+           This is not a fudge for the operator's benefit. A perfectly smooth
+           cylinder on a perfectly flat plane with no rolling resistance is the
+           UNPHYSICAL case; real steel-on-steel rolling resistance is
+           0.001-0.005. Without it the pin escapes the gripper as it closes,
+           which is what a human hit first: it reads as "I cannot reach it"
+           rather than "it rolled", because the target keeps leaving.
+
+           friction[0] = 0.4 matches the bore walls. MuJoCo mixes friction as
+           the elementwise MAX of the pair, so BOTH sides must be low or the
+           bore is sticky; against the gripper's 2.0 pads the max still resolves
+           to 2.0, so the grasp is unaffected.
 
            solref="0.005 1" must match fixture.xml's bore geoms. MuJoCo
            solmix-AVERAGES solref across a contacting pair, so stiffening only
@@ -55,9 +80,11 @@
            both. Without it the head punches clean through the collar at
            ~1.1 m/s; the full explanation is in fixture.xml. -->
       <geom name="pin_shaft" type="cylinder" size="0.005" fromto="0 0 0 0 0 0.060"
-            mass="0.030" rgba="0.78 0.80 0.84 1" friction="0.4 0.005 0.0001" solref="0.005 1"/>
+            mass="0.030" rgba="0.78 0.80 0.84 1" condim="6"
+            friction="0.4 0.005 0.005" solref="0.005 1"/>
       <geom name="pin_head" type="cylinder" size="0.012 0.006" pos="0 0 0.066"
-            mass="0.012" rgba="0.16 0.18 0.24 1" friction="1 0.005 0.0001" solref="0.005 1"/>
+            mass="0.012" rgba="0.16 0.18 0.24 1" condim="6"
+            friction="1 0.005 0.005" solref="0.005 1"/>
 
       <!-- THE TIP REFERENCE FRAME. Position: the very tip of the shaft, which
            is the body origin. Orientation: quat 0 1 0 0 = 180 degrees about
