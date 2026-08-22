@@ -161,6 +161,37 @@ class _FakeTaskMonitor:
 
 
 class _FakeCameras:
+    """Stands in for CameraManager, including the RUNTIME recorded set.
+
+    `is_recorded`/`set_record` mirror the real manager: seeded from each
+    camera's `record` config flag, owned here afterwards. Modelling that is
+    the point — the recorder now asks the manager which cameras record, so a
+    fake that only carried `cfg.record` would leave the real path untested."""
+
+    def __init__(self, cams):
+        self._c = {c.id: c for c in cams}
+        self._record = {c.id: bool(getattr(c.cfg, "record", True)) for c in cams}
+
+    def keys(self):
+        return self._c.keys()
+
+    def __getitem__(self, k):
+        return self._c[k]
+
+    def is_recorded(self, k):
+        return self._record[k]
+
+    def set_record(self, k, record):
+        if k not in self._c:
+            raise KeyError(k)
+        self._record[k] = bool(record)
+        return self._record[k]
+
+
+class _LegacyFakeCameras:
+    """A manager from before the runtime set — no `is_recorded` at all. Pins
+    the recorder's fallback onto `cfg.record`."""
+
     def __init__(self, cams):
         self._c = {c.id: c for c in cams}
 
@@ -1198,3 +1229,273 @@ async def test_an_unscored_recorder_runs_unchanged_with_no_sim_world(tmp_path):
     assert status["auto_scored"] is False
     assert status["success"] is None
     assert status["last_error"] is None
+
+
+# ---- the runtime recorded set --------------------------------------------
+#
+# Which cameras record is now a per-take decision the operator makes from the
+# cockpit (POST /cameras/{id}/record), not a config edit and a restart. The
+# config flag is only the value the rig booted with.
+
+def test_the_runtime_set_overrides_the_config_flag():
+    cams = _FakeCameras([_FakeCamera("top"), _FakeCamera("wrist", record=False)])
+    r = _recorder({"running": False}, cams=cams)
+    assert [s["id"] for s in r._active_camera_specs()] == ["top"]
+
+    cams.set_record("wrist", True)     # operator switches it on between takes
+    cams.set_record("top", False)      # ...and this one off
+    assert [s["id"] for s in r._active_camera_specs()] == ["wrist"]
+
+
+def test_a_manager_without_the_runtime_set_still_reads_the_config_flag():
+    """The fallback in `_active_camera_specs`: a camera manager that predates
+    the runtime set behaves exactly as it always did."""
+    cams = _LegacyFakeCameras([_FakeCamera("top"), _FakeCamera("wrist", record=False)])
+    r = _recorder({"running": False}, cams=cams)
+    assert [s["id"] for s in r._active_camera_specs()] == ["top"]
+
+
+async def test_switching_a_camera_on_can_collide_and_is_refused_at_start(tmp_path):
+    """config._cameras_from makes this check at LOAD time over the config
+    flags, and cannot be the only one: the recorded set is runtime state now,
+    so a clean config can be driven into a colliding set from the cockpit.
+
+    The failure it prevents is silent — two cameras keyed `top` build ONE
+    feature and every frame carries whichever was written last."""
+    cams = _FakeCameras([
+        _FakeCamera("threequarter_sim", dataset_key="top"),
+        _FakeCamera("overhead_sim", dataset_key="top", record=False),
+    ])
+    r = _recorder({"running": False}, cams=cams)
+    assert len(r._active_camera_specs()) == 1      # loads clean
+
+    cams.set_record("overhead_sim", True)          # ...and now it does not
+    with pytest.raises(RuntimeError, match="observation.images.top"):
+        await r.start_episode("smoke/collide", "lift the cube")
+
+
+def test_a_runtime_toggle_that_avoids_the_collision_is_fine():
+    """The check is about the recorded set, not the config: two cameras may
+    share a dataset_key as long as only one of them is recording."""
+    cams = _FakeCameras([
+        _FakeCamera("threequarter_sim", dataset_key="top"),
+        _FakeCamera("overhead_sim", dataset_key="top", record=False),
+    ])
+    r = _recorder({"running": False}, cams=cams)
+    cams.set_record("overhead_sim", True)
+    cams.set_record("threequarter_sim", False)
+    specs = r._active_camera_specs()
+    r._reject_colliding_keys(specs)                # does not raise
+    assert [s["id"] for s in specs] == ["overhead_sim"]
+
+
+async def test_the_recorded_set_is_frozen_at_start_and_read_fresh_next_take(tmp_path):
+    """A toggle flipped BETWEEN takes changes the next take's schema; the
+    open take keeps the columns it opened with."""
+    cams = _FakeCameras([_FakeCamera("top", 64, 48),
+                         _FakeCamera("wrist", 64, 48, record=False)])
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    rec = DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=cams, root=str(tmp_path / "a"))
+    await rec.start_episode("smoke/frozen", "t")
+    assert [c["id"] for c in rec._cam_specs] == ["top"]
+    cams.set_record("wrist", True)                 # mid-take: must not apply
+    assert [c["id"] for c in rec._cam_specs] == ["top"]
+    await rec.stop_episode(save=False)
+
+    # A new repo, because adding a camera changes the schema and resuming the
+    # old dataset would (correctly) refuse.
+    rec2 = DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=cams, root=str(tmp_path / "b"))
+    await rec2.start_episode("smoke/frozen2", "t")
+    assert [c["id"] for c in rec2._cam_specs] == ["top", "wrist"]
+    await rec2.stop_episode(save=False)
+
+
+# ---- delete the last episode ---------------------------------------------
+#
+# The operator's undo. This is the section that had to prove the feature is
+# possible at all: lerobot 0.5.1's own `delete_episodes` copies the whole
+# dataset to a new repo_id, so the in-place pop is ours, and the only thing
+# that makes it safe is that we force one video file per episode.
+
+async def _drive_video(rec, repo, task, n, root=None):
+    """A take with a real video column, driven frame by frame."""
+    await rec.start_episode(repo, task)
+    for i in range(n):
+        frame = _real_frame(task)
+        frame["observation.images.top"] = np.full((48, 64, 3), (i + 1) * 15,
+                                                  dtype=np.uint8)
+        rec._dataset.add_frame(frame)
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
+
+
+def _video_recorder(root, cams=None):
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    return DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=cams if cams is not None else _FakeCameras([_FakeCamera("top", 64, 48)]),
+        root=str(root))
+
+
+async def test_delete_last_then_record_again_round_trips(tmp_path):
+    """THE feasibility gate: record -> delete -> record again, and the dataset
+    is still one lerobot 0.5.1 can load AND resume.
+
+    Both halves matter. Loading proves the frames, videos and metadata still
+    line up; resuming proves the counters the writer reads to place the next
+    take (`info.json` total_frames/total_episodes and the final episode row's
+    `dataset_to_index`) were left consistent with each other."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    root = tmp_path / "ds"
+    repo = "smoke/pop"
+
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "lift the cube", 6)
+    await _drive_video(rec, repo, "lift the cube", 7)
+    rec.close()
+
+    out = _video_recorder(root).delete_last_episode(repo)
+    assert out["deleted_index"] == 1
+    assert out["deleted_frames"] == 7
+    assert out["total_episodes"] == 1
+    assert out["total_frames"] == 6
+
+    ds = LeRobotDataset(repo, root=root)
+    assert ds.meta.total_episodes == 1
+    assert ds.meta.total_frames == 6
+    assert len(ds) == 6
+    # The surviving episode's video still decodes — frame 0 was solid grey 15.
+    assert abs(float(ds[0]["observation.images.top"].mean()) - 15 / 255) < 0.02
+
+    # ...and the next take lands at index 1 again, appending cleanly.
+    rec3 = _video_recorder(root)
+    await _drive_video(rec3, repo, "lift the cube", 5)
+    rec3.close()
+
+    ds2 = LeRobotDataset(repo, root=root)
+    assert ds2.meta.total_episodes == 2
+    assert ds2.meta.total_frames == 11
+    assert len(ds2) == 11
+    # No hole and no repeat in the global frame index, which is what a stale
+    # total_frames would have produced.
+    assert [int(ds2[i]["index"]) for i in range(11)] == list(range(11))
+    assert sorted({int(ds2[i]["episode_index"]) for i in range(11)}) == [0, 1]
+
+
+async def test_delete_last_removes_only_its_own_video_file(tmp_path):
+    """One video file per episode is what makes the pop an unlink instead of a
+    re-encode — so the surviving episode's file must still be there."""
+    root = tmp_path / "ds"
+    repo = "smoke/pop_vid"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    await _drive_video(rec, repo, "t", 4)
+    rec.close()
+
+    videos = sorted((root / "videos" / "observation.images.top").rglob("*.mp4"))
+    assert len(videos) == 2
+    _video_recorder(root).delete_last_episode(repo)
+    left = sorted((root / "videos" / "observation.images.top").rglob("*.mp4"))
+    assert [p.name for p in left] == [videos[0].name]
+
+
+async def test_delete_last_takes_the_episode_back_out_of_stats(tmp_path):
+    """`save_episode` folds each take into meta/stats.json incrementally, so a
+    popped take that is not removed from the aggregate stays in the dataset's
+    normalisation statistics forever — invisibly."""
+    import json
+    root = tmp_path / "ds"
+    repo = "smoke/pop_stats"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 5)
+    after_first = json.loads((root / "meta" / "stats.json").read_text())
+    await _drive_video(rec, repo, "t", 6)
+    rec.close()
+    after_second = json.loads((root / "meta" / "stats.json").read_text())
+    assert after_second != after_first          # the 2nd take moved the aggregate
+
+    _video_recorder(root).delete_last_episode(repo)
+    popped = json.loads((root / "meta" / "stats.json").read_text())
+    assert popped["observation.images.top"]["count"] == after_first["observation.images.top"]["count"]
+    assert popped["observation.images.top"]["mean"] == after_first["observation.images.top"]["mean"]
+
+
+async def test_delete_last_refuses_the_only_episode(tmp_path):
+    """A zero-episode dataset is not a state the writer can resume from, and
+    "throw the last one away" means "delete the repo" — the operator's call."""
+    root = tmp_path / "ds"
+    repo = "smoke/pop_one"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    rec.close()
+    with pytest.raises(RuntimeError, match="only episode"):
+        _video_recorder(root).delete_last_episode(repo)
+
+
+async def test_delete_last_refuses_while_an_episode_is_open(tmp_path):
+    root = tmp_path / "ds"
+    repo = "smoke/pop_open"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    await rec.start_episode(repo, "t")           # second take, still running
+    with pytest.raises(RuntimeError, match="stop recording"):
+        rec.delete_last_episode(repo)
+    await rec.stop_episode(save=False)
+
+
+def test_delete_last_on_an_unknown_repo_says_so(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _video_recorder(tmp_path / "nothing").delete_last_episode("smoke/absent")
+
+
+async def test_delete_last_flushes_our_own_buffered_metadata_first(tmp_path):
+    """The trap this ordering exists for: LeRobotDatasetMetadata buffers up to
+    ten episodes' metadata in RAM. Popping against a dataset we still hold open
+    would read a meta/episodes/ that is missing the very take being deleted —
+    and then the flush would write it back."""
+    root = tmp_path / "ds"
+    repo = "smoke/pop_buffered"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    await _drive_video(rec, repo, "t", 5)
+    # NO close(): both episodes are saved but their metadata is still buffered.
+    assert rec._dataset is not None
+
+    out = rec.delete_last_episode(repo)           # same recorder, open handle
+    assert out["deleted_index"] == 1
+    assert rec._dataset is None                   # handle dropped, so the next
+    assert out["total_episodes"] == 1             # take re-resumes from disk
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset(repo, root=root)
+    assert ds.meta.total_episodes == 1
+    assert ds.meta.total_frames == 4
+
+
+async def test_delete_last_across_sessions_pops_the_right_take(tmp_path):
+    """Each recording SESSION starts its own data and metadata files (lerobot
+    rotates on resume), so the last take can be the only episode in its files.
+    Emptied files are removed rather than left as zero-row parquet."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    root = tmp_path / "ds"
+    repo = "smoke/pop_sessions"
+    for n in (4, 5, 6):                            # three separate recorders
+        r = _video_recorder(root)
+        await _drive_video(r, repo, "t", n)
+        r.close()
+    assert len(list((root / "meta" / "episodes").rglob("*.parquet"))) == 3
+
+    out = _video_recorder(root).delete_last_episode(repo)
+    assert out["deleted_index"] == 2 and out["total_frames"] == 9
+    assert len(list((root / "meta" / "episodes").rglob("*.parquet"))) == 2
+
+    ds = LeRobotDataset(repo, root=root)
+    assert ds.meta.total_episodes == 2
+    assert len(ds) == 9

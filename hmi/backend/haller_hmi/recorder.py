@@ -91,6 +91,7 @@ Joint calibration metadata:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -99,6 +100,8 @@ from os.path import expanduser
 from pathlib import Path
 
 import numpy as np
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
@@ -106,6 +109,13 @@ try:  # lerobot's own info.json writer — keeps formatting identical to its own
     from lerobot.datasets.io_utils import write_info as _lerobot_write_info
 except ImportError:  # pragma: no cover - only if lerobot moves the helper
     _lerobot_write_info = None
+
+try:  # so a popped episode's contribution can be taken back out of stats.json
+    from lerobot.datasets.compute_stats import aggregate_stats as _lerobot_agg_stats
+    from lerobot.datasets.io_utils import write_stats as _lerobot_write_stats
+except ImportError:  # pragma: no cover - only if lerobot moves the helpers
+    _lerobot_agg_stats = None
+    _lerobot_write_stats = None
 
 try:  # the columns lerobot fills in itself; never produced by _build_frame
     from lerobot.datasets.utils import DEFAULT_FEATURES as _LEROBOT_DEFAULT_FEATURES
@@ -174,6 +184,70 @@ SO101_JOINT_ORDER = (
     "wrist_roll",
     "gripper",
 )
+
+
+def lerobot_home() -> Path:
+    """Directory datasets live under when no explicit `root` is given.
+
+    The same resolution `DatasetRecorder._dataset_root` uses, exported so the
+    repo scan in `routes_data` cannot drift from where takes are actually
+    written. Read per call, not cached: `HF_LEROBOT_HOME` is how a session gets
+    pointed at an external disk, and that can change between runs.
+    """
+    return Path(expanduser(
+        environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")))
+
+
+def episode_meta_files(root: Path) -> list[Path]:
+    """Every episode-metadata parquet in a dataset, in write order.
+
+    There is more than one, and that is not an edge case: on RESUME lerobot
+    starts a fresh metadata file rather than appending
+    (`LeRobotDatasetMetadata._save_episode_metadata` bumps the file index when
+    it reloads `episodes[-1]` from disk), so a dataset collects one file per
+    recording SESSION. Reading only `chunk-000/file-000.parquet` would report
+    the first session's episodes and silently lose every later one.
+    """
+    d = root / "meta" / "episodes"
+    if not d.is_dir():
+        return []
+    return sorted(d.glob("chunk-*/file-*.parquet"))
+
+
+def read_episode_rows(root: Path, with_stats: bool = False) -> list[dict]:
+    """Episode metadata straight off disk, one dict per episode.
+
+    A plain parquet read, deliberately: listing episodes must not need a
+    `LeRobotDataset`, which would open writers, pull from the Hub and cost
+    seconds. `stats/*` is excluded by default because it is ~150 wide columns
+    of per-feature arrays that no caller wants for a listing.
+    """
+    rows: list[dict] = []
+    for path in episode_meta_files(root):
+        names = pq.read_schema(path).names
+        cols = names if with_stats else [c for c in names if not c.startswith("stats/")]
+        rows += pq.read_table(path, columns=cols).to_pylist()
+    return rows
+
+
+def _episode_stats(row: dict) -> dict[str, dict]:
+    """Rebuild one episode's nested stats dict from its flattened columns.
+
+    `stats/observation.state/min` -> `{"observation.state": {"min": array}}`,
+    which is the shape `aggregate_stats` takes. Image stats arrive as nested
+    lists (a (3,1,1) per-channel array), so the values are rebuilt through
+    `.tolist()` rather than `np.asarray` on the raw object array.
+    """
+    out: dict[str, dict] = {}
+    for col, val in row.items():
+        if not col.startswith("stats/"):
+            continue
+        _, feature, stat = col.split("/", 2)
+        arr = np.asarray(val.tolist() if hasattr(val, "tolist") else val)
+        if arr.dtype == object:
+            arr = np.asarray(arr.tolist(), dtype=np.float64)
+        out.setdefault(feature, {})[stat] = arr
+    return out
 
 
 @dataclass
@@ -268,6 +342,7 @@ class DatasetRecorder:
         # for this dataset. Only cameras that can actually yield RGB frames are
         # included (a `placeholder` camera would break add_frame every tick).
         cam_specs = self._active_camera_specs()
+        self._reject_colliding_keys(cam_specs)
         if not cam_specs:
             logger.warning("recorder: no active cameras — recording state/action/base only")
 
@@ -419,6 +494,198 @@ class DatasetRecorder:
         if self._dataset is not None:
             self._dataset.finalize()
 
+    def delete_last_episode(self, repo_id: str) -> dict:
+        """Pop the highest-numbered episode off a dataset, IN PLACE.
+
+        The operator's undo: the take just driven was a fumble, and the next
+        one should reuse its index rather than leave a bad demonstration in the
+        training set.
+
+        WHY NOT `lerobot.datasets.dataset_tools.delete_episodes`: it exists in
+        0.5.1, but it COPIES the dataset — it builds a whole new one at a new
+        repo_id through `LeRobotDatasetMetadata.create`, re-encoding every
+        surviving episode. That is minutes and a second copy of the dataset for
+        an undo button, it drops our namespaced info.json blocks
+        (`haller_joint_calibration` / `haller_scoring` / `haller_wall_clock`)
+        because the new metadata is built from scratch, and it leaves the
+        operator holding two repos. It is the right tool for curating a dataset
+        offline; it is the wrong one for "undo my last take".
+
+        WHY AN IN-PLACE POP IS SAFE HERE, and only here: because we force one
+        video file per episode (`_one_video_file_per_episode`), the last
+        episode owns its video files outright, so removing it is an unlink
+        rather than a re-encode. And because it is the LAST episode, its frames
+        are the TRAILING rows of its data file and its metadata row is the last
+        row of its metadata file — so both shrink without renumbering anything.
+        Every global counter stays consistent on its own: the new final
+        episode's `dataset_to_index` already equals the new `total_frames`,
+        which is exactly what `DatasetWriter._save_episode_data` reads to place
+        the next take. Delete any OTHER episode and all of that collapses
+        (every later episode's indices would have to shift), which is why this
+        is deliberately last-only.
+
+        Refuses rather than guesses when the dataset is not in that shape — see
+        the guards below.
+        """
+        if self._state.recording or self._episode_open:
+            raise RuntimeError(
+                "an episode is open — stop recording before deleting a take")
+
+        root = self._dataset_root(repo_id)
+        info_path = root / "meta" / "info.json"
+        if not info_path.exists():
+            raise FileNotFoundError(f"no dataset at {root}")
+
+        # FIRST, before reading a single byte: hand back our own writers.
+        # `LeRobotDatasetMetadata` buffers up to 10 episodes' metadata in RAM
+        # (`_metadata_buffer_size`) and only writes them out on finalize, so a
+        # dataset we still hold open can have episodes that exist in info.json
+        # and in the data files but NOT yet in meta/episodes/. Popping against
+        # that view would delete the wrong row and then be overwritten by the
+        # flush. Dropping the handle also forces the next take to re-resume
+        # from disk, which is what makes the surgery below invisible to it.
+        if self._dataset is not None and Path(self._dataset.meta.root) == root:
+            self._dataset.finalize()
+            self._dataset = None
+
+        info = json.loads(info_path.read_text())
+        rows = read_episode_rows(root)
+        if not rows:
+            raise RuntimeError(
+                f"dataset at {root} has no episode metadata to delete")
+        if len(rows) <= 1:
+            # Same refusal lerobot's own `delete_episodes` makes. A zero-episode
+            # dataset is not a state the writer can resume from, and "throw the
+            # last one away" means "delete the repo", which is the operator's
+            # call to make explicitly.
+            raise RuntimeError(
+                "this is the only episode in the dataset — delete the whole "
+                "repo instead of emptying it")
+
+        last = max(rows, key=lambda r: int(r["episode_index"]))
+        last_idx = int(last["episode_index"])
+        recorded = int(info.get("total_episodes", -1))
+        if last_idx != len(rows) - 1 or len(rows) != recorded:
+            raise RuntimeError(
+                f"dataset at {root} is not in the shape this pop understands "
+                f"({len(rows)} episode rows, highest index {last_idx}, "
+                f"info.json says {recorded}); refusing to "
+                "guess which frames belong to the last take")
+        length = int(last["length"])
+
+        video_keys = [k for k, f in info.get("features", {}).items()
+                      if f.get("dtype") == "video"]
+        others = [r for r in rows if int(r["episode_index"]) != last_idx]
+
+        # Guard BEFORE anything is touched: every video file this episode
+        # points at has to be its own. If lerobot packed two episodes into one
+        # file — which `video_files_size_in_mb = 0` prevents for anything we
+        # record, but not for a dataset that arrived from elsewhere — then the
+        # last take's frames can only be removed by re-encoding, and this is
+        # the wrong tool. Refuse whole rather than half-delete.
+        doomed: list[Path] = []
+        for key in video_keys:
+            chunk = int(last[f"videos/{key}/chunk_index"])
+            file_i = int(last[f"videos/{key}/file_index"])
+            if any(int(r[f"videos/{key}/chunk_index"]) == chunk
+                   and int(r[f"videos/{key}/file_index"]) == file_i for r in others):
+                raise RuntimeError(
+                    f"episode {last_idx} shares its {key} video file with an "
+                    "earlier episode, so it cannot be removed without "
+                    "re-encoding; this dataset was not written with one video "
+                    "file per episode")
+            doomed.append(root / info["video_path"].format(
+                video_key=key, chunk_index=chunk, file_index=file_i))
+
+        for path in doomed:
+            if path.exists():
+                path.unlink()
+
+        # Frames: the last episode's rows are the tail of its data file, so
+        # dropping them by episode_index leaves `index` contiguous 0..N-1 with
+        # no renumbering. The file may hold earlier episodes from the same
+        # session, hence a filter rather than an unlink.
+        data_path = root / info["data_path"].format(
+            chunk_index=int(last["data/chunk_index"]),
+            file_index=int(last["data/file_index"]))
+        if data_path.exists():
+            table = pq.read_table(data_path)
+            keep = table.filter(pc.not_equal(table.column("episode_index"), last_idx))
+            if keep.num_rows == 0:
+                data_path.unlink()
+            else:
+                pq.write_table(keep, data_path, compression="snappy",
+                               use_dictionary=True)
+
+        # The metadata row, from whichever session's file holds it.
+        for meta_path in episode_meta_files(root):
+            table = pq.read_table(meta_path)
+            if not pc.any(pc.equal(table.column("episode_index"), last_idx)).as_py():
+                continue
+            keep = table.filter(pc.not_equal(table.column("episode_index"), last_idx))
+            if keep.num_rows == 0:
+                meta_path.unlink()
+                if not any(meta_path.parent.iterdir()):
+                    meta_path.parent.rmdir()
+            else:
+                pq.write_table(keep, meta_path, compression="snappy",
+                               use_dictionary=True)
+            break
+
+        self._rewrite_aggregate_stats(root)
+
+        info["total_episodes"] = len(others)
+        info["total_frames"] = int(info["total_frames"]) - length
+        info["splits"] = {"train": f"0:{info['total_episodes']}"}
+        # `total_tasks` and meta/tasks.parquet are deliberately NOT touched.
+        # Task rows are referenced by `task_index` in every surviving frame, so
+        # dropping one would renumber the others and silently relabel data that
+        # has nothing to do with this take. An orphaned task string costs
+        # nothing; a shifted task index corrupts the dataset.
+        self._persist_info(info, root=root)
+
+        logger.info("recorder: deleted episode %d from %s (%d frames); "
+                    "%d episodes / %d frames remain",
+                    last_idx, root, length, info["total_episodes"],
+                    info["total_frames"])
+        return {
+            "deleted_index": last_idx,
+            "repo_id": repo_id,
+            "deleted_frames": length,
+            "total_episodes": info["total_episodes"],
+            "total_frames": info["total_frames"],
+        }
+
+    def _rewrite_aggregate_stats(self, root: Path) -> None:
+        """Recompute meta/stats.json from the episodes that are left.
+
+        Not cosmetic: `LeRobotDatasetMetadata.save_episode` folds each new
+        episode into the stored aggregate incrementally
+        (`aggregate_stats([self.stats, episode_stats])`), so a deleted take
+        that is not taken back out stays in the dataset's normalisation
+        statistics forever — invisibly, and for every future take. The
+        per-episode stats needed to rebuild the aggregate honestly are already
+        on disk in the `stats/*` columns of the episode rows.
+
+        Non-fatal: stale statistics are a flaw in a dataset that still loads,
+        and losing the operator's undo over one is the worse trade.
+        """
+        if _lerobot_agg_stats is None or _lerobot_write_stats is None:
+            logger.warning("recorder: lerobot stats helpers unavailable; "
+                           "meta/stats.json still counts the deleted episode")
+            return
+        try:
+            per_episode = [_episode_stats(r)
+                           for r in read_episode_rows(root, with_stats=True)]
+            per_episode = [st for st in per_episode if st]
+            if not per_episode:
+                return
+            _lerobot_write_stats(_lerobot_agg_stats(per_episode), root)
+        except Exception as e:
+            logger.warning("recorder: could not recompute meta/stats.json "
+                           "after the delete (%s); it still counts the "
+                           "deleted episode", e)
+
     # ---- internals -------------------------------------------------------
 
     def _dataset_root(self, repo_id: str) -> Path:
@@ -427,8 +694,7 @@ class DatasetRecorder:
         `LeRobotDataset.resume` refuses to write into the shared Hub cache."""
         if self.root is not None:
             return Path(self.root)
-        home = environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")
-        return Path(expanduser(home)) / repo_id
+        return lerobot_home() / repo_id
 
     def _open_dataset(self, repo_id: str, fps: int, features: dict) -> LeRobotDataset:
         """Open for appending, resuming an existing dataset or creating a new one.
@@ -553,12 +819,19 @@ class DatasetRecorder:
 
         Three filters, in order of how expensive a mistake is: the camera has
         to be connected, it has to be able to hand over RGB at all (a
-        `placeholder` would break add_frame every tick), and it has to be
-        marked `record: true`. That last one is a training decision — a view
+        `placeholder` would break add_frame every tick), and it has to be in
+        the RUNTIME recorded set. That last one is a training decision — a view
         the operator drives from is not automatically a view the policy should
         see, and every recorded camera is a camera whose stalled frame drops
         the whole tick (see `_build_frame`).
+
+        The recorded set is asked of the manager (`is_recorded`), not read off
+        `cfg.record`, because the operator flips it from the cockpit between
+        takes; `cfg.record` is only the value the rig booted with. The fallback
+        keeps a manager that predates the runtime set — and the test fakes that
+        model one — behaving exactly as before.
         """
+        is_recorded = getattr(self.cameras, "is_recorded", None)
         specs: list[dict] = []
         for cam_id in self.cameras.keys():
             handle = self.cameras[cam_id]
@@ -569,7 +842,9 @@ class DatasetRecorder:
             cfg = handle.cfg
             # getattr defaults, so a camera handle whose config predates these
             # fields keeps the old behaviour: recorded, keyed by its id.
-            if not getattr(cfg, "record", True):
+            recorded = (is_recorded(cam_id) if callable(is_recorded)
+                        else getattr(cfg, "record", True))
+            if not recorded:
                 continue
             specs.append({
                 "id": cam_id,
@@ -578,6 +853,37 @@ class DatasetRecorder:
                 "width": int(cfg.width),
             })
         return specs
+
+    @staticmethod
+    def _reject_colliding_keys(cam_specs: list[dict]) -> None:
+        """Refuse a camera set where two cameras record under one dataset key.
+
+        `config._cameras_from` makes the same check at LOAD time over the
+        config flags. It cannot be the only one: the recorded set is now
+        runtime state, so an operator who switches a second view on from the
+        cockpit can build a colliding set out of a config that loaded cleanly.
+
+        The failure it prevents is silent, which is why it is worth checking
+        twice. Two cameras keyed `top` build ONE `observation.images.top`
+        feature, the second spec wins in the dict, and every frame then carries
+        whichever camera `_build_frame` wrote last — a column that is half one
+        view and half another, with nothing on disk to say so.
+        """
+        seen: dict[str, str] = {}
+        for spec in cam_specs:
+            key = spec["key"]
+            if key in seen:
+                raise RuntimeError(
+                    f"cameras {seen[key]!r} and {spec['id']!r} would both record "
+                    f"into observation.images.{key} — one would overwrite the "
+                    "other. Switch recording off for one of them, or give it a "
+                    "distinct `dataset_key`."
+                )
+            seen[key] = spec["id"]
+
+    def dataset_root(self, repo_id: str) -> Path:
+        """Public form of `_dataset_root`, for the dataset-management routes."""
+        return self._dataset_root(repo_id)
 
     def _build_features(self, cam_specs: list[dict]) -> dict:
         names = self._state_names()

@@ -144,8 +144,45 @@ class CameraManager:
             else:
                 self._handles[c.id] = CameraHandle(c)
 
+        # Which cameras land in a recorded episode, as of RIGHT NOW. Seeded
+        # from each camera's `record:` config flag and then owned here, because
+        # the answer is a per-take decision the operator makes from the cockpit
+        # (or the headset) — not a property of the rig that needs a config edit
+        # and a restart. The config flag stays the default the rig boots with;
+        # this dict is what the recorder actually reads at `start_episode`.
+        #
+        # Kept on the manager rather than on each handle so it works uniformly
+        # across the three handle classes (CameraHandle / SimCamera /
+        # CSICameraHandle), only one of which lives in this file.
+        self._record: dict[str, bool] = {
+            cam_id: bool(getattr(self._handles[cam_id].cfg, "record", True))
+            for cam_id in self._handles
+        }
+
     def keys(self):
         return self._handles.keys()
+
+    def is_recorded(self, camera_id: str) -> bool:
+        """Is this camera in the recorded set right now?"""
+        if camera_id not in self._handles:
+            raise KeyError(f"unknown camera id {camera_id!r}; known: {list(self._handles)}")
+        return self._record[camera_id]
+
+    def set_record(self, camera_id: str, record: bool) -> bool:
+        """Add/remove a camera from the recorded set. Returns the new value.
+
+        Takes effect at the NEXT `start_episode`: the recorder freezes the
+        camera set (and with it the dataset schema) when an episode opens, so
+        flipping this mid-take could not change the take even if it were
+        allowed to. The route refuses while an episode is open for exactly
+        that reason — a toggle that silently did nothing would be worse than
+        a 409.
+        """
+        if camera_id not in self._handles:
+            raise KeyError(f"unknown camera id {camera_id!r}; known: {list(self._handles)}")
+        self._record[camera_id] = bool(record)
+        logger.info("camera %s: record=%s", camera_id, self._record[camera_id])
+        return self._record[camera_id]
 
     def connect_all(self) -> None:
         for h in self._handles.values():
@@ -172,6 +209,11 @@ class CameraManager:
                 "height": h.cfg.height,
                 "fps": h.cfg.fps,
                 "facing": h.cfg.facing,
+                # The RUNTIME flag, not `cfg.record`: `GET /cameras` is what
+                # the cockpit paints its per-camera "record this" toggles
+                # from, so it has to report the set the next episode will
+                # actually use.
+                "record": self._record[h.cfg.id],
             }
             for h in self._handles.values()
         ]

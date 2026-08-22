@@ -90,12 +90,20 @@ orchestrator mounts it in `server.py` at integration — WP-B does not edit serv
   `repo_id` optional: defaults to the recorder's current/last repo.
 - `GET /record/repos` → `{repos: [{repo_id, episodes, size_bytes}]}` — scan of the
   lerobot home (`~/.cache/huggingface/lerobot`).
-- `DELETE /record/episodes/last?repo_id=…` → `{deleted_index}` | 409 while
-  recording. **Feasibility-gated**: lerobot 0.5.1 has no delete API; we already
-  force one video file per episode, which may make a clean pop possible. WP-B
-  investigates; implement ONLY if provably clean (tests prove a
-  delete→record→resume round-trip stays consistent), otherwise return 501 and say
-  so in the report. UI must degrade gracefully on 501.
+- `DELETE /record/episodes/last?repo_id=…` → **SHIPPED (WP-B, 2026-08-22)** as an
+  in-place pop: `{deleted_index, repo_id, deleted_frames, total_episodes,
+  total_frames}`. Never 501. Refuses with 409 when: an episode is open, it is the
+  only episode, the metadata row count disagrees with info.json, or the episode's
+  video file is shared with an earlier one (foreign dataset). UI degrades on 409,
+  not 501. The pop finalizes the recorder's own metadata buffer first (lerobot
+  buffers ten episodes in RAM) and recomputes `meta/stats.json` from the
+  survivors — `save_episode` folds stats in incrementally, so a popped take
+  would otherwise haunt normalisation forever. `meta/tasks.parquet` is
+  deliberately untouched (task_index references; an orphan string is free).
+
+  Shipped response-shape extras beyond the original contract (final, per WP-B):
+  `GET /record/episodes` adds `root`; `GET /record/repos` adds `root` and
+  per-repo `frames`; each `GET /cameras` entry adds `record` (the runtime flag).
 
 ### The one teleop socket — `WS /ws/teleop/vr/in`
 
@@ -173,8 +181,12 @@ Rules for every session (non-negotiable):
   rclpy), then
   `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MUJOCO_GL=egl python -m pytest -p asyncio <scope> -q`.
   Frontend: `npm test` (vitest) and the repo's typecheck, scoped where possible.
-  Known pre-existing flake: 2 `test_recorder.py` failures in full-suite runs only
-  (lerobot/HF import order) — not yours to fix.
+  ~~Known pre-existing flake: 2 `test_recorder.py` failures in full-suite runs~~
+  — that diagnosis was wrong. Root cause (WP-B): the venv is
+  `--system-site-packages` with no scipy of its own, so the system scipy (built
+  for numpy<2) shadowed in against the venv's numpy 2.x and broke every
+  real-LeRobotDataset test. Fixed 2026-08-22 by installing scipy into the venv;
+  recorder tests now pass everywhere.
 - Comments/docstrings that narrate deleted machinery must go with it
   (e.g. `human_teleop.py:1-26,48-69,85-103,582-598`, `server.py:962`).
 - Match the house style: terse, reasoned comments that state constraints, not
@@ -256,7 +268,10 @@ The work:
 2. New router (`routes_data.py`, self-contained `APIRouter`, dependencies passed
    in via a `build_router(...)` factory mirroring `relay.py`'s pattern):
    the four endpoints in the contract. Episode listing reads `meta/info.json` +
-   `meta/episodes.jsonl` from disk — no lerobot API needed for reads.
+   `meta/episodes/chunk-*/file-*.parquet` from disk — the v3.0 layout we actually
+   write (`episodes.jsonl` is the legacy v2.x path). lerobot starts a NEW
+   metadata file on every resume, so any reader must merge all files, not just
+   the first (`recorder.read_episode_rows()` does).
 3. `DELETE /record/episodes/last`: investigate against lerobot 0.5.1 with our
    one-video-per-episode layout. Implement only with a test proving
    record→delete→record-again leaves a dataset lerobot can still load and resume.
@@ -362,7 +377,12 @@ renders on the HUD.
 
 ## Integration (orchestrator, after all four report)
 
-Mount WP-B's router in `server.py`; reconcile any contract drift; full backend
+Mount WP-B's router in `server.py` — its `build_router` takes ZERO-ARG CALLABLES
+(`get_cameras=lambda: cameras, get_recorder=lambda: recorder,
+lerobot_home=lerobot_home`), load-bearing because server.py mounts routers at
+import time but builds `cameras`/`recorder` inside `lifespan` — a router closing
+over the values would capture None and 503 forever. Then reconcile any contract
+drift; full backend
 suite + frontend suite + typecheck; `vr_smoke.py` against a cold sim backend
 (`HALLER_HMI_CONFIG=$PWD/config.bimanual-sim.yaml MUJOCO_GL=egl uvicorn
 haller_hmi.server:app --port 8077`); update `QUICKSTART-QUEST.md` + memory; commit
