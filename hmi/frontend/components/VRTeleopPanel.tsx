@@ -40,20 +40,22 @@ import {
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
+import { useStance, type Pairing } from "@/lib/stance";
 import {
-  ALL_KNOBS, armPairing, attachRenderScene, axPressed, CAM_TILE_SIZES,
+  ALL_KNOBS, attachRenderScene, axPressed, CAM_TILE_SIZES,
   clampKnob, clusterLayout, controllerRays, cycleIndex, DEFAULT_HUD_ANCHOR,
-  DEFAULT_WRIST_PIVOT_M, disengagedFrame, estopPressed, formatKnob,
-  hapticCues, holdToggle, holdToggleInit, ikHapticCues, ORIENT_DEFICIT,
-  paintHud,
+  DEFAULT_WRIST_PIVOT_M, disengagedFrame, episodesTotal, estopPressed,
+  formatKnob, hapticCues, holdToggle, holdToggleInit, ikHapticCues,
+  ORIENT_DEFICIT, paintHud,
   parseVrSocketMessage, precisionHeld, pulse, RECORD_HOLD_MS, rayQuadHit,
-  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame, sessionPresets,
+  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame,
   stepTuning, stickAxes, thumbstickPressed, WRIST_PIVOT_KEY,
   xrAvailableAtAll, xrSupported, yawTowardHead,
-  type HoldToggleState, type HudAnchor, type IkSides, type SideAuthorityLike,
-  type Stance, type TeleopXRSession, type TuningNav, type VRFrame,
+  type DatasetTally, type HoldToggleState, type HudAnchor, type IkSides,
+  type SideAuthorityLike, type TeleopXRSession, type TuningNav, type VRFrame,
   type VrMenuLike, type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
+import { presetsFor } from "./cockpit/teleopPresets";
 import { repoIdFor } from "./cockpit/CommandBar";
 import { DeadManIndicator } from "./DeadManIndicator";
 
@@ -69,7 +71,6 @@ const PUBLISH_MS = 33;
  *  click still means what it always did (next tile size). */
 const TUNE_HOLD_MS = 500;
 
-const STANCE_LS_KEY = "haller.vrTeleop.stance.v1";
 const SOLO_LS_KEY = "haller.vrTeleop.soloArm.v1";
 const WRIST_PIVOT_LS_KEY = "haller.vrTeleop.wristPivot.v1";
 
@@ -99,7 +100,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [xrMode, setXrMode] = useState<TeleopXRSession["mode"] | null>(null);
   const [estopped, setEstopped] = useState(false);
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
-  const [stance, setStance] = useState<Stance>("behind");
+  // One stance across both surfaces. lib/stance.ts holds it in localStorage
+  // behind a `storage`-backed external store, so the cockpit and this page
+  // open side by side in one browser can never disagree about where the
+  // operator is standing — and there is one pairing rule, not two.
+  const [stance, setStance] = useStance();
   // Which arm a SINGLE-ARM session drives, or null for both. The session
   // accepts a null side, so this is the whole mechanism — the other hand's
   // controller is simply ignored and nothing is ever written to it. This is
@@ -122,6 +127,9 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [takes, setTakes] = useState(0);
   // The end-of-take decision, open until the operator saves or discards.
   const [endPrompt, setEndPrompt] = useState(false);
+  // What the dataset on disk holds, so a rolling take can be named by the
+  // index it will actually land at rather than by a page-local ordinal.
+  const [tally, setTally] = useState<DatasetTally | null>(null);
   // The workspace camera floated into the HUD. In passthrough the operator
   // normally watches the REAL arms — but against a sim backend there is
   // nothing physical to look at, so the MuJoCo camera IS the workspace view
@@ -141,8 +149,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const refSpaceRef = useRef<unknown>(null);
   const clientRef = useRef<HumanTeleopClient<VRFrame> | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
-  const stanceRef = useRef<Stance>("behind");
-  const soloArmRef = useRef<string | null>(null);
+  const stanceRef = useRef(stance);
   const lastPubRef = useRef(0);
   const estopDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
@@ -167,6 +174,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const precisionRef = useRef(false);
   const takesRef = useRef(0);
   const endPromptRef = useRef(false);
+  const tallyRef = useRef<DatasetTally | null>(null);
+  // The pairing the SELECTED button describes. Posted verbatim rather than
+  // recomputed at click time: a preset that shows one mapping and starts
+  // another is invisible until an arm moves the wrong way.
+  const pairingRef = useRef<Pairing | null>(null);
   // The right stick mirrors the left's short/hold split: short click cycles
   // the tile size, a hold opens the tuning list. So its action also fires on
   // RELEASE, and a hold cannot resize the tile on its way to the menu.
@@ -186,17 +198,22 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const lStickFiredRef = useRef(false);
 
   stanceRef.current = stance;
-  // The launcher's presets, and the one that is actually selected. A remembered
-  // solo arm that the config no longer enables reads as "both": sending it
-  // would earn a 400 from a backend that has never heard of that arm.
-  const presets = sessionPresets(armIds);
-  const soloSelected = presets.length === 1
-    ? presets[0].soloArm
-    : (soloArm && armIds.includes(soloArm) ? soloArm : null);
-  const pairing = armPairing(armIds, stance, soloSelected);
-  const pairingLabel =
-    `left hand → ${pairing.left_arm ?? "—"} · right hand → ${pairing.right_arm ?? "—"}`;
-  soloArmRef.current = soloSelected;
+  // The launcher, from the cockpit's own helper — one list of sessions and one
+  // pairing rule across both surfaces, so a preset cannot mean different things
+  // depending on which screen you started it from. A remembered solo arm the
+  // config no longer enables reads as "dual": sending it would earn a 400 from
+  // a backend that has never heard of that arm.
+  const presets = presetsFor(armIds, stance);
+  const soloSelected = soloArm && armIds.includes(soloArm) ? soloArm : null;
+  const wanted = presets.find(
+    (pr) => pr.id === (soloSelected ? `solo-${soloSelected}` : "dual"));
+  // A preset this rig cannot offer is drawn, but never SELECTED — a one-armed
+  // rig defaults to its solo session rather than sitting on a disabled "dual"
+  // that Enter Passthrough would happily start anyway.
+  const selected = (wanted && wanted.unavailable === null)
+    ? wanted
+    : (presets.find((pr) => pr.unavailable === null) ?? null);
+  pairingRef.current = selected?.pairing ?? null;
   statusRef.current = status;
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
@@ -238,8 +255,6 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         tuneValuesRef.current = { ...tuneValuesRef.current, [WRIST_PIVOT_KEY]: wp };
         setTuneValues((v) => ({ ...v, [WRIST_PIVOT_KEY]: wp }));
       }
-      const st = localStorage.getItem(STANCE_LS_KEY);
-      if (st === "front" || st === "mirror") setStance(st);
       const solo = localStorage.getItem(SOLO_LS_KEY);
       if (solo) setSoloArm(solo);
       try {
@@ -421,6 +436,35 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   }, [armIds]);
 
+  /** Re-read what the dataset holds on disk.
+   *
+   *  Called on mount and on every take boundary, never on the status poll: it
+   *  reads the dataset meta off disk, which is not something to do four times
+   *  a second. A dataset that does not exist yet, or an endpoint that refuses,
+   *  leaves the tally null and the HUD falls back to its own take counter —
+   *  the episode index is a convenience, and nothing about a take depends on
+   *  it. The baseline is re-taken whenever the repo changes, so the floor in
+   *  `episodesTotal` always counts takes into the dataset it is describing.
+   */
+  const refreshEpisodes = useCallback(async (repoId?: string | null) => {
+    try {
+      const r = await api.recordEpisodes(repoId ?? undefined);
+      const onDisk = r.episodes.length;
+      const prev = tallyRef.current;
+      const next: DatasetTally = prev && prev.repoId === r.repo_id
+        ? { ...prev, onDisk }
+        : { repoId: r.repo_id, onDisk,
+            baselineOnDisk: onDisk, baselineTakes: takesRef.current };
+      tallyRef.current = next;
+      setTally(next);
+    } catch {
+      tallyRef.current = null;
+      setTally(null);
+    }
+  }, []);
+
+  useEffect(() => { void refreshEpisodes(); }, [refreshEpisodes]);
+
   /** Buzz both hands with one cue. Every recorder transition gets one, at a
    *  distinguishable weight — inside a headset the haptic is the fastest
    *  channel there is, and "did that take actually start" is exactly the
@@ -450,11 +494,14 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       setRecStatus(st);
       buzzBoth(0.7, 200);
       toast.success(`recording → ${repoId}`);
+      // Now that the repo is settled, count what was already there: the take
+      // in flight lands at exactly that index.
+      void refreshEpisodes(st.repo_id ?? repoId);
       await rec.refresh();
     } catch (e) {
       toast.error(`record start failed: ${(e as Error).message}`);
     }
-  }, [buzzBoth]);
+  }, [buzzBoth, refreshEpisodes]);
 
   /** Commit the open take, or throw it away.
    *
@@ -480,11 +527,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         buzzBoth(0.25, 80);
         toast.info("take discarded");
       }
+      void refreshEpisodes(st.repo_id);
       await rec.refresh();
     } catch (e) {
       toast.error(`record stop failed: ${(e as Error).message}`);
     }
-  }, [buzzBoth]);
+  }, [buzzBoth, refreshEpisodes]);
 
   /** The A/X hold, from inside the XR loop. Not rolling: start a take.
    *  Rolling: raise the save/discard decision — or withdraw it, so a hold
@@ -609,8 +657,8 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     // — another teleop already running, an unknown arm — we want to find out
     // before frames are in flight, not while the operator is already immersed
     // and squeezing a grip that does nothing.
-    const pairing = armPairing(armIds, stanceRef.current, soloArmRef.current);
-    if (!pairing.left_arm && !pairing.right_arm) {
+    const pairing = pairingRef.current;
+    if (!pairing || (!pairing.left_arm && !pairing.right_arm)) {
       toast.error("no arm resolved for this preset — pick another");
       await teardown({ stopBackend: false });
       return;
@@ -798,7 +846,8 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           hudCtx, statusRef.current,
           { recording: Boolean(rs?.recording),
             episode_frames: rs?.episode_frames ?? 0,
-            takes: takesRef.current },
+            takes: takesRef.current,
+            episodes: episodesTotal(tallyRef.current, takesRef.current) },
           menuRef.current && {
             ...menuRef.current,
             tuning: { open: tuneOpenRef.current,
@@ -855,6 +904,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   // so there is no "operator looked at another tab" case to preserve.
   useEffect(() => () => { void teardown({ stopBackend: true }); }, [teardown]);
 
+  const datasetEpisodes = episodesTotal(tally, takes);
   const clutch = status?.clutch;
   const running = Boolean(status?.running);
   const acquire = status?.acquire;
@@ -957,11 +1007,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           )}
           {recStatus?.recording && (
             <span className="text-red-400 font-bold animate-haller-rec">
-              ● REC take {takes + 1} · {recStatus.episode_frames}
+              ● REC {datasetEpisodes === null
+                ? `take ${takes + 1}`
+                : `ep ${datasetEpisodes}`} · {recStatus.episode_frames}
             </span>
           )}
-          {!recStatus?.recording && takes > 0 && (
-            <span className="text-neutral-400">{takes} take{takes === 1 ? "" : "s"} saved</span>
+          {!recStatus?.recording && (takes > 0 || datasetEpisodes !== null) && (
+            <span className="text-neutral-400">
+              {takes > 0 && `${takes} take${takes === 1 ? "" : "s"} this run`}
+              {takes > 0 && datasetEpisodes !== null && " · "}
+              {datasetEpisodes !== null && `${datasetEpisodes} in dataset`}
+            </span>
           )}
           {precision && (
             <span className="text-sky-400 font-bold">◆ PRECISION</span>
@@ -1110,23 +1166,19 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       <div className="space-y-1">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-muted-foreground">session</span>
-          {presets.length === 0 && (
-            <span className="text-destructive">
-              no arms enabled in the backend config
-            </span>
-          )}
           {presets.map((preset) => {
-            const on = (preset.soloArm ?? null) === soloSelected;
+            const solo = preset.id === "dual" ? null : preset.id.slice("solo-".length);
             return (
               <Button
                 key={preset.id}
                 size="sm"
-                variant={on ? "default" : "outline"}
-                disabled={inSession}
+                variant={preset.id === selected?.id ? "default" : "outline"}
+                disabled={inSession || preset.unavailable !== null}
+                title={preset.unavailable ?? preset.detail}
                 onClick={() => {
-                  setSoloArm(preset.soloArm);
+                  setSoloArm(solo);
                   try {
-                    if (preset.soloArm) localStorage.setItem(SOLO_LS_KEY, preset.soloArm);
+                    if (solo) localStorage.setItem(SOLO_LS_KEY, solo);
                     else localStorage.removeItem(SOLO_LS_KEY);
                   } catch { /* non-fatal */ }
                 }}
@@ -1137,9 +1189,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           })}
         </div>
         <div className="text-muted-foreground">
-          — {pairingLabel}. A solo session ignores the other hand entirely:
-          nothing is ever written to the arm it has none for. Half as much that
-          can go wrong, which is what a first hardware run wants.
+          — {selected
+              ? selected.detail
+              : "no arms enabled in the backend config"}. A solo session ignores
+          the other hand entirely: nothing is ever written to the arm it has
+          none for. Half as much that can go wrong, which is what a first
+          hardware run wants.
         </div>
       </div>
 
@@ -1176,8 +1231,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           onChange={(e) => {
             const v = e.target.value === "front" ? "front"
               : e.target.value === "mirror" ? "mirror" : "behind";
-            setStance(v);
-            try { localStorage.setItem(STANCE_LS_KEY, v); } catch { /* non-fatal */ }
+            setStance(v);   // lib/stance.ts persists it and tells the cockpit
           }}
         >
           <option value="behind">egocentric — arms as your own (default)</option>

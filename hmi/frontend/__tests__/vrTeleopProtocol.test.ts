@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 
+import { pairingFor } from "../lib/stance";
 import {
-  armPairing, clampKnob, DEFAULT_WRIST_PIVOT_M, formatKnob, HAPTIC_FLOOR,
+  clampKnob, DEFAULT_WRIST_PIVOT_M, episodesTotal, formatKnob, HAPTIC_FLOOR,
   ikHapticCues, ORIENT_DEFICIT, parseVrSocketMessage, precisionHeld,
-  PRECISION_STICK_Y, sampleVRFrame, sessionPresets, stepTuning, stickAxes,
+  PRECISION_STICK_Y, sampleVRFrame, stepTuning, stickAxes,
   TUNING_KNOBS, TUNING_REPEAT_MS, WRIST_PIVOT_KEY,
   BUTTON_SQUEEZE, BUTTON_TRIGGER,
   type IkSides, type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
 } from "../lib/vrTeleop";
+
+/** The pairing rule lives in lib/stance.ts — one implementation, shared with
+ *  the cockpit launcher. These pins are the in-headset client's stake in it:
+ *  the argument order differs from the old local helper, the rule does not. */
+const armPairing = (
+  arms: readonly string[],
+  stance: "behind" | "mirror" | "front",
+  solo: string | null = null,
+) => pairingFor(stance, arms, solo);
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -355,22 +365,35 @@ describe("armPairing", () => {
   });
 });
 
-describe("sessionPresets", () => {
-  it("offers dual plus one solo button per arm", () => {
-    expect(sessionPresets(["right", "left"])).toEqual([
-      { id: "dual", label: "dual", soloArm: null },
-      { id: "solo-right", label: "solo right", soloArm: "right" },
-      { id: "solo-left", label: "solo left", soloArm: "left" },
-    ]);
+describe("episodesTotal", () => {
+  const tally = { repoId: "u/haller_pick", onDisk: 7,
+                  baselineOnDisk: 7, baselineTakes: 0 };
+
+  it("reports what the dataset meta says", () => {
+    expect(episodesTotal(tally, 0)).toBe(7);
   });
 
-  it("offers no dual button on a one-armed rig — it could only fail", () => {
-    expect(sessionPresets(["left"])).toEqual([
-      { id: "solo-left", label: "solo left", soloArm: "left" },
-    ]);
+  it("floors the count with this page's own saves when the meta lags", () => {
+    // lerobot buffers ten episodes' metadata in RAM, so a disk read can sit
+    // that far behind. A counter that stalls at 7 while the operator banks
+    // their tenth take is worse than none.
+    expect(episodesTotal(tally, 3)).toBe(10);
   });
 
-  it("offers nothing at all when no arm is enabled", () => {
-    expect(sessionPresets([])).toEqual([]);
+  it("lets a fresher disk read win once the buffer flushes", () => {
+    // Another surface recorded too: on-disk is ahead of anything this page
+    // can account for, and it is the one that is right.
+    expect(episodesTotal({ ...tally, onDisk: 42 }, 3)).toBe(42);
+  });
+
+  it("counts only the takes saved SINCE this dataset was first read", () => {
+    // The operator retyped the task mid-run: new repo, new baseline, and the
+    // takes banked into the previous dataset must not inflate this one.
+    expect(episodesTotal({ repoId: "u/other", onDisk: 2,
+                           baselineOnDisk: 2, baselineTakes: 5 }, 6)).toBe(3);
+  });
+
+  it("is null with nothing read, so the HUD falls back instead of showing 0", () => {
+    expect(episodesTotal(null, 4)).toBeNull();
   });
 });

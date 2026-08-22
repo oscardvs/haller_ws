@@ -536,7 +536,14 @@ export type HudStatusLike = {
 export type RecorderHudLike = {
   recording: boolean;
   episode_frames: number;
+  /** Takes this page has saved — the fallback count, and the floor under the
+   *  dataset-wide one. */
   takes?: number;
+  /** Episodes already in the dataset, so a rolling take can be named by the
+   *  index it will actually land at (they are 0-based and sequential, so with
+   *  N on disk the one in flight is N). Null when no dataset has been read —
+   *  a fresh repo, or the endpoint refused. */
+  episodes?: number | null;
 } | null;
 
 /**
@@ -612,7 +619,12 @@ export function paintHud(
     // state: the one line that must be readable at a glance while driving.
     ctx.fillStyle = "#f28b82";
     ctx.textAlign = "right";
-    ctx.fillText(`● REC ${rec.episode_frames}`, leftW, y);
+    const ep = rec.episodes;
+    ctx.fillText(
+      typeof ep === "number"
+        ? `● REC ep ${ep} · ${rec.episode_frames}`
+        : `● REC ${rec.episode_frames}`,
+      leftW, y);
     ctx.textAlign = "left";
   }
   if (col?.enabled) {
@@ -823,13 +835,21 @@ function paintViewMenu(
 
   const recording = Boolean(rec?.recording);
   const takes = rec?.takes ?? 0;
+  const ep = rec?.episodes;
+  // The dataset-wide index when we have one — "ep 34" is what an operator
+  // reconciles against the dataset browser afterwards, where "take 3" is only
+  // ever true of this page-load.
+  const naming = typeof ep === "number" ? `ep ${ep}` : `take ${takes + 1}`;
+  const idle = typeof ep === "number"
+    ? `hold A/X to START a take  (${ep} in dataset)`
+    : takes
+      ? `hold A/X to START a take  (${takes} saved)`
+      : "hold A/X to START a take";
   ctx.fillStyle = recording ? "#f28b82" : "#9aa0a6";
   ctx.fillText(
     recording
-      ? `● REC take ${takes + 1} · ${rec?.episode_frames ?? 0} fr — hold A/X to END`
-      : takes
-        ? `hold A/X to START a take  (${takes} saved)`
-        : "hold A/X to START a take",
+      ? `● REC ${naming} · ${rec?.episode_frames ?? 0} fr — hold A/X to END`
+      : idle,
     x, y);
   y += lineH;
 
@@ -1394,78 +1414,35 @@ export function stepTuning(
   return { nav: { ...nav, index }, patch: null };
 }
 
-// ---- session launcher --------------------------------------------------------
+// ---- dataset tally ----------------------------------------------------------
 
-export type Stance = "behind" | "mirror" | "front";
-
-export type ArmPairing = { left_arm: string | null; right_arm: string | null };
-
-/**
- * Which hand drives which arm, for `POST /teleop/human/start`.
- *
- * `left_arm` names the arm the operator's LEFT hand drives. In the "behind"
- * (egocentric) stance the operator faces the same way the arms reach, so the
- * arm under their right hand — the one on frame-right in the over-shoulder
- * view — is the one the config names "left". Facing the arms, the pairing is
- * direct. Getting this wrong reads as "the controls are inverted", not as a
- * subtle mapping issue.
- *
- * Arm identity comes from the ID, not from config order. `config.yaml` lists
- * the real rig as [right, left] while the sim config lists [left, right], so
- * a positional rule is right in one and inverted in the other — which is
- * exactly the failure the stance swap exists to prevent. Unrecognisable IDs
- * fall back to config order, first = the robot's left.
- *
- * A solo session keeps the arm on the side the same rule gives it and sends
- * null for the other, so "my right hand drives the arm I picked" holds
- * identically in a one-armed and a two-armed session.
- */
-export function armPairing(
-  armIds: readonly string[], stance: Stance, soloArm: string | null = null,
-): ArmPairing {
-  const named = (re: RegExp) => armIds.find((id) => re.test(id)) ?? null;
-  let robotLeft = named(/left/i);
-  let robotRight = named(/right/i);
-  if (robotLeft !== null && robotLeft === robotRight) {
-    robotLeft = null;
-    robotRight = null;
-  }
-  if (robotLeft === null && robotRight === null) {
-    robotLeft = armIds[0] ?? null;
-    robotRight = armIds[1] ?? null;
-  } else if (robotLeft === null) {
-    robotLeft = armIds.find((id) => id !== robotRight) ?? null;
-  } else if (robotRight === null) {
-    robotRight = armIds.find((id) => id !== robotLeft) ?? null;
-  }
-
-  const behind = stance === "behind";
-  const dual: ArmPairing = behind
-    ? { left_arm: robotRight, right_arm: robotLeft }
-    : { left_arm: robotLeft, right_arm: robotRight };
-  if (!soloArm) return dual;
-  if (dual.left_arm === soloArm) return { left_arm: soloArm, right_arm: null };
-  if (dual.right_arm === soloArm) return { left_arm: null, right_arm: soloArm };
-  // An arm the left/right resolution never placed (a third arm, an ID that
-  // says neither). Treat it as the robot's left arm — the same convention
-  // the positional fallback uses — so the answer is at least consistent.
-  return behind
-    ? { left_arm: null, right_arm: soloArm }
-    : { left_arm: soloArm, right_arm: null };
-}
-
-export type SessionPreset = {
-  id: string;
-  label: string;
-  /** null = both hands drive, one arm each. */
-  soloArm: string | null;
+/** What one read of `GET /record/episodes` told us, plus where this page's own
+ *  take counter stood the first time it read THIS dataset. */
+export type DatasetTally = {
+  repoId: string | null;
+  /** Episodes the dataset meta reports on disk. */
+  onDisk: number;
+  baselineOnDisk: number;
+  baselineTakes: number;
 };
 
-/** The launcher's buttons, from the arms the backend actually enabled. A
- *  one-armed config offers exactly one preset rather than a "dual" button
- *  that can only fail. */
-export function sessionPresets(armIds: readonly string[]): SessionPreset[] {
-  const solo = armIds.map((id) => ({ id: `solo-${id}`, label: `solo ${id}`, soloArm: id }));
-  if (armIds.length < 2) return solo;
-  return [{ id: "dual", label: "dual", soloArm: null }, ...solo];
+/**
+ * Episodes in the dataset — the number the HUD counts from.
+ *
+ * `onDisk` alone is not enough: lerobot buffers ten episodes' metadata in RAM
+ * before it writes `meta/episodes.jsonl`, so a disk read can sit that far
+ * behind during a long run, and an episode counter that stalls at 7 while the
+ * operator banks their tenth take is worse than none. The floor is what this
+ * page has saved since it first read this dataset. Whichever is larger is the
+ * true count; the two converge as soon as the buffer flushes.
+ *
+ * Returns null when nothing has been read — the caller falls back to its own
+ * take counter rather than printing a confident zero.
+ */
+export function episodesTotal(
+  tally: DatasetTally | null, takes: number,
+): number | null {
+  if (!tally) return null;
+  const savedSince = Math.max(0, takes - tally.baselineTakes);
+  return Math.max(tally.onDisk, tally.baselineOnDisk + savedSince);
 }
