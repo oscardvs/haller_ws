@@ -9,23 +9,30 @@ shape the Quest browser sends), and asserts the full safety chain behaves:
   2. engage         squeeze both grips -> both sides DRIVING (the countdown
                     served, no lurch)
   3. per-side grip  releasing ONE grip releases only that side
-  4. release        letting go freezes both sides (authority HELD)
-  5. estop          POST /estop stops the session and drops torque; MANUAL
+  4. collision      driving both tools into each other trips the guard: the
+                    INTER-ARM capsule pair binds (not a bench floor), slack
+                    tightens onto the margin without crossing it, the
+                    commanded pair stops dead while the hands keep going, and
+                    the mapper is still visibly asking. Ends by parking the
+                    pair through the in-session home.
+  5. release        letting go freezes both sides (authority HELD)
+  6. estop          POST /estop stops the session and drops torque; MANUAL
                     mode re-arms
-  6. ws-drop        killing the socket mid-session auto-stops the backend
+  7. ws-drop        killing the socket mid-session auto-stops the backend
                     after its grace window
-  7. ik             the clutch + decoupled IK doing their job: locking in
+  8. ik             the clutch + decoupled IK doing their job: locking in
                     from an arbitrary hand position, the egocentric direction
                     mapping, the absorbing reach limit, the guard switch, the
                     workspace floor holding with the guard OFF, the trigger
                     on the gripper, and single-arm sessions
-  8. recording      a scripted take lands on disk with BOTH sim camera
-                    channels and every frame the recorder counted
-  9. estop mid-take the recorder notices the teleop session dying and saves
+  9. recording      a scripted take lands on disk with BOTH sim camera
+                    channels and every frame the recorder counted, and the
+                    dataset routes see it
+ 10. estop mid-take the recorder notices the teleop session dying and saves
                     the take itself, instead of appending a corrupted tail
- 10. starvation     ~1 s of socket silence (under the 2 s idle timeout)
+ 11. starvation     ~1 s of socket silence (under the 2 s idle timeout)
                     holds both sides and freezes their goals
- 11. tracking blip  one controller reporting tracked:false releases only
+ 12. tracking blip  one controller reporting tracked:false releases only
                     that side; the other keeps driving; re-track re-acquires
 
 There is one input path now: every frame feeds `QuestTeleoperator`. The
@@ -192,7 +199,7 @@ async def ik_section(base: str, ws_url: str) -> None:
     drives absolute hand POSITIONS through drags, which is the thing the ik
     path is about, where the sections above only need a hand that exists.
     """
-    print("\n-- 7: the ported clutch + decoupled IK --")
+    print("\n-- 8: the ported clutch + decoupled IK --")
     req(base, "/teleop/human/stop", {})
 
     L0 = [-0.25, 1.15, -0.30]
@@ -430,7 +437,7 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
     root = _smoke_dataset_root()
     start_body = {"left_arm": "left", "right_arm": "right"}
     try:
-        print("\n-- 8: recording round trip --")
+        print("\n-- 9: recording round trip --")
         # A crashed earlier run leaves a partial dataset behind; resume would
         # happily append to it, so start from nothing.
         shutil.rmtree(root, ignore_errors=True)
@@ -483,7 +490,23 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
                   facts["parquet_bytes"] > 1024,
                   f"{facts['parquet_bytes']} bytes")
 
-        print("\n-- 9: E-STOP mid-take auto-saves --")
+        # ...and the dataset routes see the same take the disk does. Read off
+        # `meta/` rather than through lerobot, so this also catches a router
+        # that answers from a stale in-process view of a dataset the recorder
+        # has since closed.
+        listing = req(base, f"/record/episodes?repo_id={SMOKE_REPO}")
+        eps = listing.get("episodes") or []
+        check("the dataset routes report the take that was just written",
+              len(eps) == 1 and int(eps[0].get("frames", -1)) == frames,
+              f"{len(eps)} episode(s), frames={eps and eps[0].get('frames')} "
+              f"recorder={frames}")
+        repos = req(base, "/record/repos").get("repos", [])
+        mine = next((r for r in repos if r.get("repo_id") == SMOKE_REPO), None)
+        check("the repo listing carries it too",
+              mine is not None and int(mine.get("episodes", 0)) == 1,
+              f"{mine}" if mine else f"{SMOKE_REPO} absent from /record/repos")
+
+        print("\n-- 10: E-STOP mid-take auto-saves --")
         for arm in arm_ids:
             req(base, f"/arm/{arm}/mode", {"mode": "manual"})
         req(base, "/teleop/human/stop", {})
@@ -527,7 +550,7 @@ async def robustness_section(base: str, ws_url: str) -> None:
     quiet without dying, and a controller that drops tracking mid-drive."""
     start_body = {"left_arm": "left", "right_arm": "right"}
 
-    print("\n-- 10: frame starvation holds both sides --")
+    print("\n-- 11: frame starvation holds both sides --")
     req(base, "/teleop/human/stop", {})
     req(base, "/teleop/human/start", start_body)
     async with ws_connect(ws_url) as ws:
@@ -572,7 +595,7 @@ async def robustness_section(base: str, ws_url: str) -> None:
         check("both sides re-acquire when frames resume", s is not None)
     req(base, "/teleop/human/stop", {})
 
-    print("\n-- 11: tracking blip releases only the lost side --")
+    print("\n-- 12: tracking blip releases only the lost side --")
     req(base, "/teleop/human/stop", {})
     req(base, "/teleop/human/start", start_body)
     async with ws_connect(ws_url) as ws:
@@ -654,7 +677,103 @@ async def main() -> int:
             8.0, ws=ws)
         check("right side re-acquires after re-squeeze", s is not None)
 
-        print("\n-- 4: release freezes --")
+        print("\n-- 4: collision guard --")
+        # Both hands sweep OUTWARD, which under the egocentric mapping
+        # (operator right = robot -x) drives both tools INWARD, toward each
+        # other across the bench. Measured on the sim bench 2026-08-22: the
+        # binding constraint switches from a bench floor to the inter-arm
+        # capsule pair at ~11 cm of hand travel, the guard starts clamping at
+        # ~12 cm, and the commanded pans then sit still while the hands travel
+        # another 23 cm.
+        #
+        # `worst` naming the PAIR is what makes this a bimanual-guard check
+        # rather than a bench-floor one: a sweep that only ever tripped
+        # `*:tip_floor` would pass every other assertion here while proving
+        # nothing about the thing this section exists for.
+        slack0 = req(base, "/teleop/human")["collision"].get("slack_m")
+        limited_seen = False
+        pair_seen = False
+        pan_at_wall = None
+        min_slack = 1e9
+        n = 150
+        for i in range(n):
+            dx = 0.35 * (i + 1) / n
+            await ws.send(frame(left_dx=-dx, right_dx=dx))
+            if i % 5 == 0:
+                st = req(base, "/teleop/human")
+                col = st.get("collision", {})
+                if "hand|" in str(col.get("worst")):
+                    pair_seen = True
+                if col.get("limited"):
+                    limited_seen = True
+                    if pan_at_wall is None:
+                        # The pose the guard first held the pair at. Everything
+                        # after this is hand travel the arms must not follow.
+                        pan_at_wall = {s: st["goal_deg"][s].get("shoulder_pan", 0.0)
+                                       for s in ("left", "right")}
+                if col.get("slack_m") is not None:
+                    min_slack = min(min_slack, col["slack_m"])
+            await asyncio.sleep(0.033)
+        await stream(ws, 1.0, left_dx=-0.35, right_dx=0.35)
+
+        st = req(base, "/teleop/human")
+        col = st.get("collision", {})
+        if col.get("slack_m") is not None:
+            min_slack = min(min_slack, col["slack_m"])
+        check("the guard clamped during the crossing sweep", limited_seen,
+              f"final worst={col.get('worst')}")
+        check("it was the INTER-ARM pair that bound, not a bench floor",
+              pair_seen, f"final worst={col.get('worst')}")
+        check("the clearance tightened onto the margin",
+              slack0 is not None and min_slack < slack0,
+              f"{slack0 * 1000:.1f} -> {min_slack * 1000:.1f} mm")
+        check("the commanded pair never entered the margin",
+              min_slack > -0.001, f"min slack {min_slack * 1000:.2f} mm")
+
+        # The hands are ~23 cm past where the guard first bit. The arms must
+        # not have followed them by even a degree.
+        pan_end = {s: st["goal_deg"][s].get("shoulder_pan", 0.0)
+                   for s in ("left", "right")}
+        crept = (max(abs(pan_end[s] - pan_at_wall[s]) for s in ("left", "right"))
+                 if pan_at_wall else 99.0)
+        check("the clamped pair stops dead while the hands keep going",
+              crept < 1.0, f"crept {crept:.2f} deg after the guard bit")
+
+        # ...and it is still being ASKED to move. A guard that had merely run
+        # out of demand would show the same frozen pose with nothing pending.
+        standing = min(
+            abs(j["target"] - j["committed"])
+            for s in ("left", "right")
+            for j in [st["joints"][s].get("shoulder_pan", {})]
+            if j.get("target") is not None
+        )
+        check("the mapper is still asking and the guard is still refusing",
+              standing > 1.5, f"{standing:.1f} deg of standing demand")
+
+        # Unwind, then PARK. The sections after this one anchor wherever the
+        # arms are, so a pair left pressed against the guard would have them
+        # driving out of a pose the guard is already fighting — and the
+        # failure would read as "acquisition is broken" rather than "the
+        # previous section left the arms crossed".
+        n = 90
+        for i in range(n):
+            dx = 0.35 * (1 - (i + 1) / n)
+            await ws.send(frame(left_dx=-dx, right_dx=dx))
+            await asyncio.sleep(0.033)
+        # Release FIRST: request_home deliberately skips a DRIVING side, so
+        # posting it with the grips still squeezed parks nothing at all.
+        await stream(ws, 0.7, left_squeeze=False, right_squeeze=False)
+        sides = req(base, "/teleop/human/home", {})["sides"]
+        check("in-session home accepts both sides once the grips are open",
+              sides == ["left", "right"], f"sides={sides}")
+        await stream(ws, 6.0, left_squeeze=False, right_squeeze=False)
+        parked = req(base, "/teleop/human")["goal_deg"]
+        worst = max(abs(v) for s in ("left", "right")
+                    for j, v in parked[s].items() if j != "gripper")
+        check("the pair parks clear before the sections that follow",
+              worst < 5.0, f"worst joint {worst:.1f} deg from zero")
+
+        print("\n-- 5: release freezes --")
         await stream(ws, 0.3, left_squeeze=False, right_squeeze=False)
         g0 = req(base, "/teleop/human")["goal_deg"]
         await stream_sweep(ws, 1.0, "left_dx", 0.0, 0.25,
@@ -665,7 +784,7 @@ async def main() -> int:
         check("open grips freeze both arms despite moving hands",
               drift < 0.5, f"max drift {drift:.2f} deg")
 
-        print("\n-- 5: E-STOP --")
+        print("\n-- 6: E-STOP --")
         req(base, "/estop", {})
         st = req(base, "/teleop/human")
         check("E-STOP stops the session", st["running"] is False)
@@ -679,7 +798,7 @@ async def main() -> int:
         check("MANUAL re-arms after E-STOP",
               all(a["mode"] == "manual" for a in cfg_now["arms"]))
 
-    print("\n-- 6: WS drop auto-stop --")
+    print("\n-- 7: WS drop auto-stop --")
     req(base, "/teleop/human/start", {"left_arm": "left", "right_arm": "right"})
     ws = await ws_connect(ws_url)
     await stream(ws, 0.3, left_squeeze=False, right_squeeze=False)
