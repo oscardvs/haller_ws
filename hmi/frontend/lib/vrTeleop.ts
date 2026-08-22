@@ -1,13 +1,18 @@
 /**
- * WebXR → the VR frame the backend's `vr_input.py` expects.
+ * WebXR → the frame the backend's `QuestTeleoperator` converts.
  *
- * This file is deliberately thin. Unlike `mediapipe.ts`, which fuses landmarks
- * into finished `SideFrame`s, nothing here computes geometry: it samples the
- * headset and controller poses and ships them raw. The shoulder estimate, the
- * two-link elbow IK and the synthetic hand all live server-side in
- * `vr_input.py`, where they can be tested against the real retargeter and
- * cannot drift from its coordinate conventions. Read that module's docstring
- * before changing the wire shape below.
+ * This file is deliberately thin: nothing here solves for joints. It samples
+ * the headset and controller poses and ships them raw, and the clutch-relative
+ * mapping and the 3+2 decoupled IK both live server-side in
+ * `haller_hmi/vr_teleop/`, where they are tested against the real arm model
+ * and cannot drift from its coordinate conventions.
+ *
+ * One geometric correction DOES belong here, because only the client has the
+ * grip pose to build it from: the read-out point is shifted back along the
+ * controller's own axis onto roughly where the operator's wrist turns
+ * (`wristPivotM`). Without it a pure wrist twist swings the grip point
+ * through an arc that the mapper can only read as translation nobody asked
+ * for.
  *
  * Minimal WebXR types are declared locally rather than pulling in
  * `@types/webxr`: we touch about a dozen members of the API, and a dependency
@@ -27,6 +32,11 @@ type XRPose = { transform: XRRigidTransform; emulatedPosition: boolean };
 
 export type XRGamepadLike = {
   buttons: readonly { pressed: boolean; value: number }[];
+  /** `xr-standard` puts the thumbstick on 2/3 and a touchpad on 0/1; a
+   *  controller with only a stick may report it on either pair. The only
+   *  analog inputs this client has left, and therefore where the tuning
+   *  menu and the precision modifier had to go — see `stickAxes`. */
+  axes?: readonly number[];
   hapticActuators?: readonly {
     pulse?: (intensity: number, durationMs: number) => unknown;
   }[];
@@ -87,31 +97,21 @@ export type ControllerSample = {
   /** Analog trigger [0,1]. 1 = fully squeezed = gripper closed. */
   trigger: number;
   /** Grip button — this hand's dead-man. Each squeeze speaks only for its
-   *  own arm on the backend; see vr_input.py's `dead_man_sides`. */
+   *  own arm on the backend; see the session's `dead_man_sides`. */
   squeeze: boolean;
   tracked: boolean;
+  /** Fine-work modifier: the backend multiplies both mapping gains by
+   *  `precision_factor` while this is set. Absent reads as false. */
+  precision?: boolean;
 };
 
 export type VRFrame = {
   type: "vr_keypoints";
   ts_ms: number;
-  /** Either grip — kept for the status chip and for backends that predate the
-   *  per-side split. The split itself rides on each controller's `squeeze`. */
+  /** Either grip — kept for the status chip. The per-side split itself rides
+   *  on each controller's `squeeze`. */
   dead_man: boolean;
-  /** "none" (default): identical arms mounted side by side, no mirroring —
-   *  egocentric frames already give opposite pan signs for symmetric
-   *  gestures. "both": a rig whose two mounts are true mirror images. */
-  mirror_mode?: "none" | "both";
-  /** How the backend turns this frame into joint goals.
-   *  "ik" (DEFAULT, and what an absent field now means): the ported stack in
-   *  `haller_hmi/vr_teleop` — 6-DoF clutch-relative tracking with absorbing
-   *  reach limits into a decoupled damped-least-squares solver.
-   *  "pose": the previous wrist-point mode, 3-DoF position with the
-   *  controller's pitch/roll passed through on fixed gains. Kept as the
-   *  bench fallback.
-   *  "joints": the original body-angle copying. */
-  vr_mode?: "ik" | "pose" | "joints";
-  /** How the operator's hand maps onto the gripper (position mode only).
+  /** How the operator's hand maps onto the gripper.
    *  "behind" (default): egocentric — the replica arm moves exactly like
    *  your own (goggles on, push forward = the arm extends INTO the default
    *  over-the-shoulder view). "mirror": face-to-face, the arm as your
@@ -121,14 +121,7 @@ export type VRFrame = {
   head: { position: Vec3; orientation: Quat } | null;
   left: ControllerSample | null;
   right: ControllerSample | null;
-  /** Optional per-operator limb lengths, metres. Absent keys use BodyModel defaults. */
-  body?: Partial<Record<
-    "shoulder_drop" | "shoulder_back" | "shoulder_half_width" |
-    "upper_arm" | "fore_arm" | "hand_len" | "hand_half_width", number
-  >>;
 };
-
-export type BodyOverride = NonNullable<VRFrame["body"]>;
 
 export function xrSupported(): Promise<boolean> {
   const xr = (navigator as unknown as NavigatorXR).xr;
@@ -532,14 +525,19 @@ export type HudStatusLike = {
   acquire?: Partial<Record<"left" | "right", {
     authority: string;
     remaining_ms: number | null;
-    blocking: string[];
-    error_deg?: Record<string, number>;
     reason: string;
   }>>;
 } | null;
 
-/** The slice of recorder status the in-scene HUD shows. */
-export type RecorderHudLike = { recording: boolean; episode_frames: number } | null;
+/** The slice of recorder status the in-scene HUD shows. `takes` counts what
+ *  this session has saved — the recorder reports frames, not an episode
+ *  index, and an operator mid-run wants to know how many good ones are in
+ *  the bag. */
+export type RecorderHudLike = {
+  recording: boolean;
+  episode_frames: number;
+  takes?: number;
+} | null;
 
 /**
  * Repaint the in-scene HUD. Layout: workspace camera on top (when a frame is
@@ -559,6 +557,18 @@ export type VrMenuLike = {
    *  operator must be able to SEE which mapping their hands are wired to —
    *  a wrong stance reads as "the arm goes the opposite way". */
   stance?: "behind" | "mirror" | "front";
+  /** The live-tuning list, when the operator has it open. */
+  tuning?: {
+    open: boolean;
+    index: number;
+    values: Readonly<Record<string, number>>;
+  } | null;
+  /** True while the precision modifier is held. Shown prominently: a
+   *  modifier you cannot see is one you leave on. */
+  precision?: boolean;
+  /** The end-of-take decision is open — save or discard. Modal: it takes
+   *  over the menu box and both stick clicks until the operator picks. */
+  endPrompt?: boolean;
 } | null;
 
 /** Repaint the status/menu PANEL — text only. The workspace camera is not
@@ -572,6 +582,7 @@ export function paintHud(
   status: HudStatusLike,
   rec: RecorderHudLike = null,
   menu: VrMenuLike = null,
+  ik: IkSides = {},
 ): void {
   const W = ctx.canvas.width;
   const H = ctx.canvas.height;
@@ -580,11 +591,9 @@ export function paintHud(
   ctx.fillRect(0, 0, W, H);
 
   // Two hard columns: status text on the left, the menu box on the right,
-  // and a CLIP on the status column — an acquisition line listing several
-  // blocking joints is arbitrarily long, and letting it run under the menu
-  // is exactly the overlapping-menus mess this layout replaces. Long match
-  // lines WRAP inside the column instead of being cut: which joint is off
-  // and which way is the one thing the operator needs mid-countdown.
+  // and a CLIP on the status column — an error string or a long side line is
+  // arbitrarily wide, and letting one run under the menu is exactly the
+  // overlapping-menus mess this layout replaces.
   const leftW = Math.round(W * 0.55) - 24;
   ctx.save();
   ctx.beginPath();
@@ -619,22 +628,10 @@ export function paintHud(
       24, y);
   }
   ctx.font = "28px monospace";
-  const wrapInto = (text: string, x: number, maxW: number): string[] => {
-    const words = text.split(" ");
-    const lines: string[] = [];
-    let cur = "";
-    for (const w of words) {
-      const cand = cur ? `${cur} ${w}` : w;
-      if (cur && ctx.measureText(cand).width > maxW - x) {
-        lines.push(cur);
-        cur = w;
-      } else {
-        cur = cand;
-      }
-    }
-    if (cur) lines.push(cur);
-    return lines;
-  };
+  // Per side: authority, then the solver's own reading of how the arm is
+  // coping. There is no pose to match any more — the mapper re-anchors until
+  // the side is driving, so acquisition is a countdown and nothing else —
+  // and the space that list used to take is worth more spent on conditioning.
   for (const side of ["left", "right"] as const) {
     y += 38;
     const acq = status?.acquire?.[side];
@@ -642,35 +639,38 @@ export function paintHud(
     ctx.fillStyle = "#9aa0a6";
     ctx.fillText(`${side === "left" ? "L" : "R"} ${grip ? "●" : "○"}`, 24, y);
     if (!acq) continue;
+    const d = ik[side];
     ctx.fillStyle = acq.authority === "driving" ? "#81c995"
       : acq.authority === "acquiring" ? "#fdd663" : "#9aa0a6";
     let line = acq.authority;
-    let match = "";
-    if (acq.authority === "acquiring") {
-      if (acq.remaining_ms !== null) line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
-      if (acq.blocking.length) {
-        // Signed errors, so the operator knows which WAY to move, not just
-        // which joint is off: "elbow_flex +61°" means reach further.
-        match = "match: " + acq.blocking.map((j) => {
-          const e = acq.error_deg?.[j];
-          return e === undefined ? j
-            : `${j} ${e > 0 ? "+" : ""}${e.toFixed(0)}°`;
-        }).join(", ");
-      }
+    if (acq.authority === "acquiring" && acq.remaining_ms !== null) {
+      line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
     }
     if (acq.reason === "no_tracking") line += "  (no tracking)";
+    if (acq.reason === "no_arm") line += "  (no arm this side)";
+    // σ_min is in m/rad: how far the tool moves, in its worst direction, per
+    // radian of joint travel. Falling toward zero IS the singular set.
+    if (acq.authority === "driving" && typeof d?.sigma_min === "number") {
+      line += `  σ ${d.sigma_min.toFixed(3)}`;
+    }
     ctx.fillText(line, 120, y);
-    // The match list goes on its own wrapped line(s): it is the one thing
-    // the operator needs mid-countdown, and it can name several joints.
-    for (const seg of match ? wrapInto(match, 120, leftW) : []) {
+    // The 5-DoF wrist has one axis fewer than an arbitrary orientation asks
+    // for. Say what to do about it — twisting harder at a deficit is exactly
+    // the wrong response, and the controller is buzzing at the same moment.
+    if (acq.authority === "driving"
+        && (d?.orient_residual ?? 0) > ORIENT_DEFICIT) {
       y += 32;
-      ctx.fillText(seg, 120, y);
+      ctx.fillStyle = "#fdd663";
+      ctx.fillText("wrist is out of twist — MOVE your hand", 120, y);
     }
   }
   y += 38;
   if (status?.last_error) {
     ctx.fillStyle = "#f28b82";
     ctx.fillText(status.last_error.slice(0, 60), 24, y);
+  } else if (menu?.precision) {
+    ctx.fillStyle = "#8ab4f8";
+    ctx.fillText("◆ PRECISION — gains scaled down while held", 24, y);
   } else {
     ctx.fillStyle = "#9aa0a6";
     ctx.fillText("grips = drive · trigger = gripper · B/Y = E-STOP", 24, y);
@@ -680,12 +680,16 @@ export function paintHud(
   if (menu) paintMenu(ctx, menu, rec);
 }
 
-/** The view menu, bottom-right of the HUD.
+/** The menu box, bottom-right of the HUD.
  *
  *  It states the bindings rather than only reflecting state, because in a
  *  headset there is nowhere else to look them up: the record command in
  *  particular was previously documented only in a markdown file, which is no
  *  use with a headset on and both hands clutched.
+ *
+ *  Three faces, one box. The end-of-take decision is modal and takes it over
+ *  entirely; the tuning list replaces the view list while it is open;
+ *  otherwise it is the view menu it has always been.
  */
 function paintMenu(
   ctx: CanvasRenderingContext2D,
@@ -695,8 +699,11 @@ function paintMenu(
   const W = ctx.canvas.width;
   const pad = 18;
   const lineH = 30;
-  // +1 for the reset-arms binding, +1 for the grab-to-move hint.
-  const rows = menu.views.length + 5 + (menu.stance ? 1 : 0);
+  const tuningOpen = Boolean(menu.tuning?.open);
+  const rows = menu.endPrompt ? 5
+    : tuningOpen ? TUNING_WINDOW + 2
+    // views (or the "no cameras" line), SIZE, REC, reset, grab, tune hint.
+    : Math.max(1, menu.views.length) + 6 + (menu.stance ? 1 : 0);
   const boxW = Math.round(W * 0.42);
   const boxH = rows * lineH + pad * 2;
   const x = W - boxW - 24;
@@ -706,53 +713,137 @@ function paintMenu(
   // nothing may ghost through from behind either.
   ctx.fillStyle = "rgb(10, 12, 16)";
   ctx.fillRect(x, yTop, boxW, boxH);
-  ctx.strokeStyle = "rgba(154, 160, 166, 0.45)";
+  ctx.strokeStyle = menu.endPrompt
+    ? "rgba(242, 139, 130, 0.9)" : "rgba(154, 160, 166, 0.45)";
   ctx.lineWidth = 2;
   ctx.strokeRect(x, yTop, boxW, boxH);
 
   ctx.textAlign = "left";
-  let y = yTop + pad + 22;
+  const y0 = yTop + pad + 22;
+  if (menu.endPrompt) paintEndPrompt(ctx, rec, x + pad, y0, lineH);
+  else if (tuningOpen) paintTuning(ctx, menu, x, x + pad, y0, boxW, lineH);
+  else paintViewMenu(ctx, menu, rec, x + pad, y0, lineH);
+}
+
+/** How many knob rows the in-headset list shows at once. More than this and
+ *  the box starts covering the view it hangs beside. */
+const TUNING_WINDOW = 8;
+
+function paintEndPrompt(
+  ctx: CanvasRenderingContext2D, rec: RecorderHudLike,
+  x: number, yStart: number, lineH: number,
+): void {
+  let y = yStart;
+  ctx.font = "bold 24px monospace";
+  ctx.fillStyle = "#f28b82";
+  ctx.fillText(`TAKE ENDED · ${rec?.episode_frames ?? 0} frames`, x, y);
+  y += lineH;
+  ctx.font = "22px monospace";
+  ctx.fillStyle = "#81c995";
+  ctx.fillText("L stick click = SAVE", x, y);
+  y += lineH;
+  ctx.fillStyle = "#f28b82";
+  ctx.fillText("R stick click = DISCARD", x, y);
+  y += lineH;
+  ctx.fillStyle = "#9aa0a6";
+  ctx.fillText("hold A/X = keep rolling", x, y);
+  y += lineH;
+  // Said out loud because it is the one surprising part: `/record/stop`
+  // takes the save decision AT stop time, so there is no way to end the
+  // episode first and choose afterwards. The tail is a second of stillness.
+  ctx.fillText("still rolling until you pick", x, y);
+}
+
+function paintTuning(
+  ctx: CanvasRenderingContext2D, menu: NonNullable<VrMenuLike>,
+  boxX: number, x: number, yStart: number, boxW: number, lineH: number,
+): void {
+  const tuning = menu.tuning!;
+  const index = Math.min(Math.max(tuning.index, 0), TUNING_KNOBS.length - 1);
+  let y = yStart;
   ctx.font = "bold 24px monospace";
   ctx.fillStyle = "#e8eaed";
-  ctx.fillText(`VIEW  (L stick click = next)`, x + pad, y);
+  ctx.fillText("TUNE  (R stick walks / adjusts)", x, y);
+  y += lineH;
+  ctx.font = "22px monospace";
+  const first = Math.max(
+    0, Math.min(index - Math.floor(TUNING_WINDOW / 2),
+                TUNING_KNOBS.length - TUNING_WINDOW));
+  for (let i = 0; i < Math.min(TUNING_WINDOW, TUNING_KNOBS.length); i++) {
+    const k = first + i;
+    const knob = TUNING_KNOBS[k];
+    const on = k === index;
+    if (on) {
+      ctx.fillStyle = "rgba(138, 180, 248, 0.22)";
+      ctx.fillRect(boxX + 6, y - 20, boxW - 12, lineH - 2);
+    }
+    ctx.fillStyle = on ? "#e8eaed" : "#9aa0a6";
+    ctx.fillText(`${on ? "▸" : " "} ${knob.label}`, x, y);
+    ctx.textAlign = "right";
+    ctx.fillText(formatKnob(tuning.values[knob.key]), boxX + boxW - 20, y);
+    ctx.textAlign = "left";
+    y += lineH;
+  }
+  ctx.fillStyle = "#9aa0a6";
+  ctx.fillText("hold R stick = close", x, y);
+}
+
+function paintViewMenu(
+  ctx: CanvasRenderingContext2D, menu: NonNullable<VrMenuLike>,
+  rec: RecorderHudLike, x: number, yStart: number, lineH: number,
+): void {
+  let y = yStart;
+  ctx.font = "bold 24px monospace";
+  ctx.fillStyle = "#e8eaed";
+  ctx.fillText(`VIEW  (L stick click = next)`, x, y);
   y += lineH;
 
   ctx.font = "22px monospace";
   for (const v of menu.views) {
     const on = v.id === menu.activeViewId;
     ctx.fillStyle = on ? "#8ab4f8" : "#9aa0a6";
-    ctx.fillText(`${on ? "▸" : " "} ${v.label}`, x + pad, y);
+    ctx.fillText(`${on ? "▸" : " "} ${v.label}`, x, y);
     y += lineH;
   }
   if (!menu.views.length) {
     ctx.fillStyle = "#9aa0a6";
-    ctx.fillText("  (no cameras)", x + pad, y);
+    ctx.fillText("  (no cameras)", x, y);
     y += lineH;
   }
 
   ctx.fillStyle = "#9aa0a6";
-  ctx.fillText(`SIZE  ${menu.tileSize}  (R stick = next)`, x + pad, y);
+  ctx.fillText(`SIZE  ${menu.tileSize}  (R stick = next)`, x, y);
   y += lineH;
 
   if (menu.stance) {
     const words = { behind: "egocentric", mirror: "mirror", front: "camera-true" };
-    ctx.fillText(`STANCE  ${words[menu.stance]}  (set on panel)`, x + pad, y);
+    ctx.fillText(`STANCE  ${words[menu.stance]}  (set on panel)`, x, y);
     y += lineH;
   }
 
   const recording = Boolean(rec?.recording);
+  const takes = rec?.takes ?? 0;
   ctx.fillStyle = recording ? "#f28b82" : "#9aa0a6";
   ctx.fillText(
     recording
-      ? `● REC ${rec?.episode_frames ?? 0} — hold A/X to STOP + save`
-      : "hold A/X to START a take",
-    x + pad, y);
+      ? `● REC take ${takes + 1} · ${rec?.episode_frames ?? 0} fr — hold A/X to END`
+      : takes
+        ? `hold A/X to START a take  (${takes} saved)`
+        : "hold A/X to START a take",
+    x, y);
+  y += lineH;
+
+  ctx.fillStyle = menu.precision ? "#8ab4f8" : "#9aa0a6";
+  ctx.fillText(
+    menu.precision ? "◆ PRECISION (L stick pushed away)"
+                   : "push L stick away = precision",
+    x, y);
   y += lineH;
 
   ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("hold L stick = reset arms home", x + pad, y);
+  ctx.fillText("hold L stick = reset arms · hold R stick = tune", x, y);
   y += lineH;
-  ctx.fillText("point + trigger (grip open) = move HUD", x + pad, y);
+  ctx.fillText("point + trigger (grip open) = move HUD", x, y);
 }
 
 function poseToPair(pose: XRPose | null | undefined) {
@@ -784,9 +875,9 @@ export function sampleVRFrame(
   session: XRSessionLike,
   frame: XRFrameLike,
   refSpace: unknown,
-  opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean;
-          mirrorMode?: "none" | "both"; vrMode?: "ik" | "pose" | "joints";
-          stance?: "behind" | "mirror" | "front" },
+  opts: { tsMs: number; forceDisengaged?: boolean;
+          stance?: "behind" | "mirror" | "front";
+          precision?: boolean; wristPivotM?: number },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));
 
@@ -802,6 +893,14 @@ export function sampleVRFrame(
     if (squeeze) deadMan = true;
 
     const pose = src.gripSpace ? poseToPair(frame.getPose(src.gripSpace, refSpace)) : null;
+    // Read-out point: the grip position shifted back along the controller's
+    // own +Z (which points toward the operator in WebXR grip space) onto
+    // roughly the operator's wrist pivot. See DEFAULT_WRIST_PIVOT_M — a pure
+    // twist about a palm-centred point is an ARC, and the mapper has no way
+    // to tell that arc from translation the operator never asked for.
+    const pivotM = opts.wristPivotM ?? 0;
+    const back = pose && pivotM !== 0
+      ? _rotateByQuat(pose.orientation, [0, 0, pivotM]) : null;
     // Orientation comes from the TARGET RAY, not the grip. On Quest Touch
     // controllers the grip frame is tilted ~50-60° from where a relaxed hand
     // actually points (it follows the handle, not the knuckles), and the
@@ -815,11 +914,15 @@ export function sampleVRFrame(
       ? poseToPair(frame.getPose(src.targetRaySpace, refSpace)) : null;
     const sample: ControllerSample = pose
       ? {
-          position: pose.position,
+          position: back
+            ? [pose.position[0] + back[0], pose.position[1] + back[1],
+               pose.position[2] + back[2]]
+            : pose.position,
           orientation: (ray ?? pose).orientation,
           trigger: buttons[BUTTON_TRIGGER]?.value ?? 0,
           squeeze,
           tracked: true,
+          ...(opts.precision ? { precision: true } : {}),
         }
       : {
           position: [0, 0, 0],
@@ -836,13 +939,10 @@ export function sampleVRFrame(
     type: "vr_keypoints",
     ts_ms: opts.tsMs,
     dead_man: deadMan,
-    ...(opts.vrMode ? { vr_mode: opts.vrMode } : {}),
     ...(opts.stance ? { stance: opts.stance } : {}),
-    ...(opts.mirrorMode ? { mirror_mode: opts.mirrorMode } : {}),
     head,
     left,
     right,
-    ...(opts.body ? { body: opts.body } : {}),
   };
 }
 
@@ -897,6 +997,47 @@ export function thumbstickPressed(
     if (src.gamepad?.buttons[BUTTON_THUMBSTICK]?.pressed) return true;
   }
   return false;
+}
+
+/** Thumbstick deflection for one hand, as (x, y) in [-1, 1].
+ *
+ *  `xr-standard` puts the stick on axes 2/3 and a touchpad on 0/1; a
+ *  controller carrying only one analog pair reports the stick on 0/1, so take
+ *  whichever is present. y is POSITIVE toward the operator — pushing the
+ *  stick away reads negative, which is the sign convention every caller here
+ *  assumes.
+ *
+ *  These four axes are the only inputs this client had left. Every button is
+ *  spoken for by a dead-man, a safety action or the recorder, so the tuning
+ *  menu and the precision modifier both had to land here.
+ */
+export function stickAxes(
+  session: XRSessionLike, hand: "left" | "right",
+): [number, number] {
+  for (const src of session.inputSources) {
+    if (src.handedness !== hand) continue;
+    const a = src.gamepad?.axes;
+    if (!a) continue;
+    return [a[2] ?? a[0] ?? 0, a[3] ?? a[1] ?? 0];
+  }
+  return [0, 0];
+}
+
+/** How far the LEFT stick must be pushed away from the operator before the
+ *  precision modifier engages. Deliberately past the halfway point: the thumb
+ *  rests on the stick while gripping, and gains that silently halve feel
+ *  exactly like an arm that has started lagging. */
+export const PRECISION_STICK_Y = -0.7;
+
+/** The kit's fine-work modifier, moved off A/X.
+ *
+ *  A/X hold is the record toggle and stays that way — an accidental take
+ *  boundary is corrupted data — so the modifier went to the one free input a
+ *  driving hand can still reach: the left stick, pushed away and held. The
+ *  HUD says PRECISION the whole time it is engaged, because a modifier you
+ *  cannot see is a modifier you leave on by accident. */
+export function precisionHeld(session: XRSessionLike): boolean {
+  return stickAxes(session, "left")[1] <= PRECISION_STICK_Y;
 }
 
 /** Step an index around a ring, guarding against an empty list (which would
@@ -1009,4 +1150,322 @@ export function hapticCues(
     else if (before !== undefined) cues.push({ hand, intensity: 0.45, durationMs: 100 });
   }
   return cues;
+}
+
+// ---- the backend's ik_state push --------------------------------------------
+//
+// The socket answers every frame batch with the teleoperator's own view of
+// what the solver is doing. It is the only channel that can tell the operator
+// WHY an arm feels wrong — the status poll knows about authority and
+// collisions, not about a wrist being asked for a twist two axes cannot
+// deliver.
+
+/** One side of the `ik_state` payload. Every field optional: the backend
+ *  reports a short dict for an untracked or open-gripped hand, and a client
+ *  that indexes into the long one unconditionally crashes inside the XR
+ *  loop, which on a headset looks like the page dying. */
+export type IkSideDiag = {
+  tracked?: boolean;
+  engaged?: boolean;
+  driving?: boolean;
+  /** 0..1 trouble mix the backend already computed — limit pressure, reach
+   *  absorption, singularity proximity and orientation deficit, gated and
+   *  maxed rather than averaged. */
+  haptic?: number;
+  limit_pressure_deg?: number;
+  pos_err_m?: number;
+  /** Smallest singular value of the position Jacobian, m/rad. The honest
+   *  conditioning number on a 25 cm arm — see the port handover on why this
+   *  and not |det J|. */
+  sigma_min?: number;
+  singularity?: number;
+  /** The 1-DoF orientation deficit of a 5-DoF wrist, radians of demand the
+   *  two wrist axes cannot serve. */
+  orient_residual?: number;
+  pos_absorbed?: number;
+  rot_absorbed?: number;
+};
+
+export type IkSides = Partial<Record<"left" | "right", IkSideDiag>>;
+
+/** Config values as they travel on the wire — numbers, with the two boolean
+ *  knobs and the stance enum riding along. */
+export type TuningValues = Record<string, number | boolean | string | null>;
+
+export type VrSocketMessage =
+  | { kind: "ik_state"; config: TuningValues | null; sides: IkSides }
+  | { kind: "config_applied"; config: TuningValues };
+
+/**
+ * Read one server → client message off the teleop socket.
+ *
+ * Tolerates both names the contract uses for the same payload: the relay
+ * answered `request_settings` with its `ik_state` dict, and the unified
+ * socket answers with `settings`. Anything else — a frame echoed by a second
+ * client, a keep-alive — returns null rather than throwing, because this runs
+ * on the socket's message handler and a throw there is silent.
+ */
+export function parseVrSocketMessage(raw: unknown): VrSocketMessage | null {
+  let msg: unknown = raw;
+  if (typeof raw === "string") {
+    try { msg = JSON.parse(raw); } catch { return null; }
+  }
+  if (!msg || typeof msg !== "object") return null;
+  const m = msg as { type?: unknown; config?: unknown; sides?: unknown };
+  let config = (m.config && typeof m.config === "object")
+    ? m.config as TuningValues : null;
+  if (m.type === "ik_state" || m.type === "settings") {
+    const sides = (m.sides && typeof m.sides === "object")
+      ? m.sides as IkSides : {};
+    // A `settings` reply that spreads the config at the top level instead of
+    // nesting it reads the same way here. Cheap, and the failure it prevents
+    // is silent: sliders that simply never seed, showing defaults the robot
+    // does not have.
+    if (config === null && m.type === "settings") {
+      const { type: _t, sides: _s, ...rest } = msg as Record<string, unknown>;
+      void _t; void _s;
+      if (Object.keys(rest).length) config = rest as TuningValues;
+    }
+    return { kind: "ik_state", config, sides };
+  }
+  if (m.type === "config_applied") {
+    return { kind: "config_applied", config: config ?? {} };
+  }
+  return null;
+}
+
+/** Orientation residual (rad) above which the wrist is visibly short of the
+ *  demand. The backend gates its own haptic mix at the same number; matching
+ *  it keeps the buzz and the HUD line telling one story. */
+export const ORIENT_DEFICIT = 0.5;
+
+/** Below this the backend's mixed trouble signal is noise, not information.
+ *  The kit's floor, kept. */
+export const HAPTIC_FLOOR = 0.08;
+
+/**
+ * What a driving hand should feel from the solver's own diagnostics.
+ *
+ * Two cues, and the sharper one wins. The continuous one is the backend's
+ * gated trouble mix, passed through as a light 60 ms buzz — the operator
+ * feels the workspace edge, the joint stops and the singular set. The
+ * discrete one fires on the EDGE of the orientation deficit: the wrist has
+ * run out of axes, and the answer is to move the hand rather than twist
+ * harder, so it gets a distinct hard pulse instead of blending into the hum
+ * it would otherwise be part of.
+ *
+ * Pure, and edge-triggered off `prev`, so a sustained deficit buzzes once
+ * rather than every 50 ms for as long as the operator holds the pose.
+ */
+export function ikHapticCues(prev: IkSides, next: IkSides): HapticCue[] {
+  const cues: HapticCue[] = [];
+  for (const hand of ["left", "right"] as const) {
+    const d = next[hand];
+    if (!d?.driving) continue;
+    const wasShort = (prev[hand]?.orient_residual ?? 0) > ORIENT_DEFICIT;
+    const isShort = (d.orient_residual ?? 0) > ORIENT_DEFICIT;
+    if (isShort && !wasShort) {
+      cues.push({ hand, intensity: 0.9, durationMs: 140 });
+      continue;
+    }
+    const h = d.haptic ?? 0;
+    if (h >= HAPTIC_FLOOR) {
+      cues.push({ hand, intensity: Math.min(1, h), durationMs: 60 });
+    }
+  }
+  return cues;
+}
+
+// ---- live tuning ------------------------------------------------------------
+
+export type TuningKnob = {
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  /** Client-side only: never sent as a `config_update`, persisted here. */
+  local?: boolean;
+};
+
+/** The read-out point offset, in metres, back along the controller axis onto
+ *  roughly where the operator's wrist turns. The reference stack solves for
+ *  this with a five-second in-VR ritual; this is the same idea as one
+ *  adjustable number. Client-side, because only the client has the grip pose
+ *  to apply it to. */
+export const WRIST_PIVOT_KEY = "wrist_pivot_m";
+export const DEFAULT_WRIST_PIVOT_M = 0.09;
+
+/**
+ * The knobs the in-headset list exposes, in order.
+ *
+ * Kept to the ones an operator reaches for mid-session: a list you walk with
+ * a thumbstick stops being usable somewhere around a dozen rows, and the rest
+ * of `QuestTeleopConfig` belongs on the desktop panel where there is room for
+ * it. Ranges mirror the backend's BOUNDS — it clamps regardless, this just
+ * stops the stick asking for something that will be refused.
+ */
+export const TUNING_KNOBS: readonly TuningKnob[] = [
+  { key: "scale_translation", label: "translation gain", min: 0.1, max: 4, step: 0.05 },
+  { key: "scale_rotation", label: "rotation gain", min: 0.1, max: 4, step: 0.05 },
+  { key: "precision_factor", label: "precision factor", min: 0.05, max: 1, step: 0.05 },
+  { key: "pos_reach_limit", label: "reach limit (m)", min: 0, max: 0.6, step: 0.01 },
+  { key: "rot_reach_limit", label: "twist limit (rad)", min: 0, max: 2, step: 0.05 },
+  { key: "pose_filter_alpha", label: "pose smoothing", min: 0.05, max: 1, step: 0.05 },
+  { key: "max_dq_deg_pos", label: "step cap arm (°)", min: 0.25, max: 15, step: 0.25 },
+  { key: "max_dq_deg_rot", label: "step cap wrist (°)", min: 0.25, max: 30, step: 0.25 },
+  { key: "lam_pos", label: "IK damping", min: 0.001, max: 0.2, step: 0.001 },
+  { key: "w0", label: "singularity ramp", min: 0.001, max: 0.1, step: 0.001 },
+  { key: WRIST_PIVOT_KEY, label: "wrist pivot (m)", min: 0, max: 0.2, step: 0.005, local: true },
+];
+
+/** The rest of what `QuestTeleopConfig` will take, desktop panel only —
+ *  numbers you set once against a bench measurement, not mid-take. The two
+ *  workspace floors are here rather than in the headset list on purpose:
+ *  they bound the DEMAND and keep working when the collision guard is off,
+ *  which is not a thing to nudge with a thumbstick while driving. */
+export const DESK_ONLY_KNOBS: readonly TuningKnob[] = [
+  { key: "lam0", label: "posture damping", min: 0, max: 0.5, step: 0.005 },
+  { key: "mu", label: "posture bias", min: 0, max: 0.2, step: 0.005 },
+  { key: "lam_rot", label: "wrist damping", min: 0.001, max: 1, step: 0.005 },
+  { key: "min_tip_z", label: "tip floor (m)", min: -0.2, max: 0.4, step: 0.005 },
+  { key: "min_wrist_z", label: "wrist floor (m)", min: -0.2, max: 0.4, step: 0.005 },
+];
+
+export const ALL_KNOBS: readonly TuningKnob[] = [...TUNING_KNOBS, ...DESK_ONLY_KNOBS];
+
+export function clampKnob(knob: TuningKnob, value: number): number {
+  if (!Number.isFinite(value)) return knob.min;
+  return Math.min(knob.max, Math.max(knob.min, value));
+}
+
+/** Knob value for display. Three decimals across the board so the column
+ *  does not jitter in width as a value crosses 1. */
+export function formatKnob(value: number | undefined | null): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(3) : "—";
+}
+
+/** One deliberate stick push per this many ms. Without it a held stick walks
+ *  the whole list in a frame. The kit's number. */
+export const TUNING_REPEAT_MS = 220;
+
+export type TuningNav = { index: number; lastStepMs: number };
+
+export type TuningStep = {
+  nav: TuningNav;
+  /** The knob to write, or null when this push only moved the cursor. */
+  patch: { key: string; value: number } | null;
+};
+
+/**
+ * Walk and adjust the tuning list from one thumbstick sample. Pure.
+ *
+ * Pulling the stick back walks DOWN the list, pushing it away walks up; left
+ * and right step the selected knob by its own step, clamped to its own range.
+ * Vertical wins over horizontal so a diagonal push cannot both move the
+ * cursor and change a value.
+ */
+export function stepTuning(
+  nav: TuningNav,
+  axes: readonly [number, number],
+  now: number,
+  values: Readonly<Record<string, number>>,
+  knobs: readonly TuningKnob[] = TUNING_KNOBS,
+): TuningStep {
+  if (!knobs.length) return { nav, patch: null };
+  const index = Math.min(Math.max(nav.index, 0), knobs.length - 1);
+  if (now - nav.lastStepMs < TUNING_REPEAT_MS) return { nav: { ...nav, index }, patch: null };
+  const [x, y] = axes;
+  if (Math.abs(y) > 0.6) {
+    return {
+      nav: { index: cycleIndex(knobs.length, index, y > 0 ? 1 : -1), lastStepMs: now },
+      patch: null,
+    };
+  }
+  if (Math.abs(x) > 0.6) {
+    const knob = knobs[index];
+    const current = values[knob.key];
+    const base = typeof current === "number" && Number.isFinite(current)
+      ? current : knob.min;
+    const next = clampKnob(knob, base + (x > 0 ? knob.step : -knob.step));
+    return { nav: { index, lastStepMs: now }, patch: { key: knob.key, value: next } };
+  }
+  return { nav: { ...nav, index }, patch: null };
+}
+
+// ---- session launcher --------------------------------------------------------
+
+export type Stance = "behind" | "mirror" | "front";
+
+export type ArmPairing = { left_arm: string | null; right_arm: string | null };
+
+/**
+ * Which hand drives which arm, for `POST /teleop/human/start`.
+ *
+ * `left_arm` names the arm the operator's LEFT hand drives. In the "behind"
+ * (egocentric) stance the operator faces the same way the arms reach, so the
+ * arm under their right hand — the one on frame-right in the over-shoulder
+ * view — is the one the config names "left". Facing the arms, the pairing is
+ * direct. Getting this wrong reads as "the controls are inverted", not as a
+ * subtle mapping issue.
+ *
+ * Arm identity comes from the ID, not from config order. `config.yaml` lists
+ * the real rig as [right, left] while the sim config lists [left, right], so
+ * a positional rule is right in one and inverted in the other — which is
+ * exactly the failure the stance swap exists to prevent. Unrecognisable IDs
+ * fall back to config order, first = the robot's left.
+ *
+ * A solo session keeps the arm on the side the same rule gives it and sends
+ * null for the other, so "my right hand drives the arm I picked" holds
+ * identically in a one-armed and a two-armed session.
+ */
+export function armPairing(
+  armIds: readonly string[], stance: Stance, soloArm: string | null = null,
+): ArmPairing {
+  const named = (re: RegExp) => armIds.find((id) => re.test(id)) ?? null;
+  let robotLeft = named(/left/i);
+  let robotRight = named(/right/i);
+  if (robotLeft !== null && robotLeft === robotRight) {
+    robotLeft = null;
+    robotRight = null;
+  }
+  if (robotLeft === null && robotRight === null) {
+    robotLeft = armIds[0] ?? null;
+    robotRight = armIds[1] ?? null;
+  } else if (robotLeft === null) {
+    robotLeft = armIds.find((id) => id !== robotRight) ?? null;
+  } else if (robotRight === null) {
+    robotRight = armIds.find((id) => id !== robotLeft) ?? null;
+  }
+
+  const behind = stance === "behind";
+  const dual: ArmPairing = behind
+    ? { left_arm: robotRight, right_arm: robotLeft }
+    : { left_arm: robotLeft, right_arm: robotRight };
+  if (!soloArm) return dual;
+  if (dual.left_arm === soloArm) return { left_arm: soloArm, right_arm: null };
+  if (dual.right_arm === soloArm) return { left_arm: null, right_arm: soloArm };
+  // An arm the left/right resolution never placed (a third arm, an ID that
+  // says neither). Treat it as the robot's left arm — the same convention
+  // the positional fallback uses — so the answer is at least consistent.
+  return behind
+    ? { left_arm: null, right_arm: soloArm }
+    : { left_arm: soloArm, right_arm: null };
+}
+
+export type SessionPreset = {
+  id: string;
+  label: string;
+  /** null = both hands drive, one arm each. */
+  soloArm: string | null;
+};
+
+/** The launcher's buttons, from the arms the backend actually enabled. A
+ *  one-armed config offers exactly one preset rather than a "dual" button
+ *  that can only fail. */
+export function sessionPresets(armIds: readonly string[]): SessionPreset[] {
+  const solo = armIds.map((id) => ({ id: `solo-${id}`, label: `solo ${id}`, soloArm: id }));
+  if (armIds.length < 2) return solo;
+  return [{ id: "dual", label: "dual", soloArm: null }, ...solo];
 }

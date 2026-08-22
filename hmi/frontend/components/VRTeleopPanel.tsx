@@ -2,20 +2,24 @@
 
 /**
  * Quest teleop. Owns the WebXR session, the ~30 Hz publish loop, and the
- * start/stop of the backend human-teleop session.
+ * start/stop of the backend teleop session. The only VR client there is.
  *
  * It decides nothing about safety. Squeeze state and controller poses are
  * shipped unmodified; the backend applies the acquisition countdown, the
- * confidence floor, the staleness budget, every joint clamp and the bimanual
- * collision guard. Same contract the MediaPipe panel has — see
- * HumanTeleopPanel. The decisions this file DOES own are input-shaped, not
- * safety-shaped: B/Y on either controller fires POST /estop (one press, one
- * post); a half-second hold of A/X on either controller starts or stops the
- * dataset recorder (hold-gated so a thumb brush cannot toggle a take); and
- * while the session is not fully visible (Quest system menu open) every
- * published frame is forced disengaged — the page keeps receiving the last
- * input state in that menu, so a grip held when it opened would otherwise
- * stay held forever.
+ * staleness budget, every joint clamp and the bimanual collision guard. The
+ * decisions this file DOES own are input-shaped, not safety-shaped: B/Y on
+ * either controller fires POST /estop (one press, one post); a half-second
+ * hold of A/X on either controller starts a take or ends one (hold-gated so
+ * a thumb brush cannot toggle a take, and an ended take asks save-or-discard
+ * before it commits); and while the session is not fully visible (Quest
+ * system menu open) every published frame is forced disengaged — the page
+ * keeps receiving the last input state in that menu, so a grip held when it
+ * opened would otherwise stay held forever.
+ *
+ * The socket is two-way. Frames go up at 30 Hz; the backend answers with its
+ * own `ik_state` at 20 Hz — per-side conditioning, the wrist's orientation
+ * deficit, and a trouble mix this panel turns into controller haptics — and
+ * takes `config_update` back for live tuning, clamped server-side.
  *
  * The session asks for **passthrough AR first** (the operator must watch the
  * REAL arms, not a void) with the HUD div as a dom-overlay, falling back to
@@ -37,15 +41,18 @@ import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
 import {
-  attachRenderScene, axPressed, CAM_TILE_SIZES, clusterLayout, controllerRays,
-  cycleIndex, DEFAULT_HUD_ANCHOR, disengagedFrame, estopPressed, hapticCues,
-  holdToggle, holdToggleInit, paintHud, pulse, RECORD_HOLD_MS, rayQuadHit,
-  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame, thumbstickPressed,
-  xrAvailableAtAll,
-  xrSupported, yawTowardHead,
-  type BodyOverride, type HoldToggleState, type HudAnchor,
-  type SideAuthorityLike, type TeleopXRSession, type VRFrame, type VrMenuLike,
-  type XRFrameLike, type XRSessionLike,
+  ALL_KNOBS, armPairing, attachRenderScene, axPressed, CAM_TILE_SIZES,
+  clampKnob, clusterLayout, controllerRays, cycleIndex, DEFAULT_HUD_ANCHOR,
+  DEFAULT_WRIST_PIVOT_M, disengagedFrame, estopPressed, formatKnob,
+  hapticCues, holdToggle, holdToggleInit, ikHapticCues, ORIENT_DEFICIT,
+  paintHud,
+  parseVrSocketMessage, precisionHeld, pulse, RECORD_HOLD_MS, rayQuadHit,
+  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame, sessionPresets,
+  stepTuning, stickAxes, thumbstickPressed, WRIST_PIVOT_KEY,
+  xrAvailableAtAll, xrSupported, yawTowardHead,
+  type HoldToggleState, type HudAnchor, type IkSides, type SideAuthorityLike,
+  type Stance, type TeleopXRSession, type TuningNav, type VRFrame,
+  type VrMenuLike, type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
 import { repoIdFor } from "./cockpit/CommandBar";
 import { DeadManIndicator } from "./DeadManIndicator";
@@ -57,14 +64,14 @@ const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/vr/in`;
  *  publishing every display frame would trade real headroom for nothing. */
 const PUBLISH_MS = 33;
 
-const BODY_LS_KEY = "haller.vrTeleop.body.v1";
-const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
-// v2, deliberately: v1 headsets remember "pose", which used to be the
-// default and is now the fallback. One forced re-default onto the ported IK
-// path; the choice persists again from there.
-const VRMODE_LS_KEY = "haller.vrTeleop.mode.v2";
+/** How long the RIGHT stick must stay clicked before the tuning list opens
+ *  or closes. Same short/hold split the left stick already uses, so a short
+ *  click still means what it always did (next tile size). */
+const TUNE_HOLD_MS = 500;
+
 const STANCE_LS_KEY = "haller.vrTeleop.stance.v1";
 const SOLO_LS_KEY = "haller.vrTeleop.soloArm.v1";
+const WRIST_PIVOT_LS_KEY = "haller.vrTeleop.wristPivot.v1";
 
 const TILE_LS_KEY = "haller.vrTeleop.tile.v1";
 // v2, deliberately: v1 headsets remember a view from before the
@@ -92,16 +99,29 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [xrMode, setXrMode] = useState<TeleopXRSession["mode"] | null>(null);
   const [estopped, setEstopped] = useState(false);
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
-  const [body, setBody] = useState<BodyOverride>({});
-  const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
-  const [vrMode, setVrMode] = useState<"ik" | "pose" | "joints">("ik");
-  const [stance, setStance] = useState<"behind" | "mirror" | "front">("behind");
+  const [stance, setStance] = useState<Stance>("behind");
   // Which arm a SINGLE-ARM session drives, or null for both. The session
   // accepts a null side, so this is the whole mechanism — the other hand's
   // controller is simply ignored and nothing is ever written to it. This is
   // the shape a first hardware run wants, and the only shape a rig with one
   // working servo board has.
   const [soloArm, setSoloArm] = useState<string | null>(null);
+  // The backend's own view of the solver, off the socket at 20 Hz. Mirrored
+  // into state at a quarter of that: the desktop readout does not need 20
+  // re-renders a second, and the HUD reads the ref.
+  const [ikSides, setIkSides] = useState<IkSides>({});
+  // Live-tunable config, server-clamped. Seeded by the socket's first
+  // `ik_state`; the wrist pivot is the one client-side entry (only the
+  // client has a grip pose to apply it to) and persists here.
+  const [tuneValues, setTuneValues] = useState<Record<string, number>>(
+    { [WRIST_PIVOT_KEY]: DEFAULT_WRIST_PIVOT_M });
+  const [precision, setPrecision] = useState(false);
+  // Takes saved since the page loaded. The recorder reports frames, not an
+  // episode index, and "how many good ones so far" is what an operator
+  // mid-run actually asks.
+  const [takes, setTakes] = useState(0);
+  // The end-of-take decision, open until the operator saves or discards.
+  const [endPrompt, setEndPrompt] = useState(false);
   // The workspace camera floated into the HUD. In passthrough the operator
   // normally watches the REAL arms — but against a sim backend there is
   // nothing physical to look at, so the MuJoCo camera IS the workspace view
@@ -121,10 +141,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const refSpaceRef = useRef<unknown>(null);
   const clientRef = useRef<HumanTeleopClient<VRFrame> | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
-  const bodyRef = useRef<BodyOverride>({});
-  const mirrorModeRef = useRef<"none" | "both">("none");
-  const vrModeRef = useRef<"ik" | "pose" | "joints">("ik");
-  const stanceRef = useRef<"behind" | "mirror" | "front">("behind");
+  const stanceRef = useRef<Stance>("behind");
   const soloArmRef = useRef<string | null>(null);
   const lastPubRef = useRef(0);
   const estopDownRef = useRef(false);
@@ -139,8 +156,22 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const axToggleRef = useRef<HoldToggleState>(holdToggleInit());
   const viewsRef = useRef<CameraInfo[]>([]);
   const tileIdxRef = useRef(0);
-  const rStickDownRef = useRef(false);
   const menuRef = useRef<VrMenuLike>(null);
+  const ikSidesRef = useRef<IkSides>({});
+  const prevIkRef = useRef<IkSides>({});
+  const ikPushedAtRef = useRef(0);
+  const tuneValuesRef = useRef<Record<string, number>>(
+    { [WRIST_PIVOT_KEY]: DEFAULT_WRIST_PIVOT_M });
+  const tuneOpenRef = useRef(false);
+  const tuneNavRef = useRef<TuningNav>({ index: 0, lastStepMs: 0 });
+  const precisionRef = useRef(false);
+  const takesRef = useRef(0);
+  const endPromptRef = useRef(false);
+  // The right stick mirrors the left's short/hold split: short click cycles
+  // the tile size, a hold opens the tuning list. So its action also fires on
+  // RELEASE, and a hold cannot resize the tile on its way to the menu.
+  const rStickDownAtRef = useRef<number | null>(null);
+  const rStickFiredRef = useRef(false);
   // Where the HUD cluster hangs, and the in-flight grab if the operator is
   // currently dragging it. Refs, not state: both change inside the XR loop.
   const anchorRef = useRef<HudAnchor>({
@@ -154,11 +185,18 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const lStickDownAtRef = useRef<number | null>(null);
   const lStickFiredRef = useRef(false);
 
-  bodyRef.current = body;
-  mirrorModeRef.current = mirrorMode;
-  vrModeRef.current = vrMode;
   stanceRef.current = stance;
-  soloArmRef.current = soloArm;
+  // The launcher's presets, and the one that is actually selected. A remembered
+  // solo arm that the config no longer enables reads as "both": sending it
+  // would earn a 400 from a backend that has never heard of that arm.
+  const presets = sessionPresets(armIds);
+  const soloSelected = presets.length === 1
+    ? presets[0].soloArm
+    : (soloArm && armIds.includes(soloArm) ? soloArm : null);
+  const pairing = armPairing(armIds, stance, soloSelected);
+  const pairingLabel =
+    `left hand → ${pairing.left_arm ?? "—"} · right hand → ${pairing.right_arm ?? "—"}`;
+  soloArmRef.current = soloSelected;
   statusRef.current = status;
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
@@ -169,7 +207,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     views: views.map((c) => ({ id: c.id, label: viewLabel(c) })),
     activeViewId: baseCam?.id ?? null,
     tileSize: CAM_TILE_SIZES[tileIdx]?.name ?? "S",
-    ...(vrMode === "joints" ? {} : { stance }),
+    stance,
   };
 
   useEffect(() => {
@@ -195,12 +233,11 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       })
       .catch(() => { /* no cameras is fine; the toggle just stays hidden */ });
     try {
-      const raw = localStorage.getItem(BODY_LS_KEY);
-      if (raw) setBody(JSON.parse(raw));
-      const mm = localStorage.getItem(MIRROR_LS_KEY);
-      if (mm === "both") setMirrorMode("both");
-      const vm = localStorage.getItem(VRMODE_LS_KEY);
-      if (vm === "joints" || vm === "pose" || vm === "ik") setVrMode(vm);
+      const wp = Number(localStorage.getItem(WRIST_PIVOT_LS_KEY));
+      if (Number.isFinite(wp) && wp >= 0 && wp <= 0.2) {
+        tuneValuesRef.current = { ...tuneValuesRef.current, [WRIST_PIVOT_KEY]: wp };
+        setTuneValues((v) => ({ ...v, [WRIST_PIVOT_KEY]: wp }));
+      }
       const st = localStorage.getItem(STANCE_LS_KEY);
       if (st === "front" || st === "mirror") setStance(st);
       const solo = localStorage.getItem(SOLO_LS_KEY);
@@ -241,7 +278,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       // Recorder status rides the same poll: the HUD's REC line is the only
       // way an operator inside the headset can see a take rolling.
       api.recordStatus()
-        .then((rs) => { if (alive) setRecStatus(rs); })
+        .then((rs) => {
+          if (!alive) return;
+          setRecStatus(rs);
+          // A take that ended some other way — a recorder fault, the cockpit
+          // stopping it — takes the decision with it. Leaving the prompt up
+          // would offer a choice about an episode that is already closed.
+          if (!rs.recording && endPromptRef.current) {
+            endPromptRef.current = false;
+            setEndPrompt(false);
+          }
+        })
         .catch(() => { /* recorder not ready; the badge just stays hidden */ });
       api.humanTeleopStatus()
         .then((s) => {
@@ -321,6 +368,13 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
     setInSession(false);
     setXrMode(null);
+    // Whatever was on the HUD dies with the session: an open tuning list or
+    // an unanswered save/discard has no controller left to answer it.
+    tuneOpenRef.current = false;
+    precisionRef.current = false;
+    setPrecision(false);
+    endPromptRef.current = false;
+    setEndPrompt(false);
     if (session) {
       try { await session.end(); } catch { /* already ended */ }
     }
@@ -367,38 +421,133 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
   }, [armIds]);
 
-  /** Start or stop the dataset take. Invoked from inside the XR loop by a
-   *  deliberate half-second A/X hold — see `holdToggle`. The task/HF-user
-   *  draft comes from the cockpit's Dataset tab (persisted), so a solo
-   *  operator never has to leave the headset between takes. */
-  const toggleRecording = useCallback(async () => {
-    const rec = useRecorder.getState();
+  /** Buzz both hands with one cue. Every recorder transition gets one, at a
+   *  distinguishable weight — inside a headset the haptic is the fastest
+   *  channel there is, and "did that take actually start" is exactly the
+   *  question an operator should never have to guess at. */
+  const buzzBoth = useCallback((intensity: number, durationMs: number) => {
     const session = sessionRef.current;
+    if (!session) return;
+    pulse(session, "left", intensity, durationMs);
+    pulse(session, "right", intensity, durationMs);
+  }, []);
+
+  /** Start a take. The task/HF-user draft comes from the cockpit's Dataset
+   *  tab (persisted), so a solo operator never has to leave the headset
+   *  between takes. */
+  const startTake = useCallback(async () => {
+    const rec = useRecorder.getState();
+    const task = rec.task.trim();
+    if (!task) {
+      toast.error("no task drafted — set one in the cockpit's Dataset tab first");
+      buzzBoth(0.2, 60);
+      return;
+    }
     try {
-      if (rec.status?.recording) {
-        const s = await rec.stop(true);   // always save; discard lives in the cockpit
-        if (session) {
-          pulse(session, "left", 0.5, 150);
-          pulse(session, "right", 0.5, 150);
-        }
-        toast.success(`take saved — ${s.episode_frames} frames`);
+      const repoId = repoIdFor(rec.hfUser, task);
+      const st = await rec.start(repoId, task);
+      recStatusRef.current = st;
+      setRecStatus(st);
+      buzzBoth(0.7, 200);
+      toast.success(`recording → ${repoId}`);
+      await rec.refresh();
+    } catch (e) {
+      toast.error(`record start failed: ${(e as Error).message}`);
+    }
+  }, [buzzBoth]);
+
+  /** Commit the open take, or throw it away.
+   *
+   *  `POST /record/stop` takes the save decision AT stop time — there is no
+   *  way to end the episode first and choose afterwards — so the choice runs
+   *  while the recorder is still rolling and the tail of the episode is a
+   *  second of the operator holding still. That is the honest trade, and the
+   *  HUD says so rather than pretending the take already ended. */
+  const endTake = useCallback(async (save: boolean) => {
+    endPromptRef.current = false;
+    setEndPrompt(false);
+    const rec = useRecorder.getState();
+    try {
+      const st = await rec.stop(save);
+      recStatusRef.current = st;
+      setRecStatus(st);
+      if (save) {
+        takesRef.current += 1;
+        setTakes(takesRef.current);
+        buzzBoth(0.6, 180);
+        toast.success(`take ${takesRef.current} saved — ${st.episode_frames} frames`);
       } else {
-        const task = rec.task.trim();
-        if (!task) {
-          toast.error("no task drafted — set one in the cockpit's Dataset tab first");
-          return;
-        }
-        const repoId = repoIdFor(rec.hfUser, task);
-        await rec.start(repoId, task);
-        if (session) {
-          pulse(session, "left", 0.7, 200);
-          pulse(session, "right", 0.7, 200);
-        }
-        toast.success(`recording → ${repoId}`);
+        buzzBoth(0.25, 80);
+        toast.info("take discarded");
       }
       await rec.refresh();
     } catch (e) {
-      toast.error(`record toggle failed: ${(e as Error).message}`);
+      toast.error(`record stop failed: ${(e as Error).message}`);
+    }
+  }, [buzzBoth]);
+
+  /** The A/X hold, from inside the XR loop. Not rolling: start a take.
+   *  Rolling: raise the save/discard decision — or withdraw it, so a hold
+   *  that was a mistake costs nothing. */
+  const onRecordHold = useCallback(() => {
+    if (!recStatusRef.current?.recording) {
+      void startTake();
+      return;
+    }
+    const next = !endPromptRef.current;
+    endPromptRef.current = next;
+    setEndPrompt(next);
+    buzzBoth(next ? 0.45 : 0.2, next ? 120 : 60);
+  }, [startTake, buzzBoth]);
+
+  /** Write one tuning knob.
+   *
+   *  The wrist pivot never leaves the client: it moves the read-out point on
+   *  the controller, which the backend cannot see. Everything else goes up as
+   *  a `config_update` and comes back CLAMPED in `config_applied` — the
+   *  optimistic local write below is what makes the stick feel instant, and
+   *  the echo is what makes it honest. */
+  const setTuning = useCallback((key: string, value: number) => {
+    const next = { ...tuneValuesRef.current, [key]: value };
+    tuneValuesRef.current = next;
+    setTuneValues(next);
+    if (key === WRIST_PIVOT_KEY) {
+      try { localStorage.setItem(WRIST_PIVOT_LS_KEY, String(value)); }
+      catch { /* private mode: the pivot just won't persist */ }
+      return;
+    }
+    clientRef.current?.send({ type: "config_update", config: { [key]: value } });
+  }, []);
+
+  /** One server → client message off the teleop socket. */
+  const onSocketMessage = useCallback((data: string) => {
+    const msg = parseVrSocketMessage(data);
+    if (!msg) return;
+    if (msg.config) {
+      // The server's config wins for everything it owns; the local pivot is
+      // never in its dict, so a plain merge keeps it.
+      const merged = { ...tuneValuesRef.current };
+      for (const [k, v] of Object.entries(msg.config)) {
+        if (typeof v === "number" && Number.isFinite(v)) merged[k] = v;
+      }
+      tuneValuesRef.current = merged;
+      setTuneValues(merged);
+    }
+    if (msg.kind !== "ik_state") return;
+    ikSidesRef.current = msg.sides;
+    const session = sessionRef.current;
+    if (session) {
+      for (const cue of ikHapticCues(prevIkRef.current, msg.sides)) {
+        pulse(session, cue.hand, cue.intensity, cue.durationMs);
+      }
+    }
+    prevIkRef.current = msg.sides;
+    // 20 Hz on the wire, 4 Hz into React: the HUD reads the ref every frame,
+    // and the desktop readout does not need twenty re-renders a second.
+    const now = performance.now();
+    if (now - ikPushedAtRef.current >= 250) {
+      ikPushedAtRef.current = now;
+      setIkSides(msg.sides);
     }
   }, []);
 
@@ -433,14 +582,8 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   }, []);
 
   const enterVR = useCallback(async () => {
-    if (armIds.length < 2) {
-      // Checked here rather than letting the backend 400, because the reason is
-      // not obvious from "left_arm and right_arm must be different". The session
-      // commit loop drives both sides unconditionally, so it needs two distinct
-      // arm handles; single-arm teleop is a real feature, not a config tweak.
-      toast.error(
-        "VR teleop needs 2 enabled arms — the session drives both sides",
-      );
+    if (!armIds.length) {
+      toast.error("no arms enabled in the backend config — nothing to drive");
       return;
     }
     let xrs: TeleopXRSession;
@@ -466,38 +609,27 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     // — another teleop already running, an unknown arm — we want to find out
     // before frames are in flight, not while the operator is already immersed
     // and squeezing a grip that does nothing.
-    // Hand↔arm pairing follows the stance. In the "behind" (egocentric)
-    // stance the operator faces the same way the arms reach, so the arm
-    // under their RIGHT hand — the one on frame-right in the overshoulder
-    // view — is the one the config names "left" (robot −x). Assigning the
-    // arms per stance keeps "my right hand drives the arm on my right" true
-    // in every stance; without this, behind-stance hands-apart made the
-    // arms cross on screen, which reads as "the controls are inverted".
-    //
-    // A single-arm session sends the chosen arm on the side of the hand that
-    // should drive it and null on the other. The same stance rule decides
-    // which side that is, so "my right hand drives the arm I picked" holds in
-    // every stance, exactly as it does bimanually.
-    const behind = stanceRef.current === "behind";
-    const solo = soloArmRef.current;
-    const pairing = solo
-      ? (behind ? { left_arm: solo, right_arm: null }
-                : { left_arm: null, right_arm: solo })
-      : { left_arm: behind ? armIds[1] : armIds[0],
-          right_arm: behind ? armIds[0] : armIds[1] };
+    const pairing = armPairing(armIds, stanceRef.current, soloArmRef.current);
+    if (!pairing.left_arm && !pairing.right_arm) {
+      toast.error("no arm resolved for this preset — pick another");
+      await teardown({ stopBackend: false });
+      return;
+    }
     try {
-      await api.humanTeleopStart({
-        ...pairing,
-        swap: false,
-        clutch_source: "vr_grip",
-      });
+      await api.humanTeleopStart(pairing);
     } catch (e) {
       toast.error(`teleop start refused: ${(e as Error).message}`);
       await teardown({ stopBackend: false });
       return;
     }
 
-    const client = new HumanTeleopClient<VRFrame>(WS_URL);
+    const client = new HumanTeleopClient<VRFrame>(WS_URL, {
+      // Every open, reconnects included: the teleoperator's config lives per
+      // connection, so a reconnected client whose list still shows the old
+      // numbers is describing something that no longer exists.
+      onOpen: () => { client.send({ type: "request_settings" }); },
+      onMessage: onSocketMessage,
+    });
     client.connect();
     clientRef.current = client;
     setInSession(true);
@@ -505,6 +637,10 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
 
     const onEnd = () => { void teardown({ stopBackend: true }); };
     session.addEventListener("end", onEnd);
+    prevIkRef.current = {};
+    ikSidesRef.current = {};
+    tuneOpenRef.current = false;
+    precisionRef.current = false;
 
     const scene = attachRenderScene(session, xrs.mode);
     estopDownRef.current = false;
@@ -534,15 +670,20 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       const live = sessionRef.current;
       if (!live) return;
       live.requestAnimationFrame(onXRFrame);
-      // Left stick: short click = next view, ~0.8 s hold = reset arms. The
-      // click therefore fires on RELEASE (still instant to a human), so a
-      // hold cannot first cycle the view on its way to the reset.
+      // Both sticks share one idiom: the short click acts on RELEASE, so a
+      // hold cannot first do the short thing on its way to the long one.
+      // Left: click = next view, ~0.8 s hold = reset arms. Right: click =
+      // next tile size, 0.5 s hold = the tuning list. While the end-of-take
+      // decision is open it takes both clicks instead — save left, discard
+      // right — because nothing else may be one click away from committing
+      // or binning an episode.
+      const prompt = endPromptRef.current;
       const lStick = thumbstickPressed(live, "left");
       if (lStick) {
         if (lStickDownAtRef.current === null) {
           lStickDownAtRef.current = t;
           lStickFiredRef.current = false;
-        } else if (!lStickFiredRef.current
+        } else if (!lStickFiredRef.current && !prompt
                    && t - lStickDownAtRef.current >= RESET_HOLD_MS) {
           lStickFiredRef.current = true;
           void resetArms();
@@ -550,13 +691,50 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       } else {
         if (lStickDownAtRef.current !== null && !lStickFiredRef.current
             && t - lStickDownAtRef.current < 350) {
-          cycleView();
+          if (prompt) void endTake(true);
+          else cycleView();
         }
         lStickDownAtRef.current = null;
       }
       const rStick = thumbstickPressed(live, "right");
-      if (rStick && !rStickDownRef.current) cycleTile();
-      rStickDownRef.current = rStick;
+      if (rStick) {
+        if (rStickDownAtRef.current === null) {
+          rStickDownAtRef.current = t;
+          rStickFiredRef.current = false;
+        } else if (!rStickFiredRef.current && !prompt
+                   && t - rStickDownAtRef.current >= TUNE_HOLD_MS) {
+          rStickFiredRef.current = true;
+          tuneOpenRef.current = !tuneOpenRef.current;
+          tuneNavRef.current = { ...tuneNavRef.current, lastStepMs: t };
+          pulse(live, "right", 0.3, 60);
+        }
+      } else {
+        if (rStickDownAtRef.current !== null && !rStickFiredRef.current
+            && t - rStickDownAtRef.current < 350) {
+          if (prompt) void endTake(false);
+          else cycleTile();
+        }
+        rStickDownAtRef.current = null;
+      }
+
+      // The tuning list walks and adjusts on the RIGHT stick's axes, and only
+      // while it is open: an accidental nudge mid-take must not move a gain.
+      if (tuneOpenRef.current) {
+        const step = stepTuning(tuneNavRef.current, stickAxes(live, "right"),
+                                t, tuneValuesRef.current);
+        tuneNavRef.current = step.nav;
+        if (step.patch) setTuning(step.patch.key, step.patch.value);
+      }
+
+      // Precision: the LEFT stick pushed away and held — see `precisionHeld`
+      // for why it could not stay on A/X. Edge-buzzed, because gains that
+      // silently halve feel exactly like an arm that has started lagging.
+      const fine = precisionHeld(live);
+      if (fine !== precisionRef.current) {
+        precisionRef.current = fine;
+        setPrecision(fine);
+        pulse(live, "left", fine ? 0.3 : 0.15, 50);
+      }
 
       // Grab-to-move: point at the HUD cluster and hold the trigger while
       // that hand's arm is NOT driving (while driving, the trigger is the
@@ -615,8 +793,21 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       let hudDirty = false;
       if (hudCanvas && hudCtx && t - hudPaintRef.current > 100) {
         hudPaintRef.current = t;
-        paintHud(hudCtx, statusRef.current, recStatusRef.current,
-                 menuRef.current);
+        const rs = recStatusRef.current;
+        paintHud(
+          hudCtx, statusRef.current,
+          { recording: Boolean(rs?.recording),
+            episode_frames: rs?.episode_frames ?? 0,
+            takes: takesRef.current },
+          menuRef.current && {
+            ...menuRef.current,
+            tuning: { open: tuneOpenRef.current,
+                      index: tuneNavRef.current.index,
+                      values: tuneValuesRef.current },
+            precision: precisionRef.current,
+            endPrompt: endPromptRef.current,
+          },
+          ikSidesRef.current);
         hudDirty = true;
       }
       scene.render(frame, refSpaceRef.current, {
@@ -639,7 +830,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       // the thumb near A/X must not start or end a take.
       const ax = holdToggle(axToggleRef.current, axPressed(live), t, RECORD_HOLD_MS);
       axToggleRef.current = ax;
-      if (ax.toggled) void toggleRecording();
+      if (ax.toggled) onRecordHold();
 
       if (t - lastPubRef.current < PUBLISH_MS) return;
       lastPubRef.current = t;
@@ -647,17 +838,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         live.visibilityState !== undefined && live.visibilityState !== "visible";
       const vrFrame = sampleVRFrame(live, frame, refSpaceRef.current, {
         tsMs: Date.now(),
-        body: Object.keys(bodyRef.current).length ? bodyRef.current : undefined,
         forceDisengaged: blurred,
-        mirrorMode: mirrorModeRef.current,
-        vrMode: vrModeRef.current,
         stance: stanceRef.current,
+        precision: precisionRef.current,
+        wristPivotM: tuneValuesRef.current[WRIST_PIVOT_KEY],
       });
       client.queueFrame(vrFrame);
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown, fireEstop, toggleRecording, resetArms, cycleView, cycleTile]);
+  }, [armIds, teardown, fireEstop, onRecordHold, endTake, setTuning,
+      onSocketMessage, resetArms, cycleView, cycleTile]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
   // be left mounted-but-hidden: an immersive session already owns the display,
@@ -673,6 +864,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     const a = acquire?.[side];
     if (!a) return null;
     const grip = clutch?.sides?.[side] ?? clutch?.engaged ?? false;
+    const d = ikSides[side];
     return (
       <div key={side} className="flex items-center gap-2">
         <span className="w-10 uppercase">{side}</span>
@@ -691,17 +883,24 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
             ? ` ${(a.remaining_ms / 1000).toFixed(1)}s`
             : ""}
         </span>
-        {a.authority === "acquiring" && a.blocking.length > 0 && (
+        {a.authority === "driving" && typeof d?.sigma_min === "number" && (
+          <span
+            className={d.sigma_min < 0.02 ? "text-amber-400" : "text-neutral-400"}
+            title="smallest singular value of the position Jacobian, m/rad — how far the tool moves in its worst direction per radian of joint travel"
+          >
+            σ {d.sigma_min.toFixed(3)}
+          </span>
+        )}
+        {a.authority === "driving" && (d?.orient_residual ?? 0) > ORIENT_DEFICIT && (
           <span className="text-amber-300 truncate">
-            match: {a.blocking.map((j) => {
-              const e = a.error_deg?.[j];
-              return e === undefined ? j
-                : `${j} ${e > 0 ? "+" : ""}${e.toFixed(0)}°`;
-            }).join(", ")}
+            wrist is out of twist — move your hand
           </span>
         )}
         {a.reason === "no_tracking" && (
           <span className="text-red-400">no tracking</span>
+        )}
+        {a.reason === "no_arm" && (
+          <span className="text-neutral-500">no arm this side</span>
         )}
       </div>
     );
@@ -758,8 +957,14 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           )}
           {recStatus?.recording && (
             <span className="text-red-400 font-bold animate-haller-rec">
-              ● REC {recStatus.episode_frames}
+              ● REC take {takes + 1} · {recStatus.episode_frames}
             </span>
+          )}
+          {!recStatus?.recording && takes > 0 && (
+            <span className="text-neutral-400">{takes} take{takes === 1 ? "" : "s"} saved</span>
+          )}
+          {precision && (
+            <span className="text-sky-400 font-bold">◆ PRECISION</span>
           )}
         </div>
         {sideRow("left")}
@@ -771,6 +976,25 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           grip = drive · trigger = gripper · <b>B / Y = E-STOP</b> ·{" "}
           <b>A / X hold = record</b>
         </div>
+        {endPrompt && (
+          // Mirrors the in-scene prompt so the decision exists in both HUD
+          // paths — dom-overlay headsets and the plain 2D page get the same
+          // two choices, and the stick clicks drive these same handlers.
+          <div className="rounded border border-red-400/70 p-2 space-y-1">
+            <div className="text-red-400 font-bold">
+              take ended · {recStatus?.episode_frames ?? 0} frames — still
+              rolling until you pick
+            </div>
+            <div className="flex gap-2 pointer-events-auto">
+              <Button size="sm" onClick={() => void endTake(true)}>
+                Save (L stick)
+              </Button>
+              <Button size="sm" variant="destructive" onClick={() => void endTake(false)}>
+                Discard (R stick)
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
       {inSession && (
         <div className="flex gap-3 pointer-events-auto">
@@ -863,77 +1087,61 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           arms instantly.
         </div>
         <div>
-          <b>Hold A or X</b> (either controller, ~0.5 s) starts or stops the
-          dataset take. Draft the task in the cockpit&apos;s Dataset tab first —
-          the recorder shows <span className="font-bold">● REC</span> in the HUD
-          while it rolls.
+          <b>Hold A or X</b> (either controller, ~0.5 s) starts a take, and ends
+          an open one — the HUD then asks <b>save</b> (left stick click) or{" "}
+          <b>discard</b> (right stick click). Draft the task in the
+          cockpit&apos;s Dataset tab first; the recorder shows{" "}
+          <span className="font-bold">● REC</span> in the HUD while it rolls.
         </div>
-        {vrMode !== "joints" ? (
-          <div>
-            Squeezing a grip <b>anchors your hand to the arm where it is</b> —
-            hold still through the countdown, feel the buzz, then your hand&apos;s
-            movement drives the gripper. Release, reposition your hand, squeeze
-            again to ratchet across the workspace.
-          </div>
-        ) : (
-          <div>
-            Engagement runs the acquisition countdown: match the robot&apos;s pose
-            (the HUD lists what&apos;s off), then authority transfers. The buzz on
-            your controller is the handover.
-          </div>
-        )}
+        <div>
+          Squeezing a grip <b>anchors your hand to the arm where it is</b> —
+          hold still through the countdown, feel the buzz, then your hand&apos;s
+          movement drives the gripper. Release, reposition your hand, squeeze
+          again to ratchet across the workspace.
+        </div>
+        <div>
+          <b>Push the left stick away and hold</b> for precision: both mapping
+          gains scale by the precision factor for fine work. The HUD says
+          PRECISION the whole time. <b>Hold the right stick</b> (~0.5 s) opens
+          the tuning list; its stick then walks and adjusts it.
+        </div>
       </div>
 
-      <label className="flex items-center gap-2 text-muted-foreground">
-        <span>hand mapping</span>
-        <select
-          className="bg-transparent border rounded px-1 py-0.5"
-          value={vrMode}
-          onChange={(e) => {
-            const raw = e.target.value;
-            const v = raw === "joints" ? "joints" : raw === "pose" ? "pose" : "ik";
-            setVrMode(v);
-            try { localStorage.setItem(VRMODE_LS_KEY, v); } catch { /* non-fatal */ }
-          }}
-        >
-          <option value="ik">hand pose — 6-DoF clutch + IK (default)</option>
-          <option value="pose">hand position — wrist point only (fallback)</option>
-          <option value="joints">body angles (legacy)</option>
-        </select>
-        <span>
-          — the default tracks your hand&apos;s position AND orientation
-          through a decoupled solver, with an absorbing reach limit so
-          pushing past the arm&apos;s reach feels like a wall instead of
-          winding up. The fallback is the previous wrist-point mode, kept
-          because a bench session that goes wrong needs somewhere to go.
-        </span>
-      </label>
-
-      <label className="flex items-center gap-2 text-muted-foreground">
-        <span>arms</span>
-        <select
-          className="bg-transparent border rounded px-1 py-0.5"
-          value={soloArm ?? ""}
-          onChange={(e) => {
-            const v = e.target.value || null;
-            setSoloArm(v);
-            try {
-              if (v) localStorage.setItem(SOLO_LS_KEY, v);
-              else localStorage.removeItem(SOLO_LS_KEY);
-            } catch { /* non-fatal */ }
-          }}
-        >
-          <option value="">both arms</option>
-          {armIds.map((id) => (
-            <option key={id} value={id}>only {id}</option>
-          ))}
-        </select>
-        <span>
-          — a single-arm session ignores the other hand entirely: nothing is
-          ever written to the arm it has none for. Half as much that can go
-          wrong, which is what a first hardware run wants.
-        </span>
-      </label>
+      <div className="space-y-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-muted-foreground">session</span>
+          {presets.length === 0 && (
+            <span className="text-destructive">
+              no arms enabled in the backend config
+            </span>
+          )}
+          {presets.map((preset) => {
+            const on = (preset.soloArm ?? null) === soloSelected;
+            return (
+              <Button
+                key={preset.id}
+                size="sm"
+                variant={on ? "default" : "outline"}
+                disabled={inSession}
+                onClick={() => {
+                  setSoloArm(preset.soloArm);
+                  try {
+                    if (preset.soloArm) localStorage.setItem(SOLO_LS_KEY, preset.soloArm);
+                    else localStorage.removeItem(SOLO_LS_KEY);
+                  } catch { /* non-fatal */ }
+                }}
+              >
+                {preset.label}
+              </Button>
+            );
+          })}
+        </div>
+        <div className="text-muted-foreground">
+          — {pairingLabel}. A solo session ignores the other hand entirely:
+          nothing is ever written to the arm it has none for. Half as much that
+          can go wrong, which is what a first hardware run wants.
+        </div>
+      </div>
 
       <label className="flex items-center gap-2 text-muted-foreground">
         <span>collision guard</span>
@@ -960,84 +1168,70 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         </span>
       </label>
 
-      {vrMode !== "joints" && (
-        <label className="flex items-center gap-2 text-muted-foreground">
-          <span>operator stance</span>
-          <select
-            className="bg-transparent border rounded px-1 py-0.5"
-            value={stance}
-            onChange={(e) => {
-              const v = e.target.value === "front" ? "front"
-                : e.target.value === "mirror" ? "mirror" : "behind";
-              setStance(v);
-              try { localStorage.setItem(STANCE_LS_KEY, v); } catch { /* non-fatal */ }
-            }}
-          >
-            <option value="behind">egocentric — arms as your own (default)</option>
-            <option value="mirror">facing the arms — mirror</option>
-            <option value="front">facing the arms — match the camera tile</option>
-          </select>
-          <span>
-            — how your hand maps to the gripper. Egocentric (pairs with the
-            over-shoulder view, the default): the replica arm moves exactly
-            like your own — push forward and it goes deeper into the scene.
-            Mirror: face-to-face, the arm is your reflection. Camera tile:
-            motion matches the front view&apos;s screen axes.
-          </span>
-        </label>
-      )}
-
       <label className="flex items-center gap-2 text-muted-foreground">
-        <span>arm mounting</span>
+        <span>operator stance</span>
         <select
           className="bg-transparent border rounded px-1 py-0.5"
-          value={mirrorMode}
+          value={stance}
           onChange={(e) => {
-            const v = e.target.value === "both" ? "both" : "none";
-            setMirrorMode(v);
-            try { localStorage.setItem(MIRROR_LS_KEY, v); } catch { /* non-fatal */ }
+            const v = e.target.value === "front" ? "front"
+              : e.target.value === "mirror" ? "mirror" : "behind";
+            setStance(v);
+            try { localStorage.setItem(STANCE_LS_KEY, v); } catch { /* non-fatal */ }
           }}
         >
-          <option value="none">identical, side by side (Haller tower)</option>
-          <option value="both">mirrored pair</option>
+          <option value="behind">egocentric — arms as your own (default)</option>
+          <option value="mirror">facing the arms — mirror</option>
+          <option value="front">facing the arms — match the camera tile</option>
         </select>
         <span>
-          — if an arm drives <b>away</b> from where your hand goes, flip this.
+          — how your hand maps to the gripper. Egocentric (pairs with the
+          over-shoulder view, the default): the replica arm moves exactly
+          like your own — push forward and it goes deeper into the scene.
+          Mirror: face-to-face, the arm is your reflection. Camera tile:
+          motion matches the front view&apos;s screen axes.
         </span>
       </label>
 
-      <details className="text-muted-foreground">
-        <summary className="cursor-pointer">operator limb lengths (metres)</summary>
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          {(["upper_arm", "fore_arm", "shoulder_drop", "shoulder_half_width"] as const).map((k) => (
-            <label key={k} className="flex items-center gap-2">
-              <span className="w-40">{k}</span>
-              <input
-                type="number" step="0.01" className="w-20 bg-transparent border rounded px-1"
-                value={body[k] ?? ""}
-                placeholder="default"
-                onChange={(e) => {
-                  const v = e.target.value === "" ? undefined : Number(e.target.value);
-                  const next = { ...body };
-                  if (v === undefined || Number.isNaN(v)) delete next[k];
-                  else next[k] = v;
-                  setBody(next);
-                  try { localStorage.setItem(BODY_LS_KEY, JSON.stringify(next)); } catch { /* non-fatal */ }
-                }}
-              />
-            </label>
-          ))}
-        </div>
+      <details className="text-muted-foreground" open={inSession}>
+        <summary className="cursor-pointer">
+          live tuning{inSession ? "" : " (needs a running session)"}
+        </summary>
         <p className="mt-2">
-          <b>Legacy body-angles mode only.</b> Position mode (the default) never
-          reads these: squeezing a grip anchors your hand to the arm wherever
-          both happen to be, so limb lengths cancel out by construction — there
-          is nothing to calibrate before entering VR. In body-angles mode they
-          are not cosmetic: the elbow is synthesized from these lengths and the
-          measured shoulder-to-controller distance, so a model longer than your
-          real arm means you run out of reach before the robot&apos;s elbow ever
-          straightens.
+          The same knobs the in-headset list walks, with the ones you set once
+          against a bench measurement rather than mid-take. Every value is
+          <b> clamped by the backend</b> and echoed back, so a box that snaps
+          to a different number is the robot telling you what it took. They
+          live on the socket, not in the config file: this section is live only
+          while a session is running, and the values reset with it.
+          {" "}The wrist pivot is the exception — it moves the read-out point on
+          your controller, which only this client can do, and it persists here.
         </p>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          {ALL_KNOBS.map((knob) => {
+            const local = Boolean(knob.local);
+            return (
+              <label key={knob.key} className="flex items-center gap-2">
+                <span className="w-44 truncate" title={knob.key}>{knob.label}</span>
+                <input
+                  type="number"
+                  step={knob.step}
+                  min={knob.min}
+                  max={knob.max}
+                  disabled={!inSession && !local}
+                  className="w-24 bg-transparent border rounded px-1 disabled:opacity-40"
+                  value={tuneValues[knob.key] ?? ""}
+                  placeholder={formatKnob(undefined)}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (e.target.value === "" || Number.isNaN(v)) return;
+                    setTuning(knob.key, clampKnob(knob, v));
+                  }}
+                />
+              </label>
+            );
+          })}
+        </div>
       </details>
     </div>
   );

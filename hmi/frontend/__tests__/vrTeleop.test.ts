@@ -260,24 +260,58 @@ describe("paintHud", () => {
     return { ctx: ctx as unknown as CanvasRenderingContext2D, texts };
   }
 
-  it("shows the collision hold and the blocking joints", () => {
+  it("shows the collision hold and the acquisition countdown", () => {
     const { ctx, texts } = stubCtx();
     const status: HudStatusLike = {
       state: "acquiring",
       collision: { enabled: true, slack_m: -0.004, limited: true },
       clutch: { sides: { left: true, right: false } },
       acquire: {
-        left: { authority: "acquiring", remaining_ms: 1200,
-                blocking: ["gripper"], reason: "matching" },
-        right: { authority: "held", remaining_ms: null,
-                 blocking: [], reason: "clutch_open" },
+        left: { authority: "acquiring", remaining_ms: 1200, reason: "matching" },
+        right: { authority: "held", remaining_ms: null, reason: "clutch_open" },
       },
     };
     paintHud(ctx, status);
     const all = texts.join(" | ");
     expect(all).toContain("ACQUIRING");
     expect(all).toContain("COLLISION HOLD -4 mm");
-    expect(all).toContain("match: gripper");
+    expect(all).toContain("acquiring 1.2s");
+  });
+
+  it("reads the solver's conditioning onto a driving side", () => {
+    const { ctx, texts } = stubCtx();
+    const status: HudStatusLike = {
+      state: "driving",
+      acquire: {
+        left: { authority: "driving", remaining_ms: null, reason: "engaged" },
+      },
+    };
+    paintHud(ctx, status, null, null, { left: { driving: true, sigma_min: 0.041 } });
+    expect(texts.join(" | ")).toContain("σ 0.041");
+  });
+
+  it("tells a driving hand to MOVE when the wrist runs out of twist", () => {
+    const acquire = {
+      left: { authority: "driving", remaining_ms: null, reason: "engaged" },
+    };
+    const short = stubCtx();
+    paintHud(short.ctx, { acquire }, null, null,
+             { left: { driving: true, orient_residual: 0.9 } });
+    expect(short.texts.join(" | ")).toContain("MOVE your hand");
+
+    // Below the deficit it says nothing: a hint that is always on is noise.
+    const fine = stubCtx();
+    paintHud(fine.ctx, { acquire }, null, null,
+             { left: { driving: true, orient_residual: 0.2 } });
+    expect(fine.texts.join(" | ")).not.toContain("MOVE your hand");
+  });
+
+  it("says a side has no arm rather than leaving it blank", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {
+      acquire: { right: { authority: "held", remaining_ms: null, reason: "no_arm" } },
+    });
+    expect(texts.join(" | ")).toContain("no arm this side");
   });
 
   it("never throws on an empty status", () => {
@@ -437,10 +471,58 @@ describe("paintHud view menu", () => {
     expect(idle.texts.join(" | ")).toContain("hold A/X to START");
 
     const live = stubCtx();
-    paintHud(live.ctx, {}, { recording: true, episode_frames: 42 }, menu);
+    paintHud(live.ctx, {}, { recording: true, episode_frames: 42, takes: 2 }, menu);
     const all = live.texts.join(" | ");
-    expect(all).toContain("REC 42");
-    expect(all).toContain("hold A/X to STOP");
+    expect(all).toContain("REC take 3 · 42 fr");
+    expect(all).toContain("hold A/X to END");
+  });
+
+  it("counts the takes already banked while idle", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, { recording: false, episode_frames: 0, takes: 4 }, menu);
+    expect(texts.join(" | ")).toContain("(4 saved)");
+  });
+
+  it("replaces the view list with the tuning list while it is open", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, null, {
+      ...menu,
+      tuning: { open: true, index: 1, values: { scale_rotation: 1.6 } },
+    });
+    const all = texts.join(" | ");
+    expect(all).toContain("TUNE");
+    expect(all).toContain("▸ rotation gain");
+    expect(all).toContain("1.600");
+    // A knob the server has not reported yet reads as unknown, not as zero.
+    expect(all).toContain("—");
+    expect(all).not.toContain("threequarter");
+  });
+
+  it("takes the whole box for the save/discard decision", () => {
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, { recording: true, episode_frames: 612 },
+             { ...menu, endPrompt: true });
+    const all = texts.join(" | ");
+    expect(all).toContain("TAKE ENDED · 612 frames");
+    expect(all).toContain("L stick click = SAVE");
+    expect(all).toContain("R stick click = DISCARD");
+    // The honest caveat: /record/stop decides at stop time, so the recorder
+    // is still running while the operator picks.
+    expect(all).toContain("still rolling until you pick");
+    expect(all).not.toContain("SIZE");
+  });
+
+  it("shows the precision modifier wherever the operator is looking", () => {
+    const on = stubCtx();
+    paintHud(on.ctx, {}, null, { ...menu, precision: true });
+    const all = on.texts.join(" | ");
+    expect(all).toContain("◆ PRECISION");
+    // ...and in the status column, which is where the eye already is.
+    expect(all).toContain("gains scaled down while held");
+
+    const off = stubCtx();
+    paintHud(off.ctx, {}, null, menu);
+    expect(off.texts.join(" | ")).toContain("push L stick away = precision");
   });
 
   it("is omitted entirely when no menu is passed", () => {
