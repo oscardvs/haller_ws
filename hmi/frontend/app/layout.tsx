@@ -32,8 +32,8 @@ export const metadata: Metadata = {
  * It used to also render the wordmark, nav and E-STOP for every route. The
  * cockpit at `/` is a fixed-viewport surface that draws its own header, rail
  * and command bar, so a second app-level header would either stack on top of
- * it or push it past 100vh. The remaining deep-link routes (`/base`,
- * `/arm/[id]`, `/settings`, `/teleop/human`) render <DeepLinkChrome /> for
+ * it or push it past 100vh. The remaining deep-link routes (`/settings` and
+ * `/teleop/vr`, the page the headset opens) render <DeepLinkChrome /> for
  * themselves instead — same wordmark, same rail, same always-present E-STOP.
  */
 export default function RootLayout({ children }: { children: React.ReactNode }) {

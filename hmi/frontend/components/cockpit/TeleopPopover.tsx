@@ -1,9 +1,11 @@
 "use client";
 
 /**
- * Leader → follower teleop bridge, lifted out of TeleopLauncher into the
- * command bar so it can be started and watched from any tab.
+ * Leader → follower teleop bridge: back-drive one arm by hand, the other
+ * mirrors it. Lives in the command bar so it can be started and watched from
+ * any tab.
  *
+ * Not the headset path — that is the Teleop tab, and this popover links to it.
  * Manual joint control on both participating arms is disabled while this runs
  * — the arm cards read the same telemetry and lock themselves; see ArmCard's
  * lockFor().
@@ -180,10 +182,10 @@ export function TeleopPopover({
         </span>
         <button
           type="button"
-          onClick={() => onTab("human")}
+          onClick={() => onTab("teleop")}
           className="ml-auto text-[11px] text-foreground hover:text-[var(--haller-live)]"
         >
-          Human-pose teleop →
+          Quest teleop →
         </button>
       </div>
 

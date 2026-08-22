@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 
 export type TabId =
   | "operate"
-  | "human"
+  | "teleop"
   | "calibrate"
   | "cameras"
   | "dataset"
@@ -17,7 +17,7 @@ export type TabId =
  *  to be rewritten in the same commit. */
 export const TABS: readonly { id: TabId; label: string }[] = [
   { id: "operate", label: "Operate" },
-  { id: "human", label: "Human teleop" },
+  { id: "teleop", label: "Teleop" },
   { id: "calibrate", label: "Calibrate" },
   { id: "cameras", label: "Cameras" },
   { id: "dataset", label: "Dataset" },
@@ -30,35 +30,9 @@ export const TABS: readonly { id: TabId; label: string }[] = [
 export type PopId = "teleop" | "rec" | "alerts" | `pose-${string}` | null;
 
 /** Re-exported so cockpit code has one import for its shell vocabulary; the
- *  definition lives in lib/ because HumanTeleopPanel needs it too. */
+ *  definition lives in lib/ because it is a page-wide keyboard rule, not a
+ *  cockpit one. */
 export { isEditableTarget } from "@/lib/keys";
-
-/**
- * Whether the human-teleop panel stays mounted.
- *
- * The one place tab switching cannot be plain mount/unmount. That panel owns
- * the webcam, three MediaPipe models and the ~30 Hz publish loop that IS the
- * teleop input, so unmounting it while the backend still believes a session is
- * live would stop the robot receiving poses with nothing on screen to say so.
- *
- *   - `opened` latches on first visit, so the webcam is never opened before
- *     the operator asks for it. This is someone's face, not a status LED.
- *   - `sessionRunning` keeps it alive off-tab. It reads from the retained last
- *     telemetry frame, so it stays true through a link blip rather than
- *     tearing down teleop because the websocket hiccuped.
- *   - With nothing running, leaving the tab releases the camera.
- */
-export function shouldKeepTeleopMounted({
-  opened,
-  onTeleopTab,
-  sessionRunning,
-}: {
-  opened: boolean;
-  onTeleopTab: boolean;
-  sessionRunning: boolean;
-}): boolean {
-  return opened && (onTeleopTab || sessionRunning);
-}
 
 /** Breakpoints the design calls out by number, named once here.
  *  - compact: the Operate tab drops to a single arm with a picker.
@@ -129,8 +103,8 @@ export function useSticky<T>(key: string, initial: T): [T, (v: T) => void] {
   return [value, set];
 }
 
-/** Dataset repo slug. Mirrors RecordingPanel.slugify so the two agree on what
- *  a take is called, whichever surface started it. */
+/** Dataset repo slug — the one answer to what a take is called, whichever
+ *  surface started it. */
 export function slugify(s: string): string {
   return (
     s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) ||

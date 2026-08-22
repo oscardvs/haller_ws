@@ -3,12 +3,12 @@
 /**
  * True when a key event came from somewhere the operator is typing.
  *
- * This is the fix for a live bug: BasePanel bound WASD to `window` with no
- * target check while RecordingPanel put a task-description input on the same
- * page, so typing "a red cube" drove the base sideways.
+ * Drive keys are bound to `window`, and the same page carries text fields —
+ * a task description, an HF user, a rate. Without this check, typing "a red
+ * cube" drives the base sideways.
  *
  * `select` is on the list because a focused <select> consumes letter keys for
- * type-ahead — the arm-assignment dropdowns on the teleop tab are exactly that,
+ * type-ahead — the stance and arm pickers on the teleop tab are exactly that,
  * and "s" there should pick an option, not command a robot.
  *
  * Use this on key-DOWN only. Key-up must fire unconditionally: if a key goes

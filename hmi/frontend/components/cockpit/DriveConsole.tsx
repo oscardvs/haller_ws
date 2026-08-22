@@ -12,10 +12,10 @@
  *     the Operate tab unmounts. A cockpit that keeps posting velocities while
  *     the operator is reading Settings is a cockpit that can be surprised.
  *
- *  2. Drive keys ignore events from text inputs. BasePanel bound WASD to
- *     `window` unconditionally while RecordingPanel put a task field on the
- *     same page, so typing "place the red cube" drove the base. That is fixed
- *     here and the keys are additionally scoped to this tab by mounting.
+ *  2. Drive keys ignore events from text inputs — WASD bound to `window` on a
+ *     page that also carries a task-description field means typing "place the
+ *     red cube" drives the base. The keys are additionally scoped to this tab
+ *     by mounting.
  */
 import { useEffect, useRef, useState } from "react";
 

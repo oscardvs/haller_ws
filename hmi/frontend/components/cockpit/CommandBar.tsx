@@ -146,14 +146,14 @@ function hintFor(
         return "narrow layout — one arm at a time, pick it above the card";
       }
       return "drag joints to command · wasd or arrows drive the base";
-    case "human":
-      return "hold SPACE (or open MOUTH) to close the dead-man — this tab only";
+    case "teleop":
+      return "the headset drives · per-hand grip is the dead-man · B/Y is E-STOP";
     case "calibrate":
       return "every arm must be in manual before a session starts";
     case "cameras":
       return "the Operate tab's chips pick which of these is the primary view";
     case "dataset":
-      return "start human teleop first — the take logs its commanded targets as action";
+      return "start a teleop session first — the take logs its commanded targets as action";
     case "settings":
       return "config is read-only — edit hmi/backend/config.yaml and restart";
   }

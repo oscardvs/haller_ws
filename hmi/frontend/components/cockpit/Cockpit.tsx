@@ -10,8 +10,9 @@
  *   1fr   content  the active tab, which owns its own min-h-0 and overflow
  *   34px  command  teleop · recorder · hint · census · clock
  *
- * Replaces the scrolling multi-page dashboard. `/base`, `/arm/[id]`,
- * `/settings` and `/teleop/human` still exist as unlinked deep links.
+ * Replaces the scrolling multi-page dashboard. `/settings` and `/teleop/vr`
+ * still exist as unlinked deep links — the second one is what the headset
+ * opens.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -26,14 +27,12 @@ import { AlertsPopover } from "./AlertsPopover";
 import { TeleopPopover } from "./TeleopPopover";
 import { RecordPopover } from "./RecordPopover";
 import { OperateTab } from "./OperateTab";
-import { HumanTab } from "./HumanTab";
+import { TeleopTab } from "./TeleopTab";
 import { CalibrateTab } from "./CalibrateTab";
 import { CamerasTab } from "./CamerasTab";
 import { DatasetTab } from "./DatasetTab";
 import { SettingsTab } from "./SettingsTab";
-import {
-  shouldKeepTeleopMounted, useViewport, type PopId, type TabId,
-} from "./lib";
+import { useViewport, type PopId, type TabId } from "./lib";
 
 type ConfigBody = Awaited<ReturnType<typeof api.config>>;
 
@@ -47,12 +46,6 @@ export function Cockpit() {
 
   const startTelemetry = useTelemetry((s) => s.start);
   const startPolling = useRecorder((s) => s.startPolling);
-  const humanRunning = useTelemetry(
-    (s) => s.lastFrame?.human_teleop?.running ?? false,
-  );
-  // Latched on first visit so the webcam is not opened before the operator
-  // asks for it — this is someone's face, not a status LED.
-  const [humanOpened, setHumanOpened] = useState(false);
 
   const teleopRef = useRef<HTMLButtonElement>(null);
   const recRef = useRef<HTMLButtonElement>(null);
@@ -103,24 +96,23 @@ export function Cockpit() {
 
   const closePop = useCallback(() => setPop(null), []);
   const goTab = useCallback((t: TabId) => {
-    if (t === "human") setHumanOpened(true);
     setTab(t);
     // A popover anchored to the command bar has no meaning once the surface
     // behind it changed.
     setPop(null);
   }, []);
 
+  const onCameraRecord = useCallback((id: string, record: boolean) => {
+    setCameras((prev) =>
+      prev === null
+        ? prev
+        : prev.map((c) => (c.id === id ? { ...c, record } : c)),
+    );
+  }, []);
+
   const armIds = cfg?.arms.map((a) => a.id) ?? [];
   const cams = cameras ?? [];
   const booting = cfg === null && bootError === null;
-
-  // The teleop panel outlives its tab whenever a session is running — see
-  // shouldKeepTeleopMounted() for why this is not plain mount/unmount.
-  const keepHuman = shouldKeepTeleopMounted({
-    opened: humanOpened,
-    onTeleopTab: tab === "human",
-    sessionRunning: humanRunning,
-  });
 
   return (
     <div
@@ -141,45 +133,32 @@ export function Cockpit() {
         ) : bootError ? (
           <BootError message={bootError} />
         ) : cfg ? (
-          <>
-            {/* Rendered from a fixed position in the tree whether or not it is
-                the visible tab, so React never reconciles it away. Hidden with
-                opacity rather than display:none — a display:none <video> is a
-                browser's invitation to stop decoding the MediaStream, and the
-                whole point of keeping this mounted is that the frames keep
-                coming. `inert` keeps it out of the tab order while hidden. */}
-            {keepHuman && (
-              <div
-                className={
-                  tab === "human"
-                    ? "absolute inset-0 grid"
-                    : "pointer-events-none absolute inset-0 -z-10 grid opacity-0"
-                }
-                aria-hidden={tab !== "human"}
-                inert={tab !== "human"}
-              >
-                <HumanTab armIds={armIds} active={tab === "human"} />
-              </div>
+          <div className="absolute inset-0 grid">
+            {/* Plain mount/unmount, every tab. The teleop panel used to be the
+                one exception — it owned the webcam and the publish loop that
+                WAS the teleop input, so unmounting it stopped the robot
+                receiving poses. The input now comes from the headset over its
+                own socket, so this tab is only a view of a session the backend
+                owns and can come and go like the rest. */}
+            {tab === "operate" && (
+              <OperateTab
+                armIds={armIds}
+                cameras={cams}
+                viewport={viewport}
+                pop={pop}
+                setPop={setPop}
+              />
             )}
-
-            {tab !== "human" && (
-              <div className="absolute inset-0 grid">
-                {tab === "operate" && (
-                  <OperateTab
-                    armIds={armIds}
-                    cameras={cams}
-                    viewport={viewport}
-                    pop={pop}
-                    setPop={setPop}
-                  />
-                )}
-                {tab === "calibrate" && <CalibrateTab armIds={armIds} />}
-                {tab === "cameras" && <CamerasTab cameras={cams} />}
-                {tab === "dataset" && <DatasetTab cameras={cams} />}
-                {tab === "settings" && <SettingsTab cfg={cfg} cameras={cams} />}
-              </div>
+            {tab === "teleop" && (
+              <TeleopTab arms={cfg.arms} cameras={cams} viewport={viewport} />
             )}
-          </>
+            {tab === "calibrate" && <CalibrateTab armIds={armIds} />}
+            {tab === "cameras" && <CamerasTab cameras={cams} />}
+            {tab === "dataset" && (
+              <DatasetTab cameras={cams} onCameraRecord={onCameraRecord} />
+            )}
+            {tab === "settings" && <SettingsTab cfg={cfg} cameras={cams} />}
+          </div>
         ) : null}
       </div>
 

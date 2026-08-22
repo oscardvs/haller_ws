@@ -1,12 +1,11 @@
 // hmi/frontend/__tests__/cockpitLib.test.ts
 //
-// The three cockpit rules that are safety- or data-relevant rather than
-// cosmetic, pinned as pure functions so they can be tested without standing up
-// a webcam, a websocket and six tabs.
+// The cockpit rules that are safety- or data-relevant rather than cosmetic,
+// pinned as pure functions so they can be tested without standing up a
+// websocket and six tabs.
 import { describe, it, expect } from "vitest";
 
 import { isEditableTarget } from "../lib/keys";
-import { shouldKeepTeleopMounted } from "../components/cockpit/lib";
 import { gridPlan } from "../components/cockpit/cameraGrid";
 import type { CameraInfo } from "../lib/api";
 
@@ -44,35 +43,6 @@ describe("isEditableTarget — WASD must not leak into text fields", () => {
     // Key-UP is dispatched without a target in some paths; treating that as
     // "editable" would swallow the release and latch the drive on.
     expect(isEditableTarget(null)).toBe(false);
-  });
-});
-
-describe("shouldKeepTeleopMounted", () => {
-  it("does not mount the panel before the operator has ever opened the tab", () => {
-    // The webcam is not opened speculatively.
-    expect(
-      shouldKeepTeleopMounted({ opened: false, onTeleopTab: false, sessionRunning: true }),
-    ).toBe(false);
-  });
-
-  it("stays mounted off-tab while a session is running", () => {
-    // The publish loop IS the teleop input; unmounting stops the robot
-    // receiving poses while the backend still thinks a session is live.
-    expect(
-      shouldKeepTeleopMounted({ opened: true, onTeleopTab: false, sessionRunning: true }),
-    ).toBe(true);
-  });
-
-  it("releases the camera when leaving the tab with nothing running", () => {
-    expect(
-      shouldKeepTeleopMounted({ opened: true, onTeleopTab: false, sessionRunning: false }),
-    ).toBe(false);
-  });
-
-  it("is mounted on the tab even with no session", () => {
-    expect(
-      shouldKeepTeleopMounted({ opened: true, onTeleopTab: true, sessionRunning: false }),
-    ).toBe(true);
   });
 });
 
