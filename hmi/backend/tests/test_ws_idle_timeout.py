@@ -1,9 +1,12 @@
-"""Idle-timeout detection on the teleop websockets.
+"""Idle-timeout detection on the teleop websocket.
 
 A half-open TCP connection (wifi drop without a FIN) leaves `receive_json`
 blocked forever; nothing else in the stack notices, so the session's
 WS-disconnect grace — the thing that auto-stops an abandoned session — never
-runs. The handlers now treat `WS_IDLE_TIMEOUT_S` of silence as a disconnect.
+runs. The handler now treats `WS_IDLE_TIMEOUT_S` of silence as a disconnect,
+but only for a client that was actually streaming: see the `streamed` guard
+in `ws_vr_teleop_in`, and `test_a_page_that_never_streamed_survives_idle` in
+test_routes_vr_teleop.py.
 """
 from __future__ import annotations
 
@@ -52,14 +55,18 @@ async def test_frame_within_timeout_is_returned(monkeypatch):
 
 
 def test_endpoint_idle_disconnect_notifies_the_session(app_with_mocks, monkeypatch):
-    """Full-path: an idle client is dropped and the session is told, so the
-    existing 5 s grace auto-stop can actually fire."""
+    """Full-path: a client that WAS streaming and then went quiet is dropped
+    and the session is told, so the existing 5 s grace auto-stop can fire."""
     import haller_hmi.server as srv
 
     monkeypatch.setattr(srv, "WS_IDLE_TIMEOUT_S", 0.1)
     client = app_with_mocks
     with pytest.raises(Exception):
-        with client.websocket_connect("/ws/teleop/human/in") as ws:
-            # Say nothing. The server must close us after the idle timeout.
-            ws.receive_json()
+        with client.websocket_connect("/ws/teleop/vr/in") as ws:
+            ws.receive_json()               # the unprompted settings message
+            ws.send_json({"type": "vr_keypoints", "ts_ms": 1,
+                          "left": None, "right": None})
+            # Then say nothing. The server must close us after the timeout.
+            while True:
+                ws.receive_json()
     assert srv.human_teleop.notify_ws_disconnected.called

@@ -76,10 +76,10 @@ def test_emits_a_keypoint_frame_the_session_understands():
     sess = FakeSession()
     kp = _teleop(sess).convert(_frame([0, 1.2, -0.3]))
     assert kp["type"] == "keypoints"
-    assert kp["clutch_source"] == "vr_grip"
-    # Already in robot joint space — mirroring downstream would apply
-    # handedness twice.
-    assert kp["mirror_mode"] == "none"
+    # Nothing but the clutch and the per-side goals: the session applies no
+    # handedness of its own, so this is already the final word.
+    assert set(kp) == {"type", "ts_ms", "dead_man", "dead_man_sides",
+                       "left", "right"}
     assert kp["dead_man"] is True
     assert kp["dead_man_sides"] == {"left": False, "right": True}
     goal = kp["right"]["joint_goal"]

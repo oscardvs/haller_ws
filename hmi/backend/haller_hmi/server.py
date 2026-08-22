@@ -22,13 +22,11 @@ from .calibration import (
 )
 from .cameras import CameraManager
 from .config import load_config
-from .human_teleop import ClutchSource, HumanTeleopSession
-from .vr_input import vr_frame_to_keypoint_frame
+from .human_teleop import HumanTeleopSession
 from . import motion as motion_policy
 from .motion import MoveRefused
 from .presets import PresetNotFound, PresetStore
 from .ros_bridge import RosBridge
-from . import safety
 from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
@@ -36,7 +34,7 @@ from .recorder import DatasetRecorder
 from .sim.scene import SceneController
 from .sim.task import InsertionMonitor, TaskMonitor
 from .sim.teleop import SimLeaderTeleop
-from .vr_teleop import relay as vr_relay
+from .vr_teleop import wire as vr_wire
 
 logger = logging.getLogger(__name__)
 
@@ -141,52 +139,7 @@ class HumanTeleopStartBody(BaseModel):
     # servo board is left with.
     left_arm: str | None = None
     right_arm: str | None = None
-    swap: bool = False
     hz: float = 60.0
-    # Typed, not a bare str: the source selected here is the session's sole
-    # dead-man authority for its whole life, so an unrecognised value must be
-    # rejected at the door rather than silently falling through to spacebar.
-    clutch_source: ClutchSource = "spacebar"
-
-
-class HumanTeleopSwapBody(BaseModel):
-    swap: bool
-
-
-class HumanPinchCalibSide(BaseModel):
-    min_m: float
-    max_m: float
-
-
-class HumanMouthCalib(BaseModel):
-    # Sustained levels over a hold window, not peaks — see safety.py. The
-    # browser never derives these itself; it records traces and posts them to
-    # /teleop/human/mouth/analyze, which returns exactly this shape.
-    talk_hold: float
-    open_hold: float
-    talk_peak: float | None = None
-
-
-class MouthTraceBody(BaseModel):
-    """Recorded jawOpen traces as [t_ms, score] pairs, in arrival order.
-
-    Stateless on purpose: the analyser is a pure function of the traces, so the
-    same request can be replayed, unit-tested, and reasoned about without a
-    live session. `verify` is checked against `calib` — the calibration the
-    operator is about to trust — which is why it is supplied rather than read
-    off the session.
-    """
-
-    talk: list[tuple[float, float]] | None = None
-    open: list[tuple[float, float]] | None = None
-    verify: list[tuple[float, float]] | None = None
-    calib: HumanMouthCalib | None = None
-
-
-class HumanTeleopCalibrateBody(BaseModel):
-    left: HumanPinchCalibSide | None = None
-    right: HumanPinchCalibSide | None = None
-    mouth: HumanMouthCalib | None = None
 
 
 class SimTeleopStartBody(BaseModel):
@@ -332,6 +285,12 @@ def get_config():
                 "model": h.config.model,
                 "port": h.config.port,
                 "mode": h.guard.mode.value,
+                # Reported rather than inferred. The cockpit gates its
+                # sim-leader preset on this; it used to sniff `port ==
+                # "(sim)"`, which is a convention this module happens to
+                # follow, not something it promises.
+                "source": h.config.source,
+                "sim_arm_name": h.config.sim_arm_name,
             }
             for h in arms.values()
         ],
@@ -555,12 +514,6 @@ async def get_human_teleop():
 
 @app.post("/teleop/human/start")
 async def post_human_teleop_start(body: HumanTeleopStartBody):
-    if body.clutch_source == "mouth" and not human_teleop.mouth_calib_is_valid():
-        raise HTTPException(
-            status_code=400,
-            detail=("mouth clutch has no valid calibration: capture talk/open "
-                    "and ensure their separation is at least 0.25"),
-        )
     if not body.left_arm and not body.right_arm:
         raise HTTPException(
             status_code=400,
@@ -571,8 +524,7 @@ async def post_human_teleop_start(body: HumanTeleopStartBody):
             _arm_or_404(arm_id)
     try:
         human_teleop.start(
-            left_arm=body.left_arm, right_arm=body.right_arm,
-            swap=body.swap, hz=body.hz, clutch_source=body.clutch_source,
+            left_arm=body.left_arm, right_arm=body.right_arm, hz=body.hz,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -641,55 +593,6 @@ async def post_human_teleop_collision(body: CollisionEnableBody):
         "available": _collision_guard.available,
         "margin_m": _collision_guard.cfg.margin_m,
     }}
-
-
-@app.post("/teleop/human/swap")
-async def post_human_teleop_swap(body: HumanTeleopSwapBody):
-    human_teleop.set_swap(body.swap)
-    return {"ok": True, **human_teleop.status()}
-
-
-@app.post("/teleop/human/calibrate")
-async def post_human_teleop_calibrate(body: HumanTeleopCalibrateBody):
-    human_teleop.set_pinch_calib(
-        left=body.left.model_dump() if body.left else None,
-        right=body.right.model_dump() if body.right else None,
-    )
-    if body.mouth is not None:
-        human_teleop.set_mouth_calib(body.mouth.model_dump())
-    return {"ok": True}
-
-
-@app.post("/teleop/human/mouth/analyze")
-async def post_human_teleop_mouth_analyze(body: MouthTraceBody):
-    """Derive a mouth calibration from recorded traces, and/or replay one.
-
-    Two jobs, one route, because they are the same measurement seen twice:
-      - talk+open  → the thresholds the operator would run with.
-      - verify     → what those thresholds would have done to a fresh recording
-                     of them speaking normally. `engaged: false` there is the
-                     one safety claim this feature rests on, and it is the only
-                     way to check it against a real person rather than against
-                     an assumption about jaws in general.
-    """
-    out: dict = {}
-    if body.talk is not None or body.open is not None:
-        out.update(safety.analyze_mouth_capture(body.talk or [], body.open or []))
-    if body.verify is not None:
-        if body.calib is None:
-            raise HTTPException(
-                status_code=400,
-                detail="verify needs a calib to check against",
-            )
-        out["verify"] = safety.replay_mouth_clutch(
-            body.verify,
-            safety.MouthClutchCalib(
-                talk_hold=body.calib.talk_hold,
-                open_hold=body.calib.open_hold,
-                talk_peak=body.calib.talk_peak,
-            ),
-        )
-    return out
 
 
 @app.post("/teleop/sim/start")
@@ -954,14 +857,18 @@ async def ws_telemetry(ws: WebSocket):
         return
 
 
-# Operators publish continuously (~30 Hz) for as long as a capture session is
-# open, so silence on a teleop socket means the connection is dead — e.g. wifi
+# A headset publishes continuously (~30 Hz) for as long as it is driving, so
+# silence on the teleop socket means the connection is dead — e.g. wifi
 # dropped without a FIN, where `receive` would otherwise sit blocked until the
 # OS gives up, minutes later. Naming that silence turns the session's existing
 # WS-disconnect grace (freeze now, auto-stop after 5 s) into something that
-# actually runs. Both capture paths (MediaPipe panel, VR) publish for the whole
-# time they are live, so there is no legitimate idle to false-positive on.
+# actually runs.
 WS_IDLE_TIMEOUT_S = 2.0
+
+#: How often the socket pushes `ik_state` back to the client. The headset uses
+#: it to drive haptics and paint the HUD, neither of which needs the frame
+#: rate; the pose stream flows the other way at display rate.
+IK_STATE_HZ = 20.0
 
 
 async def _receive_or_idle_timeout(ws: WebSocket):
@@ -975,88 +882,98 @@ async def _receive_or_idle_timeout(ws: WebSocket):
         return None
 
 
-@app.websocket("/ws/teleop/human/in")
-async def ws_human_teleop_in(ws: WebSocket):
-    await ws.accept()
-    try:
-        while True:
-            frame = await _receive_or_idle_timeout(ws)
-            if frame is None:
-                logger.warning("human teleop socket idle %.1fs; treating as "
-                               "disconnected", WS_IDLE_TIMEOUT_S)
-                human_teleop.notify_ws_disconnected()
-                await ws.close()
-                return
-            try:
-                human_teleop.ingest_frame(frame)
-            except Exception:
-                # Don't kill the socket over a bad frame — log and continue.
-                logger.exception("human teleop ingest_frame failed")
-    except WebSocketDisconnect:
-        human_teleop.notify_ws_disconnected()
-        return
-
-
 @app.websocket("/ws/teleop/vr/in")
 async def ws_vr_teleop_in(ws: WebSocket):
-    """Raw WebXR frames from a headset browser.
+    """The one teleop socket: WebXR frames in, IK state and settings back.
 
-    A separate socket from the MediaPipe one, but only at the door: the frame
-    is converted to the same `KeypointFrame` and handed to the same
-    `ingest_frame`. THREE converters now exist, selected by `vr_mode` on the
-    frame, all stateful per CONNECTION (the clutch anchors live exactly as
-    long as the operator's socket) and so constructed here:
+    Every frame feeds `QuestTeleoperator` — the clutch-relative mapper into
+    the 3+2 decoupled solver (`vr_teleop/`) — whose output is a per-side
+    `joint_goal` that `HumanTeleopSession` treats exactly as it treats any
+    other commanded pose. One converter per CONNECTION, because the clutch
+    anchors live exactly as long as the operator's socket does.
 
-      - `"ik"` (DEFAULT): the ported stack in `vr_teleop/` — clutch-relative
-        6-DoF hand tracking with absorbing reach limits, into a decoupled
-        damped-least-squares solver. See `vr_teleop/__init__.py`.
-      - `"pose"`: the previous wrist-point mode (`vr_pose_mode.py`) — 3-DoF
-        position IK with the controller's pitch/roll passed through on fixed
-        gains. Kept selectable so a bench session that goes wrong has
-        somewhere to fall back to that is known to work.
-      - `"joints"`: the original angle-copying adapter (`vr_input.py`), kept
-        for comparison and for the body-angle purists.
+    Message types, client → server:
+      `vr_keypoints` / `xr_frame`  a pose frame (both shapes normalised at the
+                                   door, see `vr_teleop.wire.normalize_frame`)
+      `config_update`              live tuning, clamped by QuestTeleopConfig
+      `request_settings`           ask for the current config
 
-    The relay at `/vr/*` speaks the same schema and runs the same `"ik"`
-    converter; this route exists because the Next.js page already talks to
-    it, and keeping both means the new headset page and the old one can be
-    swapped at the bench rather than in a branch.
+    and server → client: `ik_state` (at IK_STATE_HZ while frames flow),
+    `config_applied`, `settings`.
     """
     await ws.accept()
-    from .vr_pose_mode import VRPoseMode
-    # Floor for IK wrist-point targets: the guard's own wrist floor plus a
-    # little slack, so teleop demands stay in the region the guard passes
-    # without clamping (see vr_pose_mode's comment at the clamp site). Same
-    # for the fingertip floor — a pitched-down hand otherwise sinks the tip
-    # target under the bench and the guard freezes the whole step.
-    pose_mode = VRPoseMode(human_teleop, arms, min_target_z=_wrist_floor_m(),
-                           min_tip_z=_tip_floor_m())
     quest = _make_quest_teleoperator()
+    last_state = 0.0
+    state_period = 1.0 / IK_STATE_HZ
+    # Whether this client has ever streamed a pose. The idle timeout exists to
+    # catch a headset that WAS driving and went quiet; a page that is merely
+    # open — parked on the landing screen, tuning sliders, not yet in XR — is
+    # not an operator who has stopped, and tearing it down every two seconds
+    # just makes it reconnect. Measured: 62 pointless reconnects across one
+    # smoke run, each one a log line.
+    streamed = False
+    # Send the settings unprompted, so the client's sliders start on the
+    # robot's actual values rather than on their own defaults — one message,
+    # and it removes a window where the two disagree.
+    try:
+        await ws.send_json(_settings_message(quest))
+    except Exception:
+        pass
     try:
         while True:
-            frame = await _receive_or_idle_timeout(ws)
-            if frame is None:
+            msg = await _receive_or_idle_timeout(ws)
+            if msg is None:
+                if not streamed:
+                    continue        # never drove; nothing has stopped
                 logger.warning("vr teleop socket idle %.1fs; treating as "
                                "disconnected", WS_IDLE_TIMEOUT_S)
                 human_teleop.notify_ws_disconnected()
                 await ws.close()
                 return
+            if not isinstance(msg, dict):
+                continue
+            mtype = msg.get("type")
+            if mtype == "config_update":
+                # Echo the CLAMPED values back, so a slider that asked for
+                # something out of range snaps to what the robot actually took
+                # instead of silently disagreeing with it.
+                applied = quest.apply_config_update(msg.get("config") or {})
+                await ws.send_json({"type": "config_applied", "config": applied})
+                continue
+            if mtype == "request_settings":
+                await ws.send_json(_settings_message(quest))
+                continue
+            streamed = True
             try:
-                mode = frame.get("vr_mode")
-                if mode == "joints":
-                    kp = vr_frame_to_keypoint_frame(frame)
-                elif mode == "pose":
-                    kp = pose_mode.convert(frame)
-                else:
-                    kp = quest.convert(frame)
-                human_teleop.ingest_frame(kp)
+                human_teleop.ingest_frame(
+                    quest.convert(vr_wire.normalize_frame(msg)))
             except Exception:
-                # Same rule as the MediaPipe socket: one malformed frame must
-                # not drop the operator's connection mid-session.
+                # One malformed frame must never drop the operator's
+                # connection mid-session.
                 logger.exception("vr teleop ingest_frame failed")
+            now = asyncio.get_running_loop().time()
+            if now - last_state >= state_period:
+                last_state = now
+                try:
+                    await ws.send_json(quest.state())
+                except Exception:
+                    pass
     except WebSocketDisconnect:
-        human_teleop.notify_ws_disconnected()
+        # Same rule as the idle path: only a client that was actually
+        # streaming poses has an operator whose disappearance should start the
+        # session's grace window. A watcher page closing is not an operator
+        # leaving.
+        if streamed:
+            human_teleop.notify_ws_disconnected()
         return
+
+
+def _settings_message(quest) -> dict:
+    """The full live-tunable config, as its own message type — the reply to
+    `request_settings` and the greeting on connect. `ik_state` carries the same
+    config block, but only starts flowing once frames do, and a client parked
+    on the tuning panel needs the values before it drives anything."""
+    return {"type": "settings", "config": quest.config.to_dict()}
 
 
 # ---- the ported VR teleop stack -----------------------------------------
@@ -1091,13 +1008,6 @@ def _make_quest_teleoperator():
         QuestTeleopConfig(min_tip_z=_tip_floor_m(),
                           min_wrist_z=_wrist_floor_m()),
     )
-
-
-app.include_router(vr_relay.build_router(
-    make_teleoperator=_make_quest_teleoperator,
-    ingest=human_teleop.ingest_frame,
-    on_disconnect=human_teleop.notify_ws_disconnected,
-))
 
 
 def run() -> None:

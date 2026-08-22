@@ -28,14 +28,12 @@ from .test_human_teleop import (
 def _session(left, right, **kw):
     mgr, arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, **_fast_acquire(**kw))
-    sess.start(left_arm=left, right_arm=right, swap=False,
-               clutch_source="vr_grip")
+    sess.start(left_arm=left, right_arm=right)
     return sess, arms
 
 
 def _sided_frame(*, left: bool, right: bool):
     frame = _kp_frame(dead_man=left or right)
-    frame["clutch_source"] = "vr_grip"
     frame["dead_man_sides"] = {"left": left, "right": right}
     return frame
 
@@ -64,14 +62,14 @@ def test_refuses_a_session_with_no_arms_at_all():
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, **_fast_acquire())
     with pytest.raises(ValueError, match="at least one"):
-        sess.start(left_arm=None, right_arm=None, swap=False)
+        sess.start(left_arm=None, right_arm=None)
 
 
 def test_still_refuses_the_same_arm_twice():
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, **_fast_acquire())
     with pytest.raises(ValueError, match="must be different"):
-        sess.start(left_arm="right", right_arm="right", swap=False)
+        sess.start(left_arm="right", right_arm="right")
 
 
 def test_the_absent_side_says_why_rather_than_claiming_tracking_loss():
@@ -155,8 +153,7 @@ def test_collision_guard_sees_only_the_driven_arm():
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, collision_guard=RecordingGuard(),
                               **_fast_acquire())
-    sess.start(left_arm=None, right_arm="right", swap=False,
-               clutch_source="vr_grip")
+    sess.start(left_arm=None, right_arm="right")
     try:
         for _ in range(4):
             sess.ingest_frame(_sided_frame(left=False, right=True))

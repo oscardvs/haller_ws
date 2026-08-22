@@ -1,20 +1,23 @@
-"""HTTP surface for the two things a bench session needs to change live:
-which arms a session runs on, and whether the collision guard clamps.
+"""The VR teleop surface: the start/collision routes, and the one socket.
 
-`app_with_mocks` stubs the session itself, so what these check is the HTTP
-contract — validation, status codes, and what actually reaches the session.
-The session's own single-arm behaviour is pinned in
-`test_human_teleop_single_arm.py`, against a real session and real arms.
+`app_with_mocks` stubs the session itself, so what these check is the
+CONTRACT — validation, status codes, what actually reaches the session, and
+the socket's message protocol. The session's own behaviour is pinned in
+`test_human_teleop*.py` against a real session and real arms; the converter's
+in `tests/vr_teleop/`.
 """
 from __future__ import annotations
+
+import time
+
+import pytest
 
 import haller_hmi.server as srv
 
 
 def test_single_arm_start_reaches_the_session_with_one_side_null(app_with_mocks):
     client = app_with_mocks
-    res = client.post("/teleop/human/start",
-                      json={"right_arm": "right", "clutch_source": "vr_grip"})
+    res = client.post("/teleop/human/start", json={"right_arm": "right"})
     assert res.status_code == 200, res.text
     srv.human_teleop.start.assert_called_once()
     kwargs = srv.human_teleop.start.call_args.kwargs
@@ -24,7 +27,7 @@ def test_single_arm_start_reaches_the_session_with_one_side_null(app_with_mocks)
 
 def test_start_with_no_arms_is_a_400(app_with_mocks):
     client = app_with_mocks
-    res = client.post("/teleop/human/start", json={"clutch_source": "vr_grip"})
+    res = client.post("/teleop/human/start", json={})
     assert res.status_code == 400
     assert "at least one" in res.json()["detail"]
 
@@ -71,35 +74,162 @@ def test_enabling_an_unavailable_guard_is_refused(app_with_mocks, monkeypatch):
     assert "mount geometry" in res.json()["detail"]
 
 
-def test_the_relay_page_is_mounted_on_the_app(app_with_mocks):
-    """Same origin as the API and the sockets. A separate origin would bring
-    back the certificate interstitial that cannot be accepted for a
-    WebSocket, which is the whole reason this rig has one origin."""
+# ---- the one teleop socket ----------------------------------------------
+#
+# `/ws/teleop/vr/in` absorbed the relay: pose frames in (either wire shape),
+# `ik_state` back at 20 Hz, and the live-tuning round trip. There is no other
+# teleop socket and no `vr_mode` dispatch — every frame takes the ik path.
+
+def _xr_ctrl(squeeze=True):
+    return {"tracked": True, "position": [0.1, 1.2, -0.3],
+            "orientation": [0, 0, 0, 1], "trigger": 0.0, "squeeze": squeeze}
+
+
+def _kp_frame(**kw):
+    return {"type": "vr_keypoints", "ts_ms": 1234,
+            "head": {"position": [0, 1.5, 0], "orientation": [0, 0, 0, 1]},
+            "left": None, "right": _xr_ctrl(), **kw}
+
+
+def test_settings_arrive_unprompted_on_connect(app_with_mocks):
+    """One message, and it removes the window where the client's sliders and
+    the robot's actual config disagree."""
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        msg = ws.receive_json()
+    assert msg["type"] == "settings"
+    assert msg["config"]["scale_translation"] == pytest.approx(1.0)
+
+
+def test_a_frame_reaches_the_session_as_converter_output(app_with_mocks):
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json(_kp_frame())
+        ws.receive_json()               # the ik_state that follows the frame
+    frame = srv.human_teleop.ingest_frame.call_args.args[0]
+    assert frame["type"] == "keypoints"
+    assert frame["dead_man"] is True
+    assert frame["dead_man_sides"] == {"left": False, "right": True}
+
+
+def test_the_xr_standard_frame_shape_is_accepted_too(app_with_mocks):
+    """Normalised at the door, so the converter, the session and the recorder
+    only ever see one shape — and a client written against the WebXR gamepad
+    mapping still drives the rig."""
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "type": "xr_frame", "ts_ms": 7,
+            "viewer": {"position": [0, 1.5, 0], "orientation": [0, 0, 0, 1]},
+            "controllers": {"left": None, "right": {
+                "position": [0.1, 1.2, -0.3], "orientation": [0, 0, 0, 1],
+                "buttons": [{"p": False, "v": 0.0}, {"p": True, "v": 1.0}],
+            }},
+        })
+        ws.receive_json()
+    frame = srv.human_teleop.ingest_frame.call_args.args[0]
+    assert frame["ts_ms"] == 7
+    assert frame["dead_man_sides"]["right"] is True
+
+
+def test_ik_state_is_pushed_while_frames_flow(app_with_mocks):
+    """The HUD's telemetry channel: per-side conditioning and the orientation
+    residual, at a rate that does not need to be the frame rate."""
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json(_kp_frame())
+        msg = ws.receive_json()
+    assert msg["type"] == "ik_state"
+    assert set(msg["sides"]) == {"left", "right"}
+    assert "config" in msg
+
+
+def test_config_update_is_echoed_clamped(app_with_mocks):
+    """A slider that asks for something out of range must snap to what the
+    robot actually took, rather than silently disagreeing with it."""
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "config_update",
+                      "config": {"scale_translation": 99.0}})
+        msg = ws.receive_json()
+    assert msg["type"] == "config_applied"
+    assert msg["config"]["scale_translation"] == pytest.approx(4.0)
+
+
+def test_request_settings_answers_with_the_whole_config(app_with_mocks):
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "config_update",
+                      "config": {"scale_translation": 2.5}})
+        ws.receive_json()
+        ws.send_json({"type": "request_settings"})
+        msg = ws.receive_json()
+    assert msg["type"] == "settings"
+    assert msg["config"]["scale_translation"] == pytest.approx(2.5)
+
+
+def test_each_connection_gets_its_own_converter(app_with_mocks, monkeypatch):
+    """The clutch anchors are connection state — two headsets must not share
+    them, and a reconnect must start clean."""
+    made = []
+    real = srv._make_quest_teleoperator
+
+    def _spy():
+        made.append(real())
+        return made[-1]
+
+    monkeypatch.setattr(srv, "_make_quest_teleoperator", _spy)
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as a:
+        a.receive_json()
+        with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as b:
+            b.receive_json()
+    assert len(made) == 2 and made[0] is not made[1]
+
+
+def test_a_bad_frame_does_not_drop_the_socket(app_with_mocks):
+    """One malformed frame must never end the operator's session."""
+    srv.human_teleop.ingest_frame.side_effect = ValueError("synthetic")
+    try:
+        with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+            ws.receive_json()
+            ws.send_json(_kp_frame())
+            ws.receive_json()
+            # Still alive: a later well-formed message is still answered.
+            ws.send_json({"type": "request_settings"})
+            assert ws.receive_json()["type"] == "settings"
+    finally:
+        srv.human_teleop.ingest_frame.side_effect = None
+
+
+def test_a_page_that_never_streamed_survives_idle(app_with_mocks, monkeypatch):
+    """The idle timeout catches a headset that WAS driving and went quiet. A
+    page merely open — parked on the landing screen, tuning sliders, not yet
+    in XR — is not an operator who stopped, and closing it just makes it
+    reconnect in a loop (62 times across one smoke run, before this)."""
+    monkeypatch.setattr(srv, "WS_IDLE_TIMEOUT_S", 0.05)
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        time.sleep(0.2)                 # several timeouts' worth
+        ws.send_json({"type": "request_settings"})
+        assert ws.receive_json()["type"] == "settings"
+    # ...and closing it does not start a grace window either: a watcher page
+    # going away is not an operator leaving.
+    assert not srv.human_teleop.notify_ws_disconnected.called
+
+
+def test_closing_after_streaming_starts_the_grace_window(app_with_mocks):
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json(_kp_frame())
+        ws.receive_json()
+    assert srv.human_teleop.notify_ws_disconnected.called
+
+
+def test_the_legacy_teleop_sockets_and_pages_are_gone(app_with_mocks):
+    """One input path. A route that still answered here would be a second one
+    nobody maintains — which is what this refactor removed."""
     client = app_with_mocks
-    assert client.get("/vr/").status_code == 200
-    assert client.get("/vr/client.js").status_code == 200
-
-
-def test_bare_vr_redirects_to_the_trailing_slash(app_with_mocks):
-    """`/vr` must redirect, never serve the page in place.
-
-    Bench, 2026-08-21, Quest on `https://<host>:8444/api/vr`: both arm
-    selectors empty and Start inert. The page had been served from the bare
-    path, so `<script src="client.js">` resolved to `/api/client.js` and
-    404'd — the markup arrived with no client at all, and nothing in the UI
-    could say so.
-    """
-    client = app_with_mocks
-    res = client.get("/vr", follow_redirects=False)
-    assert res.status_code == 307
-    # Relative: behind the proxy the browser asked for /api/vr, and an
-    # absolute /vr/ would land on the Next.js side of the origin.
-    assert res.headers["location"] == "vr/"
-    assert "no-store" in res.headers.get("cache-control", "")
-
-
-def test_bare_vr_followed_lands_on_the_page(app_with_mocks):
-    client = app_with_mocks
-    res = client.get("/vr", follow_redirects=True)
-    assert res.status_code == 200
-    assert "client.js" in res.text
+    for path in ("/vr", "/vr/", "/vr/client.js"):
+        assert client.get(path).status_code == 404, path
+    with pytest.raises(Exception):
+        with client.websocket_connect("/ws/teleop/human/in"):
+            pass

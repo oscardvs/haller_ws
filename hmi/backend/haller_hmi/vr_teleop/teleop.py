@@ -14,8 +14,7 @@ session needs and which nothing about this port should bypass:
     * the mode guard and E-STOP,
     * the dataset recorder's `action` column.
 
-So the seam is the same one `vr_pose_mode.py` already used: this module only
-*produces the target*. It emits a `KeypointFrame` carrying a per-side
+So the seam is a narrow one: this module only *produces the target*. It emits a `KeypointFrame` carrying a per-side
 `joint_goal` in robot joint space — degrees, gripper in [0, 1] — and the
 session does the rest. That is also what keeps it working identically
 against a real arm and a MuJoCo one: it talks to `ArmHandle` and
@@ -126,11 +125,9 @@ class QuestTeleoperator:
     # ---- per-frame conversion -------------------------------------------
 
     def convert(self, frame: dict) -> dict:
-        """Raw WebXR frame → a `KeypointFrame` carrying per-side joint goals.
-
-        Same contract as `vr_pose_mode.VRPoseMode.convert`, so the two are
-        interchangeable behind the socket's mode selector.
-        """
+        """Raw WebXR frame → the frame `HumanTeleopSession.ingest_frame` eats:
+        the clutch, per side, and a per-side `joint_goal` already solved in
+        robot joint space. Handedness is applied here and nowhere else."""
         status = self._session.status()
         committed = status.get("goal_deg") or {}
         acquire = status.get("acquire") or {}
@@ -162,13 +159,8 @@ class QuestTeleoperator:
         return {
             "type": "keypoints",
             "ts_ms": int(frame.get("ts_ms", 0)),
-            "clutch_source": "vr_grip",
             "dead_man": dead_man or bool(frame.get("dead_man", False)),
             "dead_man_sides": dict(squeezes),
-            "jaw_open": None,
-            # Already in robot joint space; mirroring here would apply
-            # handedness twice.
-            "mirror_mode": "none",
             "left": sides["left"],
             "right": sides["right"],
         }

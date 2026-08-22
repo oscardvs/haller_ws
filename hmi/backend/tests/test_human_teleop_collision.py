@@ -57,7 +57,7 @@ def test_driving_commits_go_through_the_guard():
     guard = _StubGuard()
     sess = HumanTeleopSession(mgr, collision_guard=guard,
                               **_fast_acquire(hz_override=200.0))
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
         assert _wait_until(lambda: bool(guard.filter_calls))
@@ -82,7 +82,7 @@ def test_idle_session_still_publishes_live_clearance():
     mgr, _arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, collision_guard=_StubGuard(),
                               **_fast_acquire(hz_override=200.0))
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right")
     try:
         assert _wait_until(
             lambda: sess.status()["collision"].get("slack_m") == 0.123)
@@ -94,7 +94,7 @@ def test_idle_session_still_publishes_live_clearance():
 def test_no_guard_reports_disabled_and_writes_unfiltered():
     mgr, arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right")
     try:
         # `available` joined `enabled` when the guard gained a runtime
         # switch: a UI needs to tell "off, flip it back on" apart from "this
@@ -115,7 +115,7 @@ def test_a_crashing_guard_fails_safe_not_silent():
     mgr, arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, collision_guard=_StubGuard(explode=True),
                               **_fast_acquire(hz_override=200.0))
-    sess.start(left_arm="left", right_arm="right", swap=False)
+    sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
         assert _wait_until(

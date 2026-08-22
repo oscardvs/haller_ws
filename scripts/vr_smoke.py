@@ -6,31 +6,30 @@ session, streams synthetic WebXR frames over /ws/teleop/vr/in (the exact wire
 shape the Quest browser sends), and asserts the full safety chain behaves:
 
   1. arm            session reaches TRACKING on the first frame
-  2. engage         squeeze both grips at a matched pose -> both sides DRIVING
-                    (countdown + dwell served, no lurch)
+  2. engage         squeeze both grips -> both sides DRIVING (the countdown
+                    served, no lurch)
   3. per-side grip  releasing ONE grip releases only that side
-  4. drive          moving a controller moves that arm's commanded pan
-  5. collision      driving both hands into the centre trips the guard:
-                    status.collision.limited, slack clamped at ~0, and the
-                    commanded poses stop approaching
-  6. release        letting go freezes both sides (authority HELD)
-  7. estop          POST /estop stops the session and drops torque; MANUAL
+  4. release        letting go freezes both sides (authority HELD)
+  5. estop          POST /estop stops the session and drops torque; MANUAL
                     mode re-arms
-  8. ws-drop        killing the socket mid-session auto-stops the backend
+  6. ws-drop        killing the socket mid-session auto-stops the backend
                     after its grace window
-  9. pose mode      anchor-on-squeeze wrist-point tracking (the fallback
-                    mode, `vr_mode: "pose"`)
- 9b. ik mode       the ported stack (`vr_mode: "ik"`, the server DEFAULT):
-                    6-DoF clutch tracking, the absorbing reach limit, the
-                    workspace floor, and single-arm sessions
- 10. recording      a scripted take lands on disk with BOTH sim camera
+  7. ik             the clutch + decoupled IK doing their job: locking in
+                    from an arbitrary hand position, the egocentric direction
+                    mapping, the absorbing reach limit, the guard switch, the
+                    workspace floor holding with the guard OFF, the trigger
+                    on the gripper, and single-arm sessions
+  8. recording      a scripted take lands on disk with BOTH sim camera
                     channels and every frame the recorder counted
- 11. estop mid-take the recorder notices the teleop session dying and saves
+  9. estop mid-take the recorder notices the teleop session dying and saves
                     the take itself, instead of appending a corrupted tail
- 12. starvation     ~1 s of socket silence (under the 2 s idle timeout)
+ 10. starvation     ~1 s of socket silence (under the 2 s idle timeout)
                     holds both sides and freezes their goals
- 13. tracking blip  one controller reporting tracked:false releases only
+ 11. tracking blip  one controller reporting tracked:false releases only
                     that side; the other keeps driving; re-track re-acquires
+
+There is one input path now: every frame feeds `QuestTeleoperator`. The
+`vr_mode` dispatch and the two modes behind it are gone.
 
 Run it against a sim backend (never against real arms unattended):
 
@@ -94,16 +93,16 @@ IDENT = [0.0, 0.0, 0.0, 1.0]
 # is already rolled; this stands in for that.
 FLIP_Z = [0.0, 0.0, 1.0, 0.0]
 HEAD = {"position": [0.0, 1.6, 0.0], "orientation": IDENT}
-# Shoulders end up at y=1.38, x=±0.19, z=+0.06 (see vr_input.BodyModel).
-# A controller 0.56 m straight ahead of its shoulder is at full reach, which
-# retargets to pan 0 / lift 0 / elbow straight — the pose a freshly-connected
-# sim arm (all joints 0°) already holds, so the acquisition gate can match.
+# A hand roughly where a standing operator's would be: shoulder height, half
+# a metre out in front. Nothing downstream depends on the exact numbers — the
+# clutch is relative, so it anchors wherever the hand happens to be — but the
+# two hands must be far enough apart that a section driving them toward each
+# other has somewhere to start from.
 SHOULDER_Y = 1.6 - 0.22
 REACH_Z = -0.50
-# Deliberately relaxed: the gripper is EXEMPT from the VR acquisition gate
-# (vr_grip sessions use VR_ACQUIRE_TOL_DEG), so engagement must succeed with
-# the trigger at rest. This constant staying 0.0 is the regression test for
-# that exemption — it used to have to be 0.9.
+# At rest. The trigger is the gripper, not part of engagement, so a session
+# must hand over with it untouched — this constant staying 0.0 is the
+# regression test for that.
 TRIGGER = 0.0
 
 
@@ -125,9 +124,6 @@ def frame(*, left_dx: float = 0.0, right_dx: float = 0.0,
     return json.dumps({
         "type": "vr_keypoints",
         "ts_ms": int(time.time() * 1000),
-        # Phases 1-8 exercise the original angle-copying adapter; the server
-        # now defaults to position mode, so say so explicitly.
-        "vr_mode": "joints",
         "dead_man": left_squeeze or right_squeeze,
         "head": HEAD,
         "left": controller("left", dx=left_dx, squeeze=left_squeeze,
@@ -189,163 +185,35 @@ def _fk_tip(goal_deg: dict) -> "object | None":
     return fk_points((0.0, 0.0, 0.0), 0.0, goal_deg)["tip"]
 
 
-async def pose_mode_section(base: str, ws_url: str) -> None:
-    """Position mode (the server default): anchor-on-squeeze hand tracking."""
-    print("\n-- 9: position mode — lock in anywhere, drive, grab, guard --")
-    cfg = req(base, "/config")
-    for arm in (a["id"] for a in cfg["arms"]):
-        req(base, f"/arm/{arm}/mode", {"mode": "manual"})
-    req(base, "/teleop/human/stop", {})
-    req(base, "/teleop/human/start",
-        {"left_arm": "left", "right_arm": "right", "swap": False,
-         "clutch_source": "vr_grip"})
+async def ik_section(base: str, ws_url: str) -> None:
+    """The clutch + decoupled IK, exercised the way a bench run uses them.
 
-    L0 = [-0.25, 1.15, -0.30]
-    R0 = [0.25, 1.15, -0.30]
-
-    def pframe(lpos, rpos, *, lsq=True, rsq=True, ltrig=0.0):
-        def hand(pos, sq, trig):
-            return {"position": list(pos), "orientation": IDENT,
-                    "trigger": trig, "squeeze": sq, "tracked": True}
-        return json.dumps({
-            "ts_ms": int(time.time() * 1000),
-            "vr_mode": "pose",
-            "dead_man": lsq or rsq,
-            "head": HEAD,
-            "left": hand(lpos, lsq, ltrig),
-            "right": hand(rpos, rsq, 0.0),
-        })
-
-    async def hold(seconds, lpos, rpos, **kw):
-        for _ in range(max(1, int(seconds * 30))):
-            await ws.send(pframe(lpos, rpos, **kw))
-            await asyncio.sleep(1 / 30)
-
-    async with ws_connect(ws_url) as ws:
-        # Hands ANYWHERE, held still: that must be enough to engage.
-        await hold(0.3, L0, R0, lsq=False, rsq=False)
-        t0 = time.monotonic()
-        deadline = time.monotonic() + 8.0
-        st = None
-        while time.monotonic() < deadline:
-            await ws.send(pframe(L0, R0))
-            st = req(base, "/teleop/human")
-            if authorities(st) == ("driving", "driving"):
-                break
-            await asyncio.sleep(0.033)
-        check("pose mode locks in from an arbitrary hand position",
-              authorities(st or {}) == ("driving", "driving"),
-              f"{time.monotonic() - t0:.1f}s, authorities={st and authorities(st)}")
-
-        tip0 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
-
-        # Lateral drag: hand right by 12 cm -> tip tracks in +x.
-        n = 45
-        for i in range(n):
-            lp = [L0[0] + 0.12 * (i + 1) / n, L0[1], L0[2]]
-            await ws.send(pframe(lp, R0))
-            await asyncio.sleep(1 / 30)
-        await hold(0.8, [L0[0] + 0.12, L0[1], L0[2]], R0)
-        tip1 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
-        if tip0 is not None and tip1 is not None:
-            # Default stance is "behind" (egocentric): operator right is robot
-            # −x. This assertion pins the DEFAULT wire behaviour — a frame
-            # with no stance key must get the egocentric mapping.
-            check("hand right 12 cm drags the tip right (egocentric: robot -x)",
-                  float(tip1[0] - tip0[0]) < -0.06,
-                  f"tip dx={float(tip1[0] - tip0[0]) * 1000:.0f} mm")
-
-        # The grab: hand DOWN 14 cm + trigger. This is the motion that was
-        # impossible under angle copying (human elbows do not bend that way).
-        L1 = [L0[0] + 0.12, L0[1], L0[2]]
-        for i in range(n):
-            lp = [L1[0], L1[1] - 0.14 * (i + 1) / n, L1[2]]
-            await ws.send(pframe(lp, R0, ltrig=0.8))
-            await asyncio.sleep(1 / 30)
-        await hold(0.8, [L1[0], L1[1] - 0.14, L1[2]], R0, ltrig=0.8)
-        g = req(base, "/teleop/human")["goal_deg"]["left"]
-        tip2 = _fk_tip(g)
-        if tip1 is not None and tip2 is not None:
-            # The hand asks for more dive than the bench allows; the right
-            # outcome is BOTH: the tip tracks downward AND the guard's height
-            # floors stop it at the surface instead of through it.
-            dz = float(tip2[2] - tip1[2])
-            check("hand down 14 cm dives the tip until the bench holds it",
-                  dz < -0.04 and float(tip2[2]) > -0.005,
-                  f"tip dz={dz * 1000:.0f} mm, final z={float(tip2[2]) * 1000:.0f} mm")
-        lo, hi = -10.0, 100.0  # sim gripper range, deg
-        check("trigger closes the gripper in pose mode",
-              g.get("gripper", hi) < lo + 0.45 * (hi - lo),
-              f"gripper={g.get('gripper'):.0f} deg")
-
-        # Both hands driven so the ARMS cross: under the egocentric default
-        # the mapping flips x, so hands sweeping OUTWARD send the arms at
-        # each other. The guard must still bite.
-        limited = False
-        for i in range(90):
-            dx = 0.35 * (i + 1) / 90
-            await ws.send(pframe([L0[0] - dx, L0[1], L0[2]],
-                                 [R0[0] + dx, R0[1], R0[2]]))
-            if i % 6 == 0 and req(base, "/teleop/human")["collision"].get("limited"):
-                limited = True
-            await asyncio.sleep(1 / 30)
-        st = req(base, "/teleop/human")
-        limited = limited or bool(st["collision"].get("limited"))
-        check("collision guard limits pose-mode crossings", limited,
-              f"slack={st['collision'].get('slack_m')}")
-
-        # Drive back and release: freeze.
-        for i in range(60):
-            k = 1 - (i + 1) / 60
-            await ws.send(pframe([L0[0] - 0.35 * k, L0[1], L0[2]],
-                                 [R0[0] + 0.35 * k, R0[1], R0[2]]))
-            await asyncio.sleep(1 / 30)
-        await hold(0.4, L0, R0, lsq=False, rsq=False)
-        g0 = req(base, "/teleop/human")["goal_deg"]
-        await hold(0.8, [L0[0] + 0.3, L0[1] + 0.2, L0[2]], R0,
-                   lsq=False, rsq=False)
-        g1 = req(base, "/teleop/human")["goal_deg"]
-        drift = max(abs(g1[s].get(j, 0.0) - g0[s].get(j, 0.0))
-                    for s in ("left", "right") for j in g0[s])
-        check("released grips freeze the arms in pose mode",
-              drift < 0.5, f"max drift {drift:.2f} deg")
-
-    req(base, "/teleop/human/stop", {})
-
-
-async def ik_mode_section(base: str, ws_url: str) -> None:
-    """The ported stack, exercised the way tonight's bench run will use it.
-
-    Everything here rides on `vr_mode: "ik"` — which is also what a frame with
-    NO vr_mode key gets, so the last check pins that the default really is
-    this path and not the one it replaced.
+    Its own frame builder rather than the module-level `frame()`: this section
+    drives absolute hand POSITIONS through drags, which is the thing the ik
+    path is about, where the sections above only need a hand that exists.
     """
-    print("\n-- 9b: ik mode — the ported clutch + decoupled IK --")
+    print("\n-- 7: the ported clutch + decoupled IK --")
     req(base, "/teleop/human/stop", {})
 
     L0 = [-0.25, 1.15, -0.30]
     R0 = [0.25, 1.15, -0.30]
 
-    def frame(lpos, rpos, *, lsq=True, rsq=True, ltrig=0.0, mode="ik",
+    def frame(lpos, rpos, *, lsq=True, rsq=True, ltrig=0.0,
               left=True, right=True):
         def hand(pos, sq, trig):
             return {"position": list(pos), "orientation": IDENT,
                     "trigger": trig, "squeeze": sq, "tracked": True}
-        body = {
+        return json.dumps({
+            "type": "vr_keypoints",
             "ts_ms": int(time.time() * 1000),
             "dead_man": (lsq and left) or (rsq and right),
             "head": HEAD,
             "left": hand(lpos, lsq, ltrig) if left else None,
             "right": hand(rpos, rsq, 0.0) if right else None,
-        }
-        if mode is not None:
-            body["vr_mode"] = mode
-        return json.dumps(body)
+        })
 
     # ---- single-arm session: the shape a first hardware run uses ----
-    req(base, "/teleop/human/start",
-        {"left_arm": "left", "right_arm": None, "swap": False,
-         "clutch_source": "vr_grip"})
+    req(base, "/teleop/human/start", {"left_arm": "left", "right_arm": None})
     st = req(base, "/teleop/human")
     check("a single-arm session starts with one side null",
           st["running"] and st["left_arm"] == "left" and st["right_arm"] is None,
@@ -360,7 +228,7 @@ async def ik_mode_section(base: str, ws_url: str) -> None:
             if st["acquire"]["left"]["authority"] == "driving":
                 break
             await asyncio.sleep(0.033)
-        check("ik mode locks in from an arbitrary hand position",
+        check("the clutch locks in from an arbitrary hand position",
               (st or {}).get("acquire", {}).get("left", {}).get("authority") == "driving",
               f"authority={st and st['acquire']['left']['authority']}")
         check("the armless side says so, instead of claiming tracking loss",
@@ -387,7 +255,7 @@ async def ik_mode_section(base: str, ws_url: str) -> None:
         hand = await drag(L0, [L0[0] + 0.12, L0[1], L0[2]])
         tip1 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
         if tip0 is not None and tip1 is not None:
-            check("ik mode: hand right 12 cm drives the tip to robot -x",
+            check("hand right 12 cm drives the tip to robot -x",
                   float(tip1[0] - tip0[0]) < -0.06,
                   f"tip dx={float(tip1[0] - tip0[0]) * 1000:.0f} mm")
 
@@ -442,7 +310,7 @@ async def ik_mode_section(base: str, ws_url: str) -> None:
                   float(tip_low[2]) > -0.01,
                   f"tip z={float(tip_low[2]) * 1000:.0f} mm")
         lo, hi = -10.0, 100.0  # sim gripper range, deg
-        check("trigger closes the gripper in ik mode",
+        check("the trigger closes the gripper",
               g.get("gripper", hi) < lo + 0.45 * (hi - lo),
               f"gripper={g.get('gripper'):.0f} deg")
         if guard_before.get("enabled"):
@@ -464,29 +332,12 @@ async def ik_mode_section(base: str, ws_url: str) -> None:
         g1 = req(base, "/teleop/human")["goal_deg"]
         drift = max(abs(g1["left"].get(j, 0.0) - g0["left"].get(j, 0.0))
                     for j in g0["left"])
-        check("released grip freezes the arm in ik mode",
+        check("released grip freezes the arm",
               drift < 0.5, f"max drift {drift:.2f} deg")
 
-        # A frame with NO vr_mode key must take this same path. Driving it
-        # after a release re-runs acquisition, so just assert the goal moves
-        # at all — under `joints` it would not move this way, and under
-        # `pose` the orientation channel is a different code path.
-        deadline = time.monotonic() + 8.0
-        got = False
-        while time.monotonic() < deadline:
-            await ws.send(frame(L0, R0, mode=None, right=False))
-            if req(base, "/teleop/human")["acquire"]["left"]["authority"] == "driving":
-                got = True
-                break
-            await asyncio.sleep(0.033)
-        check("a frame with no vr_mode key gets the ik path (the default)", got)
-
-        # Park the arm before handing over to the sections that follow. They
-        # run in `joints` mode, whose acquisition gate compares the operator's
-        # retargeted body pose against where the arm actually IS, so an arm
-        # left dived at the bench makes their handover unreachable — and the
-        # failure would read as "acquisition is broken" rather than "the
-        # previous section left the arm somewhere else".
+        # Park the arm before handing over to the sections that follow: they
+        # anchor wherever the arm is, so an arm left dived at the bench sends
+        # them driving from a pose the guard is already fighting.
         #
         # In-session home, not the discrete /arm/{id}/home: that one refuses a
         # move this large by design (`large_move_deg`), and it is refused
@@ -577,10 +428,9 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
     takes used to record ZERO image channels while the UI said "in take"),
     and an E-STOP mid-take must make the recorder save the take itself."""
     root = _smoke_dataset_root()
-    start_body = {"left_arm": "left", "right_arm": "right", "swap": False,
-                  "clutch_source": "vr_grip"}
+    start_body = {"left_arm": "left", "right_arm": "right"}
     try:
-        print("\n-- 10: recording round trip --")
+        print("\n-- 8: recording round trip --")
         # A crashed earlier run leaves a partial dataset behind; resume would
         # happily append to it, so start from nothing.
         shutil.rmtree(root, ignore_errors=True)
@@ -633,7 +483,7 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
                   facts["parquet_bytes"] > 1024,
                   f"{facts['parquet_bytes']} bytes")
 
-        print("\n-- 11: E-STOP mid-take auto-saves --")
+        print("\n-- 9: E-STOP mid-take auto-saves --")
         for arm in arm_ids:
             req(base, f"/arm/{arm}/mode", {"mode": "manual"})
         req(base, "/teleop/human/stop", {})
@@ -675,10 +525,9 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
 async def robustness_section(base: str, ws_url: str) -> None:
     """Input-path failures the safety chain must absorb: a socket that goes
     quiet without dying, and a controller that drops tracking mid-drive."""
-    start_body = {"left_arm": "left", "right_arm": "right", "swap": False,
-                  "clutch_source": "vr_grip"}
+    start_body = {"left_arm": "left", "right_arm": "right"}
 
-    print("\n-- 12: frame starvation holds both sides --")
+    print("\n-- 10: frame starvation holds both sides --")
     req(base, "/teleop/human/stop", {})
     req(base, "/teleop/human/start", start_body)
     async with ws_connect(ws_url) as ws:
@@ -723,7 +572,7 @@ async def robustness_section(base: str, ws_url: str) -> None:
         check("both sides re-acquire when frames resume", s is not None)
     req(base, "/teleop/human/stop", {})
 
-    print("\n-- 13: tracking blip releases only the lost side --")
+    print("\n-- 11: tracking blip releases only the lost side --")
     req(base, "/teleop/human/stop", {})
     req(base, "/teleop/human/start", start_body)
     async with ws_connect(ws_url) as ws:
@@ -768,9 +617,7 @@ async def main() -> int:
     req(base, "/teleop/human/stop", {})
 
     print("\n-- 1: arm + first frame --")
-    req(base, "/teleop/human/start",
-        {"left_arm": "left", "right_arm": "right", "swap": False,
-         "clutch_source": "vr_grip"})
+    req(base, "/teleop/human/start", {"left_arm": "left", "right_arm": "right"})
     async with ws_connect(ws_url) as ws:
         await ws.send(frame(left_squeeze=False, right_squeeze=False))
         s = await wait_for(base, lambda st: st.get("state") == "tracking", 2.0,
@@ -782,7 +629,7 @@ async def main() -> int:
               col.get("enabled") is True and col.get("slack_m") is not None,
               f"slack={col.get('slack_m')}")
 
-        print("\n-- 2: engage both grips (countdown + dwell) --")
+        print("\n-- 2: engage both grips (the countdown) --")
         t0 = time.monotonic()
         s = await wait_for(
             base, lambda st: authorities(st) == ("driving", "driving"),
@@ -790,10 +637,9 @@ async def main() -> int:
         took = time.monotonic() - t0
         check("both sides reach DRIVING", s is not None,
               f"authorities={s and authorities(s)}")
-        # vr_grip sessions count down 1 s, not the camera path's 3 s: the
-        # pose-mode handover is zero-error by construction, so the countdown
-        # only filters accidental grips (VR_ACQUIRE_MS). Still assert a REAL
-        # wait was served — instant handover is the bug this check exists for.
+        # The countdown is 1 s (ACQUIRE_MS): the handover is zero-error by
+        # construction, so all it filters is an accidental grip. Still assert
+        # a REAL wait was served — instant handover is the bug this exists for.
         check("handover served a real countdown", s is None or took > 0.7,
               f"{took:.1f}s")
 
@@ -808,59 +654,7 @@ async def main() -> int:
             8.0, ws=ws)
         check("right side re-acquires after re-squeeze", s is not None)
 
-        print("\n-- 4: drive --")
-        pan0 = req(base, "/teleop/human")["goal_deg"]["left"].get("shoulder_pan", 0.0)
-        await stream_sweep(ws, 2.0, "left_dx", 0.0, 0.15)
-        await stream(ws, 0.5, left_dx=0.15)
-        pan1 = req(base, "/teleop/human")["goal_deg"]["left"].get("shoulder_pan", 0.0)
-        check("moving the left hand pans the left arm", abs(pan1 - pan0) > 3.0,
-              f"{pan0:.1f} -> {pan1:.1f} deg")
-        await stream_sweep(ws, 1.5, "left_dx", 0.15, 0.0)
-
-        print("\n-- 5: collision guard --")
-        # Both hands sweep hard toward the centre and past each other. The
-        # capsule guard must clamp the commanded pair before the margin.
-        limited_seen = False
-        min_slack = 1e9
-        n = 150
-        for i in range(n):
-            dx = 0.40 * (i + 1) / n
-            await ws.send(frame(left_dx=dx, right_dx=-dx))
-            if i % 5 == 0:
-                st = req(base, "/teleop/human")
-                col = st.get("collision", {})
-                if col.get("limited"):
-                    limited_seen = True
-                if col.get("slack_m") is not None:
-                    min_slack = min(min_slack, col["slack_m"])
-            await asyncio.sleep(0.033)
-        st = req(base, "/teleop/human")
-        col = st.get("collision", {})
-        if col.get("slack_m") is not None:
-            min_slack = min(min_slack, col["slack_m"])
-        check("guard engaged during the crossing sweep", limited_seen,
-              f"final worst={col.get('worst')}")
-        check("commanded pair never entered the margin",
-              min_slack > -0.005, f"min slack {min_slack*1000:.1f} mm")
-        # The retargeter is still asking for the crossed pose; the guard must
-        # be visibly holding the commit short of it.
-        pan = st.get("joints", {}).get("left", {}).get("shoulder_pan", {})
-        held_short = (pan.get("target") is not None
-                      and pan["target"] - pan["committed"] > 5.0)
-        check("commit held well short of the crossed target", held_short,
-              f"target={pan.get('target')} committed={pan.get('committed')}")
-
-        # Drive back out to centre while still gripping, so the run is
-        # repeatable: a released arm stays where it is, and a rerun's
-        # acquisition gate would (correctly) refuse a crossed park.
-        n = 90
-        for i in range(n):
-            dx = 0.40 * (1 - (i + 1) / n)
-            await ws.send(frame(left_dx=dx, right_dx=-dx))
-            await asyncio.sleep(0.033)
-        await stream(ws, 1.0)
-
-        print("\n-- 6: release freezes --")
+        print("\n-- 4: release freezes --")
         await stream(ws, 0.3, left_squeeze=False, right_squeeze=False)
         g0 = req(base, "/teleop/human")["goal_deg"]
         await stream_sweep(ws, 1.0, "left_dx", 0.0, 0.25,
@@ -871,7 +665,7 @@ async def main() -> int:
         check("open grips freeze both arms despite moving hands",
               drift < 0.5, f"max drift {drift:.2f} deg")
 
-        print("\n-- 7: E-STOP --")
+        print("\n-- 5: E-STOP --")
         req(base, "/estop", {})
         st = req(base, "/teleop/human")
         check("E-STOP stops the session", st["running"] is False)
@@ -885,10 +679,8 @@ async def main() -> int:
         check("MANUAL re-arms after E-STOP",
               all(a["mode"] == "manual" for a in cfg_now["arms"]))
 
-    print("\n-- 8: WS drop auto-stop --")
-    req(base, "/teleop/human/start",
-        {"left_arm": "left", "right_arm": "right", "swap": False,
-         "clutch_source": "vr_grip"})
+    print("\n-- 6: WS drop auto-stop --")
+    req(base, "/teleop/human/start", {"left_arm": "left", "right_arm": "right"})
     ws = await ws_connect(ws_url)
     await stream(ws, 0.3, left_squeeze=False, right_squeeze=False)
     await ws.close()
@@ -902,8 +694,7 @@ async def main() -> int:
     check("dropping the socket auto-stops the session within the grace window",
           stopped)
 
-    await pose_mode_section(base, ws_url)
-    await ik_mode_section(base, ws_url)
+    await ik_section(base, ws_url)
     await recording_section(base, ws_url, arm_ids)
     await robustness_section(base, ws_url)
 

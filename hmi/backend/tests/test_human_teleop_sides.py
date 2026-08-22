@@ -8,7 +8,6 @@ from .test_human_teleop import _fake_arm_manager, _fast_acquire, _kp_frame
 
 def _sided_frame(*, left: bool, right: bool, dead_man: bool | None = None):
     frame = _kp_frame(dead_man=(left or right) if dead_man is None else dead_man)
-    frame["clutch_source"] = "vr_grip"
     frame["dead_man_sides"] = {"left": left, "right": right}
     return frame
 
@@ -16,8 +15,7 @@ def _sided_frame(*, left: bool, right: bool, dead_man: bool | None = None):
 def _session():
     mgr, arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, **_fast_acquire())
-    sess.start(left_arm="left", right_arm="right", swap=False,
-               clutch_source="vr_grip")
+    sess.start(left_arm="left", right_arm="right")
     return sess, arms
 
 
@@ -46,13 +44,12 @@ def test_releasing_one_grip_releases_only_that_side():
 
 
 def test_frames_without_a_split_mirror_the_global_boolean():
-    """A MediaPipe/spacebar client knows nothing of sides; both must follow
-    the one dead_man it sends, exactly as before the split existed."""
+    """A frame that carries only the global dead_man — a smoke harness, or a
+    controller shape with no per-hand squeeze — must drive both sides from it
+    rather than silently engaging neither."""
     sess, _ = _session()
     try:
-        frame = _kp_frame(dead_man=True)
-        frame["clutch_source"] = "vr_grip"
-        sess.ingest_frame(frame)
+        sess.ingest_frame(_kp_frame(dead_man=True))
         acq = sess.status()["acquire"]
         assert acq["left"]["authority"] == SideAuthority.DRIVING.value
         assert acq["right"]["authority"] == SideAuthority.DRIVING.value
@@ -89,55 +86,3 @@ def test_stop_clears_the_split():
     sess.ingest_frame(_sided_frame(left=True, right=True))
     sess.stop()
     assert sess.status()["clutch"]["sides"] == {"left": False, "right": False}
-
-
-def test_mirror_mode_none_disables_both_mirrors():
-    """A vr frame stamped mirror_mode=none must retarget BOTH sides
-    unmirrored, whatever swap says — see _side_mirrored's docstring."""
-    sess, _ = _session()
-    try:
-        frame = _sided_frame(left=True, right=True)
-        frame["mirror_mode"] = "none"
-        sess.ingest_frame(frame)
-        assert sess._side_mirrored("left") is False
-        assert sess._side_mirrored("right") is False
-    finally:
-        sess.stop()
-
-
-def test_frames_without_mirror_mode_keep_the_swap_convention():
-    sess, _ = _session()
-    try:
-        sess.ingest_frame(_kp_frame(dead_man=True))
-        assert sess._side_mirrored("left") is False   # swap=False
-        assert sess._side_mirrored("right") is True
-    finally:
-        sess.stop()
-
-
-def test_vr_sessions_get_the_vr_tolerances():
-    """Headset errors are systematic (BodyModel mismatch), not estimator
-    noise, so vr_grip sessions gate on the wider VR set — and the gripper is
-    effectively exempt: forcing the trigger ~90% squeezed through the whole
-    countdown reads as 'engagement is broken', not as a safety feature."""
-    from haller_hmi.human_teleop import HumanTeleopSession as S
-
-    mgr, _ = _fake_arm_manager()
-    vr = S(mgr)
-    vr.start(left_arm="left", right_arm="right", swap=False,
-             clutch_source="vr_grip")
-    try:
-        assert vr._tol_for("elbow_flex") == 60.0
-        assert vr._tol_for("shoulder_pan") == 30.0
-        assert vr._tol_for("gripper") >= 360.0
-    finally:
-        vr.stop()
-
-    cam = S(mgr)
-    cam.start(left_arm="left", right_arm="right", swap=False,
-              clutch_source="spacebar")
-    try:
-        assert cam._tol_for("elbow_flex") == 20.0
-        assert cam._tol_for("gripper") == 30.0
-    finally:
-        cam.stop()

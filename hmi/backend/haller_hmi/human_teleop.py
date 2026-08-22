@@ -1,10 +1,14 @@
-"""Bimanual human-pose teleop session.
+"""Bimanual teleop session — the safety core the headset drives through.
 
 This is the sibling of `teleop.TeleopSession` (leader/follower). Where that
 session reads positions off a physical leader arm at 60 Hz, this one reads
-keypoints off a WebSocket from the operator's browser and runs them through
-`retarget.compute_joint_goal` to produce joint angles. Otherwise the lifecycle
-and safety semantics match exactly.
+frames off a WebSocket carrying a per-side `joint_goal` that
+`vr_teleop.QuestTeleoperator` has already solved in ROBOT joint space —
+degrees, gripper in [0, 1]. Everything a bench session needs lives here and
+not in the converter: per-side authority, the acquisition countdown and rate
+ramp, the command filter, the collision guard, the mode guard, E-STOP, and
+the recorder's `action` column. Otherwise the lifecycle and safety semantics
+match `TeleopSession` exactly.
 
 Session state machine:
     IDLE → (start)        → ARMED
@@ -16,7 +20,7 @@ below rather than set directly — see `_derive_state`.
 
 Authority transfer (per side):
     HELD → (clutch closed, side trackable) → ACQUIRING
-    ACQUIRING → (countdown elapsed AND pose matched for the dwell) → DRIVING
+    ACQUIRING → (countdown elapsed) → DRIVING
     ACQUIRING/DRIVING → (clutch released, or side lost) → HELD
 
 The robot only ever starts following through ACQUIRING, whether the session is
@@ -31,104 +35,70 @@ import logging
 import math
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Literal, cast
+from dataclasses import dataclass
 
 from .arm import ArmManager
-from .safety import (
-    Mode,
-    MouthClutchCalib,
-    MouthClutchState,
-    mouth_clutch_thresholds,
-)
-from . import retarget
+from .safety import Mode
 
 logger = logging.getLogger(__name__)
 
 # ---- acquisition ------------------------------------------------------
 #
 # Closing the dead-man used to hand the robot over instantly, from wherever the
-# operator's arms happened to be — which is essentially never where the robot's
-# arms are. Worse, the smoothing state kept slewing toward the operator's pose
+# operator's hand happened to be — which is essentially never where the robot's
+# arm is. Worse, the smoothing state kept slewing toward the operator's pose
 # the whole time the clutch was OPEN, so the first commit after engaging was a
 # single step command to the operator's current pose. The rate cap had already
 # been spent against an arm that was not moving; on hardware that is a step
 # input to the servos, i.e. maximum velocity.
 #
-# Three mechanisms replace that instant, and they do different jobs:
+# Two mechanisms replace that instant, and they do different jobs:
 #
-#   the GATE   bounds how far apart the two poses may be at handover,
 #   the COUNTDOWN gives the operator warning and a window to abort,
-#   the RAMP   bounds the speed at which whatever error remains is closed.
+#   the RAMP      bounds the speed at which whatever error remains is closed.
 #
 # Only the ramp is load-bearing for safety — it holds unconditionally, needs no
-# cooperation from the operator, and cannot be satisfied by accident. The gate
-# and the countdown make engagement deliberate and legible. Do not drop the
-# ramp on the grounds that the gate already bounds the error: the gate is
-# checked against a pose estimate, and the ramp is what makes being wrong about
-# it survivable.
+# cooperation from the operator, and cannot be satisfied by accident. The
+# countdown makes engagement deliberate and legible.
+#
+# There was a third: a per-joint MATCH GATE that refused handover until the
+# commanded pose was within tolerance of the measured one. It went with the
+# pose-reconstruction input path it existed for. That path GUESSED the
+# operator's joint angles from webcam landmarks, so the commanded pose could
+# sit tens of degrees from the arm at the moment of handover, and the gate was
+# what stopped that becoming a lurch. The headset path anchors instead: squeezing
+# the grip binds the target to wherever the arm already IS, and the mapper
+# re-anchors every frame until the side is DRIVING — the error is zero by
+# construction, so a gate on it can only ever be satisfied. What the gate
+# actually bounded, the ramp still bounds.
 
-#: Per-joint match tolerance, in degrees. Generous on purpose — the gate exists
-#: to make the operator look at the robot and pre-position, not to demand
-#: precision the pose estimate cannot deliver, and the ramp covers the residual.
-ACQUIRE_TOL_DEFAULT_DEG = 20.0
-ACQUIRE_TOL_DEG: dict[str, float] = {
-    # The palm-normal cross product is the noisiest term in the retargeter.
-    "wrist_roll": 30.0,
-    # One low-inertia DOF whose approach speed the ramp bounds anyway; a tight
-    # tolerance here would block acquisition over a pinch the operator cannot
-    # see the robot holding.
-    "gripper": 30.0,
-}
-#: The VR path's tolerances, selected by clutch source. The camera path's
-#: errors are NOISE — a per-frame estimator wobble the operator can shrink by
-#: holding still — so 20° is reachable. The VR path's errors are SYSTEMATIC:
-#: the elbow is synthesized from BodyModel limb lengths, so an operator whose
-#: arm differs from the model carries a constant elbow offset no amount of
-#: care removes (a straight-elbow target needs a reach the model may simply
-#: not allow), and the first headset session stalled exactly there. The gate
-#: is legibility, not the safety mechanism — the acquisition RAMP bounds the
-#: handover speed regardless of the matched error (see the block comment
-#: above) — so these are sized to what a headset can actually deliver:
-#: precise pan/lift, model-limited elbow, and a gripper that is EXEMPT
-#: (110° of jaw range < 360): the trigger is an explicit, low-inertia ask,
-#: and demanding it be held ~90% squeezed through the countdown taught the
-#: first operator that engagement was broken.
-VR_ACQUIRE_TOL_DEFAULT_DEG = 30.0
-VR_ACQUIRE_TOL_DEG: dict[str, float] = {
-    "elbow_flex": 60.0,
-    "wrist_flex": 35.0,
-    "wrist_roll": 60.0,
-    "gripper": 360.0,
-}
 #: Countdown from the clutch closing to the earliest possible handover.
-ACQUIRE_MS = 3000.0
-#: The same countdown for vr_grip sessions, much shorter — and not because VR
-#: operators are more trusted. In position mode the handover is ZERO-ERROR by
-#: construction (the anchor binds the hand to wherever the arm already is, so
-#: there is nothing to lurch toward), which removes the reason the countdown
-#: is 3 s everywhere else. What remains is filtering an accidental grip, and
-#: 1 s does that. This matters because every tracking blip longer than the
-#: grace window costs one full re-acquire: at 3 s a session with a few blips
-#: feels broken, at 1 s it feels like a hiccup.
-VR_ACQUIRE_MS = 1000.0
-#: Per-side tracking-loss grace for vr_grip sessions, vs the 300 ms default.
-#: Quest controller tracking flickers — hands at the FOV edge, occlusions —
-#: and in position mode a longer grace is SAFE by construction: during the
-#: gap no new targets arrive (the arm holds), and on recovery the next frame
-#: re-anchors at the hand's new position, so there is no stale-goal jump for
-#: the grace to protect against.
-VR_FRAME_AGE_MS_LOSS = 700.0
-#: How long the pose match must hold before handover. Separate from the
-#: countdown so estimator jitter across the tolerance boundary costs the
-#: operator this much, not the whole countdown — a hard reset on every flicker
-#: is how a gate becomes unreachable.
+#: One second, not the three the camera path ran: with a zero-error handover
+#: there is nothing to lurch toward, so all this filters is an accidental
+#: grip. It matters because every tracking blip longer than the grace window
+#: costs one full re-acquire — at 3 s a session with a few blips feels broken,
+#: at 1 s it feels like a hiccup.
+ACQUIRE_MS = 1000.0
+#: Floor under that countdown: the clutch must be held, and the side tracked,
+#: for at least this long before authority transfers, however short
+#: `acquire_ms` is set. Handover fires at max(ACQUIRE_MS, MATCH_DWELL_MS).
 MATCH_DWELL_MS = 400.0
-#: Joint speed the first instant of DRIVING is allowed to command. At the
-#: default tolerance a worst-case matched pose closes in ~1.25 s, inside the
-#: ramp, so the two constants stay consistent if either is retuned.
+#: Per-side tracking-loss grace. Quest controller tracking flickers — hands at
+#: the FOV edge, occlusions — and a long grace is SAFE by construction here:
+#: during the gap no new targets arrive (the arm holds), and on recovery the
+#: next frame re-anchors at the hand's new position, so there is no stale-goal
+#: jump for the grace to protect against.
+FRAME_AGE_MS_LOSS = 700.0
+#: What `status()["clutch"]["reason"]` says when nothing is squeezed. A
+#: resting state, not a fault — the grip is armed and simply not held — which
+#: is why it is named for the control rather than for the absence. Mirrored in
+#: TypeScript as `ClutchReason`.
+CLUTCH_RESTING = "vr_grip_mode"
+#: Joint speed the first instant of DRIVING is allowed to command.
 ACQUIRE_RATE_DEG_S = 20.0
-#: Time over which the cap returns to the session's normal rate limit.
+#: Time over which the cap returns to the session's normal rate limit. Long
+#: enough to absorb a handover the anchor somehow did not zero — 30° at
+#: ACQUIRE_RATE_DEG_S closes inside it.
 ACQUIRE_RAMP_MS = 1500.0
 #: How many consecutive failed ticks the 60 Hz loop tolerates before it stops
 #: the session outright. A failed tick sleeps 50 ms and retries, which rides
@@ -152,43 +122,18 @@ class _SideAcquire:
     authority: SideAuthority = SideAuthority.HELD
     #: Countdown origin — when ACQUIRING began.
     since_perf: float | None = None
-    #: Start of the current unbroken pose match, or None if not matched now.
-    matched_since_perf: float | None = None
     #: Ramp origin — when DRIVING began.
     driving_since_perf: float | None = None
-    #: Signed (clamped target − committed) per joint, in degrees.
-    error_deg: dict[str, float] = field(default_factory=dict)
-    blocking: tuple[str, ...] = ()
-    matched: bool = False
-    #: Why this side is where it is. The blocking-joint list explains a failed
-    #: MATCH, but says nothing about a side that never got as far as matching —
-    #: which is the state an operator is most likely to be stuck in and least
-    #: able to diagnose, since a countdown that silently restarts looks
-    #: identical to one that is frozen.
+    #: Why this side is where it is. The state an operator is most likely to be
+    #: stuck in is also the one they are least able to diagnose, since a
+    #: countdown that silently restarts looks identical to one that is frozen.
     reason: str = "clutch_open"
 
     def release(self, reason: str) -> None:
         self.authority = SideAuthority.HELD
         self.since_perf = None
-        self.matched_since_perf = None
         self.driving_since_perf = None
-        self.error_deg = {}
-        self.blocking = ()
-        self.matched = False
         self.reason = reason
-
-
-#: Which source holds dead-man authority. Exactly these three strings, mirrored
-#: in TypeScript as `ClutchSource` — nothing else may reach the session.
-#:
-#: `vr_grip` is a Quest controller's squeeze button. It shares the spacebar's
-#: code path because both are the same thing to this module: a boolean the
-#: operator holds, carried on the frame, with no threshold or hold timer of its
-#: own. It exists as a distinct name only so `status()` reports honestly which
-#: physical control is armed — a session driven from a headset must not tell the
-#: operator the spacebar holds authority.
-ClutchSource = Literal["spacebar", "mouth", "vr_grip"]
-CLUTCH_SOURCES: tuple[str, ...] = ("spacebar", "mouth", "vr_grip")
 
 
 class HumanState(str, enum.Enum):
@@ -207,7 +152,6 @@ class _SessionConfig:
     #: start() rather than discovering on the bench.
     left_arm: str | None
     right_arm: str | None
-    swap: bool = False
     hz: float = 60.0
 
     def arm_for(self, side: str) -> str | None:
@@ -223,8 +167,8 @@ class _SessionConfig:
 class JointStep:
     """One joint's outcome for one tick of the commit loop.
 
-    `target` is what the retargeter asked for, in degrees (the gripper's
-    [0,1] output is already scaled onto its calibrated range). `committed`
+    `target` is what the converter asked for, in degrees (the gripper's
+    [0,1] input is already scaled onto its calibrated range). `committed`
     is what was actually written. `reason` explains any difference.
     """
     target: float | None
@@ -240,15 +184,10 @@ class HumanTeleopSession:
         arms: ArmManager,
         *,
         hz_override: float | None = None,
-        frame_age_ms_loss: float = 300.0,
+        frame_age_ms_loss: float = FRAME_AGE_MS_LOSS,
         ws_disconnect_grace_s: float = 5.0,
-        face_stale_ms: float = 250.0,
         acquire_ms: float = ACQUIRE_MS,
         match_dwell_ms: float = MATCH_DWELL_MS,
-        acquire_tol_deg: dict[str, float] | None = None,
-        acquire_tol_default_deg: float = ACQUIRE_TOL_DEFAULT_DEG,
-        vr_acquire_tol_deg: dict[str, float] | None = None,
-        vr_acquire_tol_default_deg: float = VR_ACQUIRE_TOL_DEFAULT_DEG,
         acquire_rate_deg_s: float = ACQUIRE_RATE_DEG_S,
         acquire_ramp_ms: float = ACQUIRE_RAMP_MS,
         collision_guard=None,
@@ -271,8 +210,8 @@ class HumanTeleopSession:
         self._dead_man: bool = False
         # Per-side dead-man. A Quest controller's squeeze is per hand, and a
         # grip held on one controller must not hand over the arm the *other*
-        # hand happens to be waving around. Sources that have only one global
-        # boolean (spacebar, mouth) mirror it onto both sides.
+        # hand happens to be waving around. A frame carrying only the global
+        # boolean mirrors it onto both sides.
         self._dead_man_sides: dict[str, bool] = {"left": False, "right": False}
         self._target_left: dict | None = None
         self._target_right: dict | None = None
@@ -280,8 +219,6 @@ class HumanTeleopSession:
         # hold-the-left-stick reset). Cleared the moment a side starts
         # driving: the operator's hand always outranks a parked reset.
         self._home_req: dict[str, bool] = {"left": False, "right": False}
-        self._pinch_calib_left: dict = {"min_m": 0.02, "max_m": 0.18}
-        self._pinch_calib_right: dict = {"min_m": 0.02, "max_m": 0.18}
         self._committed_left: dict[str, float] = {}
         self._committed_right: dict[str, float] = {}
         self._steps_left: dict[str, JointStep] = {}
@@ -296,34 +233,18 @@ class HumanTeleopSession:
         self._last_left_perf: float = 0.0
         self._last_right_perf: float = 0.0
         self._peers: list = []
-        # Mouth-clutch state. The hold timer and the last-sample memory live in
-        # safety.MouthClutchState so that the calibration analyser and the
-        # replay-based speech test drive the same object this session does.
-        self._mouth = MouthClutchState(stale_after_ms=face_stale_ms)
-        # Set once by start() and never by a frame: the operator selects the
-        # authority before the session exists, and the browser cannot hand it
-        # over afterwards (spec 1, 6.4).
-        self._clutch_source: ClutchSource = "spacebar"
-        self._mouth_calib: MouthClutchCalib | None = None
-        self._clutch_reason: str = "spacebar_mode"
-        # Frame-carried mirror override: "none" | "both" | None (legacy
-        # swap-based parity). See _side_mirrored.
-        self._mirror_mode: str | None = None
-        # Acquisition: per-side authority, and the parameters that gate it.
+        self._clutch_reason: str = CLUTCH_RESTING
+        # Acquisition: per-side authority, and the countdown that gates it.
         self._acquire_ms = acquire_ms
         self._match_dwell_ms = match_dwell_ms
-        self._acquire_tol_deg = dict(acquire_tol_deg or ACQUIRE_TOL_DEG)
-        self._acquire_tol_default_deg = acquire_tol_default_deg
-        self._vr_acquire_tol_deg = dict(vr_acquire_tol_deg or VR_ACQUIRE_TOL_DEG)
-        self._vr_acquire_tol_default_deg = vr_acquire_tol_default_deg
         self._acquire_rate_deg_s = acquire_rate_deg_s
         self._acquire_ramp_ms = acquire_ramp_ms
         self._acq: dict[str, _SideAcquire] = {
             "left": _SideAcquire(), "right": _SideAcquire(),
         }
         # Set on every authority change: the smoothing state has to be re-read
-        # from the arm before it is used to judge a pose match or to command a
-        # first step, or both are judged against a number nothing measured.
+        # from the arm before it is used to command a first step, or the step
+        # is measured from a number nothing observed.
         self._reseed_pending: dict[str, bool] = {"left": True, "right": True}
         self._seen_frame: bool = False
 
@@ -343,86 +264,18 @@ class HumanTeleopSession:
         the route)."""
         self._peers.append(peer)
 
-    def set_swap(self, swap: bool) -> None:
-        with self._lock:
-            if self._cfg is not None:
-                self._cfg.swap = bool(swap)
-
-    def set_pinch_calib(self, *, left: dict | None, right: dict | None) -> None:
-        with self._lock:
-            if left is not None:
-                self._pinch_calib_left = dict(left)
-            if right is not None:
-                self._pinch_calib_right = dict(right)
-
-    def set_mouth_calib(self, calib: dict | None) -> None:
-        """Store per-operator jaw calibration. None clears it.
-
-        Both levels are SUSTAINED ones, measured over a hold window — see
-        safety.MouthClutchCalib. This deliberately does not accept the old
-        peak-based `talk_max`/`open_min` pair: those numbers are not the ones
-        the current policy reasons about, and silently reinterpreting a peak as
-        a sustained level would place t_engage far above where the operator can
-        hold, which is exactly the failure this replaced.
-        """
-        with self._lock:
-            self._mouth_calib = (
-                MouthClutchCalib(
-                    talk_hold=float(calib["talk_hold"]),
-                    open_hold=float(calib["open_hold"]),
-                    talk_peak=(float(calib["talk_peak"])
-                               if calib.get("talk_peak") is not None else None),
-                )
-                if calib else None
-            )
-
-    def mouth_calib_is_valid(self) -> bool:
-        """True when a calibration is set AND yields safe thresholds."""
-        with self._lock:
-            return (self._mouth_calib is not None
-                    and mouth_clutch_thresholds(self._mouth_calib) is not None)
-
-    def _reset_clutch_state(self, source: ClutchSource | None) -> None:
+    def _reset_clutch_state(self) -> None:
         """Clear every clutch transient. Caller holds the lock.
 
-        Called from both ends of the lifecycle. At start(), `source` is the
-        newly selected authority: a stale jaw sample from the previous session
-        must not let a fresh one engage. At stop(), `source` is None — nothing
-        is being asked for any more, so `engaged`/`reason`/the hold timer all
-        have to clear (an ended session that still advertises
+        Called from both ends of the lifecycle. At stop() this matters as much
+        as at start(): nothing is being asked for any more, so `engaged` and
+        `reason` have to clear — an ended session that still advertises
         `{"engaged": true, "reason": "engaged"}` beside `"state": "idle"` is
-        telling the operator the arms are live when they are not) — but
-        `_clutch_source` itself is deliberately left alone.
-
-        That last part is a considered choice, not an oversight: a session
-        that ran in mouth mode and then stopped must keep reporting "mouth" in
-        this diagnostic block, not silently revert to the default. Rewriting
-        it to "spacebar" here made the block self-contradictory — a stopped
-        mouth session claiming the spacebar was armed, which it never was.
-        `start()` is the only place authority is actually chosen, and it
-        always passes a concrete `source` here.
-
-        The initial reason is honest about why a fresh mouth session cannot
-        engage yet: no face has ever been seen, which is exactly what status()
-        reports live as `stale`.
+        telling the operator the arms are live when they are not.
         """
-        if source is not None:
-            self._clutch_source = source
-        self._mouth.reset()
         self._dead_man = False
         self._dead_man_sides = {"left": False, "right": False}
-        # Held-button sources report "<source>_mode" — a resting state, not a
-        # fault. Only the mouth clutch starts "stale", because it genuinely
-        # cannot engage until a face has been seen.
-        self._clutch_reason = (
-            "stale" if self._clutch_source == "mouth"
-            else f"{self._clutch_source}_mode"
-        )
-
-    def _mouth_thresholds(self) -> tuple[float, float] | None:
-        """Caller holds the lock."""
-        return (mouth_clutch_thresholds(self._mouth_calib)
-                if self._mouth_calib else None)
+        self._clutch_reason = CLUTCH_RESTING
 
     def status(self) -> dict:
         with self._lock:
@@ -430,25 +283,21 @@ class HumanTeleopSession:
             now = time.perf_counter()
             left_age = (now - self._last_left_perf) * 1000.0 if self._last_left_perf else None
             right_age = (now - self._last_right_perf) * 1000.0 if self._last_right_perf else None
-            th = self._mouth_thresholds()
-            face_stale = (self._clutch_source == "mouth"
-                          and self._mouth.is_stale(now))
             return {
                 "running": self.running,
                 "state": self._state.value,
                 "left_arm": cfg.left_arm if cfg else None,
                 "right_arm": cfg.right_arm if cfg else None,
-                "swap": cfg.swap if cfg else False,
                 "started_at": self._started_at,
                 "last_error": self._last_error,
                 "tracking": {
                     "left":  {
                         "age_ms": left_age,
-                        "lost":   left_age is not None and left_age > self._frame_age_ms_loss_now(),
+                        "lost":   left_age is not None and left_age > self._frame_age_ms_loss,
                     },
                     "right": {
                         "age_ms": right_age,
-                        "lost":   right_age is not None and right_age > self._frame_age_ms_loss_now(),
+                        "lost":   right_age is not None and right_age > self._frame_age_ms_loss,
                     },
                 },
                 "goal_deg": {
@@ -461,29 +310,17 @@ class HumanTeleopSession:
                     "left":  self._steps_as_dict(self._steps_left),
                     "right": self._steps_as_dict(self._steps_right),
                 },
-                # Two different clocks in one block, on purpose. `engaged`
-                # and `reason` are whatever the last ingested frame decided —
-                # they only move when a frame arrives. `stale` is recomputed
-                # here against the current time, so a face that stopped being
-                # seen reads as stale from a poll alone.
-                #
-                # That asymmetry is safe because it is not what catches a
-                # total frame stall: if frames stop entirely, the pre-existing
-                # 300 ms per-side tracking-loss gate in _loop stops writing to
-                # the arms regardless of what the clutch block still says. The
-                # face budget only ever judges the freshness of the jaw signal
-                # inside a stream of frames that is otherwise arriving.
+                # Whatever the last ingested frame decided — these only move
+                # when a frame arrives. That is not what catches a total frame
+                # stall: if frames stop, the per-side tracking-loss gate in
+                # `_update_authority` releases both sides regardless of what
+                # this block still says.
                 "clutch": {
-                    "source": self._clutch_source,
-                    "jaw_open": self._mouth.score,
-                    "t_engage": th[0] if th else None,
-                    "t_release": th[1] if th else None,
                     "engaged": self._dead_man,
-                    # Which sides that global bool actually covers. For
-                    # vr_grip these are the two squeeze buttons; for spacebar
-                    # and mouth they simply mirror `engaged`.
+                    # Which sides that global bool actually covers: the two
+                    # squeeze buttons, or a mirror of `engaged` for a frame
+                    # that carried no split.
                     "sides": dict(self._dead_man_sides),
-                    "stale": face_stale,
                     "reason": self._clutch_reason,
                 },
                 # Bimanual collision guard. `enabled: false` means no guard is
@@ -496,7 +333,7 @@ class HumanTeleopSession:
                 # actually been handed over, and if not, what is still in the
                 # way. The two were the same event before acquisition existed.
                 "acquire": {
-                    "acquire_ms": self._acquire_ms_now(),
+                    "acquire_ms": self._handover_ms(),
                     "match_dwell_ms": self._match_dwell_ms,
                     "left":  self._acquire_status("left", now),
                     "right": self._acquire_status("right", now),
@@ -532,13 +369,14 @@ class HumanTeleopSession:
 
         `remaining_ms` is recomputed against the live clock rather than cached
         from the last tick, so the operator's countdown runs smoothly off a
-        20 Hz telemetry poll instead of stepping with the commit loop.
+        20 Hz telemetry poll instead of stepping with the commit loop. Both it
+        and `authority` are read back by `QuestTeleoperator.convert` and the
+        in-headset HUD — that contract outranks tidiness here.
         """
         acq = self._acq[side]
-        committed = self._committed_left if side == "left" else self._committed_right
         remaining: float | None = None
         if acq.authority is SideAuthority.ACQUIRING and acq.since_perf is not None:
-            remaining = max(0.0, self._acquire_ms_now() - (now - acq.since_perf) * 1000.0)
+            remaining = max(0.0, self._handover_ms() - (now - acq.since_perf) * 1000.0)
         ramp: float | None = None
         if acq.authority is SideAuthority.DRIVING and acq.driving_since_perf is not None:
             ramp = min(1.0, (now - acq.driving_since_perf) * 1000.0
@@ -546,84 +384,18 @@ class HumanTeleopSession:
         return {
             "authority": acq.authority.value,
             "reason": acq.reason,
-            "matched": acq.matched,
-            "blocking": list(acq.blocking),
-            "error_deg": dict(acq.error_deg),
-            "tol_deg": {j: self._tol_for(j) for j in acq.error_deg},
             "remaining_ms": remaining,
             "ramp": ramp,
-            # Where the arm actually is, as a human arm pointing the same way.
-            # Emitted whether or not the clutch is closed: the operator needs
-            # it BEFORE they engage, to pre-position against.
-            "ghost": self._ghost(side, committed),
         }
 
-    def _acquire_ms_now(self) -> float:
-        """vr_grip sessions count down faster — see VR_ACQUIRE_MS."""
-        if self._clutch_source == "vr_grip":
-            return min(self._acquire_ms, VR_ACQUIRE_MS)
-        return self._acquire_ms
-
-    def _frame_age_ms_loss_now(self) -> float:
-        """vr_grip sessions ride out longer tracking blips — see
-        VR_FRAME_AGE_MS_LOSS."""
-        if self._clutch_source == "vr_grip":
-            return max(self._frame_age_ms_loss, VR_FRAME_AGE_MS_LOSS)
-        return self._frame_age_ms_loss
-
-    def _tol_for(self, joint: str) -> float:
-        """Tolerance by clutch source: vr_grip sessions get the VR set — see
-        VR_ACQUIRE_TOL_DEG for why headset errors are systematic, not noise."""
-        if self._clutch_source == "vr_grip":
-            return self._vr_acquire_tol_deg.get(
-                joint, self._vr_acquire_tol_default_deg)
-        return self._acquire_tol_deg.get(joint, self._acquire_tol_default_deg)
-
-    def _side_mirrored(self, side: str) -> bool:
-        """Whether this side's goals go through `apply_mirror`.
-
-        The one source of truth for both `ingest_frame` and the ghost — the
-        ghost has to be un-mirrored back into the operator's own frame or it
-        renders the wrong arm's pose.
-
-        The default (left follows `swap`, right its inverse) is the camera
-        path's convention: a front-facing webcam delivers a pre-mirrored view
-        of the operator, and exactly one side must be negated to land that on
-        two identical, same-yaw arms. Egocentric sources are different: a
-        headset's frames are NOT pre-mirrored, and two mirror-symmetric hand
-        gestures already retarget to opposite pan signs — which is precisely
-        what identical side-by-side arms need. So the VR adapter stamps its
-        frames `mirror_mode: "none"`, and a hypothetical rig with genuinely
-        mirrored mounts would use `"both"`. Frame-carried like `pinch_calib`:
-        it is a property of the input source, not of the session.
-        """
-        if self._mirror_mode == "none":
-            return False
-        if self._mirror_mode == "both":
-            return True
-        swap = bool(self._cfg and self._cfg.swap)
-        return swap if side == "left" else not swap
-
-    def _ghost(self, side: str, committed: dict[str, float]) -> dict | None:
-        """The arm's current pose as unit upper-arm/forearm vectors, in the
-        operator's frame. Caller holds the lock."""
-        if not committed:
-            return None
-        pan = committed.get("shoulder_pan", 0.0)
-        if self._side_mirrored(side):
-            # apply_mirror negates shoulder_pan and wrist_roll; only the former
-            # reaches the arm's direction, and negating it again inverts it.
-            pan = -pan
-        upper, fore = retarget.arm_direction_vectors(
-            pan,
-            committed.get("shoulder_lift", 0.0),
-            committed.get("elbow_flex", 0.0),
-        )
-        return {"upper": list(upper), "fore": list(fore)}
+    def _handover_ms(self) -> float:
+        """How long an unbroken engagement must run before authority
+        transfers. The dwell is a floor under the countdown — see
+        MATCH_DWELL_MS."""
+        return max(self._acquire_ms, self._match_dwell_ms)
 
     def start(self, *, left_arm: str | None, right_arm: str | None,
-              swap: bool, hz: float = 60.0,
-              clutch_source: str = "spacebar") -> None:
+              hz: float = 60.0) -> None:
         """Begin a session on one or both arms.
 
         Passing None for a side starts a SINGLE-ARM session: that hand's
@@ -643,10 +415,6 @@ class HumanTeleopSession:
                 raise ValueError("at least one of left_arm/right_arm is required")
             if left_arm and right_arm and left_arm == right_arm:
                 raise ValueError("left_arm and right_arm must be different")
-            if clutch_source not in CLUTCH_SOURCES:
-                raise ValueError(
-                    f"clutch_source must be one of {CLUTCH_SOURCES}, got {clutch_source!r}"
-                )
             arm_ids = {side: arm_id
                        for side, arm_id in (("left", left_arm),
                                             ("right", right_arm))
@@ -672,7 +440,7 @@ class HumanTeleopSession:
                 a.guard.set(Mode.MANUAL)
             effective_hz = self._hz_override or hz
             self._cfg = _SessionConfig(left_arm=left_arm, right_arm=right_arm,
-                                       swap=swap, hz=effective_hz)
+                                       hz=effective_hz)
             self._started_at = time.time()
             self._state = HumanState.ARMED
             self._last_error = None
@@ -680,7 +448,7 @@ class HumanTeleopSession:
             #   _ws_disconnected_at_perf — set when the operator's tab closes,
             #     which happens *before* stop(); leaving it set makes the next
             #     session's first tick see an expired grace window and auto-stop.
-            #   _target_left/_target_right — the last retarget goal of the
+            #   _target_left/_target_right — the last joint goal of the
             #     previous session; leaving them set makes a freshly-ARMED
             #     session drift toward where the operator's hands used to be,
             #     before a single new frame has arrived.
@@ -688,9 +456,6 @@ class HumanTeleopSession:
             self._target_left = None
             self._target_right = None
             self._home_req = {"left": False, "right": False}
-            # Mirror parity belongs to the input source; the next session's
-            # frames re-assert it or fall back to the swap-based default.
-            self._mirror_mode = None
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
             # A new session starts with neither arm handed over, whatever the
@@ -699,8 +464,7 @@ class HumanTeleopSession:
             for acq in self._acq.values():
                 acq.release("clutch_open")
             self._reseed_pending = {"left": True, "right": True}
-            # The membership check above is what narrows the bare str.
-            self._reset_clutch_state(cast(ClutchSource, clutch_source))
+            self._reset_clutch_state()
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
             # Reset smoothing state to current observed positions where
@@ -721,8 +485,8 @@ class HumanTeleopSession:
             daemon=True,
         )
         self._thread.start()
-        logger.info("human teleop started: left=%s right=%s swap=%s @ %.1f Hz",
-                    left_arm or "-", right_arm or "-", swap, effective_hz)
+        logger.info("human teleop started: left=%s right=%s @ %.1f Hz",
+                    left_arm or "-", right_arm or "-", effective_hz)
 
     def request_home(self) -> list[str]:
         """Slew every non-driving side to home (0° joints, gripper open),
@@ -752,7 +516,7 @@ class HumanTeleopSession:
     @staticmethod
     def _home_target(handle) -> dict[str, float]:
         """Home pose in target units: 0° on every joint, gripper OPEN (1.0 in
-        the retargeter's [0,1] gripper convention) — a reset that ends with
+        the converter's [0,1] gripper convention) — a reset that ends with
         closed jaws would fight the very next grab."""
         target = {j: 0.0 for j in handle.joint_limits_deg}
         target["gripper"] = 1.0
@@ -783,7 +547,7 @@ class HumanTeleopSession:
             # live reason, and no clutch may still advertise authority.
             self._steps_left = self._held_steps(self._committed_left)
             self._steps_right = self._held_steps(self._committed_right)
-            self._reset_clutch_state(None)
+            self._reset_clutch_state()
             # Same reasoning as the clutch block: a stopped session must not
             # still advertise an arm as DRIVING or mid-countdown.
             self._seen_frame = False
@@ -792,54 +556,22 @@ class HumanTeleopSession:
         logger.info("human teleop stopped")
 
     def ingest_frame(self, frame: dict) -> None:
-        """Apply a KeypointFrame from the browser. Thread-safe."""
+        """Apply one converter frame — per-side `joint_goal` plus the clutch.
+        Thread-safe."""
         with self._lock:
             if not self.running:
                 return
-            # The session's authority is whatever start() was told, full stop.
-            # The frame's own clutch_source is read only to detect a browser
-            # asserting through the *other* source; it can never reassign
-            # authority, or two frames (one to disengage, one to drive) would
-            # be enough to hand the arms to the spacebar mid-session.
-            frame_source = frame.get("clutch_source")
-            source_mismatch = (
-                frame_source is not None and str(frame_source) != self._clutch_source
-            )
-            now_perf_clutch = time.perf_counter()
-            if self._clutch_source == "mouth":
-                jaw = frame.get("jaw_open")
-                engaged = self._mouth.observe(
-                    now_perf_clutch,
-                    float(jaw) if jaw is not None else None,
-                    self._mouth_thresholds(),
-                )
-                self._clutch_reason = self._mouth.reason
-            else:
-                # spacebar and vr_grip are both plain held booleans; the backend
-                # applies no threshold or hold timer to either.
-                engaged = bool(frame.get("dead_man", False))
-                self._clutch_reason = f"{self._clutch_source}_mode"
-                self._mouth.above_since_t = None
-            if source_mismatch:
-                # Authority never hands over mid-motion. A frame speaking for
-                # the source that does NOT hold authority disengages and wipes
-                # the hold timer, so the operator has to re-assert through the
-                # armed source deliberately. The mismatch itself is the fault
-                # here — not "closed mouth" (below_threshold) and not "SPACE
-                # holds authority" (spacebar_mode), both of which the frontend
-                # treats as non-blocking resting states and prints nothing
-                # for. Overriding whichever reason the branch above just set
-                # is what makes this visible on the operator's chip instead
-                # of silent.
-                engaged = False
-                self._mouth.above_since_t = None
-                self._mouth.engaged = False
-                self._clutch_reason = "source_mismatch"
+            # A plain held boolean: the Quest's squeeze button, carried on the
+            # frame. The backend applies no threshold and no hold timer of its
+            # own — the acquisition countdown is the only filter, and it lives
+            # in `_update_authority`.
+            engaged = bool(frame.get("dead_man", False))
             self._dead_man = engaged
+            self._clutch_reason = "engaged" if engaged else CLUTCH_RESTING
             # Per-side split, gated on the global decision: a frame that is
-            # disengaged (or disqualified by source_mismatch above) must read
-            # disengaged on both sides no matter what the split claims. Only
-            # frames that carry a split get one; everything else mirrors.
+            # disengaged must read disengaged on both sides no matter what the
+            # split claims. Only frames that carry a split get one; everything
+            # else mirrors.
             sides_raw = frame.get("dead_man_sides")
             if engaged and isinstance(sides_raw, dict):
                 self._dead_man_sides = {
@@ -849,56 +581,37 @@ class HumanTeleopSession:
             else:
                 self._dead_man_sides = {"left": engaged, "right": engaged}
 
-            # Frame-carried calibration follows the same rule as the clutch
-            # itself: a spacebar session must not be able to arm the mouth
-            # clutch from frame data alone.
-            mc = frame.get("mouth_calib")
-            if mc and self._clutch_source == "mouth":
-                self._mouth_calib = MouthClutchCalib(
-                    talk_hold=float(mc["talk_hold"]),
-                    open_hold=float(mc["open_hold"]),
-                    talk_peak=(float(mc["talk_peak"])
-                               if mc.get("talk_peak") is not None else None),
-                )
-
-            calib = frame.get("pinch_calib") or {}
-            if "left" in calib:
-                self._pinch_calib_left = calib["left"]
-            if "right" in calib:
-                self._pinch_calib_right = calib["right"]
             self._latest_frame_ts_ms = int(frame.get("ts_ms", 0))
             now_perf = time.perf_counter()
             self._latest_arrival_perf = now_perf
             # WS is healthy: cancel any pending grace window.
             self._ws_disconnected_at_perf = None
 
-            mode = frame.get("mirror_mode")
-            self._mirror_mode = mode if mode in ("none", "both") else None
             left_side = frame.get("left")
             right_side = frame.get("right")
             # A side counts as tracked only when it produced a USABLE goal.
             #
-            # `compute_joint_goal` returns None below the confidence floor, and
-            # this used to store that None while still stamping the side as
-            # freshly seen. The effect was invisible and nasty: one sub-floor
-            # frame — routine when a hand is near the edge of frame — made the
+            # The converter refuses to emit one for a hand that is not tracked,
+            # and this used to store that refusal while still stamping the side
+            # as freshly seen. The effect was invisible and nasty: one bad
+            # frame — routine at the edge of the tracking volume — made the
             # side momentarily not-live, which released its acquisition and
-            # restarted the 3 s countdown, while `tracking.age_ms` went on
+            # restarted the countdown, while `tracking.age_ms` went on
             # reporting a healthy few milliseconds because a frame HAD
             # arrived. The operator saw a countdown that would not count down
             # and nothing anywhere saying why.
             #
             # Treating an unusable frame exactly like an absent one fixes both
-            # halves: the 300 ms staleness budget now absorbs a flicker instead
-            # of resetting on it, and a side that really is below the floor
-            # ages out and reads as lost, which is the truth.
+            # halves: the staleness budget now absorbs a flicker instead of
+            # resetting on it, and a side that really has stopped producing
+            # goals ages out and reads as lost, which is the truth.
             if left_side is not None:
-                goal = self._side_goal(left_side, self._pinch_calib_left, "left")
+                goal = self._side_goal(left_side)
                 if goal is not None:
                     self._target_left = goal
                     self._last_left_perf = now_perf
             if right_side is not None:
-                goal = self._side_goal(right_side, self._pinch_calib_right, "right")
+                goal = self._side_goal(right_side)
                 if goal is not None:
                     self._target_right = goal
                     self._last_right_perf = now_perf
@@ -911,29 +624,26 @@ class HumanTeleopSession:
             # must never wait for the loop.
             self._update_authority(now_perf)
 
-    def _side_goal(self, side_frame: dict, pinch_calib: dict,
-                   side: str) -> dict | None:
-        """One side's joint target, whichever shape the frame carried.
+    def _side_goal(self, side_frame: dict) -> dict | None:
+        """One side's joint target, or None if the frame carried no usable one.
 
-        Camera and VR-angle frames hold landmarks for the retargeter. VR
-        position-mode frames (vr_pose_mode.py) hold a ``joint_goal`` the
-        adapter already solved in ROBOT joint space — degrees, gripper in
-        [0, 1], same contract as compute_joint_goal's output — and mirroring
-        is the adapter's business there: applying it again here would apply
-        handedness twice.
+        The converter (`vr_teleop.QuestTeleoperator`) has already solved this
+        in ROBOT joint space — degrees, gripper in [0, 1] — and has already
+        applied handedness, so nothing here reinterprets it. A side dict with
+        no `joint_goal` is an UNUSABLE side, not a zeroed one: the caller
+        treats it exactly like an absent side, so it ages out through the
+        staleness budget instead of parking the arm at the origin.
         """
         joint_goal = side_frame.get("joint_goal")
-        if joint_goal is not None:
-            return {k: float(v) for k, v in joint_goal.items()}
-        return retarget.compute_joint_goal(
-            side_frame, pinch_calib, mirror=self._side_mirrored(side),
-        )
+        if joint_goal is None:
+            return None
+        return {k: float(v) for k, v in joint_goal.items()}
 
     # ---- authority transfer ---------------------------------------------
 
     def _side_trackable(self, side: str, now: float) -> bool:
         last = self._last_left_perf if side == "left" else self._last_right_perf
-        return last != 0.0 and (now - last) * 1000.0 <= self._frame_age_ms_loss_now()
+        return last != 0.0 and (now - last) * 1000.0 <= self._frame_age_ms_loss
 
     def _update_authority(self, now: float) -> None:
         """Advance both sides' authority. Caller holds the lock.
@@ -941,8 +651,8 @@ class HumanTeleopSession:
         Idempotent and safe to call from either thread; it reads the clock the
         caller passes and nothing else. Sides are independent on purpose — one
         hand leaving frame must not freeze the arm the other hand is mid-reach
-        with, and re-acquiring the side that dropped should not make the
-        operator re-match a pose for the side that never did.
+        with, and re-acquiring the side that dropped should not restart the
+        countdown for the side that never did.
         """
         for side in ("left", "right"):
             acq = self._acq[side]
@@ -954,9 +664,9 @@ class HumanTeleopSession:
                 acq.release("no_arm")
                 continue
             target = self._target_left if side == "left" else self._target_right
-            # `target is None` also covers a side below the confidence floor:
-            # compute_joint_goal refuses to emit a goal there, so the
-            # confidence gate is an acquisition gate for free.
+            # `target is None` also covers a hand the converter refused to
+            # solve for — an untracked controller — so the tracking gate is an
+            # acquisition gate for free.
             tracked = self._side_trackable(side, now) and target is not None
             engaged = self._dead_man_sides.get(side, self._dead_man)
             if not engaged or not tracked:
@@ -974,42 +684,16 @@ class HumanTeleopSession:
             if acq.authority is SideAuthority.HELD:
                 acq.authority = SideAuthority.ACQUIRING
                 acq.since_perf = now
-                acq.matched_since_perf = None
                 self._reseed_pending[side] = True
-
-            handle = self._handle(side)
-            if handle is None:      # guarded above; kept for the type checker
-                continue
-            limits = handle.joint_limits_deg
-            committed = (self._committed_left if side == "left"
-                         else self._committed_right)
-            desired = self._target_deg(target, limits)
-            # Against the CLAMPED target, so a joint the operator is asking to
-            # drive past its limit matches at the limit. Comparing against the
-            # raw ask would make such a pose permanently unmatchable, and the
-            # arm cannot go there in any case.
-            acq.error_deg = {j: v - committed.get(j, 0.0) for j, v in desired.items()}
-            acq.blocking = tuple(j for j, e in acq.error_deg.items()
-                                 if abs(e) > self._tol_for(j))
-            acq.matched = not acq.blocking
 
             if acq.authority is SideAuthority.DRIVING:
                 acq.reason = "driving"
-                continue    # the error stays published; the ramp handles it
+                continue    # the ramp owns the rest
 
-            if acq.matched:
-                if acq.matched_since_perf is None:
-                    acq.matched_since_perf = now
-            else:
-                acq.matched_since_perf = None
-            acq.reason = "counting" if acq.matched else "matching"
-
-            counted_down = (acq.since_perf is not None
-                            and (now - acq.since_perf) * 1000.0 >= self._acquire_ms_now())
-            dwelled = (acq.matched_since_perf is not None
-                       and (now - acq.matched_since_perf) * 1000.0
-                       >= self._match_dwell_ms)
-            if counted_down and dwelled:
+            acq.reason = "counting"
+            held_for_ms = ((now - acq.since_perf) * 1000.0
+                           if acq.since_perf is not None else 0.0)
+            if held_for_ms >= self._handover_ms():
                 acq.authority = SideAuthority.DRIVING
                 acq.driving_since_perf = now
                 # Here, not only on the next pass: for one tick the block would
@@ -1017,9 +701,7 @@ class HumanTeleopSession:
                 # `reason: counting`, which is the kind of self-contradiction
                 # that teaches an operator to stop reading the diagnostics.
                 acq.reason = "driving"
-                logger.info("human teleop: %s arm acquired (max error %.1f deg)",
-                            side, max((abs(e) for e in acq.error_deg.values()),
-                                      default=0.0))
+                logger.info("human teleop: %s arm acquired", side)
         self._derive_state()
 
     def _derive_state(self) -> None:
@@ -1035,15 +717,6 @@ class HumanTeleopSession:
             self._state = HumanState.TRACKING
         else:
             self._state = HumanState.ARMED
-
-    def _handle(self, side: str):
-        """This side's arm handle, or None if the session has no arm for it.
-
-        Caller holds the lock. Attribute reads only — no bus traffic.
-        """
-        assert self._cfg is not None
-        arm_id = self._cfg.arm_for(side)
-        return self._arms[arm_id] if arm_id else None
 
     def _ramp_cap(self, side: str, period: float, now: float) -> float:
         """Per-tick rate cap for one side, in degrees.
@@ -1129,34 +802,16 @@ class HumanTeleopSession:
 
     @staticmethod
     def _to_degrees(joint: str, value: float, lo: float, hi: float) -> float:
-        """One retargeted joint value in degrees, unclamped.
+        """One target joint value in degrees, unclamped.
 
-        Special-cases the gripper: retarget emits [0, 1] (0 = closed, 1 = open),
-        which is scaled onto the joint's calibrated degree range so that every
-        comparison downstream — smoothing, rate caps, the acquisition match —
-        is between two numbers in the same unit.
+        Special-cases the gripper: the converter emits [0, 1] (0 = closed,
+        1 = open), which is scaled onto the joint's calibrated degree range so
+        that every comparison downstream — smoothing, rate caps, the ramp — is
+        between two numbers in the same unit.
         """
         if joint == "gripper":
             return lo + max(0.0, min(1.0, value)) * (hi - lo)
         return value
-
-    @classmethod
-    def _target_deg(
-        cls,
-        target: dict[str, float] | None,
-        limits: dict[str, tuple[float, float]],
-    ) -> dict[str, float]:
-        """A retarget goal in degrees, clamped to the arm — i.e. the pose the
-        arm would actually reach if it were handed this goal."""
-        if target is None:
-            return {}
-        out: dict[str, float] = {}
-        for joint, (lo, hi) in limits.items():
-            if joint not in target:
-                continue
-            out[joint] = max(lo, min(hi, cls._to_degrees(
-                joint, float(target[joint]), lo, hi)))
-        return out
 
     def _smooth_step(
         self,
@@ -1249,7 +904,7 @@ class HumanTeleopSession:
                             self._steps_right = self._held_steps(observed)
 
                 # Read the clock HERE, not at the top of the tick. Authority is
-                # judged against a 300 ms freshness budget and the ramp against
+                # judged against a 700 ms freshness budget and the ramp against
                 # a 1.5 s one, while the re-seed above is a bus read on
                 # hardware and a locked world step in sim — either can block.
                 # A `tick_start` captured before that work is stale by however
@@ -1367,7 +1022,7 @@ class HumanTeleopSession:
                     self._collision_last = collision_last
                 # Authority IS the write gate. The per-side tracking-loss check
                 # that used to live here moved into `_update_authority`, which
-                # runs off the same `tick_start` a few microseconds earlier —
+                # runs off the same `now` a few microseconds earlier —
                 # keeping it here as well would be a second opinion about
                 # whether an arm may move, and two of those is how they come to
                 # disagree. Losing a side now DEMOTES it rather than merely
