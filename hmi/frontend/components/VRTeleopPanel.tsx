@@ -59,8 +59,12 @@ const PUBLISH_MS = 33;
 
 const BODY_LS_KEY = "haller.vrTeleop.body.v1";
 const MIRROR_LS_KEY = "haller.vrTeleop.mirror.v1";
-const VRMODE_LS_KEY = "haller.vrTeleop.mode.v1";
+// v2, deliberately: v1 headsets remember "pose", which used to be the
+// default and is now the fallback. One forced re-default onto the ported IK
+// path; the choice persists again from there.
+const VRMODE_LS_KEY = "haller.vrTeleop.mode.v2";
 const STANCE_LS_KEY = "haller.vrTeleop.stance.v1";
+const SOLO_LS_KEY = "haller.vrTeleop.soloArm.v1";
 
 const TILE_LS_KEY = "haller.vrTeleop.tile.v1";
 // v2, deliberately: v1 headsets remember a view from before the
@@ -90,8 +94,14 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const [status, setStatus] = useState<HumanTeleopStatus | null>(null);
   const [body, setBody] = useState<BodyOverride>({});
   const [mirrorMode, setMirrorMode] = useState<"none" | "both">("none");
-  const [vrMode, setVrMode] = useState<"pose" | "joints">("pose");
+  const [vrMode, setVrMode] = useState<"ik" | "pose" | "joints">("ik");
   const [stance, setStance] = useState<"behind" | "mirror" | "front">("behind");
+  // Which arm a SINGLE-ARM session drives, or null for both. The session
+  // accepts a null side, so this is the whole mechanism — the other hand's
+  // controller is simply ignored and nothing is ever written to it. This is
+  // the shape a first hardware run wants, and the only shape a rig with one
+  // working servo board has.
+  const [soloArm, setSoloArm] = useState<string | null>(null);
   // The workspace camera floated into the HUD. In passthrough the operator
   // normally watches the REAL arms — but against a sim backend there is
   // nothing physical to look at, so the MuJoCo camera IS the workspace view
@@ -113,8 +123,9 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<BodyOverride>({});
   const mirrorModeRef = useRef<"none" | "both">("none");
-  const vrModeRef = useRef<"pose" | "joints">("pose");
+  const vrModeRef = useRef<"ik" | "pose" | "joints">("ik");
   const stanceRef = useRef<"behind" | "mirror" | "front">("behind");
+  const soloArmRef = useRef<string | null>(null);
   const lastPubRef = useRef(0);
   const estopDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
@@ -147,6 +158,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   mirrorModeRef.current = mirrorMode;
   vrModeRef.current = vrMode;
   stanceRef.current = stance;
+  soloArmRef.current = soloArm;
   statusRef.current = status;
   baseCamRef.current = baseCam;
   showCamRef.current = showCam;
@@ -157,7 +169,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     views: views.map((c) => ({ id: c.id, label: viewLabel(c) })),
     activeViewId: baseCam?.id ?? null,
     tileSize: CAM_TILE_SIZES[tileIdx]?.name ?? "S",
-    ...(vrMode === "pose" ? { stance } : {}),
+    ...(vrMode === "joints" ? {} : { stance }),
   };
 
   useEffect(() => {
@@ -187,9 +199,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       if (raw) setBody(JSON.parse(raw));
       const mm = localStorage.getItem(MIRROR_LS_KEY);
       if (mm === "both") setMirrorMode("both");
-      if (localStorage.getItem(VRMODE_LS_KEY) === "joints") setVrMode("joints");
+      const vm = localStorage.getItem(VRMODE_LS_KEY);
+      if (vm === "joints" || vm === "pose" || vm === "ik") setVrMode(vm);
       const st = localStorage.getItem(STANCE_LS_KEY);
       if (st === "front" || st === "mirror") setStance(st);
+      const solo = localStorage.getItem(SOLO_LS_KEY);
+      if (solo) setSoloArm(solo);
       try {
         const a = JSON.parse(localStorage.getItem(HUD_ANCHOR_LS_KEY) ?? "");
         if (Array.isArray(a?.pos) && a.pos.length === 3
@@ -458,11 +473,21 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     // arms per stance keeps "my right hand drives the arm on my right" true
     // in every stance; without this, behind-stance hands-apart made the
     // arms cross on screen, which reads as "the controls are inverted".
+    //
+    // A single-arm session sends the chosen arm on the side of the hand that
+    // should drive it and null on the other. The same stance rule decides
+    // which side that is, so "my right hand drives the arm I picked" holds in
+    // every stance, exactly as it does bimanually.
     const behind = stanceRef.current === "behind";
+    const solo = soloArmRef.current;
+    const pairing = solo
+      ? (behind ? { left_arm: solo, right_arm: null }
+                : { left_arm: null, right_arm: solo })
+      : { left_arm: behind ? armIds[1] : armIds[0],
+          right_arm: behind ? armIds[0] : armIds[1] };
     try {
       await api.humanTeleopStart({
-        left_arm: behind ? armIds[1] : armIds[0],
-        right_arm: behind ? armIds[0] : armIds[1],
+        ...pairing,
         swap: false,
         clutch_source: "vr_grip",
       });
@@ -843,7 +868,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           the recorder shows <span className="font-bold">● REC</span> in the HUD
           while it rolls.
         </div>
-        {vrMode === "pose" ? (
+        {vrMode !== "joints" ? (
           <div>
             Squeezing a grip <b>anchors your hand to the arm where it is</b> —
             hold still through the countdown, feel the buzz, then your hand&apos;s
@@ -865,21 +890,77 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           className="bg-transparent border rounded px-1 py-0.5"
           value={vrMode}
           onChange={(e) => {
-            const v = e.target.value === "joints" ? "joints" : "pose";
+            const raw = e.target.value;
+            const v = raw === "joints" ? "joints" : raw === "pose" ? "pose" : "ik";
             setVrMode(v);
             try { localStorage.setItem(VRMODE_LS_KEY, v); } catch { /* non-fatal */ }
           }}
         >
-          <option value="pose">hand position (natural, default)</option>
+          <option value="ik">hand pose — 6-DoF clutch + IK (default)</option>
+          <option value="pose">hand position — wrist point only (fallback)</option>
           <option value="joints">body angles (legacy)</option>
         </select>
         <span>
-          — position mode tracks your hand through IK; no pose matching, no
-          limb-length calibration.
+          — the default tracks your hand&apos;s position AND orientation
+          through a decoupled solver, with an absorbing reach limit so
+          pushing past the arm&apos;s reach feels like a wall instead of
+          winding up. The fallback is the previous wrist-point mode, kept
+          because a bench session that goes wrong needs somewhere to go.
         </span>
       </label>
 
-      {vrMode === "pose" && (
+      <label className="flex items-center gap-2 text-muted-foreground">
+        <span>arms</span>
+        <select
+          className="bg-transparent border rounded px-1 py-0.5"
+          value={soloArm ?? ""}
+          onChange={(e) => {
+            const v = e.target.value || null;
+            setSoloArm(v);
+            try {
+              if (v) localStorage.setItem(SOLO_LS_KEY, v);
+              else localStorage.removeItem(SOLO_LS_KEY);
+            } catch { /* non-fatal */ }
+          }}
+        >
+          <option value="">both arms</option>
+          {armIds.map((id) => (
+            <option key={id} value={id}>only {id}</option>
+          ))}
+        </select>
+        <span>
+          — a single-arm session ignores the other hand entirely: nothing is
+          ever written to the arm it has none for. Half as much that can go
+          wrong, which is what a first hardware run wants.
+        </span>
+      </label>
+
+      <label className="flex items-center gap-2 text-muted-foreground">
+        <span>collision guard</span>
+        <select
+          className="bg-transparent border rounded px-1 py-0.5"
+          value={status?.collision?.enabled ? "on" : "off"}
+          disabled={status?.collision?.available === false}
+          onChange={(e) => {
+            const enabled = e.target.value === "on";
+            void api.humanTeleopCollision(enabled)
+              .then(() => toast.info(
+                `collision guard ${enabled ? "enabled" : "disabled"}`))
+              .catch((err) => toast.error(
+                `guard toggle refused: ${(err as Error).message}`));
+          }}
+        >
+          <option value="on">on — clamp steps at the margin</option>
+          <option value="off">off — measure only, never clamp</option>
+        </select>
+        <span>
+          {status?.collision?.available === false
+            ? "— unavailable: no mounts configured for every arm, so the guard has no geometry to reason about."
+            : `— off still MEASURES (slack ${fmtMm(status?.collision?.slack_m)}), it just stops holding steps back. The workspace floor, joint limits, rate caps and motion envelope stay on either way.`}
+        </span>
+      </label>
+
+      {vrMode !== "joints" && (
         <label className="flex items-center gap-2 text-muted-foreground">
           <span>operator stance</span>
           <select

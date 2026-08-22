@@ -102,10 +102,15 @@ export type VRFrame = {
    *  egocentric frames already give opposite pan signs for symmetric
    *  gestures. "both": a rig whose two mounts are true mirror images. */
   mirror_mode?: "none" | "both";
-  /** "pose" (default): clutch-relative hand-position tracking — squeezing a
-   *  grip anchors your hand to the arm's current pose and deltas drive the
-   *  gripper through IK. "joints": the original body-angle copying. */
-  vr_mode?: "pose" | "joints";
+  /** How the backend turns this frame into joint goals.
+   *  "ik" (DEFAULT, and what an absent field now means): the ported stack in
+   *  `haller_hmi/vr_teleop` — 6-DoF clutch-relative tracking with absorbing
+   *  reach limits into a decoupled damped-least-squares solver.
+   *  "pose": the previous wrist-point mode, 3-DoF position with the
+   *  controller's pitch/roll passed through on fixed gains. Kept as the
+   *  bench fallback.
+   *  "joints": the original body-angle copying. */
+  vr_mode?: "ik" | "pose" | "joints";
   /** How the operator's hand maps onto the gripper (position mode only).
    *  "behind" (default): egocentric — the replica arm moves exactly like
    *  your own (goggles on, push forward = the arm extends INTO the default
@@ -780,7 +785,7 @@ export function sampleVRFrame(
   frame: XRFrameLike,
   refSpace: unknown,
   opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean;
-          mirrorMode?: "none" | "both"; vrMode?: "pose" | "joints";
+          mirrorMode?: "none" | "both"; vrMode?: "ik" | "pose" | "joints";
           stance?: "behind" | "mirror" | "front" },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));

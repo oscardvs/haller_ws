@@ -1,14 +1,31 @@
-# Quest bimanual teleop — quickstart
+# Quest teleop — quickstart
 
-Drive both SO-101 arms from a Meta Quest in passthrough AR: you see the real
+Drive the SO-101 arms from a Meta Quest in passthrough AR: you see the real
 arms through the headset, each grip is that arm's dead-man, and a capsule
-model of both arms runs inside the 60 Hz loop so you cannot command them into
-each other or through the bench.
+model runs inside the 60 Hz loop so you cannot command them into each other
+or through the bench.
 
 The whole pipeline is exercised end-to-end in sim by `scripts/vr_smoke.py`
-(38 checks, run against a live backend). What has **not** happened yet is a
+(50 checks, run against a live backend). What has **not** happened yet is a
 human driving the real arms from the headset — do the *first hardware run*
 checklist below before trusting it.
+
+---
+
+## Just want one arm on the bench tonight?
+
+```bash
+# desktop, repo root — ONE real arm, no Jetson
+scripts/quest-teleop/up.sh --solo
+```
+
+`config.solo-real.yaml`: one arm, one hand, and the collision guard **off**
+by default (see [The collision guard](#the-collision-guard) for why, and for
+what stays on regardless). Open the printed URL in the Quest browser, pick
+**Single arm** and the arm under your right hand, press Start, then Enter VR.
+
+A session no longer needs two arms. Either hand can be left without one: its
+controller is simply ignored and nothing is ever written to that side.
 
 ---
 
@@ -186,6 +203,7 @@ ssh jetson 'cd ~/haller_ws && git fetch origin && git checkout feat/quest-bimanu
 | **trigger** (analog) | that arm's gripper — 0 open, 1 closed |
 | **B or Y** (either controller) | **E-STOP**: torque off both arms, session stops |
 | **hold A or X** (~0.5 s) | start / stop-and-save a dataset take — REC state + frame count show in the HUD |
+| **A or X**, *relay page only* | **precision** — both gains drop while held, for fine work |
 | **left stick click** | next camera view in the HUD tile |
 | **hold left stick** (~0.8 s) | **reset arms to home** (0°, gripper open) — only sides with the grip open; a driving hand always wins |
 | **right stick click** | next tile size (S/M/L) |
@@ -197,18 +215,54 @@ The HUD is two separate floating panels: the **camera tile** (updates at
 display rate, native resolution) with the **status/menu panel below it** —
 instructions never cover the view. Grab either one to move the pair.
 
-**Position mode (default).** Squeezing a grip *anchors*: your hand's current
-position is bound to the arm's current pose, so there is nothing to match —
-hold still through the 1 s countdown, feel the buzz, and from then on your
-hand's movement drives the gripper tip through IK on the robot's own
-kinematics. Release to freeze; move your hand somewhere comfortable and
-squeeze again to ratchet across the workspace. Controller pitch/roll steer
-the wrist relative to where it was anchored. No limb-length calibration is
-involved. (The *hand mapping* selector still offers the legacy body-angle
-mode; expect it to fight you — the SO-101's shoulder barely pitches below
-horizontal and its elbow folds the opposite way to yours, which is why
-position mode exists.) All motion rides the same rate limiter (60 °/s
-ceiling at the handle, less during the first 1.5 s ramp).
+**Two headset pages exist, and A/X means different things on each.** The
+cockpit page (`<origin>/teleop/vr`) is the one above: A/X held is the dataset
+take toggle. The relay page (`<origin>/api/vr/`) is the ported one — no
+recorder, so A/X is free and is the precision modifier there. Both drive the
+same backend through the same converter; pick the cockpit page when you are
+recording, the relay page when you are tuning.
+
+**Hand pose mode (default).** Squeezing a grip *anchors*: your hand's current
+pose is bound to the arm's current pose, so there is nothing to match — hold
+still through the 1 s countdown, feel the buzz, and from then on your hand
+drives the gripper. Release to freeze; move your hand somewhere comfortable
+and squeeze again to ratchet across the workspace. No limb-length calibration
+is involved. All motion rides the same rate limiter (60 °/s ceiling at the
+handle, less during the first 1.5 s ramp).
+
+Three things this mode does that are worth knowing at the bench:
+
+* **Position and orientation, not position plus pitch/roll gains.** Your
+  hand's full 6-DoF pose is mapped; the arm's three position joints track the
+  point and its two wrist joints track as much of the orientation as two axes
+  can. When you ask for a twist the wrist physically cannot reach — a yaw,
+  usually, since with the tool where it is the gripper's yaw is decided by
+  the shoulder — the controller buzzes and the HUD says so. **Move your hand
+  instead of twisting harder.**
+* **Pushing past the arm's reach feels like a wall, not a wind-up.** The
+  target can never run more than 12 cm ahead of where the arm actually is,
+  and the excess is *absorbed*. Reversing bites after at most that 12 cm,
+  however far past the wall you pushed. The cost is that absorbed travel is
+  gone, so hand↔gripper correspondence drifts — re-clutch to realign, which
+  is the ratchet you are doing anyway.
+* **Hold A or X for precision.** Both gains drop (0.4× by default) while it
+  is held, for fine work. It re-anchors on press and release, so it never
+  reinterprets motion you already made under a new gain.
+
+The *hand mapping* selector keeps two older modes: **hand position** (the
+previous wrist-point mode — 3-DoF position with controller pitch/roll passed
+through on fixed gains) as a fallback if the default misbehaves at the bench,
+and **body angles** (legacy) which will fight you — the SO-101's shoulder
+barely pitches below horizontal and its elbow folds the opposite way to
+yours, which is why neither of the other two copies joint angles.
+
+**Tuning it live.** The relay page at `<origin>/api/vr/` has sliders for the
+gains, the reach limits, the smoothing and the IK damping, applied on the
+next solver tick and clamped server-side. Inside the headset, **click a
+thumbstick** to open the same list on the HUD panel and push the stick to walk
+it and change values. If the arm feels *sluggish* rather than badly mapped,
+the binding limit is usually `motion.max_speed_deg_s` in the config (60 °/s),
+not anything on that panel.
 
 **Operator stance** (panel selector, shown in the HUD menu) picks how your
 hand maps onto the gripper AND which arm each controller drives — in the
@@ -250,31 +304,66 @@ by the guard. When it bites you feel a light buzz and the HUD shows
 
 Config lives in `hmi/backend/config.yaml` under `collision:`. The mount
 positions are **the sim scene's ±0.20 m and have not been measured on the
-tower** — do the checklist below before trusting mm-level margins. `enabled:
-false` turns the guard off entirely (it will say so in the HUD).
+tower** — do the checklist below before trusting mm-level margins.
+
+### Switching it off
+
+It is a **runtime** switch, not a restart: the *collision guard* selector on
+the VR panel and the relay page's Safety card, or
+
+```bash
+curl -X POST <origin>/api/teleop/human/collision \
+     -H 'content-type: application/json' -d '{"enabled": false}'
+```
+
+`config.solo-real.yaml` starts with it off, because with one arm there is no
+arm-vs-arm case at all and the mounts are still a guess — and a guard
+reasoning about millimetres from geometry nobody has measured is exactly what
+clamps an arm that is plainly nowhere near anything.
+
+**Off still measures.** The clearance number keeps updating on the HUD, so
+you can drive with the guard off, watch it, and switch the guard on once the
+mounts are measured and the number behaves.
+
+**What stays on regardless:** the teleop's own workspace floor (the commanded
+fingertip and wrist can never be asked to go below the bench), the per-joint
+limits, the acquisition ramp, the per-tick rate caps and the motion envelope.
+Turning off the bimanual guard does not remove the bench.
+
+It cannot be switched on at all on a rig with no mounts configured for every
+arm — a guard with no geometry for an arm would pass every check for it,
+which is the one failure this module exists to prevent. The panel shows
+`unavailable` in that case rather than a toggle that does nothing.
 
 ## First hardware run — 10 minutes, in this order
 
+**One arm first.** Steps 2, 3 and 6 are about two arms not hitting each
+other, so on a single-arm run skip them and run the guard off
+(`--solo` already does). Everything else applies unchanged, and step 4 is
+the one that matters most.
+
 1. **Bench clear, DC-DCs on, second person or desktop cockpit at the E-STOP.**
-2. **Mount geometry.** Measure base-plate bolt to bolt between the arms; set
+2. **Mount geometry.** *(two arms)* Measure base-plate bolt to bolt between the arms; set
    `collision.mounts` x to ±half that (and `table_z_m` if the bench surface
    isn't the mount plane). Restart the backend after editing.
-3. **Clearance readout sanity.** On the VR page (no headset needed — the same
+3. **Clearance readout sanity.** *(two arms)* On the VR page (no headset needed — the same
    card is on the 2D page), with the session started but grips open: torque
    off both arms from the cockpit and move them toward each other **by
    hand**. The clearance number must shrink as they approach and go negative
    just before they touch. If it doesn't move, the mounts are wrong.
 4. **Direction check, one arm at a time.** In the headset, squeeze ONE grip,
-   match the pose, and nudge your hand 5 cm outward. The arm must move
-   outward. If it moves **opposite** your hand, flip the *arm mounting*
-   selector on the panel (identical ↔ mirrored) — this rig should be
-   `identical, side by side`. If the **wrong arm** moves, the left/right
-   naming is crossed: swap the two `mounts` entries AND the arm order, or
-   physically relabel.
+   hold still through the 1 s countdown, then nudge your hand 5 cm outward.
+   The arm must move outward. If it moves **opposite** your hand, the
+   *operator stance* is wrong for where you are standing — fix it there
+   (egocentric if you are behind the arms, mirror if facing them). If the
+   **wrong arm** moves, the hand↔arm pairing is crossed: on the relay page
+   the selectors are labelled by hand, so just pick the other arm.
+   Then check all three axes before trusting any of them: hand up must be
+   gripper up, hand forward must be the arm extending.
 5. **Gripper + speed feel.** Trigger through its range; then drive a slow
    reach. If anything feels fast, lower `motion.max_speed_deg_s` (global or
    per-arm) — the teleop path obeys it at the handle level.
-6. **Provoke the guard once, gently.** Drive both hands slowly toward the
+6. **Provoke the guard once, gently.** *(two arms, guard on)* Drive both hands slowly toward the
    centre; the arms must stop with a buzz before they meet, HUD shows
    `COLLISION HOLD`, and pulling back out must work instantly.
 7. Only then: real speed, real manipulation, recording.
@@ -290,7 +379,11 @@ cockpit records datasets while a teleop session is driving.
 | symptom | cause / fix |
 |---|---|
 | "WebXR is not available" | Page not HTTPS, or cert not accepted. `navigator.xr` is simply absent over http — no prompt explains it. |
-| Enter does nothing / start refused | Another teleop session (cockpit, sim) holds the arms — stop it first. Needs **2 enabled arms**. |
+| Enter does nothing / start refused | Another teleop session (cockpit, sim) holds the arms — stop it first. One arm is enough since 2026-08-20 (`arms` selector on the panel, or `--solo`). |
+| Twisting the wrist does nothing and the controller buzzes | The demand is off the arm's reachable orientations — with the tool where it is, the gripper's yaw is set by the shoulder. Two wrist axes cannot cover three; move your hand instead. |
+| Arm stops short and pressing harder does nothing | The reach limit is absorbing (that is the wall). Release, reposition your hand, squeeze again — the ratchet is how you cross the workspace. |
+| Changed the headset page and nothing happened | Was the cockpit page, not the relay page — or a stale cache. The relay serves `no-store`; the Next.js page needs a real reload. |
+| Tracking feels sluggish, not wrong | `motion.max_speed_deg_s` (60 °/s) is the binding limit, below both the IK step cap and the session rate cap. Raise it deliberately, with a hand near the E-STOP. |
 | Countdown won't finish | HUD `match:` lists the blocking joints; move to the robot's pose. `match: gripper` → squeeze trigger ~90 %. |
 | Arm moves opposite the hand | Wrong *operator stance* (egocentric / mirror / camera-tile) on the panel. If only ONE arm is reversed, it's the *arm mounting* parity — see step 4 above. |
 | Workspace tile looks left/right-flipped | The active camera faces you (tower mast cam). It should auto-mirror (`facing: operator` in config.yaml); if a camera moved, update its `facing`. |

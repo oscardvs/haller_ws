@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Haller VR teleop</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d1013;
+    --panel: #161b21;
+    --line: #262d36;
+    --ink: #e8edf2;
+    --dim: #8b97a5;
+    --ok: #46d18a;
+    --warn: #e8b046;
+    --bad: #e2564a;
+    --accent: #5aa9e6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 64px;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .01em; }
+  .sub { color: var(--dim); font-size: 13px; margin: 0 0 20px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--dim); margin: 0 0 10px; font-weight: 600;
+  }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row + .row { margin-top: 10px; }
+  label { color: var(--dim); font-size: 13px; min-width: 108px; }
+  select, input[type=text] {
+    background: #0f1317; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 9px; font: inherit; font-size: 14px;
+  }
+  button {
+    background: var(--accent); color: #06121c; border: 0;
+    border-radius: 7px; padding: 10px 16px;
+    font: inherit; font-weight: 650; cursor: pointer;
+  }
+  button.ghost { background: #1d242c; color: var(--ink); border: 1px solid var(--line); }
+  button.danger { background: var(--bad); color: #fff; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.big { font-size: 17px; padding: 15px 26px; width: 100%; }
+  .pill {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim);
+  }
+  .pill.on { color: var(--ok); border-color: #244d3a; background: #10221a; }
+  .pill.off { color: var(--bad); border-color: #4d2724; background: #221211; }
+  .slider { display: grid; grid-template-columns: 150px 1fr 62px; gap: 10px; align-items: center; }
+  .slider + .slider { margin-top: 7px; }
+  .slider span:first-child { color: var(--dim); font-size: 13px; }
+  .slider output { font-variant-numeric: tabular-nums; text-align: right; font-size: 13px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .note { color: var(--dim); font-size: 12.5px; margin-top: 10px; }
+  .note b { color: var(--ink); font-weight: 600; }
+  #log {
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--dim); white-space: pre-wrap; max-height: 190px; overflow: auto;
+  }
+  kbd {
+    font: 11.5px ui-monospace, monospace; background: #0f1317;
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  }
+</style>
+</head>
+<body>
+  <h1>Haller VR teleop</h1>
+  <p class="sub">Open this page in the Quest browser, start a session, then enter VR.</p>
+
+  <div class="card">
+    <h2>Session</h2>
+    <div class="row">
+      <label for="mode">Arms</label>
+      <select id="mode">
+        <option value="single">Single arm (one hand)</option>
+        <option value="dual">Both arms</option>
+      </select>
+      <span id="running" class="pill">idle</span>
+    </div>
+    <div class="row">
+      <label for="armRight">Right hand</label>
+      <select id="armRight"></select>
+    </div>
+    <div class="row" id="leftRow">
+      <label for="armLeft">Left hand</label>
+      <select id="armLeft"></select>
+    </div>
+    <div class="row">
+      <label for="stance">Stance</label>
+      <select id="stance">
+        <option value="behind">Behind the arms — egocentric (default)</option>
+        <option value="mirror">Facing the arms — mirror</option>
+        <option value="front">Facing the arms — screen-true</option>
+      </select>
+    </div>
+    <div class="row">
+      <button id="start">Start session</button>
+      <button id="stop" class="ghost">Stop</button>
+      <button id="estop" class="danger">E-STOP</button>
+    </div>
+    <p class="note">
+      A single-arm session ignores the other hand entirely — nothing is ever
+      written to the arm it has none for. In the <b>behind</b> stance the arm
+      under your right hand is the one named <b>left</b>; the selectors above
+      are labelled by hand, not by arm id, so pick the arm you can see under
+      that hand.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Safety</h2>
+    <div class="row">
+      <label for="guard">Collision guard</label>
+      <select id="guard">
+        <option value="on">On — clamp steps at the margin</option>
+        <option value="off">Off — measure only, never clamp</option>
+      </select>
+      <span id="guardState" class="pill">—</span>
+    </div>
+    <p class="note">
+      Off still <b>measures</b>: the clearance read-out keeps working, it just
+      stops holding steps back. The bench floor, the joint limits, the rate
+      caps and the motion envelope are separate and stay on either way.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Enter VR</h2>
+    <button id="enter" class="big" disabled>Checking WebXR…</button>
+    <p class="note">
+      <b>Grip</b> = clutch (hold to drive; release, reposition, grip again).
+      <b>Trigger</b> = gripper. <b>A / X</b> = precision (hold for fine work).
+      <b>B / Y</b> = E-STOP. <b>Thumbstick click</b> = settings panel;
+      push the stick to move through it and change values.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Tuning <span class="pill" id="wsState">disconnected</span></h2>
+    <div id="sliders"></div>
+    <p class="note">
+      Applied on the next solver tick, and clamped server-side — a slider that
+      asks for something out of range snaps back to what the robot took.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+
+  <script type="module" src="client.js"></script>
+</body>
+</html>

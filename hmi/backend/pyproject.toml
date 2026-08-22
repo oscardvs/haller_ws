@@ -42,6 +42,12 @@ haller-hmi = "haller_hmi.server:run"
 where = ["."]
 include = ["haller_hmi*"]
 
+# The WebXR page the relay serves is data, not code, so a plain package find
+# would leave it out of a built wheel and the headset would get a 404 from an
+# installed backend while working fine from a source checkout.
+[tool.setuptools.package-data]
+"haller_hmi.vr_teleop" = ["web/*.html", "web/*.js"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

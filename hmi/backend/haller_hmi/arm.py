@@ -52,6 +52,58 @@ def _write_calibration_to_motors(robot: SO101Follower) -> None:
     robot.bus.write_calibration(robot.calibration)
 
 
+def _park_goal_on_present(robot: SO101Follower) -> None:
+    """Point every servo's Goal_Position at where the arm actually IS.
+
+    lerobot's `configure()` does its register writes inside
+    `bus.torque_disabled()`, and that context manager re-enables torque
+    unconditionally on the way out. Nothing between here and there ever tells
+    the servos where the arm is standing, so torque comes back on against
+    whatever Goal_Position the registers already held. On a cold power-up
+    that value is 0 for every joint, and enabling torque commands all six to
+    tick 0 at once, at whatever speed they can manage — from a rest pose
+    that is most of a revolution on the elbow and the wrist roll.
+
+    Measured on the bench 2026-08-21, one arm, cold power-up, before this
+    function existed: torque off on all six, every Goal_Position reading 0,
+    against a present pose of 642 / 1095 / 3715 / 1 / 3913 / 3312 raw. So
+    connect() alone was one command away from ~327 deg on the elbow and ~344
+    deg on the wrist roll.
+
+    Whether this is also what happened on 2026-08-01 — the arm that slewed
+    into the bench after a recalibration and took the 7.4 V DC-DC with it —
+    is not something the logs can still settle, and the note in
+    config.solo-real.yaml blames the Home that followed. Worth knowing that
+    the Home is not needed for it: on a cold bus the slew is already
+    committed when connect() returns, before any goal is ever sent.
+
+    So: raw ticks, read then written back, before lerobot's configure() runs.
+    Raw on purpose — Goal_Position and Present_Position share one register
+    space, so present-into-goal is exact whatever the calibration says, and
+    stays exact across the offsets `_write_calibration_to_motors` just wrote.
+    Torque is still off here, so this moves nothing; it only makes the
+    torque-enable that follows a hold instead of a lunge.
+
+    lerobot's own note on connect() — "we assume that at connection time, arm
+    is in a rest position, and torque can be safely disabled to run
+    calibration" — is about *disabling* torque. Nothing there covers turning
+    it back on, which is the half that moves the arm.
+    """
+    present = robot.bus.sync_read("Present_Position", normalize=False)
+    robot.bus.sync_write("Goal_Position", present, normalize=False)
+    logger.info(
+        "arm %s: parked Goal_Position on Present_Position before torque enable (raw ticks: %s)",
+        robot.id,
+        {j: int(v) for j, v in present.items()},
+    )
+
+
+def _configure_holding_position(robot: SO101Follower) -> None:
+    """`robot.configure()`, with the goal registers parked first."""
+    _park_goal_on_present(robot)
+    SO101Follower.configure(robot)
+
+
 @dataclass
 class ArmHandle:
     config: ArmConfig
@@ -138,6 +190,10 @@ class ArmHandle:
         # equivalent before connecting, so lerobot keeps its own ordering and
         # still applies the calibration before configure() touches the motors.
         self.robot.calibrate = partial(_write_calibration_to_motors, self.robot)
+        # Same substitution trick, for the step that actually moves the arm:
+        # configure() re-enables torque on its way out, and does it against
+        # goal registers nobody has set. See _park_goal_on_present.
+        self.robot.configure = partial(_configure_holding_position, self.robot)
         self.robot.connect(calibrate=True)
         # Load joint limits from the now-loaded calibration.
         self.joint_limits_deg = self._load_joint_limits()
@@ -153,10 +209,61 @@ class ArmHandle:
         self._effort_fail_streak = 0
         logger.info("arm %s: effort read path = %s", self.config.id, self._effort_mode)
 
+    def _release_torque_per_motor(self) -> list[str]:
+        """Torque off, one servo at a time. Returns the ids that refused.
+
+        lerobot's `bus.disconnect(disable_torque=True)` releases the arm with
+        a single `disable_torque()` that walks the motors and raises on the
+        first one to answer with an error. A servo in a latched alarm answers
+        with an error to everything, including "turn your torque off" — so the
+        one motor that most needs releasing is also the one that aborts the
+        walk, and every motor after it in the chain stays energised.
+
+        Bench, 2026-08-21: shoulder_lift (id 2) overloaded holding the arm
+        cantilevered, and the shutdown died on
+        `Failed to write 'Torque_Enable' on id_=2 with '0' after 6 tries.
+        [RxPacketError] Overload error!`. Torque afterwards read pan=0,
+        lift=0, elbow=1, wrist_flex=1, wrist_roll=1, gripper=1 — the backend
+        had exited and four joints were still holding. `Application shutdown
+        failed` was the only sign, in a log nobody reads while an arm is
+        stiff on the bench.
+
+        So: never let one servo's refusal decide the fate of the other five.
+        Per-motor, each in its own try, worst case six failures instead of
+        one abort.
+        """
+        assert self.robot is not None
+        refused: list[str] = []
+        for joint in list(self.robot.bus.motors):
+            try:
+                self.robot.bus.write("Torque_Enable", joint, 0, normalize=False)
+            except Exception:
+                refused.append(joint)
+                logger.exception(
+                    "arm %s: %s refused Torque_Enable=0; continuing to the rest",
+                    self.config.id, joint)
+        return refused
+
     def disconnect(self) -> None:
         if self.robot is not None:
-            self.robot.disconnect()
+            refused = self._release_torque_per_motor()
+            if refused:
+                logger.error(
+                    "arm %s: %d motor(s) would not release torque: %s. They are "
+                    "in an alarm state (overload/overheat is what does this) and "
+                    "will stay stiff until the arm is power-cycled.",
+                    self.config.id, len(refused), ", ".join(refused))
+            # Every motor has now been asked individually, so lerobot must not
+            # repeat the bulk walk that raises on the first refusal — that
+            # exception is what escaped `disconnect_all` and stranded the rest
+            # of the shutdown.
+            self.robot.config.disable_torque_on_disconnect = False
+            try:
+                self.robot.disconnect()
+            except Exception:
+                logger.exception("arm %s: port close failed", self.config.id)
             self.robot = None
+            self.torque_enabled = False
         # A later connect() re-probes: the same arm can come back on a
         # different adapter, or with different firmware, than it left on.
         self._effort_mode = "unprobed"
@@ -559,8 +666,15 @@ class ArmManager:
             self._handles[cfg.id] = handle
 
     def disconnect_all(self) -> None:
+        # Each arm in its own try: on a bimanual rig one arm's bad servo must
+        # not leave the OTHER arm energised, which is the same failure as
+        # ArmHandle._release_torque_per_motor one level up.
         for handle in self._handles.values():
-            handle.disconnect()
+            try:
+                handle.disconnect()
+            except Exception:
+                logger.exception("arm %s: disconnect failed; continuing",
+                                 getattr(handle.config, "id", "?"))
         if self._world is not None:
             self._world.stop()
             self._world = None

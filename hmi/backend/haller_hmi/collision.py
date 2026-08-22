@@ -33,67 +33,27 @@ clearance readout reacts correctly before anything moves fast.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
 
 from .config import CollisionConfig
-
-#: The five pose joints, in kinematic order. `gripper` is deliberately absent.
-POSE_JOINTS: tuple[str, ...] = (
-    "shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll",
+# The kinematics moved to `so101_kinematics` so the VR teleop IK could share
+# them instead of reaching into this module's privates — one chain, one
+# definition, and `tests/sim/test_collision_sim.py` still pins it against
+# MuJoCo through these names. Re-exported here because the guard's own
+# soundness argument is stated in terms of them, and every existing caller
+# and test imports them from `haller_hmi.collision`.
+from .so101_kinematics import (  # noqa: F401  (re-exported)
+    POSE_JOINTS,
+    _CHAIN,
+    _TIP_LOCAL,
+    _axis_angle,
+    _quat_to_mat,
+    _rx,
+    _ry,
+    fk_points,
 )
-
-
-def _quat_to_mat(q: tuple[float, float, float, float]) -> np.ndarray:
-    """(w, x, y, z) — MJCF's ordering, not WebXR's — to a rotation matrix."""
-    w, x, y, z = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-    ])
-
-
-def _axis_angle(axis: tuple[float, float, float], theta: float) -> np.ndarray:
-    ax = np.asarray(axis, dtype=float)
-    half = theta / 2.0
-    w = math.cos(half)
-    xyz = ax * math.sin(half)
-    return _quat_to_mat((w, float(xyz[0]), float(xyz[1]), float(xyz[2])))
-
-
-def _rx(a: float) -> np.ndarray:
-    return _axis_angle((1.0, 0.0, 0.0), a)
-
-
-def _ry(a: float) -> np.ndarray:
-    return _axis_angle((0.0, 1.0, 0.0), a)
-
-
-# Kinematic chain transcribed from sim/assets/so101/so_arm100.xml: each entry
-# is (body name, body pos in parent frame, body rotation, joint axis, HMI
-# joint name). tests/sim/test_collision_sim.py pins this against the MJCF
-# itself, so a vendored-model update that moves a link fails a test here
-# rather than silently skewing the guard.
-_CHAIN: tuple[tuple[str, tuple[float, float, float], np.ndarray,
-                    tuple[float, float, float], str], ...] = (
-    ("Rotation_Pitch", (0.0, -0.0452, 0.0165),
-     _quat_to_mat((0.707105, 0.707108, 0.0, 0.0)), (0.0, 1.0, 0.0),
-     "shoulder_pan"),
-    ("Upper_Arm", (0.0, 0.1025, 0.0306), _rx(1.57079), (1.0, 0.0, 0.0),
-     "shoulder_lift"),
-    ("Lower_Arm", (0.0, 0.11257, 0.028), _rx(-1.57079), (1.0, 0.0, 0.0),
-     "elbow_flex"),
-    ("Wrist_Pitch_Roll", (0.0, 0.0052, 0.1349), _rx(-1.57079),
-     (1.0, 0.0, 0.0), "wrist_flex"),
-    ("Fixed_Jaw", (0.0, -0.0601, 0.0), _ry(1.57079), (0.0, 1.0, 0.0),
-     "wrist_roll"),
-)
-
-#: Fingertip in the Fixed_Jaw frame — just past the last jaw pad (y=-0.1014).
-_TIP_LOCAL = np.array([0.010, -0.105, 0.0])
 
 #: Capsule radii, metres. Sized to contain the STL meshes with a little slack;
 #: the sim soundness test is what holds them honest. Grow a radius rather than
@@ -116,21 +76,6 @@ _INTER_PAIRS: tuple[tuple[str, str], ...] = tuple(
 #: adjacent links share a joint and are always "in contact" by construction.
 _SELF_PAIRS: tuple[tuple[str, str], ...] = (("hand", "column"),
                                             ("fore", "column"))
-
-
-def fk_points(mount_pos: tuple[float, float, float], mount_yaw_deg: float,
-              joints_deg: dict[str, float]) -> dict[str, np.ndarray]:
-    """World-frame chain points for one arm. Missing joints read as 0°."""
-    R = _axis_angle((0.0, 0.0, 1.0), math.radians(mount_yaw_deg))
-    t = np.asarray(mount_pos, dtype=float)
-    pts: dict[str, np.ndarray] = {"root": t.copy()}
-    for body, pos, rot, axis, joint in _CHAIN:
-        t = t + R @ np.asarray(pos, dtype=float)
-        R = R @ rot
-        pts[body] = t.copy()
-        R = R @ _axis_angle(axis, math.radians(float(joints_deg.get(joint, 0.0))))
-    pts["tip"] = t + R @ _TIP_LOCAL
-    return pts
 
 
 def _capsule_segments(pts: dict[str, np.ndarray]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
@@ -189,14 +134,48 @@ class GuardResult:
 
 
 class CollisionGuard:
-    """Stateless filter: every decision is a pure function of (prev, want)."""
+    """Stateless filter: every decision is a pure function of (prev, want).
 
-    def __init__(self, cfg: CollisionConfig):
+    `enabled` is a live switch, not a construction-time one. Turning it off
+    keeps every measurement running and stops only the *clamping*:
+    `filter_step` returns the wanted step untouched while `clearance` goes on
+    reporting the same slack it always did. That asymmetry is the whole
+    point of having a switch rather than a `None` guard — an operator who
+    turned the guard off because it bit too early still gets the number on
+    the HUD telling them how close they actually are, and can turn it back
+    on mid-session without restarting anything.
+
+    `available` is the construction-time one, and it is one-way: a guard
+    built without mount geometry for every arm can never be switched on,
+    because it would silently pass every check for the arm it has no
+    geometry for — the fail-open this module exists to prevent.
+    """
+
+    def __init__(self, cfg: CollisionConfig, *, enabled: bool | None = None,
+                 available: bool = True):
         self.cfg = cfg
+        #: False when the rig has no usable geometry — see the class docstring.
+        self.available = bool(available)
+        self._enabled = bool(cfg.enabled if enabled is None else enabled)
         self._mounts = {
             arm_id: (tuple(m.pos), float(m.yaw_deg))
             for arm_id, m in cfg.mounts.items()
         }
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the guard is currently allowed to clamp a step."""
+        return self._enabled and self.available
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        want = bool(value)
+        if want and not self.available:
+            raise ValueError(
+                "collision guard cannot be enabled: no mount geometry was "
+                "configured for every arm (see collision.mounts in the config)"
+            )
+        self._enabled = want
 
     # ---- clearance -------------------------------------------------------
 
@@ -248,6 +227,10 @@ class CollisionGuard:
                     want: dict[str, dict[str, float]]) -> GuardResult:
         """Bound one commit-loop step. Never blocks escape.
 
+        With `enabled` False this measures and reports but never clamps: the
+        wanted step goes through with `alpha=1.0, limited=False` and the
+        clearance read-out is still the real one. See the class docstring.
+
         Three regimes, in order:
           1. The wanted pose clears everything → pass through.
           2. It doesn't, but it is no worse than where the arms already are →
@@ -260,6 +243,9 @@ class CollisionGuard:
              already inside it.
         """
         want_cl = self.clearance(want)
+        if not self.enabled:
+            return GuardResult(poses=want, alpha=1.0, limited=False,
+                               clearance=want_cl)
         if want_cl.slack >= 0.0:
             return GuardResult(poses=want, alpha=1.0, limited=False,
                                clearance=want_cl)

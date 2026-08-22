@@ -36,6 +36,7 @@ from .recorder import DatasetRecorder
 from .sim.scene import SceneController
 from .sim.task import InsertionMonitor, TaskMonitor
 from .sim.teleop import SimLeaderTeleop
+from .vr_teleop import relay as vr_relay
 
 logger = logging.getLogger(__name__)
 
@@ -49,20 +50,31 @@ cameras: CameraManager | None = None   # constructed in lifespan, after arms.con
 ros = RosBridge(cfg.ros)
 presets = PresetStore()
 teleop = TeleopSession(arms)
-# The bimanual collision guard needs a mount pose for every enabled arm; an
-# arm it has no geometry for would silently pass every check, which is the
-# fail-open a guard must not have. Missing mounts therefore disable it loudly.
-_collision_guard = None
-if cfg.collision.enabled:
-    _unmounted = [a.id for a in cfg.arms
-                  if a.enabled and a.id not in cfg.collision.mounts]
-    if _unmounted:
-        logger.warning(
-            "collision guard DISABLED: no mounts configured for arms %s "
-            "(add them under collision.mounts in config.yaml)", _unmounted)
-    else:
-        from .collision import CollisionGuard
-        _collision_guard = CollisionGuard(cfg.collision)
+# The collision guard needs a mount pose for every enabled arm; an arm it has
+# no geometry for would silently pass every check, which is the fail-open a
+# guard must not have. Missing mounts therefore make it UNAVAILABLE — a state
+# no runtime toggle can leave.
+#
+# It is constructed even when `collision.enabled` is false, which it was not
+# before. Two things follow, and both are the point of the change: the guard
+# can be switched on and off mid-session from the headset or the panel
+# (`POST /teleop/human/collision`), and a guard that is switched OFF still
+# publishes live clearance. An operator who turned it off because it bit too
+# early — the common complaint, and the reason the switch exists — should
+# still be able to see on the HUD how close the arm actually is.
+from .collision import CollisionGuard
+
+_unmounted = [a.id for a in cfg.arms
+              if a.enabled and a.id not in cfg.collision.mounts]
+if _unmounted:
+    logger.warning(
+        "collision guard UNAVAILABLE: no mounts configured for arms %s "
+        "(add them under collision.mounts in config.yaml)", _unmounted)
+_collision_guard = CollisionGuard(cfg.collision, available=not _unmounted)
+if not _collision_guard.enabled:
+    logger.warning("collision guard starts DISABLED (config collision.enabled="
+                   "%s, available=%s)", cfg.collision.enabled,
+                   _collision_guard.available)
 human_teleop = HumanTeleopSession(arms, collision_guard=_collision_guard)
 sim_teleop = SimLeaderTeleop(arms)
 # Bilateral session lock between every pair — any one running blocks the others.
@@ -123,8 +135,12 @@ class TeleopStartBody(BaseModel):
 
 
 class HumanTeleopStartBody(BaseModel):
-    left_arm: str
-    right_arm: str
+    # Either side may be null for a SINGLE-ARM session: that hand's
+    # controller is ignored and nothing is ever written to that arm. This is
+    # what a first hardware bring-up wants, and what a rig with one working
+    # servo board is left with.
+    left_arm: str | None = None
+    right_arm: str | None = None
     swap: bool = False
     hz: float = 60.0
     # Typed, not a bare str: the source selected here is the session's sole
@@ -545,8 +561,14 @@ async def post_human_teleop_start(body: HumanTeleopStartBody):
             detail=("mouth clutch has no valid calibration: capture talk/open "
                     "and ensure their separation is at least 0.25"),
         )
-    _arm_or_404(body.left_arm)
-    _arm_or_404(body.right_arm)
+    if not body.left_arm and not body.right_arm:
+        raise HTTPException(
+            status_code=400,
+            detail="at least one of left_arm/right_arm is required",
+        )
+    for arm_id in (body.left_arm, body.right_arm):
+        if arm_id:
+            _arm_or_404(arm_id)
     try:
         human_teleop.start(
             left_arm=body.left_arm, right_arm=body.right_arm,
@@ -577,6 +599,48 @@ async def post_human_teleop_home():
         raise HTTPException(status_code=409, detail="no teleop session running")
     sides = human_teleop.request_home()
     return {"ok": True, "sides": sides}
+
+
+class CollisionEnableBody(BaseModel):
+    enabled: bool
+
+
+@app.post("/teleop/human/collision")
+async def post_human_teleop_collision(body: CollisionEnableBody):
+    """Switch the collision/workspace guard on or off, live.
+
+    A runtime switch rather than config-only, because the decision is made
+    with the arm in front of you: the guard's margins are sized for a mount
+    geometry that is still a placeholder on this rig, and an operator who
+    finds it clamping while they are plainly nowhere near anything needs to
+    be able to turn it off and keep working — not stop, edit YAML and
+    restart. Switching it off leaves the measurement running, so
+    `status().collision.slack_m` keeps telling them how close they really
+    are.
+
+    What this does NOT switch off: the teleop's own workspace floor (see
+    `vr_teleop.config.QuestTeleopConfig.min_tip_z`), the per-joint limits,
+    the rate caps or the motion envelope. Those are separate on purpose —
+    turning off the bimanual guard should not also remove the bench.
+    """
+    if _collision_guard is None:
+        raise HTTPException(status_code=409, detail="no collision guard wired")
+    try:
+        _collision_guard.enabled = body.enabled
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    logger.warning("collision guard %s by operator request",
+                   "ENABLED" if _collision_guard.enabled else "DISABLED")
+    # Read back off the GUARD, not off the session status. The session only
+    # publishes a clearance read-out once its loop has run a tick, so
+    # answering from there would report `null` to an operator who flipped the
+    # switch before starting a session — which reads as "the toggle did
+    # nothing".
+    return {"ok": True, "collision": {
+        "enabled": _collision_guard.enabled,
+        "available": _collision_guard.available,
+        "margin_m": _collision_guard.cfg.margin_m,
+    }}
 
 
 @app.post("/teleop/human/swap")
@@ -939,15 +1003,24 @@ async def ws_vr_teleop_in(ws: WebSocket):
 
     A separate socket from the MediaPipe one, but only at the door: the frame
     is converted to the same `KeypointFrame` and handed to the same
-    `ingest_frame`. Two converters exist:
+    `ingest_frame`. THREE converters now exist, selected by `vr_mode` on the
+    frame, all stateful per CONNECTION (the clutch anchors live exactly as
+    long as the operator's socket) and so constructed here:
 
-      - position mode (default): clutch-relative hand tracking through IK on
-        the real chain — see vr_pose_mode.py for why angle copying cannot
-        feel natural on this kinematics. Stateful per CONNECTION (the anchors
-        live exactly as long as the operator's socket), hence constructed
-        here and not module-level.
-      - `vr_mode: "joints"`: the original angle-copying adapter
-        (vr_input.py), kept for comparison and for the body-angle purists.
+      - `"ik"` (DEFAULT): the ported stack in `vr_teleop/` — clutch-relative
+        6-DoF hand tracking with absorbing reach limits, into a decoupled
+        damped-least-squares solver. See `vr_teleop/__init__.py`.
+      - `"pose"`: the previous wrist-point mode (`vr_pose_mode.py`) — 3-DoF
+        position IK with the controller's pitch/roll passed through on fixed
+        gains. Kept selectable so a bench session that goes wrong has
+        somewhere to fall back to that is known to work.
+      - `"joints"`: the original angle-copying adapter (`vr_input.py`), kept
+        for comparison and for the body-angle purists.
+
+    The relay at `/vr/*` speaks the same schema and runs the same `"ik"`
+    converter; this route exists because the Next.js page already talks to
+    it, and keeping both means the new headset page and the old one can be
+    swapped at the bench rather than in a branch.
     """
     await ws.accept()
     from .vr_pose_mode import VRPoseMode
@@ -956,13 +1029,9 @@ async def ws_vr_teleop_in(ws: WebSocket):
     # without clamping (see vr_pose_mode's comment at the clamp site). Same
     # for the fingertip floor — a pitched-down hand otherwise sinks the tip
     # target under the bench and the guard freezes the whole step.
-    _floor = 0.02
-    _tip_floor = 0.005
-    if cfg.collision.table_z_m is not None:
-        _floor = cfg.collision.table_z_m + cfg.collision.wrist_min_m + 0.005
-        _tip_floor = cfg.collision.table_z_m + cfg.collision.tip_min_m + 0.005
-    pose_mode = VRPoseMode(human_teleop, arms, min_target_z=_floor,
-                           min_tip_z=_tip_floor)
+    pose_mode = VRPoseMode(human_teleop, arms, min_target_z=_wrist_floor_m(),
+                           min_tip_z=_tip_floor_m())
+    quest = _make_quest_teleoperator()
     try:
         while True:
             frame = await _receive_or_idle_timeout(ws)
@@ -973,10 +1042,13 @@ async def ws_vr_teleop_in(ws: WebSocket):
                 await ws.close()
                 return
             try:
-                if frame.get("vr_mode") == "joints":
+                mode = frame.get("vr_mode")
+                if mode == "joints":
                     kp = vr_frame_to_keypoint_frame(frame)
-                else:
+                elif mode == "pose":
                     kp = pose_mode.convert(frame)
+                else:
+                    kp = quest.convert(frame)
                 human_teleop.ingest_frame(kp)
             except Exception:
                 # Same rule as the MediaPipe socket: one malformed frame must
@@ -985,6 +1057,47 @@ async def ws_vr_teleop_in(ws: WebSocket):
     except WebSocketDisconnect:
         human_teleop.notify_ws_disconnected()
         return
+
+
+# ---- the ported VR teleop stack -----------------------------------------
+
+def _wrist_floor_m() -> float:
+    """Lowest wrist height the teleop may COMMAND, in the mount frame.
+
+    Derived from the collision config's bench geometry but deliberately not
+    gated on `collision.enabled`: this bounds the demand, and it has to keep
+    working when the guard is off, which is precisely when nothing else is
+    watching the bench. The slack keeps teleop demands inside the region the
+    guard passes without clamping.
+    """
+    if cfg.collision.table_z_m is None:
+        return 0.02
+    return cfg.collision.table_z_m + cfg.collision.wrist_min_m + 0.005
+
+
+def _tip_floor_m() -> float:
+    """Lowest fingertip height the teleop may command. See `_wrist_floor_m`."""
+    if cfg.collision.table_z_m is None:
+        return 0.005
+    return cfg.collision.table_z_m + cfg.collision.tip_min_m + 0.005
+
+
+def _make_quest_teleoperator():
+    """One `QuestTeleoperator` per connection — the clutch anchors are
+    connection state, exactly as long-lived as the operator's socket."""
+    from .vr_teleop import QuestTeleopConfig, QuestTeleoperator
+    return QuestTeleoperator(
+        human_teleop, arms,
+        QuestTeleopConfig(min_tip_z=_tip_floor_m(),
+                          min_wrist_z=_wrist_floor_m()),
+    )
+
+
+app.include_router(vr_relay.build_router(
+    make_teleoperator=_make_quest_teleoperator,
+    ingest=human_teleop.ingest_frame,
+    on_disconnect=human_teleop.notify_ws_disconnected,
+))
 
 
 def run() -> None:

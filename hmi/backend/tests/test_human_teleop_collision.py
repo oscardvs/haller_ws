@@ -96,7 +96,11 @@ def test_no_guard_reports_disabled_and_writes_unfiltered():
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right", swap=False)
     try:
-        assert sess.status()["collision"] == {"enabled": False}
+        # `available` joined `enabled` when the guard gained a runtime
+        # switch: a UI needs to tell "off, flip it back on" apart from "this
+        # rig has no mount geometry, the switch does nothing".
+        assert sess.status()["collision"] == {"enabled": False,
+                                              "available": False}
         sess.ingest_frame(_kp_frame(dead_man=True))
         assert _wait_until(lambda: arms["left"].send_goal.called)
         sent = arms["left"].send_goal.call_args[0][0]

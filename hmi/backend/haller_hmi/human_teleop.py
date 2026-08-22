@@ -201,10 +201,22 @@ class HumanState(str, enum.Enum):
 
 @dataclass
 class _SessionConfig:
-    left_arm: str
-    right_arm: str
+    #: Arm id driven by each hand, or None for a side this session has no
+    #: arm for. Exactly one side may be None — a session with neither would
+    #: be a loop that writes to nothing, which is a bug worth refusing at
+    #: start() rather than discovering on the bench.
+    left_arm: str | None
+    right_arm: str | None
     swap: bool = False
     hz: float = 60.0
+
+    def arm_for(self, side: str) -> str | None:
+        return self.left_arm if side == "left" else self.right_arm
+
+    @property
+    def sides(self) -> tuple[str, ...]:
+        """The sides this session actually drives."""
+        return tuple(s for s in ("left", "right") if self.arm_for(s))
 
 
 @dataclass
@@ -492,11 +504,25 @@ class HumanTeleopSession:
             }
 
     def _collision_status(self) -> dict:
-        """Caller holds the lock."""
+        """Caller holds the lock.
+
+        `enabled` is whether the guard may clamp a step; `available` is
+        whether it *could* be enabled at all (it cannot without mount
+        geometry for every arm). The two are reported separately because a
+        UI that shows one switch for both would offer the operator a toggle
+        that silently does nothing on a rig with no mounts configured.
+
+        `slack_m` and `worst` are published either way — a disabled guard
+        still measures, so the operator can watch the clearance they chose
+        to stop enforcing.
+        """
         if self._collision is None:
-            return {"enabled": False}
-        out = {"enabled": True,
-               "margin_m": float(self._collision.cfg.margin_m)}
+            return {"enabled": False, "available": False}
+        out = {
+            "enabled": bool(getattr(self._collision, "enabled", True)),
+            "available": bool(getattr(self._collision, "available", True)),
+            "margin_m": float(self._collision.cfg.margin_m),
+        }
         if self._collision_last is not None:
             out.update(self._collision_last)
         return out
@@ -595,39 +621,52 @@ class HumanTeleopSession:
         )
         return {"upper": list(upper), "fore": list(fore)}
 
-    def start(self, *, left_arm: str, right_arm: str, swap: bool, hz: float = 60.0,
+    def start(self, *, left_arm: str | None, right_arm: str | None,
+              swap: bool, hz: float = 60.0,
               clutch_source: str = "spacebar") -> None:
+        """Begin a session on one or both arms.
+
+        Passing None for a side starts a SINGLE-ARM session: that hand's
+        controller is ignored, its authority stays HELD, and nothing is ever
+        written to it. This is the shape a first hardware bring-up wants —
+        one arm on the bench, one hand on the grip, half as much that can go
+        wrong — and it is also what a rig with one working servo board is
+        left with.
+        """
         with self._lock:
             for _peer in self._peers:
                 if getattr(_peer, "status", lambda: {})().get("running"):
                     raise RuntimeError("leader/follower teleop is running; stop it first")
             if self.running:
                 raise RuntimeError("human teleop already running; stop it first")
-            if left_arm == right_arm:
+            if not left_arm and not right_arm:
+                raise ValueError("at least one of left_arm/right_arm is required")
+            if left_arm and right_arm and left_arm == right_arm:
                 raise ValueError("left_arm and right_arm must be different")
             if clutch_source not in CLUTCH_SOURCES:
                 raise ValueError(
                     f"clutch_source must be one of {CLUTCH_SOURCES}, got {clutch_source!r}"
                 )
-            left = self._arms[left_arm]
-            right = self._arms[right_arm]
+            arm_ids = {side: arm_id
+                       for side, arm_id in (("left", left_arm),
+                                            ("right", right_arm))
+                       if arm_id}
+            handles = {side: self._arms[arm_id]
+                       for side, arm_id in arm_ids.items()}
             # See TeleopSession.start's identical guard (teleop.py): once
             # this session sets both arms to Mode.MANUAL below, an in-flight
             # discrete-move ramp is no longer visible to the mode guard, so
             # it must be refused explicitly here rather than trusted to
             # self-cancel. Mirrors move_to's refusal when a teleop session
             # already owns the arm — see motion.py and A6 in the plan.
-            if left.executor.is_running:
-                raise RuntimeError(
-                    f"arm {left_arm!r} has a move in progress; wait for it "
-                    "to finish or cancel it before starting teleop"
-                )
-            if right.executor.is_running:
-                raise RuntimeError(
-                    f"arm {right_arm!r} has a move in progress; wait for it "
-                    "to finish or cancel it before starting teleop"
-                )
-            for a in (left, right):
+            for side, arm_id in arm_ids.items():
+                handle = handles[side]
+                if handle.executor.is_running:
+                    raise RuntimeError(
+                        f"arm {arm_id!r} has a move in progress; wait for it "
+                        "to finish or cancel it before starting teleop"
+                    )
+            for a in handles.values():
                 if not a.torque_enabled:
                     a.enable_torque()
                 a.guard.set(Mode.MANUAL)
@@ -664,20 +703,26 @@ class HumanTeleopSession:
             self._reset_clutch_state(cast(ClutchSource, clutch_source))
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
-            # Reset smoothing state to current observed positions where available.
-            self._committed_left = self._observed_or_zero(left)
-            self._committed_right = self._observed_or_zero(right)
+            # Reset smoothing state to current observed positions where
+            # available. A side with no arm holds an empty pose: every
+            # downstream loop is keyed on the joints present in it, so an
+            # absent side simply contributes nothing rather than needing a
+            # branch at each use.
+            self._committed_left = (self._observed_or_zero(handles["left"])
+                                    if "left" in handles else {})
+            self._committed_right = (self._observed_or_zero(handles["right"])
+                                     if "right" in handles else {})
             self._steps_left = self._held_steps(self._committed_left)
             self._steps_right = self._held_steps(self._committed_right)
         self._stop_flag.clear()
         self._thread = threading.Thread(
             target=self._loop,
-            name=f"haller-hmi-human-teleop-{left_arm}-{right_arm}",
+            name=f"haller-hmi-human-teleop-{left_arm or '-'}-{right_arm or '-'}",
             daemon=True,
         )
         self._thread.start()
         logger.info("human teleop started: left=%s right=%s swap=%s @ %.1f Hz",
-                    left_arm, right_arm, swap, effective_hz)
+                    left_arm or "-", right_arm or "-", swap, effective_hz)
 
     def request_home(self) -> list[str]:
         """Slew every non-driving side to home (0° joints, gripper open),
@@ -698,7 +743,7 @@ class HumanTeleopSession:
         with self._lock:
             if not self.running:
                 return []
-            sides = [s for s in ("left", "right")
+            sides = [s for s in self._cfg.sides
                      if self._acq[s].authority is not SideAuthority.DRIVING]
             for s in sides:
                 self._home_req[s] = True
@@ -724,8 +769,8 @@ class HumanTeleopSession:
         self._thread = None
         # Restore arms to MANUAL with torque on.
         if cfg is not None:
-            for arm_id in (cfg.left_arm, cfg.right_arm):
-                handle = self._arms[arm_id]
+            for side in cfg.sides:
+                handle = self._arms[cfg.arm_for(side)]
                 if not handle.torque_enabled:
                     handle.enable_torque()
                 handle.guard.set(Mode.MANUAL)
@@ -901,6 +946,13 @@ class HumanTeleopSession:
         """
         for side in ("left", "right"):
             acq = self._acq[side]
+            # A side this session has no arm for can never acquire. It is
+            # not "lost" — nothing was ever expected of it — so it reports a
+            # reason of its own rather than borrowing the tracking-loss one
+            # and making the operator hunt for a hand that is not missing.
+            if self._cfg is not None and self._cfg.arm_for(side) is None:
+                acq.release("no_arm")
+                continue
             target = self._target_left if side == "left" else self._target_right
             # `target is None` also covers a side below the confidence floor:
             # compute_joint_goal refuses to emit a goal there, so the
@@ -925,7 +977,10 @@ class HumanTeleopSession:
                 acq.matched_since_perf = None
                 self._reseed_pending[side] = True
 
-            limits = self._handle(side).joint_limits_deg
+            handle = self._handle(side)
+            if handle is None:      # guarded above; kept for the type checker
+                continue
+            limits = handle.joint_limits_deg
             committed = (self._committed_left if side == "left"
                          else self._committed_right)
             desired = self._target_deg(target, limits)
@@ -982,10 +1037,13 @@ class HumanTeleopSession:
             self._state = HumanState.ARMED
 
     def _handle(self, side: str):
-        """Caller holds the lock. Attribute reads only — no bus traffic."""
+        """This side's arm handle, or None if the session has no arm for it.
+
+        Caller holds the lock. Attribute reads only — no bus traffic.
+        """
         assert self._cfg is not None
-        return self._arms[self._cfg.left_arm if side == "left"
-                          else self._cfg.right_arm]
+        arm_id = self._cfg.arm_for(side)
+        return self._arms[arm_id] if arm_id else None
 
     def _ramp_cap(self, side: str, period: float, now: float) -> float:
         """Per-tick rate cap for one side, in degrees.
@@ -1010,10 +1068,29 @@ class HumanTeleopSession:
             return {"left": self._target_left, "right": self._target_right}
 
     def notify_ws_disconnected(self) -> None:
+        """Start the grace window after which a session with no operator on
+        the other end stops itself.
+
+        STARTS it — it does not restart one that is already running. That
+        distinction is load-bearing now that more than one socket can call
+        this: the VR relay hands the same session frames, and every idle
+        client it drops calls in here too. Re-stamping the clock on each of
+        those turned the window into something a second page could hold open
+        indefinitely, so a session whose driving headset had genuinely died
+        never stopped — measured, with one stray browser tab sitting on the
+        relay page reconnecting every three seconds.
+
+        What actually clears the window is a FRAME arriving (`ingest_frame`),
+        which is the only evidence that an operator is still there. So the
+        window means "time since the last frame", not "time since some socket
+        closed", and no number of unrelated sockets opening and closing can
+        extend it.
+        """
         with self._lock:
             if not self.running:
                 return
-            self._ws_disconnected_at_perf = time.perf_counter()
+            if self._ws_disconnected_at_perf is None:
+                self._ws_disconnected_at_perf = time.perf_counter()
 
     @staticmethod
     def _observed_or_zero(handle) -> dict[str, float]:
@@ -1135,8 +1212,11 @@ class HumanTeleopSession:
         with self._lock:
             cfg = self._cfg
         assert cfg is not None
-        left = self._arms[cfg.left_arm]
-        right = self._arms[cfg.right_arm]
+        # None for a side this session has no arm for. Every use below is
+        # guarded; a single-arm session runs the same loop with one half of
+        # it inert rather than a second loop that could drift from this one.
+        left = self._arms[cfg.left_arm] if cfg.left_arm else None
+        right = self._arms[cfg.right_arm] if cfg.right_arm else None
         period = 1.0 / max(1.0, cfg.hz)
         # Smoothing time constant ≈ 100 ms (frequency-independent).
         tau_s = 0.100
@@ -1150,6 +1230,8 @@ class HumanTeleopSession:
                 # traffic on real hardware, and status() must not block on it.
                 # Edge-triggered, so a steady session pays nothing.
                 for side, handle in (("left", left), ("right", right)):
+                    if handle is None:
+                        continue
                     with self._lock:
                         pending = self._reseed_pending[side]
                     if not pending:
@@ -1202,20 +1284,22 @@ class HumanTeleopSession:
                         self._home_req["right"] = False
                     target_left = (self._target_left if driving_left
                                    else self._home_target(left)
-                                   if self._home_req["left"] else None)
+                                   if self._home_req["left"] and left else None)
                     target_right = (self._target_right if driving_right
                                     else self._home_target(right)
-                                    if self._home_req["right"] else None)
+                                    if self._home_req["right"] and right else None)
                     cap_left = self._ramp_cap("left", period, now)
                     cap_right = self._ramp_cap("right", period, now)
                     prev_left = dict(self._committed_left)
                     prev_right = dict(self._committed_right)
                 steps_left = self._smooth_step(
-                    prev_left, target_left, left.joint_limits_deg, alpha,
+                    prev_left, target_left,
+                    left.joint_limits_deg if left else {}, alpha,
                     cap=cap_left,
                 )
                 steps_right = self._smooth_step(
-                    prev_right, target_right, right.joint_limits_deg, alpha,
+                    prev_right, target_right,
+                    right.joint_limits_deg if right else {}, alpha,
                     cap=cap_right,
                 )
                 committed_left = {j: s.committed for j, s in steps_left.items()}
@@ -1228,19 +1312,25 @@ class HumanTeleopSession:
                 # can sanity-check the mount geometry against the real arms
                 # BEFORE the first engagement.
                 collision_last: dict | None = None
-                if self._collision is not None:
-                    pair_prev = {cfg.left_arm: prev_left,
-                                 cfg.right_arm: prev_right}
-                    pair_want = {cfg.left_arm: committed_left,
-                                 cfg.right_arm: committed_right}
+                # Only the sides this session actually drives go to the
+                # guard. A single-arm session still gets the self-collision
+                # pairs and the bench floors — which is most of what bites on
+                # one arm anyway — while the inter-arm checks simply have no
+                # second arm to find.
+                by_side = {"left": (cfg.left_arm, prev_left, committed_left,
+                                    steps_left),
+                           "right": (cfg.right_arm, prev_right,
+                                     committed_right, steps_right)}
+                present = {s: v for s, v in by_side.items() if v[0]}
+                if self._collision is not None and present:
+                    pair_prev = {arm_id: prev
+                                 for arm_id, prev, _, _ in present.values()}
+                    pair_want = {arm_id: want
+                                 for arm_id, _, want, _ in present.values()}
                     if driving_left or driving_right:
                         result = self._collision.filter_step(pair_prev, pair_want)
-                        for steps, committed, filtered in (
-                            (steps_left, committed_left,
-                             result.poses[cfg.left_arm]),
-                            (steps_right, committed_right,
-                             result.poses[cfg.right_arm]),
-                        ):
+                        for arm_id, _, committed, steps in present.values():
+                            filtered = result.poses[arm_id]
                             for joint, value in filtered.items():
                                 if abs(value - committed.get(joint, value)) > 1e-9:
                                     st = steps[joint]
@@ -1248,8 +1338,10 @@ class HumanTeleopSession:
                                         target=st.target, committed=value,
                                         reason="collision",
                                     )
-                        committed_left = result.poses[cfg.left_arm]
-                        committed_right = result.poses[cfg.right_arm]
+                        if cfg.left_arm:
+                            committed_left = result.poses[cfg.left_arm]
+                        if cfg.right_arm:
+                            committed_right = result.poses[cfg.right_arm]
                         collision_last = {
                             "limited": result.limited,
                             "alpha": result.alpha,
@@ -1289,9 +1381,11 @@ class HumanTeleopSession:
                 with self._lock:
                     homing_left = self._home_req["left"]
                     homing_right = self._home_req["right"]
-                if driving_left or homing_left:
+                write_left = left is not None and (driving_left or homing_left)
+                write_right = right is not None and (driving_right or homing_right)
+                if write_left:
                     sent_left = self._commit(left, self._committed_left)
-                if driving_right or homing_right:
+                if write_right:
                     sent_right = self._commit(right, self._committed_right)
                 # `_commit` reports what send_goal ACTUALLY sent, which can be
                 # less than `_committed_left`/`_right` asked for (see
@@ -1305,9 +1399,9 @@ class HumanTeleopSession:
                 # above stay outside any lock: real hardware traffic, or a
                 # locked sim step, that status() must not block on.
                 with self._lock:
-                    if driving_left or homing_left:
+                    if write_left:
                         self._committed_left = {**self._committed_left, **sent_left}
-                    if driving_right or homing_right:
+                    if write_right:
                         self._committed_right = {**self._committed_right, **sent_right}
                 # WS disconnect grace window: if too much time has passed, auto-stop.
                 with self._lock:

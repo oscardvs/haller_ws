@@ -103,10 +103,19 @@ export const api = {
     postJson<{ ok: true } & TeleopStatus>("/teleop/stop", {}),
   humanTeleopStatus: () =>
     getJson<HumanTeleopStatus>("/teleop/human"),
+  /** Start a session. Either arm may be null for a SINGLE-ARM session: that
+   *  hand's controller is ignored and nothing is ever written to that side.
+   *  At least one must be given. */
   humanTeleopStart: (body: {
-    left_arm: string; right_arm: string; swap: boolean;
+    left_arm: string | null; right_arm: string | null; swap: boolean;
     hz?: number; clutch_source?: "spacebar" | "mouth" | "vr_grip";
   }) => postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/start", body),
+  /** Switch the collision/workspace guard on or off, live. Off still
+   *  MEASURES — `collision.slack_m` keeps updating — it just stops holding
+   *  steps back. 409 when the rig has no mount geometry to guard with. */
+  humanTeleopCollision: (enabled: boolean) =>
+    postJson<{ ok: true; collision: CollisionStatus }>(
+      "/teleop/human/collision", { enabled }),
   humanTeleopHome: () =>
     postJson<{ ok: true; sides: ("left" | "right")[] }>("/teleop/human/home", {}),
   humanTeleopStop: () =>
@@ -276,7 +285,14 @@ export type HumanTeleopStatus = {
 };
 
 export type CollisionStatus = {
+  /** Whether the guard is currently allowed to clamp a step. */
   enabled: boolean;
+  /** Whether it COULD be enabled at all. False when the rig has no mount
+   *  geometry for every arm, which is a one-way state: a guard that has no
+   *  geometry for an arm would pass every check for it. Shown separately so
+   *  a UI can tell "off, flip it back on" from "the switch does nothing
+   *  here". Absent on backends that predate the runtime switch. */
+  available?: boolean;
   /** Gap left before the guard clamps, metres. Negative while inside the
    *  margin (escape-only regime — the guard blocks approach, never retreat). */
   slack_m?: number;

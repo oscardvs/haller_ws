@@ -647,3 +647,148 @@ def test_read_effort_norm_returns_empty_rather_than_raising_when_unreadable():
 
     handle.robot = None
     assert handle.read_effort_norm() == {}
+
+
+# --- Goal_Position parking (the 2026-08-01 slew) -----------------------------
+#
+# lerobot's configure() re-enables torque on its way out of
+# bus.torque_disabled(), against goal registers nobody has set — 0 on a cold
+# power-up. Measured on the bench 2026-08-21 before the guard existed: goal 0
+# vs present 3715 (elbow_flex) and 3913 (wrist_roll), i.e. ~327 deg and ~344
+# deg of unplanned travel the instant connect() finished.
+
+def _fake_robot_with_bus(present: dict[str, int]):
+    robot = MagicMock()
+    robot.id = "haller_leader"
+    robot.bus.sync_read.return_value = dict(present)
+    return robot
+
+
+def test_park_goal_on_present_writes_raw_present_into_goal():
+    from haller_hmi.arm import _park_goal_on_present
+
+    present = {"shoulder_pan": 642, "shoulder_lift": 1095, "elbow_flex": 3715,
+               "wrist_flex": 1, "wrist_roll": 3913, "gripper": 3312}
+    robot = _fake_robot_with_bus(present)
+
+    _park_goal_on_present(robot)
+
+    robot.bus.sync_read.assert_called_once_with("Present_Position", normalize=False)
+    robot.bus.sync_write.assert_called_once_with("Goal_Position", present, normalize=False)
+
+
+def test_park_goal_on_present_is_raw_not_normalized():
+    """Raw both ways, or the calibration offsets make present != goal."""
+    from haller_hmi.arm import _park_goal_on_present
+
+    robot = _fake_robot_with_bus({"shoulder_pan": 642})
+    _park_goal_on_present(robot)
+
+    assert robot.bus.sync_read.call_args.kwargs["normalize"] is False
+    assert robot.bus.sync_write.call_args.kwargs["normalize"] is False
+
+
+def test_configure_parks_goals_before_lerobot_configure(monkeypatch):
+    """Ordering is the whole guard: park first, torque-enable second."""
+    import haller_hmi.arm as arm_mod
+
+    calls: list[str] = []
+    robot = _fake_robot_with_bus({"shoulder_pan": 642})
+    robot.bus.sync_write.side_effect = lambda *a, **k: calls.append("park")
+    monkeypatch.setattr(arm_mod.SO101Follower, "configure",
+                        lambda self: calls.append("configure"))
+
+    arm_mod._configure_holding_position(robot)
+
+    assert calls == ["park", "configure"]
+
+
+def test_connect_substitutes_the_parking_configure(monkeypatch):
+    """connect() must install the wrapper, not call lerobot's configure bare."""
+    import haller_hmi.arm as arm_mod
+
+    robot = _fake_robot_with_bus({"shoulder_pan": 642})
+    robot.calibration = {"shoulder_pan": MagicMock(range_min=0, range_max=4095)}
+    robot.bus.motors = {"shoulder_pan": MagicMock(id=1)}
+    monkeypatch.setattr(arm_mod, "SO101Follower", lambda cfg: robot)
+
+    handle = ArmHandle(ArmConfig(id="left", model="so101_follower",
+                                 port="/dev/null", calibration_id="haller_leader"))
+    handle.connect()
+
+    # robot.configure was replaced with the parking wrapper before connect().
+    assert robot.configure.func is arm_mod._configure_holding_position
+
+
+# --- torque release on disconnect --------------------------------------------
+#
+# Bench, 2026-08-21: shoulder_lift (id 2) latched an overload alarm while
+# holding the arm cantilevered, then refused Torque_Enable=0. lerobot's bulk
+# disable_torque() raised on it, disconnect_all() unwound, and elbow_flex,
+# wrist_flex, wrist_roll and gripper were all still holding torque after the
+# backend process had exited.
+
+def _handle_with_motors(monkeypatch, refuse: set[str] = frozenset()):
+    robot = MagicMock()
+    robot.bus.motors = {n: MagicMock(id=i) for i, n in enumerate(
+        ["shoulder_pan", "shoulder_lift", "elbow_flex",
+         "wrist_flex", "wrist_roll", "gripper"], start=1)}
+    written: list[str] = []
+
+    def _write(reg, joint, value, **kw):
+        if reg == "Torque_Enable" and value == 0:
+            if joint in refuse:
+                raise RuntimeError(
+                    f"Failed to write 'Torque_Enable' on id_={joint} with '0' "
+                    "after 6 tries. [RxPacketError] Overload error!")
+            written.append(joint)
+    robot.bus.write.side_effect = _write
+
+    handle = ArmHandle(ArmConfig(id="left", model="so101_follower",
+                                 port="/dev/null", calibration_id="haller_leader"))
+    handle.robot = robot
+    return handle, robot, written
+
+
+def test_one_alarmed_servo_does_not_strand_the_others(monkeypatch):
+    """The exact bench failure: id 2 refuses, 3-6 must still be released."""
+    handle, robot, written = _handle_with_motors(monkeypatch, refuse={"shoulder_lift"})
+
+    handle.disconnect()
+
+    assert written == ["shoulder_pan", "elbow_flex",
+                       "wrist_flex", "wrist_roll", "gripper"]
+    assert robot.disconnect.called
+
+
+def test_disconnect_does_not_let_lerobot_repeat_the_bulk_walk(monkeypatch):
+    """Re-running lerobot's own disable_torque would raise again and escape."""
+    handle, robot, _ = _handle_with_motors(monkeypatch, refuse={"shoulder_lift"})
+
+    handle.disconnect()
+
+    assert robot.config.disable_torque_on_disconnect is False
+
+
+def test_every_motor_released_when_none_refuse(monkeypatch):
+    handle, robot, written = _handle_with_motors(monkeypatch)
+
+    handle.disconnect()
+
+    assert written == list(robot.bus.motors)
+    assert handle.robot is None
+    assert handle.torque_enabled is False
+
+
+def test_disconnect_all_continues_past_a_failing_arm(monkeypatch):
+    """A bimanual rig must not leave arm B stiff because arm A threw."""
+    from haller_hmi.arm import ArmManager
+
+    mgr = ArmManager([])
+    bad, good = MagicMock(), MagicMock()
+    bad.disconnect.side_effect = RuntimeError("Overload error!")
+    mgr._handles = {"left": bad, "right": good}
+
+    mgr.disconnect_all()
+
+    assert good.disconnect.called

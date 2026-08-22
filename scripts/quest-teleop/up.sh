@@ -19,6 +19,13 @@
 #                                         # plugged into this machine
 #                                         # (config.desktop-real.yaml, or
 #                                         # $HALLER_HMI_CONFIG).
+#   scripts/quest-teleop/up.sh --solo     # ONE real arm on this desktop
+#                                         # (config.solo-real.yaml). The
+#                                         # first-hardware-run shape: one arm,
+#                                         # one hand, collision guard off by
+#                                         # default (flip it live from the VR
+#                                         # page's Safety card). Implies
+#                                         # --local.
 #   scripts/quest-teleop/up.sh --tailscale  # serve the SAME single origin on
 #                                         # the tailnet instead of the LAN.
 #                                         # Composes with the others, e.g.
@@ -51,6 +58,7 @@ set -eo pipefail
 
 SIM=0
 LOCAL=0
+SOLO=0
 TAILSCALE=0
 SIM_CFG="config.bimanual-sim.yaml"
 # A loop, not the old if/elif on $1: --tailscale picks the ORIGIN and the
@@ -65,10 +73,11 @@ while [ $# -gt 0 ]; do
         --sim)       SIM=1 ;;
         --insertion) SIM=1; SIM_CFG="config.bimanual-insertion.yaml" ;;
         --local)     LOCAL=1 ;;
+        --solo)      LOCAL=1; SOLO=1 ;;
         --tailscale) TAILSCALE=1 ;;
         *)
             printf 'up.sh: unknown option %s\n' "$1" >&2
-            printf 'usage: up.sh [--sim|--insertion|--local] [--tailscale]\n' >&2
+            printf 'usage: up.sh [--sim|--insertion|--local|--solo] [--tailscale]\n' >&2
             exit 2
             ;;
     esac
@@ -182,6 +191,11 @@ elif [ "$SIM" = 1 ] || [ "$LOCAL" = 1 ]; then
     if [ "$SIM" = 1 ]; then
         BACKEND_CFG="$SIM_CFG"
         say "starting SIM backend on :$BACKEND_PORT ($BACKEND_CFG — MuJoCo bimanual, no hardware)"
+    elif [ "$SOLO" = 1 ]; then
+        BACKEND_CFG="${HALLER_HMI_CONFIG:-config.solo-real.yaml}"
+        say "starting SOLO backend on :$BACKEND_PORT ($BACKEND_CFG — ONE real arm, no Jetson)"
+        say "  collision guard starts OFF in this config; the workspace floor,"
+        say "  joint limits, rate caps and motion envelope all stay on."
     else
         BACKEND_CFG="${HALLER_HMI_CONFIG:-config.desktop-real.yaml}"
         say "starting LOCAL backend on :$BACKEND_PORT ($BACKEND_CFG — real arms, no Jetson)"
@@ -366,6 +380,8 @@ curl -ksm 4 "$ORIGIN/teleop/vr" -o /dev/null || ok=0
 if [ "$ok" = 1 ]; then
     if [ "$SIM" = 1 ]; then
         say "READY (SIM — MuJoCo arms, nothing physical can move)."
+    elif [ "$SOLO" = 1 ]; then
+        say "READY (ONE REAL ARM on this desktop — no Jetson)."
     elif [ "$LOCAL" = 1 ]; then
         say "READY (REAL ARMS on this desktop — no Jetson)."
     else
@@ -373,7 +389,9 @@ if [ "$ok" = 1 ]; then
     fi
     say "In the Quest browser open:"
     say ""
-    say "    $ORIGIN/teleop/vr"
+    say "    $ORIGIN/teleop/vr          (the Next.js cockpit page)"
+    say "    $ORIGIN/api/vr/            (the ported relay page — settings +"
+    say "                                single-arm start + guard toggle)"
     say ""
     if [ "$TAILSCALE" = 1 ]; then
         say "(over the tailnet, with a real cert — no interstitial). The headset"
