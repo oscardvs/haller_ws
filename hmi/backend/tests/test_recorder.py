@@ -641,17 +641,28 @@ def test_scoring_block_carries_the_predicate_and_the_exact_thresholds():
 # land here. Otherwise the take keeps appending action == measured frames
 # while the arms sag torque-off, and nothing marks where it went wrong.
 
+class _FakeDatasetMeta:
+    """`meta.total_episodes` is the index the NEXT episode will take, and
+    `save_episode` advances it — modelled because `_finish_episode` reads it to
+    stamp the session log, exactly as it does against a real dataset."""
+
+    def __init__(self):
+        self.total_episodes = 0
+
+
 class _FakeDataset:
     def __init__(self):
         self.saved = 0
         self.cleared = 0
         self.frames: list[dict] = []
+        self.meta = _FakeDatasetMeta()
 
     def add_frame(self, frame):
         self.frames.append(frame)
 
     def save_episode(self):
         self.saved += 1
+        self.meta.total_episodes += 1
 
     def clear_episode_buffer(self, delete_images=True):
         self.cleared += 1
@@ -1499,3 +1510,85 @@ async def test_delete_last_across_sessions_pops_the_right_take(tmp_path):
     ds = LeRobotDataset(repo, root=root)
     assert ds.meta.total_episodes == 2
     assert len(ds) == 9
+
+
+# ---- the session episode log ---------------------------------------------
+#
+# `meta/episodes/` lags reality while a dataset is open (lerobot buffers ten
+# episodes in RAM, and the file it eventually writes has no footer until
+# finalize). The recorder therefore remembers what it saved, and the listing
+# route overlays it. The log must vouch for saved takes and ONLY saved takes.
+
+async def test_the_session_log_records_each_saved_take(tmp_path):
+    rec = _video_recorder(tmp_path / "ds")
+    await _drive_video(rec, "smoke/log", "take one", 4)
+    await _drive_video(rec, "smoke/log", "take two", 6)
+    assert rec.session_episodes("smoke/log") == [
+        {"repo_id": "smoke/log", "index": 0, "frames": 4, "task": "take one"},
+        {"repo_id": "smoke/log", "index": 1, "frames": 6, "task": "take two"},
+    ]
+    assert rec.session_episodes("smoke/other") == []
+    rec.close()
+
+
+def _video_frame(task):
+    frame = _real_frame(task)
+    frame["observation.images.top"] = np.zeros((48, 64, 3), dtype=np.uint8)
+    return frame
+
+
+async def test_a_discarded_take_is_never_logged(tmp_path):
+    """save=False is the operator throwing the take away — it must not appear
+    in a browser that claims to say what was collected."""
+    rec = _video_recorder(tmp_path / "ds")
+    await rec.start_episode("smoke/discard", "fumbled")
+    for _ in range(3):
+        rec._dataset.add_frame(_video_frame("fumbled"))
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=False)
+    assert rec.session_episodes("smoke/discard") == []
+    rec.close()
+
+
+async def test_a_take_too_short_to_save_is_never_logged(tmp_path):
+    """A sub-MIN_SAVEABLE_FRAMES take is discarded by _finish_episode rather
+    than written, so nothing may vouch for it either."""
+    rec = _video_recorder(tmp_path / "ds")
+    await rec.start_episode("smoke/short", "misclick")
+    rec._dataset.add_frame(_video_frame("misclick"))
+    rec._state.episode_frames += 1              # one frame; minimum is 2
+    await rec.stop_episode(save=True)
+    assert rec.session_episodes("smoke/short") == []
+    assert "discarded" in (rec.status()["last_error"] or "")
+    rec.close()
+
+
+async def test_deleting_a_take_removes_it_from_the_session_log(tmp_path):
+    rec = _video_recorder(tmp_path / "ds")
+    await _drive_video(rec, "smoke/logpop", "take one", 4)
+    await _drive_video(rec, "smoke/logpop", "take two", 5)
+    rec.delete_last_episode("smoke/logpop")
+    assert [e["index"] for e in rec.session_episodes("smoke/logpop")] == [0]
+
+
+async def test_the_log_keeps_two_repos_apart(tmp_path, monkeypatch):
+    """A new task draft in the cockpit is a new repo_id. Each repo keeps its
+    own takes, and the indices restart per repo exactly as the datasets do."""
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    rec = DatasetRecorder(
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=_FakeCameras([]))   # root=None, like the server
+    for repo, task in (("smoke/first", "a"), ("smoke/second", "b")):
+        await rec.start_episode(repo, task)
+        for _ in range(3):
+            rec._dataset.add_frame(_real_frame(task))
+            rec._state.episode_frames += 1
+        await rec.stop_episode(save=True)
+
+    assert [e["index"] for e in rec.session_episodes("smoke/first")] == [0]
+    assert [e["index"] for e in rec.session_episodes("smoke/second")] == [0]
+    assert rec.session_episodes("smoke/first")[0]["task"] == "a"
+    assert rec.session_episodes("smoke/second")[0]["task"] == "b"
+    rec.close()

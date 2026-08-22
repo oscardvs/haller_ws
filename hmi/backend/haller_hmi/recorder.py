@@ -224,9 +224,25 @@ def read_episode_rows(root: Path, with_stats: bool = False) -> list[dict]:
     """
     rows: list[dict] = []
     for path in episode_meta_files(root):
-        names = pq.read_schema(path).names
-        cols = names if with_stats else [c for c in names if not c.startswith("stats/")]
-        rows += pq.read_table(path, columns=cols).to_pylist()
+        try:
+            names = pq.read_schema(path).names
+            cols = names if with_stats else [c for c in names
+                                             if not c.startswith("stats/")]
+            rows += pq.read_table(path, columns=cols).to_pylist()
+        except Exception as e:
+            # Almost always the file the CURRENTLY OPEN dataset is writing:
+            # a `pq.ParquetWriter` only lays down its footer on close, so the
+            # session's own metadata file is unreadable until finalize. Those
+            # episodes are covered by `DatasetRecorder._session_episodes`,
+            # which is why skipping is right rather than merely convenient.
+            # A listing that 503s from the tenth take of every session would
+            # be a worse answer than one episode short.
+            #
+            # It also covers the genuinely truncated file a crash leaves
+            # behind — which lerobot itself cannot read either — so the warning
+            # is loud enough to find afterwards.
+            logger.warning("recorder: episode metadata at %s is not readable "
+                           "(%s); skipping it", path, e)
     return rows
 
 
@@ -311,6 +327,20 @@ class DatasetRecorder:
     # no matter who reaches it first: the operator's /record/stop, or the
     # record loop itself when the teleop session dies mid-take.
     _episode_open: bool = field(default=False, init=False)
+    # Episodes THIS PROCESS has saved, in order: {repo_id, index, frames, task}.
+    #
+    # It exists because `meta/episodes/` lags reality badly while a dataset is
+    # open for writing, and the cockpit's episode browser is the surface that
+    # answers "what have I actually got". Two distinct lags, both measured:
+    #   - takes 1-9 of a session are ONLY in `LeRobotDatasetMetadata`'s RAM
+    #     buffer (`_metadata_buffer_size=10`), so no metadata file exists yet;
+    #   - from take 10 the file exists but is an OPEN `pq.ParquetWriter` with
+    #     no footer, which is unreadable until finalize.
+    # Flushing on read cannot fix either: closing the writer mid-session makes
+    # the next flush reopen `pq.ParquetWriter` at the SAME path, TRUNCATING it
+    # — measured, and it destroyed episodes 0-11 of a 15-take run. So the
+    # recorder remembers what it saved instead, and `routes_data` overlays it.
+    _session_episodes: list[dict] = field(default_factory=list, init=False)
 
     # ---- public API ------------------------------------------------------
 
@@ -453,6 +483,7 @@ class DatasetRecorder:
             return self.status()
         if save and frames > 0:
             self._mark_terminal_frame()
+            episode_index = int(self._dataset.meta.total_episodes)
             # save_episode encodes video + writes parquet for the buffered frames.
             try:
                 self._dataset.save_episode()
@@ -482,8 +513,19 @@ class DatasetRecorder:
                                      "dropping the dataset handle")
                     self._dataset = None
                 raise
-            logger.info("recorder: saved episode (%d frames, success=%s in %d frames)",
-                        frames, self._state.success, self._state.success_frames)
+            # AFTER save_episode returned, so a failed save is never logged as
+            # a take that exists. `index` was read before it: `save_episode`
+            # validates the buffer against `meta.total_episodes` and then
+            # increments it, so the pre-save value IS this episode's index.
+            self._session_episodes.append({
+                "repo_id": self._state.repo_id,
+                "index": episode_index,
+                "frames": frames,
+                "task": self._state.task,
+            })
+            logger.info("recorder: saved episode %d (%d frames, success=%s in %d frames)",
+                        episode_index, frames,
+                        self._state.success, self._state.success_frames)
         else:
             self._dataset.clear_episode_buffer()
             logger.info("recorder: discarded episode (save=%s, frames=%d)", save, frames)
@@ -643,6 +685,11 @@ class DatasetRecorder:
         # has nothing to do with this take. An orphaned task string costs
         # nothing; a shifted task index corrupts the dataset.
         self._persist_info(info, root=root)
+
+        # The take is gone; the session log must not keep vouching for it.
+        self._session_episodes = [
+            e for e in self._session_episodes
+            if not (e["repo_id"] == repo_id and e["index"] == last_idx)]
 
         logger.info("recorder: deleted episode %d from %s (%d frames); "
                     "%d episodes / %d frames remain",
@@ -884,6 +931,15 @@ class DatasetRecorder:
     def dataset_root(self, repo_id: str) -> Path:
         """Public form of `_dataset_root`, for the dataset-management routes."""
         return self._dataset_root(repo_id)
+
+    def session_episodes(self, repo_id: str) -> list[dict]:
+        """Episodes this process saved into `repo_id`, newest last.
+
+        The listing routes overlay these onto what is readable on disk — see
+        `_session_episodes` for why disk alone is not enough. Copies, so a
+        caller cannot edit the log.
+        """
+        return [dict(e) for e in self._session_episodes if e["repo_id"] == repo_id]
 
     def _build_features(self, cam_specs: list[dict]) -> dict:
         names = self._state_names()

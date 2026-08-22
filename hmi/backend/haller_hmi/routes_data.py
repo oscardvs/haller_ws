@@ -173,26 +173,41 @@ def build_router(*, get_cameras, get_recorder, lerobot_home) -> APIRouter:
         actually lasted. It is not read from the video's own duration, which
         would disagree the moment a tick was skipped.
         """
-        _require_recorder()
+        recorder = _require_recorder()
         repo = _resolve_repo(repo_id)
         root = _root_for(repo)
         info = _read_info(root)
         fps = float(info.get("fps") or 0) or None
-        episodes = []
+
+        def _entry(index: int, frames: int, task) -> dict:
+            return {
+                "index": int(index),
+                "frames": int(frames),
+                "task": task,
+                "length_s": (round(frames / fps, 3) if fps else None),
+            }
+
+        by_index: dict[int, dict] = {}
         for row in read_episode_rows(root):
             tasks = row.get("tasks") or []
-            frames = int(row.get("length") or 0)
-            episodes.append({
-                "index": int(row["episode_index"]),
-                "frames": frames,
-                # One string, not the list: a take is driven against one
-                # instruction here. The column is a list because lerobot
-                # allows several, so the rest are not invented away — they
-                # simply have no operator-facing slot yet.
-                "task": (next(iter(tasks)) if len(tasks) else None),
-                "length_s": (round(frames / fps, 3) if fps else None),
-            })
-        episodes.sort(key=lambda e: e["index"])
+            # One string, not the list: a take is driven against one
+            # instruction here. The column is a list because lerobot allows
+            # several, so the rest are not invented away — they simply have
+            # no operator-facing slot yet.
+            task = next(iter(tasks)) if len(tasks) else None
+            index = int(row["episode_index"])
+            by_index[index] = _entry(index, int(row.get("length") or 0), task)
+
+        # Overlay what this process has saved but lerobot has not yet made
+        # readable. Disk wins on conflict — it is the durable record, and the
+        # session log is only ever filling a gap it left. Without this the
+        # browser shows NOTHING for the first nine takes of a session and then
+        # nothing again until finalize; see `_session_episodes`.
+        for saved in recorder.session_episodes(repo):
+            by_index.setdefault(saved["index"],
+                                _entry(saved["index"], saved["frames"], saved["task"]))
+
+        episodes = [by_index[i] for i in sorted(by_index)]
         return {
             "repo_id": repo,
             "root": str(root),

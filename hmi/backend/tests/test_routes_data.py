@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 from haller_hmi.cameras import CameraManager
 from haller_hmi.config import CameraConfig
-from haller_hmi.recorder import SO101_JOINT_ORDER, DatasetRecorder
+from haller_hmi.recorder import SO101_JOINT_ORDER, DatasetRecorder, read_episode_rows
 from haller_hmi.routes_data import build_router
 
 SIX = list(SO101_JOINT_ORDER)
@@ -118,6 +118,9 @@ class _FakeRecorder:
     def status(self):
         return {"recording": self._recording, "repo_id": self._repo_id}
 
+    def session_episodes(self, repo_id):
+        return []
+
 
 def _client(cameras=None, recorder=None, home=None):
     app = FastAPI()
@@ -138,6 +141,28 @@ def _recorder(root, cams=None):
         cameras=cams if cams is not None else _FakeCameraManager([_FakeCamera("top")]),
         root=str(root),
     )
+
+
+def _plain_recorder(root):
+    """No cameras: state/action only. Much faster than encoding video, which
+    matters for the tests that drive a dozen takes to trip lerobot's buffer."""
+    return DatasetRecorder(
+        telemetry=_FakeTelemetry(), human_teleop=_FakeHumanTeleop(),
+        cameras=_FakeCameraManager([]), root=str(root))
+
+
+def _plain_frame(task):
+    frame = _frame(task)
+    del frame["observation.images.top"]
+    return frame
+
+
+async def _drive_plain(rec, repo, task, n):
+    await rec.start_episode(repo, task)
+    for _ in range(n):
+        rec._dataset.add_frame(_plain_frame(task))
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
 
 
 def _frame(task):
@@ -328,6 +353,119 @@ def test_episodes_for_an_unknown_repo_is_404(tmp_path):
     r = _client(recorder=_recorder(tmp_path / "empty")).get(
         "/record/episodes", params={"repo_id": "smoke/absent"})
     assert r.status_code == 404
+
+
+# ---- the listing vs lerobot's metadata buffer ----------------------------
+#
+# `meta/episodes/` lags reality badly while a dataset is open for writing, and
+# this endpoint is the surface that answers "what have I actually got". Both
+# lags are measured, not theoretical: takes 1-9 of a session live only in
+# LeRobotDatasetMetadata's RAM buffer (no file exists yet), and from take 10
+# the file exists but is an open ParquetWriter with no footer, so reading it
+# RAISES. Flushing on read cannot fix either — closing the writer mid-session
+# makes the next flush truncate the file and destroy the session's earlier
+# episodes. So the recorder remembers, and the route overlays.
+
+async def test_a_saved_take_is_listed_before_lerobot_flushes_it(tmp_path):
+    """One take, no close, no natural flush — the browser must still see it."""
+    root = tmp_path / "ds"
+    rec = _plain_recorder(root)
+    await _drive_plain(rec, "smoke/buf", "pick the cube", 3)
+
+    assert not list((root / "meta" / "episodes").rglob("*.parquet"))  # nothing yet
+    body = _client(recorder=rec).get(
+        "/record/episodes", params={"repo_id": "smoke/buf"}).json()
+    assert body["episodes"] == [
+        {"index": 0, "frames": 3, "task": "pick the cube", "length_s": 0.15}]
+    assert body["total_frames"] == 3
+
+
+async def test_the_listing_keeps_up_across_the_whole_buffer_window(tmp_path):
+    """Every take from 1 to 12 is visible the moment it is saved — across the
+    boundary at 10 where lerobot writes its (still unreadable) file."""
+    root = tmp_path / "ds"
+    rec = _plain_recorder(root)
+    c = _client(recorder=rec)
+    for n in range(1, 13):
+        await _drive_plain(rec, "smoke/window", f"take {n}", 3)
+        body = c.get("/record/episodes", params={"repo_id": "smoke/window"}).json()
+        assert [e["index"] for e in body["episodes"]] == list(range(n)), (
+            f"after {n} saves the browser showed {len(body['episodes'])}")
+        assert body["total_frames"] == 3 * n
+
+
+async def test_the_open_metadata_file_never_breaks_the_listing(tmp_path):
+    """From take 10 the on-disk file is a footerless open writer. Reading it
+    raises; the endpoint must degrade to the session log, not 500."""
+    root = tmp_path / "ds"
+    rec = _plain_recorder(root)
+    for n in range(12):
+        await _drive_plain(rec, "smoke/open", f"take {n}", 2)
+    assert list((root / "meta" / "episodes").rglob("*.parquet"))   # the file exists...
+    assert read_episode_rows(root) == []      # ...and yields nothing: no footer yet
+
+    r = _client(recorder=rec).get("/record/episodes", params={"repo_id": "smoke/open"})
+    assert r.status_code == 200
+    assert [e["index"] for e in r.json()["episodes"]] == list(range(12))
+
+
+async def test_no_duplicates_once_the_dataset_is_finalized(tmp_path):
+    """After close the disk is authoritative and every episode is on it — the
+    overlay must merge with it, not append a second copy of each take."""
+    root = tmp_path / "ds"
+    rec = _plain_recorder(root)
+    for n in range(4):
+        await _drive_plain(rec, "smoke/final", f"take {n}", 3)
+    rec.close()
+
+    body = _client(recorder=rec).get(
+        "/record/episodes", params={"repo_id": "smoke/final"}).json()
+    assert [e["index"] for e in body["episodes"]] == [0, 1, 2, 3]
+    assert [e["task"] for e in body["episodes"]] == [f"take {n}" for n in range(4)]
+
+
+async def test_disk_wins_over_the_session_log(tmp_path):
+    """The durable record is the truth; the log only fills the gap it left."""
+    root = tmp_path / "ds"
+    rec = _plain_recorder(root)
+    await _drive_plain(rec, "smoke/wins", "the real task", 3)
+    rec.close()
+    rec._session_episodes[0]["task"] = "a stale lie"
+
+    body = _client(recorder=rec).get(
+        "/record/episodes", params={"repo_id": "smoke/wins"}).json()
+    assert body["episodes"][0]["task"] == "the real task"
+
+
+async def test_the_overlay_is_scoped_to_one_repo(tmp_path):
+    """A session that recorded into two repos must not cross-contaminate."""
+    home = tmp_path / "home"
+    rec = _plain_recorder(home / "smoke/a")
+    await _drive_plain(rec, "smoke/a", "take a", 3)
+    rec2 = _plain_recorder(home / "smoke/b")
+    await _drive_plain(rec2, "smoke/b", "take b", 3)
+
+    body = _client(recorder=rec2).get(
+        "/record/episodes", params={"repo_id": "smoke/b"}).json()
+    assert [e["task"] for e in body["episodes"]] == ["take b"]
+
+
+async def test_a_deleted_take_leaves_the_listing_immediately(tmp_path):
+    """The pop drops its session-log entry too, or the overlay would keep
+    vouching for a take that is no longer on disk."""
+    root = tmp_path / "ds"
+    rec = _plain_recorder(root)
+    await _drive_plain(rec, "smoke/popped", "take 0", 3)
+    await _drive_plain(rec, "smoke/popped", "take 1", 4)
+
+    c = _client(recorder=rec)
+    assert len(c.get("/record/episodes",
+                     params={"repo_id": "smoke/popped"}).json()["episodes"]) == 2
+    assert c.delete("/record/episodes/last",
+                    params={"repo_id": "smoke/popped"}).status_code == 200
+    body = c.get("/record/episodes", params={"repo_id": "smoke/popped"}).json()
+    assert [e["index"] for e in body["episodes"]] == [0]
+    assert body["total_frames"] == 3
 
 
 # ---- GET /record/repos ---------------------------------------------------
