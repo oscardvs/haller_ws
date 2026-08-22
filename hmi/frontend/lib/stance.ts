@@ -105,32 +105,62 @@ export function useStance(): [Stance, (s: Stance) => void] {
 export type Pairing = { left_arm: string | null; right_arm: string | null };
 
 /**
+ * The robot's own left and right, resolved from the arm ids.
+ *
+ * Identity first: an id containing "left" or "right" names the side the arm is
+ * bolted to, whatever order the config happens to declare it in. This is not
+ * pedantry — `config.yaml` declares `[right, left]` while every sim config
+ * declares `[left, right]`, so a rule that reads position instead of identity
+ * makes the same stance mean opposite things on the two.
+ *
+ * Ids that name no side fall back to declaration order, first = the robot's
+ * left. The left slot is filled first, so a lone unnamed arm is the left one.
+ */
+export function sidesOf(arms: readonly string[]): {
+  robotLeft: string | null;
+  robotRight: string | null;
+} {
+  let robotLeft = arms.find((a) => /left/i.test(a)) ?? null;
+  let robotRight =
+    arms.find((a) => /right/i.test(a) && a !== robotLeft) ?? null;
+  const spare = arms.filter((a) => a !== robotLeft && a !== robotRight);
+  if (robotLeft === null) robotLeft = spare.shift() ?? null;
+  if (robotRight === null) robotRight = spare.shift() ?? null;
+  return { robotLeft, robotRight };
+}
+
+/** Behind the arms the operator faces the way the arms reach, so the robot's
+ *  LEFT arm is the one on their right — the sides cross. Facing the arms
+ *  (mirror / front) they line up. Either way "my right hand drives the arm on
+ *  my right" stays true, which is the property worth preserving. */
+function forStance(
+  stance: Stance,
+  sides: { robotLeft: string | null; robotRight: string | null },
+): Pairing {
+  return stance === "behind"
+    ? { left_arm: sides.robotRight, right_arm: sides.robotLeft }
+    : { left_arm: sides.robotLeft, right_arm: sides.robotRight };
+}
+
+/**
  * Hand↔arm pairing for a stance.
  *
- * Standing behind the arms, the operator faces the way the arms reach, so the
- * arm under their right hand is the one on frame-right of the over-shoulder
- * view — and the declared pair is taken in reverse. Face to face (mirror /
- * front) it is taken as declared. Either way "my right hand drives the arm on
- * my right" stays true, which is the property worth preserving.
- *
- * `arms` is the arm list **in config declaration order**, and the behind-stance
- * swap is positional on it — the same order both callers get from `/config`.
- * A single-arm session sends its one arm on the side of the hand that should
- * drive it, by the same rule, and null on the other.
+ * A solo session is the dual pairing with the other hand emptied, deliberately:
+ * "my right hand drives the arm I picked" then means the same thing whether
+ * one arm is in the session or two. Picking the robot's left arm in the behind
+ * stance puts it under the RIGHT hand, exactly as it would bimanually.
  */
 export function pairingFor(
   stance: Stance,
   arms: readonly string[],
   solo: string | null = null,
 ): Pairing {
-  const behind = stance === "behind";
-  if (solo) {
-    return behind
-      ? { left_arm: solo, right_arm: null }
-      : { left_arm: null, right_arm: solo };
-  }
-  return {
-    left_arm: (behind ? arms[1] : arms[0]) ?? null,
-    right_arm: (behind ? arms[0] : arms[1]) ?? null,
-  };
+  const dual = forStance(stance, sidesOf(arms));
+  if (!solo) return dual;
+  if (dual.left_arm === solo) return { left_arm: solo, right_arm: null };
+  if (dual.right_arm === solo) return { left_arm: null, right_arm: solo };
+  // An arm the resolved pair does not cover — a third arm, or ids the identity
+  // rule could not place. Resolve it as a rig of its own rather than hand the
+  // backend two nulls, which it refuses.
+  return forStance(stance, sidesOf([solo]));
 }

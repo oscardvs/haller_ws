@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import {
-  pairingFor, readStance, writeStance, isStance, STANCE_LS_KEY,
+  pairingFor, sidesOf, readStance, writeStance, isStance, STANCE_LS_KEY,
 } from "../lib/stance";
 import {
   describePairing, isSimArm, presetsFor, simLeaderFor,
@@ -14,20 +14,44 @@ import {
 import { jointRows } from "../components/cockpit/TeleopTab";
 import type { TelemetryFrame } from "../lib/telemetry";
 
-/** Declaration order as /config reports it. */
+/** The sim configs declare left first. */
 const ARMS = ["left", "right"];
+/** config.yaml declares the SAME two arms the other way round. The pairing
+ *  must not notice — that is the whole point of the identity rule. */
+const ARMS_REVERSED = ["right", "left"];
+
+describe("sidesOf", () => {
+  it("reads the side off the id, not off the declaration order", () => {
+    expect(sidesOf(ARMS)).toEqual({ robotLeft: "left", robotRight: "right" });
+    expect(sidesOf(ARMS_REVERSED)).toEqual({
+      robotLeft: "left", robotRight: "right",
+    });
+  });
+
+  it("places ids that name no side by declaration order, left slot first", () => {
+    expect(sidesOf(["armA", "armB"])).toEqual({
+      robotLeft: "armA", robotRight: "armB",
+    });
+  });
+
+  it("leaves the missing side null on a one-arm rig", () => {
+    // config.solo-real.yaml is `left` alone; config.solo-sim.yaml is `right`
+    // alone. Neither may be silently promoted into the other's slot.
+    expect(sidesOf(["left"])).toEqual({ robotLeft: "left", robotRight: null });
+    expect(sidesOf(["right"])).toEqual({ robotLeft: null, robotRight: "right" });
+  });
+});
 
 describe("pairingFor", () => {
-  it("takes the declared pair in reverse when the operator stands behind", () => {
-    // Standing behind, the operator faces the way the arms reach: the arm
-    // under their right hand is the one on frame-right of the over-shoulder
-    // view, which is the first-declared arm.
+  it("crosses the sides when the operator stands behind the arms", () => {
+    // Behind, the operator faces the way the arms reach, so the robot's LEFT
+    // arm is the one on their right.
     expect(pairingFor("behind", ARMS)).toEqual({
       left_arm: "right", right_arm: "left",
     });
   });
 
-  it("takes it as declared face to face", () => {
+  it("lines the sides up directly when facing the arms", () => {
     for (const stance of ["mirror", "front"] as const) {
       expect(pairingFor(stance, ARMS)).toEqual({
         left_arm: "left", right_arm: "right",
@@ -35,18 +59,59 @@ describe("pairingFor", () => {
     }
   });
 
-  it("puts a solo arm on the hand the same rule picks, and null on the other", () => {
-    expect(pairingFor("behind", ARMS, "right")).toEqual({
-      left_arm: "right", right_arm: null,
+  it("gives the same answer whichever order the config declares the arms", () => {
+    // The bug this rule replaces: config.yaml declares [right, left] and the
+    // sim configs declare [left, right], so a positional rule made "behind"
+    // mean opposite things on the two — the controls read as inverted on
+    // exactly one of them.
+    for (const stance of ["behind", "mirror", "front"] as const) {
+      expect(pairingFor(stance, ARMS_REVERSED)).toEqual(
+        pairingFor(stance, ARMS),
+      );
+    }
+  });
+
+  it("puts a solo arm on the hand the dual session would have used", () => {
+    // The property: "my right hand drives the arm I picked" means the same
+    // thing with one arm in the session as with two.
+    for (const stance of ["behind", "mirror", "front"] as const) {
+      const dual = pairingFor(stance, ARMS);
+      for (const arm of ARMS) {
+        expect(pairingFor(stance, ARMS, arm)).toEqual({
+          left_arm: dual.left_arm === arm ? arm : null,
+          right_arm: dual.right_arm === arm ? arm : null,
+        });
+      }
+    }
+  });
+
+  it("drives the robot's left arm with the RIGHT hand in the behind stance", () => {
+    // Spelled out because this is the case that flipped: a solo session on
+    // `left` used to land on the left hand regardless of which arm it was.
+    expect(pairingFor("behind", ["left"], "left")).toEqual({
+      left_arm: null, right_arm: "left",
     });
-    expect(pairingFor("front", ARMS, "right")).toEqual({
-      left_arm: null, right_arm: "right",
+    expect(pairingFor("front", ["left"], "left")).toEqual({
+      left_arm: "left", right_arm: null,
     });
   });
 
+  it("falls back to declaration order for ids that name no side", () => {
+    expect(pairingFor("behind", ["armA", "armB"])).toEqual({
+      left_arm: "armB", right_arm: "armA",
+    });
+    expect(pairingFor("front", ["armA", "armB"])).toEqual({
+      left_arm: "armA", right_arm: "armB",
+    });
+  });
+
+  it("never sends two nulls, which the backend refuses", () => {
+    // An arm outside the resolved pair still has to produce a startable body.
+    const odd = pairingFor("behind", ["left", "right"], "spare");
+    expect([odd.left_arm, odd.right_arm].filter(Boolean)).toEqual(["spare"]);
+  });
+
   it("never invents an arm the rig does not have", () => {
-    // A one-arm rig has no second side. `undefined` on the wire would be an
-    // absent key, which is not the same message as "this side drives nothing".
     expect(pairingFor("behind", ["left"])).toEqual({
       left_arm: null, right_arm: "left",
     });
@@ -102,6 +167,21 @@ describe("presetsFor", () => {
     expect(behind.pairing).not.toEqual(front.pairing);
     expect(behind.detail).toBe("L hand → right · R hand → left");
     expect(front.detail).toBe("L hand → left · R hand → right");
+  });
+
+  it("describes exactly the pairing it would post", () => {
+    // The button text and the start body must come from one object: a preset
+    // that says one mapping and posts another is invisible until an arm moves.
+    for (const p of presetsFor(ARMS_REVERSED, "behind")) {
+      expect(p.detail).toBe(describePairing(p.pairing));
+    }
+  });
+
+  it("offers the same sessions whichever order the config declares the arms", () => {
+    const byId = (ps: ReturnType<typeof presetsFor>) =>
+      Object.fromEntries(ps.map((p) => [p.id, p.pairing]));
+    expect(byId(presetsFor(ARMS_REVERSED, "behind")))
+      .toEqual(byId(presetsFor(ARMS, "behind")));
   });
 
   it("names only the hand that drives something on a solo preset", () => {

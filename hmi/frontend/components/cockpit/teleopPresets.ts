@@ -5,6 +5,9 @@
  * is the one decision in the launcher that is wrong in a way you only find out
  * by moving a real arm, so it is worth pinning in tests rather than reading off
  * a rendered button.
+ *
+ * The rule itself lives in lib/stance.ts — one implementation, shared with the
+ * in-headset panel. This module only decides which sessions to offer.
  */
 import { pairingFor, type Pairing, type Stance } from "@/lib/stance";
 
@@ -31,6 +34,10 @@ export function isSimArm(a: ConfigArm): boolean {
   return a.port === SIM_PORT;
 }
 
+/** The pairing in the operator's terms. Rendered from the very `Pairing` that
+ *  goes in the start body, never recomputed — a preset button that describes
+ *  one mapping and posts another is the failure this whole module exists to
+ *  prevent, and it would be invisible until an arm moved. */
 export function describePairing(p: Pairing): string {
   const parts: string[] = [];
   if (p.left_arm) parts.push(`L hand → ${p.left_arm}`);
@@ -38,8 +45,10 @@ export function describePairing(p: Pairing): string {
   return parts.join(" · ") || "no arm";
 }
 
-/** Dual first, then one solo preset per configured arm. A solo session leaves
- *  the other hand's controller ignored and never writes to the absent side. */
+/** Dual first, then one solo preset per configured arm, in the order `/config`
+ *  declares them. A solo session leaves the other hand's controller ignored and
+ *  never writes to the absent side — and puts its arm on the same hand the dual
+ *  session would, so the mapping does not change shape when you drop an arm. */
 export function presetsFor(
   arms: readonly string[],
   stance: Stance,

@@ -106,10 +106,12 @@ describe("TeleopTab — session launcher", () => {
     await waitFor(() => {
       const start = calls.find((c) => c.url.includes("/teleop/human/start"));
       expect(start).toBeTruthy();
-      // Behind stance puts a solo arm under the left hand; the other side is
-      // an explicit null, not a missing key.
+      // Behind the arms, the robot's LEFT arm is the one on the operator's
+      // right, so a solo session on it goes under the right hand — the same
+      // hand a dual session would have given it. The empty side is an
+      // explicit null, not a missing key.
       expect(JSON.parse(start!.init!.body as string)).toEqual({
-        left_arm: "left", right_arm: null, hz: 60,
+        left_arm: null, right_arm: "left", hz: 60,
       });
     });
   });
