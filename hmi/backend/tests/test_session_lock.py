@@ -29,8 +29,8 @@ def test_teleop_blocks_human_teleop():
     t, h, _ = _make_three_sessions()
     t.status = MagicMock(return_value={"running": True})
     with pytest.raises(RuntimeError):
-        # human_teleop.start signature: start(*, left_arm, right_arm, swap, hz)
-        h.start(left_arm="left", right_arm="right", swap=False, hz=60.0)
+        # human_teleop.start signature: start(*, left_arm, right_arm, hz)
+        h.start(left_arm="left", right_arm="right", hz=60.0)
 
 
 def test_human_teleop_blocks_teleop():
@@ -47,7 +47,7 @@ def test_sim_teleop_blocks_teleop_and_human():
     with pytest.raises(RuntimeError):
         t.start(leader_id="left", follower_id="right", hz=60.0)
     with pytest.raises(RuntimeError):
-        h.start(left_arm="left", right_arm="right", swap=False, hz=60.0)
+        h.start(left_arm="left", right_arm="right", hz=60.0)
 
 
 def test_teleop_blocks_sim():

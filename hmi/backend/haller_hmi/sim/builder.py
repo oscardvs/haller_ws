@@ -444,7 +444,7 @@ def build_scene(arms: list[str], cubes: int,
         f'xyaxes="{camera_xyaxes(_tq_pos, _tq_target)}" fovy="46"/>'
     )
     # Over-the-shoulder view: behind the mounts, looking along the arms — the
-    # same geometry as the passthrough operator's own eyes (vr_pose_mode's
+    # same geometry as the passthrough operator's own eyes (the
     # "behind" stance, the default). In this frame the operator's right is
     # frame-right, so hand and gripper agree on screen; the threequarter view
     # above faces the mounts and is the "front" stance's counterpart. Pulled

@@ -1,7 +1,7 @@
 """Bimanual self-collision + workspace guard for the streaming teleop path.
 
 Two SO-101 arms share one bench. Nothing upstream stops the operator from
-commanding both hands into the same cubic decimetre of air — the retargeter is
+commanding both hands into the same cubic decimetre of air — the IK is
 per-side, the joint clamps are per-joint, and the step caps bound speed, not
 destination. This module is the piece that knows where both arms are at once.
 
