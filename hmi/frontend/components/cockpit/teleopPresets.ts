@@ -11,12 +11,12 @@
  */
 import { pairingFor, type Pairing, type Stance } from "@/lib/stance";
 
-/** The port a sim arm reports. `/config` carries no `source` field, and this
- *  is the value the backend puts there for `source: sim` — a per-arm test,
- *  because a rig can mix one real arm with one sim arm. */
+/** The port a sim arm reports — the fallback test for a backend that predates
+ *  the `source` field on `/config` arms. Per-arm either way, because a rig can
+ *  mix one real arm with one sim arm. */
 export const SIM_PORT = "(sim)";
 
-export type ConfigArm = { id: string; port: string };
+export type ConfigArm = { id: string; port: string; source?: "real" | "sim" };
 
 export type SessionPreset = {
   id: string;
@@ -31,7 +31,7 @@ export type SessionPreset = {
 };
 
 export function isSimArm(a: ConfigArm): boolean {
-  return a.port === SIM_PORT;
+  return a.source ? a.source === "sim" : a.port === SIM_PORT;
 }
 
 /** The pairing in the operator's terms. Rendered from the very `Pairing` that
