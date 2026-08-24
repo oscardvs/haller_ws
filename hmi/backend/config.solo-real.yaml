@@ -68,7 +68,7 @@ collision:
   # bias from the hand calibration — so this is set permissive; the true
   # fix is pinning it to an FK reading taken with the fingertip touching
   # the wood.
-  table_z_m: -0.20
+  table_z_m: -0.25
   mounts:
     left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
     right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
