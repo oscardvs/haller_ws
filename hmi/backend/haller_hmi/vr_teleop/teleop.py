@@ -397,11 +397,15 @@ class QuestTeleoperator:
         # ramp opens well before the arm is in trouble, and buzzing through
         # the whole ramp region would be a constant hum.
         i_singular = _gate(s.last_singularity_proximity, 0.90, 1.0)
-        # The 1-DoF orientation deficit: the operator is twisting at
-        # something two axes cannot reach and needs to move their hand
-        # instead of twisting harder.
-        i_orient = _gate(s.last_orient_residual, 0.5, 1.0)
-        raw = max(i_limit, i_reach, i_twist, i_singular, i_orient)
+        # The 1-DoF orientation deficit (last_orient_residual) is deliberately
+        # NOT in this mix. On a 5-DoF arm some unreachable twist is the
+        # STANDING state of ordinary driving — tool yaw belongs to the
+        # shoulder — so blending it here turns a structural fact into a
+        # permanent tremble at 20 Hz. It is still reported below; the client
+        # gives it a dedicated one-shot cue and HUD line (ikHapticCues),
+        # which is what the operator doc promises: one firm buzz on crossing
+        # into the deficit, then no nagging.
+        raw = max(i_limit, i_reach, i_twist, i_singular)
         state.haptic = 0.6 * state.haptic + 0.4 * (raw if driving else 0.0)
         return {
             "tracked": True,

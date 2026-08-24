@@ -1258,6 +1258,12 @@ export function parseVrSocketMessage(raw: unknown): VrSocketMessage | null {
  *  demand. The backend gates its own haptic mix at the same number; matching
  *  it keeps the buzz and the HUD line telling one story. */
 export const ORIENT_DEFICIT = 0.5;
+/** Re-arm threshold for the deficit's one-shot buzz. Controller pose jitter
+ *  makes the residual flutter around ORIENT_DEFICIT, and with a single
+ *  threshold every flutter is a fresh "edge" — a 0.9-intensity pulse every
+ *  50 ms, felt as a trembling controller. The cue re-arms only after the
+ *  residual has genuinely receded below this. */
+export const ORIENT_DEFICIT_CLEAR = 0.4;
 
 /** Below this the backend's mixed trouble signal is noise, not information.
  *  The kit's floor, kept. */
@@ -1282,7 +1288,10 @@ export function ikHapticCues(prev: IkSides, next: IkSides): HapticCue[] {
   for (const hand of ["left", "right"] as const) {
     const d = next[hand];
     if (!d?.driving) continue;
-    const wasShort = (prev[hand]?.orient_residual ?? 0) > ORIENT_DEFICIT;
+    // Hysteresis: fire on crossing ORIENT_DEFICIT, re-arm only below
+    // ORIENT_DEFICIT_CLEAR — a residual hovering at the threshold is one
+    // sustained deficit, not a new edge every sample.
+    const wasShort = (prev[hand]?.orient_residual ?? 0) > ORIENT_DEFICIT_CLEAR;
     const isShort = (d.orient_residual ?? 0) > ORIENT_DEFICIT;
     if (isShort && !wasShort) {
       cues.push({ hand, intensity: 0.9, durationMs: 140 });

@@ -226,6 +226,23 @@ describe("ikHapticCues", () => {
     expect(again).toEqual([{ hand: "left", intensity: 0.3, durationMs: 60 }]);
   });
 
+  it("does not re-fire the hard pulse while the residual flutters at the threshold", () => {
+    // 2026-08-24 bench finding: pose jitter walks the residual across 0.5
+    // every few samples, and a single-threshold edge turned each crossing
+    // into a fresh 0.9 pulse — a continuously trembling controller. The cue
+    // re-arms only below ORIENT_DEFICIT_CLEAR.
+    const nearBelow = driving({ haptic: 0.3, orient_residual: ORIENT_DEFICIT - 0.02 });
+    const nearAbove = driving({ haptic: 0.3, orient_residual: ORIENT_DEFICIT + 0.02 });
+    expect(ikHapticCues(nearBelow, nearAbove)).toEqual([
+      { hand: "left", intensity: 0.3, durationMs: 60 },
+    ]);
+    // A genuinely receded residual re-arms it.
+    const clear = driving({ haptic: 0.1, orient_residual: 0.1 });
+    expect(ikHapticCues(clear, nearAbove)).toEqual([
+      { hand: "left", intensity: 0.9, durationMs: 140 },
+    ]);
+  });
+
   it("says nothing about a hand that is not driving", () => {
     const idle: IkSides = { right: { driving: false, haptic: 1, orient_residual: 2 } };
     expect(ikHapticCues({}, idle)).toEqual([]);
