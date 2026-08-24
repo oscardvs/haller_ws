@@ -330,6 +330,15 @@ class ArmHandle:
 
     def enable_torque(self) -> None:
         if self.robot is not None:
+            # Park before enabling, every time — not just at connect. The
+            # servo keeps whatever Goal_Position it last held, and anything
+            # that moved the arm or shifted its frame while torque was off
+            # (hand-repositioning, an E-STOP mid-motion, a homing-offset
+            # rewrite) turns that stale goal into a full-speed lunge on
+            # enable. 2026-08-24: a recalibration's offset rewrite did
+            # exactly that — the arm slewed to full extension the moment
+            # torque came back.
+            _park_goal_on_present(self.robot)
             self.robot.bus.enable_torque()
             self.torque_enabled = True
             self._last_commanded = None
