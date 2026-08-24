@@ -55,7 +55,11 @@ collision:
   enabled: false
   margin_m: 0.025
   self_margin_m: 0.008
-  table_z_m: 0.0
+  # The arm sits on the XLeRobot base plate, ~10 cm above the table surface
+  # (measured 2026-08-24). The mount frame's z=0 is the plate, so the bench
+  # is below it — this feeds the teleop's workspace floors (tip may go to
+  # 5 mm above the table, wrist to 35 mm) even with the guard off.
+  table_z_m: -0.10
   mounts:
     left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
     right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
