@@ -25,7 +25,12 @@ motion:
   # because of the 2026-08-01 incident (a Home straight after a recalibration
   # slewed an arm into the bench and burnt the 7.4 V DC-DC), so raise it
   # deliberately and with a hand near the E-STOP.
-  max_speed_deg_s: 60.0
+  # 90, up from the first-run 60 (2026-08-24): the cap was the binding
+  # limiter and read as latency — the arm trailing the hand. Raised only
+  # after enable_torque gained the park-on-present guard and the rig moved
+  # to a 7.4 V / 5 A bench supply; the 2026-08-01 incident that set it low
+  # was a lunge this pair of changes now prevents at the mechanism level.
+  max_speed_deg_s: 90.0
   large_move_deg: 30.0
   ramp_hz: 50.0
 
