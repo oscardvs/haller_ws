@@ -60,11 +60,15 @@ collision:
   enabled: false
   margin_m: 0.025
   self_margin_m: 0.008
-  # The arm sits on the XLeRobot base plate, ~10 cm above the table surface
-  # (measured 2026-08-24). The mount frame's z=0 is the plate, so the bench
-  # is below it — this feeds the teleop's workspace floors (tip may go to
-  # 5 mm above the table, wrist to 35 mm) even with the guard off.
-  table_z_m: -0.10
+  # The arm sits on the XLeRobot base plate above the table surface. The
+  # mount frame's z=0 is the plate, so the bench is below it — this feeds
+  # the teleop's workspace floors (tip may go to 5 mm above this plane,
+  # wrist to 35 mm) even with the guard off. -0.10 (the measured riser)
+  # still refused the last stretch on the bench 2026-08-24 — residual FK
+  # bias from the hand calibration — so this is set permissive; the true
+  # fix is pinning it to an FK reading taken with the fingertip touching
+  # the wood.
+  table_z_m: -0.20
   mounts:
     left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
     right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
