@@ -855,9 +855,28 @@ class DatasetRecorder:
         # ArmManager is reachable through the telemetry broadcaster's `_arms`.
         return self.telemetry._arms[arm_id]
 
+    def _sides(self) -> list[tuple[str, str]]:
+        """(side, arm_id) pairs for the arms this rig actually has, left first.
+
+        The solo rig has one arm; the schema simply loses the absent side's
+        columns rather than fabricating zeros for hardware that is not there
+        (2026-08-24: the hard-coded pair made every /record/start 500 on
+        `config.solo-real.yaml` with `KeyError: 'right'`). Column names stay
+        side-prefixed, so a solo dataset is distinguishable from a bimanual
+        one by its names alone.
+        """
+        out: list[tuple[str, str]] = []
+        for side, arm_id in (("left", self.left_arm_id), ("right", self.right_arm_id)):
+            try:
+                self._arm_handle(arm_id)
+            except KeyError:
+                continue
+            out.append((side, arm_id))
+        return out
+
     def _state_names(self) -> list[str]:
         names: list[str] = []
-        for side, arm_id in (("left", self.left_arm_id), ("right", self.right_arm_id)):
+        for side, arm_id in self._sides():
             names += [f"{side}_{j}" for j in self._joint_order(arm_id)]
         return names
 
@@ -1012,7 +1031,7 @@ class DatasetRecorder:
         from, instead of a consumer having to infer that from an absence.
         """
         out: dict[str, dict] = {}
-        for side, arm_id in (("left", self.left_arm_id), ("right", self.right_arm_id)):
+        for side, arm_id in self._sides():
             handle = self._arm_handle(arm_id)
             getter = getattr(handle, "calibration_metadata", None)
             per_joint = getter() if callable(getter) else {}
@@ -1227,7 +1246,7 @@ class DatasetRecorder:
         state_vec: list[float] = []
         action_vec: list[float] = []
         effort_vec: list[float] = []
-        for arm_id in (self.left_arm_id, self.right_arm_id):
+        for _side, arm_id in self._sides():
             joints = self._joint_order(arm_id)
             arm_snap = tele_frame.get("arms", {}).get(arm_id)
             if arm_snap is None:
