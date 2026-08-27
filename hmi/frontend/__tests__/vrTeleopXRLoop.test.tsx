@@ -22,7 +22,7 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { toast } from "sonner";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 
 import {
   BUTTON_AX, BUTTON_BY, BUTTON_SQUEEZE, BUTTON_THUMBSTICK, BUTTON_TRIGGER,
@@ -157,13 +157,34 @@ function fakeHeadset() {
   };
   return {
     left, right, session, frame,
-    /** One rendered frame at `t` ms. The loop re-registers itself each call. */
+    /** One rendered frame at `t` ms. The loop re-registers itself each call.
+     *  A null callback here means the session was never entered — see
+     *  `clickEnterPassthrough`. */
     step: async (t: number) => {
       const cb = onFrame;
       expect(cb).not.toBeNull();
       await act(async () => { cb!(t, frame); });
     },
   };
+}
+
+/** Click `Enter Passthrough` once it is actually clickable.
+ *
+ *  The button renders DISABLED until `xrSupported()` resolves
+ *  (`VRTeleopPanel.tsx:1428`; `supported` starts `null` at `:168` and is set
+ *  from a promise at `:338`). `findByRole` matches a disabled button perfectly
+ *  well, and **clicking a disabled button is a no-op** — so a click landing in
+ *  that window silently fails to enter the session. The loop never registers a
+ *  frame callback, and the first `step` after entry reads null.
+ *
+ *  That is the whole residual flake: measured 4 of 15 full-suite runs red
+ *  before this wait, every failure the first step after an entry. It is a
+ *  property of the harness, not of the panel — an operator cannot click a
+ *  button that is not there yet. */
+async function clickEnterPassthrough(): Promise<void> {
+  const enter = await screen.findByRole("button", { name: /enter passthrough/i });
+  await waitFor(() => expect((enter as HTMLButtonElement).disabled).toBe(false));
+  await act(async () => { enter.click(); });
 }
 
 /** Hold a thumbstick from `t0` for `ms`, then release — the same shape the
@@ -243,8 +264,7 @@ afterEach(() => {
  *  Returns the frame time to continue from. */
 async function intoThePrompt(): Promise<number> {
   render(<VRTeleopPanel arms={ARMS} />);
-  const enter = await screen.findByRole("button", { name: /enter passthrough/i });
-  await act(async () => { enter.click(); });
+  await clickEnterPassthrough();
   let t = 1000;
   t = await holdAX(hs, t);          // idle  -> armed
   t = await holdAX(hs, t);          // armed -> rolling
@@ -323,8 +343,7 @@ describe("the right stick while the prompt is open", () => {
 describe("the A/X ladder, driven through the XR loop", () => {
   it("arms before it rolls, and writes nothing in between", async () => {
     render(<VRTeleopPanel arms={ARMS} />);
-    const enter = await screen.findByRole("button", { name: /enter passthrough/i });
-    await act(async () => { enter.click(); });
+    await clickEnterPassthrough();
 
     const t = await holdAX(hs, 1000);
     // The gate: one hold in, the dataset is open and NOTHING has rolled.
@@ -340,8 +359,7 @@ describe("the A/X ladder, driven through the XR loop", () => {
     // An accidental take boundary is corrupted data, which is why the toggle is
     // hold-gated rather than edge-detected.
     render(<VRTeleopPanel arms={ARMS} />);
-    const enter = await screen.findByRole("button", { name: /enter passthrough/i });
-    await act(async () => { enter.click(); });
+    await clickEnterPassthrough();
 
     hs.right.buttons[BUTTON_AX].pressed = true;
     for (let t = 1000; t < 1000 + RECORD_HOLD_MS - 100; t += 16) await hs.step(t);
@@ -368,8 +386,7 @@ async function pressEstop(
 
 async function enterSession(): Promise<void> {
   render(<VRTeleopPanel arms={ARMS} />);
-  const enter = await screen.findByRole("button", { name: /enter passthrough/i });
-  await act(async () => { enter.click(); });
+  await clickEnterPassthrough();
 }
 
 describe("the E-STOP", () => {
@@ -468,8 +485,7 @@ describe("the E-STOP", () => {
     // ref under test.
     estop.mockRejectedValueOnce(new Error("network"));
     render(<VRTeleopPanel arms={ARMS} />);
-    const enter = await screen.findByRole("button", { name: /enter passthrough/i });
-    await act(async () => { enter.click(); });
+    await clickEnterPassthrough();
     await pressEstop("right", 1000, 2);
     expect(estop).toHaveBeenCalledTimes(1);
 
@@ -480,7 +496,9 @@ describe("the E-STOP", () => {
       isSessionSupported: () => Promise.resolve(true),
       requestSession: () => Promise.resolve(hs.session),
     };
-    await act(async () => { enter.click(); });
+    // Re-enter on the SAME instance — `clickEnterPassthrough` does not render,
+    // so the component (and therefore the in-flight guard) is the one under test.
+    await clickEnterPassthrough();
     await pressEstop("right", 2000, 2);
     expect(estop).toHaveBeenCalledTimes(2);
   });
