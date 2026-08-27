@@ -55,36 +55,27 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1563 passed, 1 xfailed — measured at commit `d32cb3b`**
-  (was 593 pre-port). **A baseline without a commit beside it is not a baseline.**
-  It RECONCILES, which is the property worth having — every delta is attributable:
+- **backend `pytest`: 1601 passed, 1 xfailed — measured at commit `5c221cd`**, detached
+  worktree, clean tree. **A baseline without a commit beside it is not a baseline**, and
+  it must RECONCILE — every delta attributable:
 
-        42d5fa4  baseline                        1487
-        a6965dd  tick 2a (Track A)               + 24  -> 1511
-        38ec8d6  tick handover (Track A)         +  7  -> 1518
-        d32cb3b  rollout route + gate (Track B)  + 45  -> 1563
+        42d5fa4  baseline                          1487
+        a6965dd + 38ec8d6  Phase 2a  (Track A)     + 31  -> 1518
+        5a0c525 + a60e274  Phase 2b  (Track A)     + 34  -> 1552
+        d32cb3b  rollout route + gate (Track B)    + 45  -> 1597
+        f7b862c  compare caps        (Track B)     +  4  -> 1601
 
-  **Report a suite delta as `base + N = total`, not as a total.** It makes the claim
-  checkable by arithmetic instead of merely true, and it caught a commit the integrator
-  had not been told about — the +7 was the gap between what two tracks reported and what
-  the tree actually held.
-- **frontend `vitest`: 396 passed, 17 files — 0/25 runs red at `e8d6942`.** `tsc
-  --noEmit` clean. No known flake. Publish it for `hmi/frontend` at that commit only.
-  (eslint on `VRTeleopPanel.tsx` is 11 — 10 errors + 1 warning — all pre-existing.)
-- **The flake's cause was NOT the status-reconcile race, and "the fix halved it" was
-  never measured.** Both claims were the integrator's and both were wrong. The real cause:
-  `Enter Passthrough` renders DISABLED until `xrSupported()` resolves
-  (`VRTeleopPanel.tsx:1428`, `supported` starts `null` at `:168`, set from a promise at
-  `:338`), **`findByRole` matches a disabled button and clicking one is a no-op** — so a
-  click inside that window silently failed to enter the session, the XR loop never
-  registered a frame callback, and the first `step` after entry read null. Fixed `9c2d087`
-  by routing all five entry sites through one `clickEnterPassthrough`.
-  **On the retracted number:** "~40% -> ~20%, halved" rested on ten runs before and five
-  after. At a ~27% underlying rate five runs cannot separate 40% from 20% — the interval
-  on 1-of-5 spans most of the range — and the disabled-button race accounts for
-  essentially the whole residual on its own (5/15 red with that one line removed, on top
-  of the earlier change). **Whether `8e7ff7a` moved the rate at all is unknown.** It is a
-  correct change on its own merits, and that is a different claim from the one published.
+  **Report a delta as `base + N = total`, never a bare total.** A total is checkable only
+  by its author and it credits everyone's work to whoever ran it last; a sum is checkable
+  by anyone holding a different tree, and when it fails to close the residual points at a
+  specific commit. That is how `38ec8d6` was found — a commit no track had reported.
+- **frontend `vitest`: 412 passed, 18 files** at `5c221cd`. `tsc --noEmit` clean.
+  **A flake survives, and it is NOT the one Track D fixed:**
+  `__tests__/cockpitTabs.test.tsx > "names the newest episode on the confirm, not the last
+  row"` (~1018 ms, so a timeout shape). 2 red in 16 consecutive runs. **No rate is quoted
+  on purpose** — 2 in 16 cannot separate 5% from 25%. A single failure proves EXISTENCE,
+  which a small sample can support; a rate is not, which is the error that was published
+  and retracted once already today.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```
