@@ -1,7 +1,8 @@
 # Integrator handoff — the kit port
 
-Written 2026-08-27 by `haller-ws-13`, handing the integrator role to a fresh session
-because the original ran its context out. **Read this first, then
+Written 2026-08-27 by `haller-ws-13`, handing the integrator role on. Integrator is now
+`haller-ws-57`. **Sessions saturate and are replaced — that is normal here; the docs are
+the continuity, not the sessions.** Four fresh track sessions were opened 2026-08-27 pm. **Read this first, then
 `hmi/PLAN-2026-08-27-kit-port.md`, then `docs/port/integrator-followups.md`.**
 
 ---
@@ -35,10 +36,10 @@ honoured exactly.
 
 | track | session | territory | state |
 |---|---|---|---|
-| **A** realtime core | `haller-ws-d7` | `arm/human_teleop/telemetry/recorder/cameras/collision/config/realsense.py`, `vr_teleop/**`, `sim/**`, `tick.py`, config yamls | **ACTIVE — the critical path** |
-| **B** Lab backend | `haller-ws-ea` | `lab/**`, `api/**`, `runners/**` | ✅ COMPLETE |
-| **C** Lab frontend | `haller-ws-fd` | all `hmi/frontend/**` except D's files | ✅ COMPLETE, holding |
-| **D** headset client | `haller-ws-1a` | `VRTeleopPanel.tsx`, `lib/vrTeleop.ts`, `lib/humanTeleopClient.ts`, `app/teleop/vr/**` + their tests | ✅ COMPLETE, holding |
+| **A** realtime core | *(in handover)* | `arm/human_teleop/telemetry/recorder/cameras/collision/config/realsense.py`, `vr_teleop/**`, `sim/**`, `tick.py`, config yamls | **ACTIVE — the critical path** |
+| **B** Lab backend | *(in handover)* | `lab/**`, `api/**`, `runners/**` | ✅ COMPLETE |
+| **C** Lab frontend | *(in handover)* | all `hmi/frontend/**` except D's files | ✅ COMPLETE, holding |
+| **D** headset client | *(in handover)* | `VRTeleopPanel.tsx`, `lib/vrTeleop.ts`, `lib/humanTeleopClient.ts`, `app/teleop/vr/**` + their tests | ✅ COMPLETE, holding |
 
 ### What remains — all of it Track A
 
@@ -54,8 +55,11 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1472 passed, 1 xfailed** (was 593 pre-port)
-- **frontend `vitest`: 387 passed** (was 186)
+- **backend `pytest`: 1474 passed, 1 xfailed** (was 593 pre-port)
+- **frontend `vitest`: 396 passed** (was 186)
+- Both re-verified by `haller-ws-57` 2026-08-27 pm. The numbers move as tracks land work;
+  re-measure rather than trusting a number in a doc — the 387 above was already stale when
+  it was written here, by two commits.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```
@@ -65,6 +69,12 @@ cd hmi/frontend && npm test && npx tsc --noEmit     # no CI typecheck; run it by
 ```
 
 Rollback tag: **`baseline-2026-08-27-kit-port`** at `51844b9`.
+
+**Verify against a DETACHED WORKTREE, not the shared tree.** A full-suite red while other
+tracks are mid-edit measures the tree, not the code: `haller-ws-57` got 36 failures then 17
+on two runs minutes apart, and every failing file was open in another session's editor at
+the time. `git worktree add <scratch> <commit>` gives an attributable run and touches
+nobody. (`git worktree` is safe here; `git stash` is not — see below.)
 
 ---
 
@@ -121,6 +131,15 @@ Commit style: `type(scope): lowercase sentence stating the change as a fact`.
 - **The end-of-take prompt owns the sticks** and refuses home — with two lapse conditions
   recorded in the plan. If either stops holding, the exception lapses and returns to you.
 - **`pos_reach_limit` is 0.15**, matching the kit's SO-101 value.
+- **The rate gate is `safety.py::MIN_RATE_FRACTION = 0.9`** (`fec47cb`), NOT in `tick.py`.
+  Two surfaces measure different quantities against ONE threshold, so it cannot live inside
+  either measuring surface — and `safety.py` is stdlib-only while `tick.py` reaches lerobot,
+  which the rollout child must not import. Payload keys stay namespaced per surface:
+  `record_rate_gate` and `control_rate_gate` are two measured quantities, not two spellings.
+- **The durable episode key is a bare per-frame `episode_uid`** (`int64`, microseconds since
+  the Unix epoch UTC, stamped at ARM time). `episode_index` is exact at record time and
+  renumbers across a prune. **Never namespace it under `observation.` or `action.`** —
+  `dataset_to_policy_features` classifies by prefix and would feed it to the policy.
 - **PLAN-2026-08-22 decision 6 STANDS** — `pyrealsense2` is NOT required (see retraction
   below).
 
@@ -142,9 +161,11 @@ Commit style: `type(scope): lowercase sentence stating the change as a fact`.
 
 ## Open items
 
-- **Track A's control-rate constant has not been published.** Track B's rollout child
-  carries `MIN_CONTROL_HZ_FRACTION` as a named placeholder. When A publishes, confirm the
-  two halves agree rather than assuming.
+- ~~Track A's control-rate constant has not been published.~~ **CLOSED** — published and
+  verified connected, `fec47cb` / `be9c9c6`. The two halves did NOT agree at first and the
+  VALUE was the only half that did (both 0.9, different names, silent fallback). Confirmed
+  by publishing 0.5 and watching the resolver follow: **two numbers agreeing is not evidence
+  that one reads the other.**
 - **`docs/port/integrator-followups.md`** carries every cross-track debt, each tagged with
   the EVENT that unblocks it. Read it; it is the working list.
 - **The take-protocol docs are deliberately stale** — `hmi/QUICKSTART-QUEST.md` and
