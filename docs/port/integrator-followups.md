@@ -90,6 +90,25 @@ claim's own terms, before reading the implementation — a sweep for a mapping, 
 end-to-end for a sequence, and for a contract, a test that compares the two real
 components rather than either against a fixture.
 
+4. **An absence assertion in a teardown-on-success path is VACUOUS BY CONSTRUCTION.**
+   `not.toHaveBeenCalled()` reads identically whether the code under test ran or not, and
+   if the success path tears down the thing being observed, the assertion holds however
+   the code behaves. Three of eight E-STOP tests were vacuous on first writing; only
+   mutation found them, in a harness built the day before. The three causes are each
+   worth knowing: the request RESOLVED, so teardown stopped the loop before a second post
+   was possible (fix: make it hang — the only state where a held button can post twice);
+   the throttle clock was still 0 on a fresh session, so the throttle was never in the way
+   (fix: publish a frame first, then act inside the window); and the component was
+   REMOUNTED between the two presses, handing itself a fresh ref, so a permanently-latched
+   guard would have passed too (fix: stay on the same instance).
+   **The mutation pass is the mechanism. There is no reading-based substitute**, and
+   nobody should claim they will notice next time.
+
+**Also from that pass:** where two guards each independently prevent an outcome, no
+single-mutation test can isolate either — the test pins the PROPERTY, not a mechanism, and
+its comment must say so. A comment that reads as though it pinned one of them is the
+checklist-asserting-a-contradicted-number failure again.
+
 **Decision rule, from getting the fixture call wrong:** prefer the test that catches the
 OBSERVED failure over the more elegant one. Elegance is not a coverage argument.
 
