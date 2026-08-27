@@ -96,7 +96,8 @@ it the suite already holds and what the run genuinely adds. The split is not
 cosmetic: a frontend test can pin what the CLIENT decides and what the HUD says,
 and can never see a frame land on disk. Read the notes before starting — most of
 these items are one backend assertion each once the client half is taken as
-given, and V11 is the only one whose core is device-only.
+given, and V11's core is now pinned headlessly too (see its note) — what is left for the
+headset is genuinely about the arm and the optics, not about this client.
 
 
 ARMED is the whole reason this port touched the record path. Stock
@@ -239,13 +240,22 @@ The workflow claim, run as a workflow: arm once, then A/X hold → drive → A/X
 
 ### V11. Home is refused mid-prompt, and says so ☐
 
-> **Partly pinned.** The SEEN half is a test: the refusal line paints and the
-> box does not change height. The FELT half, the arm not homing, and the
-> release not falling through to `keep` all live in the XR animation loop, which
-> has no headless harness — so conditions 1, 2 and 3 are genuinely device-only.
-> **Do this one on hardware and do it carefully:** it is the item invariant 5's
-> exception is granted on, and if the refusal is felt but not seen, or seen but
-> not felt, the exception lapses.
+> **Now pinned — this item is no longer device-only.**
+> `__tests__/vrTeleopXRLoop.test.tsx` drives the real XR animation loop headless:
+> `requestTeleopSession` reads `navigator.xr` and nothing else, so stubbing that
+> one property hands the panel a session whose `requestAnimationFrame` the test
+> owns. Frame timestamps become an argument and a 0.8 s hold is four calls.
+> All three conditions are held there, and each was confirmed FALSIFIABLE by
+> deliberately breaking it: dropping the prompt guard, dropping the fired flag
+> so the release falls through to `keep`, and silencing the tick each fail the
+> test on their own. Condition 4 (the HUD line, the box not changing height) is
+> pinned separately against the canvas.
+> **What this run still adds:** that the physical arm does not move. The test
+> asserts no POST to `/teleop/human/home`, which is the meaningful half but not
+> the same statement.
+> **Still do it first in the headset.** It is the item invariant 5's exception
+> is granted on, and a lapse discovered at the start of a session is a design
+> change with time to make it; discovered at the end it is a wasted session.
 
 Hold the LEFT stick past `RESET_HOLD_MS` (≈0.8 s) while the prompt is open. This
 is the trained in-session home gesture, and inside the prompt it is the same
