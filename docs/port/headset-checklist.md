@@ -24,6 +24,12 @@ them MOUNTED, so no single session can ever tick it whole. A ◐ must name which
 were measured and which were not — a partial state that does not say which half is just
 a ☐ that has stopped being honest.
 
+**V13 is the only item split ACROSS the mount; V3 and V4 sit wholly on its far side.**
+V3's PASS requires `GET /record/status` to report `state:"armed"`, and the live payload
+measured 2026-08-27 carries ten keys with no `state` at all — so V3 and V4 are BLOCKED
+on the mount rather than merely unrun, and no wording of theirs can be checked before it.
+Nothing else on this list changes character when the routes land.
+
 ---
 
 ## Why these items are here and not in vitest
@@ -312,7 +318,7 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 
 ## 5. The fallback path
 
-### V13. Local gate against a backend without `/record/arm` ☐
+### V13. Local gate against a backend without `/record/arm` ◐
 
 > **Now pinned headlessly, both halves.** `__tests__/vrTeleopXRLoop.test.tsx`
 > drives the fallback through the real XR loop: a 404 from `api.recordArm` holds
@@ -351,12 +357,16 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 > unbacked-up datasets — see `integrator-followups.md`. Real-data md5 fingerprint
 > taken before and re-checked after: byte-identical.
 >
-> **Still open, which is why this stays `☐`:** the second PASS needs a backend
-> that DOES mount the routes and none exists yet, so that half becomes runnable
-> only once the integrator mounts Track A's — the mirror of the first half, whose
-> window closes at the same moment. The operator-facing strings (one `toast.info`
-> per session, `◆ ARMED take N (local gate)`) are vitest-pinned but have not
-> been read on the device.
+> **MEASURED — two clauses.** An unmounted route really answers 404, with the
+> 422/200 controls that make that a fact about the path rather than about the
+> harness. And nothing lands on disk before ROLL, with the 0 -> 4 write that
+> makes the empty directory falsifiable.
+>
+> **NOT MEASURED — two clauses.** The silent upgrade against a backend that DOES
+> mount the routes: not runnable until the mount, and the exact mirror of the
+> first clause, whose window closes at the same moment. And the operator-facing
+> strings — one `toast.info` per session, `◆ ARMED take N (local gate)` — which
+> are vitest-pinned but have not been read on a device.
 
 `POST /record/arm` / `/record/roll` are not mounted yet — that is the
 integrator's follow-up, gated on Track A reporting the bodies. Until then the
