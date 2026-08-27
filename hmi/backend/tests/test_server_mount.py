@@ -19,7 +19,10 @@ import ast
 import inspect
 import textwrap
 
+import pytest
 from haller_hmi import server
+from haller_hmi.recorder import DatasetRecorder
+from haller_hmi.telemetry import TelemetryBroadcaster
 
 #: Everything in `_lifespan` that must be handed the session's bus. A consumer
 #: built without one does not fail loudly — it reads an empty world forever.
@@ -149,3 +152,52 @@ def test_the_idle_sampler_stops_before_the_arms_are_disconnected():
 def test_the_sampler_is_stopped_at_all():
     """A started daemon thread with no stop outlives the backend it belongs to."""
     assert "idle_sampler.stop()" in _lifespan_source()
+
+
+def _bus_consumer_calls():
+    """Every `_lifespan` call that constructs a bus consumer, as an AST node."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(server._lifespan)))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name in BUS_CONSUMERS:
+            yield name, node
+
+
+def test_every_bus_consumer_call_satisfies_its_constructor_signature():
+    """A missing REQUIRED argument is a boot-time `TypeError` the suite cannot see.
+
+    Nothing in this file constructs `_lifespan` — driving it needs a sim config
+    and a mujoco context (see the module docstring) — so a call site that omits a
+    required parameter raises at startup, the backend never comes up, and **the
+    whole suite stays green through it.** Unbootable server, green suite, on a
+    branch four sessions pull from.
+
+    That is not hypothetical: `tick_bus` is about to stop being optional on
+    `DatasetRecorder`, because 2c deleted the mode `None` stood for and left the
+    default behind — an optional parameter is a standing promise that `None` is a
+    working mode, and the promise outlived the mode. Making it required is the
+    right fix and it is precisely the edit that can strand this file green.
+
+    Binds the real signature against the real call rather than naming arguments,
+    so it covers every required parameter either class ever grows, and catches an
+    unknown keyword in the same motion.
+    """
+    classes = {"TelemetryBroadcaster": TelemetryBroadcaster,
+               "DatasetRecorder": DatasetRecorder}
+    seen = set()
+    for name, node in _bus_consumer_calls():
+        seen.add(name)
+        # Sentinels: only the ARITY and the names matter to `bind`.
+        args = [object()] * len(node.args)
+        kwargs = {k.arg: object() for k in node.keywords if k.arg is not None}
+        try:
+            inspect.signature(classes[name]).bind(*args, **kwargs)
+        except TypeError as e:
+            pytest.fail(f"{name}(...) in _lifespan does not satisfy its own "
+                        f"constructor: {e}. The backend raises this at startup "
+                        f"and every other test stays green.")
+    assert seen == BUS_CONSUMERS, (
+        f"expected {sorted(BUS_CONSUMERS)}, found {sorted(seen)} — a rename "
+        f"empties this test rather than failing it")
