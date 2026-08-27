@@ -55,30 +55,21 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1611 passed, 1 xfailed — measured at commit `f67ddbf`**, detached
-  worktree, clean tree. **A baseline without a commit beside it is not a baseline**, and
-  it must RECONCILE — every delta attributable:
+- **backend `pytest`: 1632 passed, 1 xfailed at `95d2507`** (was 593 pre-port), detached
+  worktree, clean tree. **A baseline without a commit beside it is not a baseline**, and it
+  must RECONCILE — report `base + N = total`, never a bare total:
 
-        42d5fa4  baseline                          1487
-        a6965dd + 38ec8d6  Phase 2a  (Track A)     + 31  -> 1518
-        5a0c525 + a60e274  Phase 2b  (Track A)     + 34  -> 1552
-        d32cb3b  rollout route + gate (Track B)    + 45  -> 1597
-        f7b862c  compare caps        (Track B)     +  4  -> 1601
-        b0f876e  server mount tests   (integrator)  +  5  -> 1606
-        154ca9c  arm effort, real+sim (Track A)     +  3  -> 1609
-        ff537da  tags on run detail   (Track B)     +  2  -> 1611
+        f67ddbf  previous pinned baseline              1611
+        54bf6fd  mechanism 1 dead     (Track A)        + ..
+        95d2507  mechanism 3 dead     (Track A)        + ..   -> 1632
+        (the other 9 commits in that range are docs or frontend-only)
 
-  **Report a delta as `base + N = total`, never a bare total.** A total is checkable only
-  by its author and it credits everyone's work to whoever ran it last; a sum is checkable
-  by anyone holding a different tree, and when it fails to close the residual points at a
-  specific commit. That is how `38ec8d6` was found — a commit no track had reported.
-- **frontend `vitest`: 418 passed, 18 files at `b644a60`**, `tsc --noEmit` clean.
-  **No known flake.** Both afternoon flakes were the SAME defect in different files — a
-  click on a control still rendered `disabled`, silently swallowed (`9c2d087`, `9e39e99`).
-  **0/16 red measured by the integrator, independently of the session that wrote the fix**,
-  plus 16/16 from that session — 32 clean runs by two parties. Still CORROBORATION: the
-  deterministic repro is the evidence, since 32 clean runs against a low rate happen often
-  enough by luck.
+  **Track A reports Phase 2 against `42d5fa4` + Phase 2 alone (1487 + 89 = 1576).** That is
+  a legitimate TRACK delta and it is not the tree — it excludes Track B's and the
+  integrator's commits. Both numbers are right; say which base you mean.
+- **frontend `vitest`: 424 passed, 18 files at `c2a4a15`**, `tsc --noEmit` clean.
+  **No known flake** — 0 red in 12 consecutive runs from the integrator's worktree,
+  independently of the sessions that wrote the fixes.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```
