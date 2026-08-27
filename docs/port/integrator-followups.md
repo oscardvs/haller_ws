@@ -158,6 +158,53 @@ the integrator on a throwaway 709 MB copy:
 Do not skip the throwaway copy when running this for real. The prune is destructive and
 re-encodes; a mistake is not recoverable on this machine.
 
+## U9 — episode identity across a prune: ANSWERED, 2026-08-27
+
+Raised by Track A (`haller-ws-d7`) off the back of U4/U5: `episode_index` is exact at
+record time and **not durable across a prune**, so anything storing an index as a lasting
+key silently re-points after `delete_episodes` — review marks, a pre-prune keep set passed
+as `--dataset.episodes`, a counter shown against an episode recorded earlier. The failure
+corrupts a REVIEW rather than a frame, which is why it is expensive: you train on the
+wrong 35 episodes and nothing says so.
+
+A durable id is only worth stamping if it survives the operation it exists to survive, so
+that was measured before it was ruled on. Synthetic 4-episode dataset, redirected
+`HF_LEROBOT_HOME`, lerobot 0.6.1, prune of episodes 1 and 2:
+
+| home for the id | survives the prune? |
+|---|---|
+| **per-frame `int64` column** | **YES** — survivors carry 90001 / 90004 under renumbered `episode_index` 0 / 1 |
+| dataset-level key in `info.json` | **NO** — not propagated to the pruned copy, and the loader warns `Unknown fields in DatasetInfo ... will be ignored` |
+
+**Ruling: the identity is a per-frame `int64` column.** The `info.json` route would have
+been a check that cannot fire — present, readable, reassuring, and gone at exactly the
+moment it was needed.
+
+**The name must NOT start with `observation` or `action`.** `dataset_to_policy_features`
+(`lerobot/utils/feature_utils.py:139-181`) classifies by key prefix and `continue`s on
+anything it does not recognise, so `episode_uid` is dropped on the floor before the policy
+sees it — inert to training, which is the property that makes the column safe to add. The
+same code path means `observation.episode_uid` would be classified `FeatureType.STATE` and
+fed to the policy as an input. Namespacing it under `observation.` is the natural instinct
+and it is the one thing that turns this from free into a contaminated dataset.
+
+Two facts fell out of the probe that were assumed rather than known:
+
+- **`delete_episodes` does NOT prune in place.** With `output_dir=None, repo_id=None` it
+  writes a NEW dataset at `<repo_id>_modified` and leaves the source untouched. Invariant
+  13's "pruning is a separate explicit act" is enforced by the library, not only by our
+  runner. Stats are recomputed with the extra column present, so that path is proven too.
+- **Episode metadata is buffered in RAM and the parquet has no readable footer until
+  `finalize()`.** `metadata_buffer_size` defaults to 10. This is the mechanism Track D's
+  `episodesTotal()` papers over, observed directly rather than inferred: a 4-episode
+  dataset raised `FileNotFoundError: ... does not contain any parquet file`, and forcing
+  per-episode flush then raised `ArrowInvalid: Parquet magic bytes not found in footer`.
+  `recorder.py:387,537,590` already calls `finalize()` at the right places.
+
+Probe kept at `scratchpad/prune_identity_probe.py`. It contains a destructive call, so it
+points at a scratch `HF_LEROBOT_HOME` and never at `~/robot-data` — the gate-matrix rule
+applies to any probe that prunes, not only to a matrix.
+
 ## Standing rules that came out of rulings
 
 - **THE GIT INDEX IS SHARED ACROSS ALL FOUR SESSIONS.** Four processes, one working

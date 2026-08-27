@@ -187,8 +187,8 @@ it stops and this document gets amended.
 
 | # | question | how it is answered | blocks |
 |---|---|---|---|
-| U1 | Does `pyrealsense2` install into `~/venvs/haller-hmi` (`--system-site-packages`) without shadowing or being shadowed? | install + import + one frame | P2 |
-| U2 | Can `haller_hmi` hold the D455 colour node through librealsense while anything else on the box wants it? The kit says the colour node **cannot** be shared. | open under librealsense with the ROS node up, then down | P2 |
+| U1 | Does `pyrealsense2` install into `~/venvs/haller-hmi` (`--system-site-packages`) without shadowing or being shadowed? | install + import + one frame | ~~P2~~ **SUPERSEDED** |
+| U2 | Can `haller_hmi` hold the D455 colour node through librealsense while anything else on the box wants it? The kit says the colour node **cannot** be shared. | open under librealsense with the ROS node up, then down | ~~P2~~ **SUPERSEDED** |
 | U3 | What is the **measured** end-to-end sample rate on real hardware with Feetech round trips in the tick? `fps` must be measured, never declared. | instrument the new sampler, 60 s run | P1, P7-H |
 | U4 | Does `delete_episodes` (0.5.1) handle **our** v3.0 layout — one video file per episode, resumed metadata across several `meta/episodes/chunk-*/file-*.parquet`? Identical signatures are not identical behaviour on our data. | record → delete → record → load + resume, on a scratch repo | P4 |
 | U5 | Does a dataset **written** by lerobot 0.6.1 (haller-lab) load in 0.5.1 (haller-hmi), and vice versa? Both claim v3.0; that is a claim, not a test. | round-trip both directions on a scratch repo | P6 |
@@ -302,7 +302,7 @@ disagree, the phase NAMES below win.
 |---|---|---|---|---|
 | 0 | **Probes** | U1–U5, U7 answered with numbers; `~/venvs/haller-lab` built at lerobot 0.6.1; scratch repo harness | **LOW** | — |
 | 1 | **One sampler** | the tick that owns state+action+pixels; `isAvailable()` honoured, degraded read → dropped frame; measured fps; mechanisms 1–3 dead | **HIGH** | U3 |
-| 2 | **Camera truth** | `source: realsense` via guarded `pyrealsense2`; opencv retained and default; brightness/bias re-measured through the recorder, not a probe script | **MED** | U1, U2 |
+| 2 | **Camera truth** | the IR emitter disable, the no-udev-rule fallback, and the colour-health check — `realsense.py`'s *smaller* justification per §Consequences. The mast-cam OpenCV path is CORRECT and is left alone; `pyrealsense2` stays a soft optional dependency | **LOW** | — |
 | 3 | **Runtime arm set** | left / right / both selectable at session start in real and sim; schema follows the selection end to end | **LOW** | — |
 | 4 | **Episode lifecycle** | hand-rolled pop deleted for `delete_episodes`; `review.json` keep/reject sidecar; the kit's per-episode grading (grasp, motion, …) with ONE implementation behind both CLI and UI | **MED** | U4 |
 | 5 | **Collection workspace** | cockpit dataset tab grows the review/grade surface; HUD gets episode + frame counters and the save/discard choice, in the existing menu style | **LOW** | P4 |
@@ -364,9 +364,11 @@ Risk notes worth stating rather than discovering:
 - **P1 is the phase that can break teleop.** It touches the commit loop that invariants
   1–7 live in. It ships with the existing tests green *before* any recorder change, so a
   regression is attributable.
-- **P2's real risk is U2, not the import.** If the colour node cannot be shared, the
-  arbitration between "the HUD wants this view" and "the recorder wants this view"
-  becomes a design question, not a config flag.
+- ~~**P2's real risk is U2, not the import.**~~ **WITHDRAWN with the D455 retraction.**
+  Colour-node sharing only ever mattered because the recorder was going to be moved onto
+  librealsense; it is not, so there is no arbitration to design. P2's residual risk is the
+  **USB 2.1 negotiation** (480 Mb/s, not 5000), which caps colour rate and is cable-or-port,
+  not software.
 - **P7 is high risk for schedule, not safety** — it is new code against hardware that has
   not arrived. It is last for that reason and nothing downstream depends on it.
 
