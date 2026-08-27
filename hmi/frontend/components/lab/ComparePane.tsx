@@ -40,6 +40,55 @@ const MAX_POINTS = 600;
  *  logged step, and the server pairs each value with that step. */
 const X_LABEL = "step";
 
+/**
+ * Used ONLY when `/lab/system` does not publish `compare_max_keys`.
+ *
+ * **This is not the source.** The cap is `compare.py::MAX_KEYS`, published on
+ * `/lab/system` since `f7b862c`, and `capFor` below reads it. This constant
+ * exists so a backend older than that still batches instead of sending one
+ * oversized request, and it is named FALLBACK so it cannot be read as the
+ * authority — the same discipline as `RECORD_RATE_GATE_FALLBACK`, and for the
+ * same reason: a UI that keeps its own copy of a number is how a dashboard
+ * comes to disagree with the system it monitors.
+ *
+ * A stale value here is self-correcting rather than silent: too high and the
+ * backend refuses in its own words, which the pane now renders; too low and
+ * the request is merely split more finely than it needed to be. That is why a
+ * fallback is tolerable HERE and was not for the rate gate, where a wrong copy
+ * would have shown the operator a wrong threshold with nothing to contradict
+ * it.
+ */
+const COMPARE_MAX_KEYS_FALLBACK = 8;
+
+/** Split `keys` into requests no larger than the server's cap.
+ *
+ *  A real ACT run logs more chartable keys than the cap allows — 12 on a step
+ *  row, 15 across the whole run once eval rows contribute keys step rows do
+ *  not — so batching is the ordinary path, not an edge case. */
+export function batchKeys(keys: string[], cap: number): string[][] {
+  const size = Math.max(1, Math.floor(cap));
+  const out: string[][] = [];
+  for (let i = 0; i < keys.length; i += size) out.push(keys.slice(i, i + size));
+  return out;
+}
+
+/** Merge per-run series from several batched responses into one map.
+ *
+ *  Batches carry disjoint KEYS for the same runs, so this unions the key maps
+ *  per run id rather than replacing them — a plain `{...a, ...b}` at the top
+ *  level would keep only the last batch's keys for every run. */
+export function mergeSeries(
+  parts: CompareMetrics["runs"][],
+): CompareMetrics["runs"] {
+  const out: CompareMetrics["runs"] = {};
+  for (const part of parts) {
+    for (const [runId, series] of Object.entries(part ?? {})) {
+      out[runId] = { ...(out[runId] ?? {}), ...series };
+    }
+  }
+  return out;
+}
+
 /** A run's status as a colour.
  *
  *  `ui.tsx` carries a shared vocabulary for marks and verdicts but not for run
@@ -170,9 +219,16 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
         let seriesMissing = false;
         let seriesRefusal: string | null = null;
         if (shared.length > 0 && speaking.length > 0) {
+          // The cap comes from the server that enforces it. An older backend
+          // publishes nothing, and only THEN does the named fallback apply.
+          const cap = await capFor();
           try {
-            const res = await lab.compareMetrics(speaking, shared, MAX_POINTS);
-            series = res.runs ?? {};
+            const parts = await Promise.all(
+              batchKeys(shared, cap).map((batch) =>
+                lab.compareMetrics(speaking, batch, MAX_POINTS).then((r) => r.runs ?? {}),
+              ),
+            );
+            series = mergeSeries(parts);
           } catch (e) {
             if (isMissing(e)) seriesMissing = true;
             else seriesRefusal = reason(e);
@@ -530,6 +586,20 @@ async function runOrNull(id: string): Promise<Run | null> {
     // caller tells them apart by whether EVERY id came back empty.
     if (isMissing(e)) return null;
     throw e;
+  }
+}
+
+/** The server's key cap, or the named fallback if it does not publish one.
+ *
+ *  Never throws: a backend that cannot answer `/lab/system` must not cost the
+ *  operator their curves, and an unreadable cap is exactly the absent case the
+ *  fallback exists for. */
+async function capFor(): Promise<number> {
+  try {
+    const cap = (await lab.system()).compare_max_keys;
+    return typeof cap === "number" && cap > 0 ? cap : COMPARE_MAX_KEYS_FALLBACK;
+  } catch {
+    return COMPARE_MAX_KEYS_FALLBACK;
   }
 }
 

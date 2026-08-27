@@ -19,7 +19,8 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { CheckpointList, checkpointName } from "@/components/lab/CheckpointList";
-import { ComparePane } from "@/components/lab/ComparePane";
+import { ComparePane, batchKeys, mergeSeries } from "@/components/lab/ComparePane";
+import { RunDetail } from "@/components/lab/RunDetail";
 import { epochSeconds, fullWhen, shortWhen } from "@/components/lab/RunList";
 import {
   metricKeys, metricX, plottableMetricKeys,
@@ -211,6 +212,139 @@ describe("a chart is offered only for a key that can sit on an axis", () => {
     expect(plottableMetricKeys([EVAL])).toContain("eval_loss");
     expect(metricX(EVAL, "epoch")).toBeNull();
     expect(metricX(EVAL, "step")).toBe(5000);
+  });
+});
+
+/* ─── tags on the detail ──────────────────────────────────────────────── */
+
+describe("RunDetail shows the tags a run was launched with", () => {
+  // Written only now, and the delay was the point. `GET /lab/runs/{id}` used
+  // to add `tags` solely in its `if not detail:` branch, so the field never
+  // reached this pane and `RunDetail`'s TagChips could not fire — while
+  // `RunSummary.tags` being optional kept it type-checking. A test written
+  // then would have handed the component a run WITH tags, passed, and
+  // "proved" a feature the real backend never fed: the mock-agrees-with-the-
+  // type failure that hid four defects this morning. The route was fixed at
+  // `ff537da` and verified on the wire before this was written.
+  it("renders them once the route actually sends the field", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/metrics")) {
+          return new Response(JSON.stringify({ offset: 0, rows: [] }), { status: 200 });
+        }
+        if (url.includes("/log")) {
+          return new Response(JSON.stringify({ offset: 0, text: "" }), { status: 200 });
+        }
+        if (url.includes("/checkpoints")) {
+          return new Response(JSON.stringify({ checkpoints: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          id: "train-x", kind: "train", name: "tagged", status: "done",
+          started_at: STARTED, finished_at: FINISHED,
+          tags: ["baseline", "35ep"], spec: { policy_type: "act" },
+        }), { status: 200 });
+      },
+    );
+    render(<RunDetail runId="train-x" />);
+    // Asserted case-INSENSITIVELY on purpose: the chips are uppercased by CSS,
+    // and `innerText` reflects `text-transform`. Matching the literal lowercase
+    // string reports a working feature as broken, which cost me two false
+    // readings against the live page before I noticed.
+    await waitFor(() => expect(screen.getByText(/baseline/i)).toBeTruthy());
+    expect(screen.getByText(/35ep/i)).toBeTruthy();
+  });
+});
+
+/* ─── the compare cap is READ, never copied ───────────────────────────── */
+
+describe("compare batches to the cap the server publishes", () => {
+  it("splits the key list at the cap", () => {
+    expect(batchKeys(["a", "b", "c", "d", "e"], 2)).toEqual([["a", "b"], ["c", "d"], ["e"]]);
+    expect(batchKeys(["a", "b"], 8)).toEqual([["a", "b"]]);
+    expect(batchKeys([], 8)).toEqual([]);
+    // A nonsense cap must not produce an infinite loop of empty requests.
+    expect(batchKeys(["a", "b"], 0)).toEqual([["a"], ["b"]]);
+  });
+
+  it("unions the keys per run rather than replacing them", () => {
+    // Batches carry DISJOINT keys for the SAME runs, so a top-level spread
+    // would keep only the last batch's keys for every run — every chart but
+    // the final batch's would silently vanish, which is indistinguishable
+    // from a run that never logged them.
+    const merged = mergeSeries([
+      { r1: { loss: [[0, 1]] }, r2: { loss: [[0, 2]] } },
+      { r1: { lr: [[0, 3]] }, r2: { lr: [[0, 4]] } },
+    ]);
+    expect(Object.keys(merged.r1).sort()).toEqual(["loss", "lr"]);
+    expect(Object.keys(merged.r2).sort()).toEqual(["loss", "lr"]);
+  });
+});
+
+describe("ComparePane reads the cap from the server", () => {
+  /** Mount with `n` chartable keys and whatever `/lab/system` answers, and
+   *  report the sizes of the cross-run metrics requests that resulted. */
+  async function requestSizes(system: unknown, keyCount: number) {
+    const row: Record<string, number> = { steps: 1 };
+    for (let i = 0; i < keyCount; i += 1) row[`k${i}`] = i;
+    const sizes: number[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/lab/system")) {
+          if (typeof system === "number") {
+            return new Response(JSON.stringify({ detail: "no" }), { status: system });
+          }
+          return new Response(JSON.stringify(system), { status: 200 });
+        }
+        if (url.includes("/lab/runs/metrics")) {
+          const keys = decodeURIComponent(url).match(/keys=([^&]*)/)?.[1] ?? "";
+          sizes.push(keys.split(",").filter(Boolean).length);
+          return new Response(JSON.stringify({ runs: {} }), { status: 200 });
+        }
+        if (url.includes("/metrics")) {
+          return new Response(JSON.stringify({ offset: 0, rows: [row] }), { status: 200 });
+        }
+        if (url.includes("/lab/runs/")) {
+          const id = decodeURIComponent(url.split("/lab/runs/")[1].split("?")[0]);
+          return new Response(JSON.stringify({
+            id, kind: "train", name: id, status: "done",
+            started_at: STARTED, finished_at: FINISHED, tags: [], spec: {},
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      },
+    );
+    render(<ComparePane runIds={["train-a", "train-b"]} />);
+    await waitFor(() => expect(sizes.length).toBeGreaterThan(0));
+    return sizes;
+  }
+
+  it("follows a published cap that is NOT the fallback", async () => {
+    // The decisive test, and the only one that can tell a live read from a
+    // hardcoded copy: `8` resolving to `8` proves nothing, because the
+    // fallback is also 8. So the server publishes 3 and the request count has
+    // to follow to ceil(10/3) = 4. Verified the same way against the real
+    // backend by republishing `compare.MAX_KEYS` and watching [8,2] become
+    // [3,3,3,1].
+    const sizes = await requestSizes({ compare_max_keys: 3 }, 10);
+    await waitFor(() => expect(sizes).toEqual([3, 3, 3, 1]));
+  });
+
+  it("falls back — visibly — when the backend publishes no cap", async () => {
+    // The ABSENT case, pinned as its own test so it cannot silently become a
+    // second source of truth. An older backend answers `/lab/system` without
+    // the field; batching must still happen, at the named fallback of 8.
+    const sizes = await requestSizes({ lerobot_home: "/x" }, 10);
+    await waitFor(() => expect(sizes).toEqual([8, 2]));
+  });
+
+  it("falls back when /lab/system cannot be read at all", async () => {
+    // A 404 is a backend with no Lab system route. It must cost nothing: an
+    // unreadable cap is exactly what the fallback is for, and it must not
+    // take the curves down with it.
+    const sizes = await requestSizes(404, 10);
+    await waitFor(() => expect(sizes).toEqual([8, 2]));
   });
 });
 

@@ -476,8 +476,19 @@ export type CompareMetrics = { runs: Record<string, Record<string, [number, numb
 export type LabSystem = {
   disk_free_bytes: number;
   lerobot_home: string;
+  runs_dir: string;
   runner_python: string;
+  /** Whether `~/venvs/haller-lab` is actually there — the "can this box train
+   *  at all" fact, and the one worth saying before a spec is accepted. */
+  runner_python_exists: boolean;
   torch_available: boolean;
+  lerobot_version: string | null;
+  /** The compare endpoint's own caps, read from `compare.py::MAX_KEYS` and
+   *  `MAX_RUNS` rather than re-declared. Optional because a backend older than
+   *  `f7b862c` does not publish them, and that absent case is pinned — see
+   *  `COMPARE_MAX_KEYS_FALLBACK`. */
+  compare_max_keys?: number;
+  compare_max_runs?: number;
 };
 
 /* ─── the client ──────────────────────────────────────────────────────── */
