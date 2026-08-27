@@ -28,3 +28,8 @@ log/
 # Python packaging artifacts
 *.egg-info/
 dist/
+
+# Browser-automation scratch (console/page dumps from the Playwright MCP
+# server). Debug debris, not work product — the ones committed before this
+# rule stay tracked on purpose.
+.playwright-mcp/
