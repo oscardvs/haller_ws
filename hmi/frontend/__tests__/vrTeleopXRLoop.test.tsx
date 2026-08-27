@@ -35,6 +35,21 @@ vi.mock("sonner", () => ({
 
 // vi.hoisted, because vi.mock factories are lifted above the module body and a
 // plain const would not exist yet when the factory runs.
+// The recorder's state lives here, and the mocks READ it rather than each
+// returning a fixed literal. The panel polls /record/status every 250 ms and
+// reconciles the take machine against whatever it says — so a status mock that
+// answered "idle" while the test had driven the page to ARMED would race the
+// assertions and knock the state back. It did: roughly two runs in five failed,
+// on a different test each time. A fake backend has to be as consistent as a
+// real one or the test is measuring the scheduler.
+const gate = vi.hoisted(() => ({
+  status: {
+    recording: false, state: "idle", repo_id: "local/t", task: "t",
+    episode_frames: 0, skipped_frames: 0, started_at: null,
+    last_error: null, episode_index: 12,
+  } as Record<string, unknown>,
+}));
+
 const { recordArm, recordRoll, recordStop, humanTeleopHome, estop,
         humanTeleopStop, recordStart } = vi.hoisted(() => ({
   recordArm: vi.fn(),
@@ -48,16 +63,12 @@ const { recordArm, recordRoll, recordStop, humanTeleopHome, estop,
 
 vi.mock("../lib/api", async (importOriginal) => {
   const real = await importOriginal<typeof import("../lib/api")>();
-  const idle = {
-    recording: false, repo_id: "local/t", task: "t", episode_frames: 0,
-    skipped_frames: 0, started_at: null, last_error: null,
-  };
   return {
     ...real,
     api: {
       ...real.api,
       cameras: vi.fn().mockResolvedValue({ cameras: [] }),
-      recordStatus: vi.fn().mockResolvedValue(idle),
+      recordStatus: vi.fn(() => Promise.resolve({ ...gate.status })),
       recordEpisodes: vi.fn().mockResolvedValue({ repo_id: "local/t", episodes: [] }),
       humanTeleopStatus: vi.fn().mockResolvedValue({
         running: true, state: "driving",
@@ -190,21 +201,25 @@ let hs: ReturnType<typeof fakeHeadset>;
 
 beforeEach(async () => {
   vi.clearAllMocks();
-  const armed = {
-    recording: false, state: "armed", repo_id: "local/t", task: "t",
-    episode_frames: 0, skipped_frames: 0, started_at: null, last_error: null,
-    episode_index: 12,
+  gate.status = {
+    recording: false, state: "idle", repo_id: "local/t", task: "t",
+    episode_frames: 0, skipped_frames: 0, started_at: null,
+    last_error: null, episode_index: 12,
   };
-  recordArm.mockResolvedValue(armed);
-  recordRoll.mockResolvedValue({ ...armed, state: "recording", recording: true });
-  recordStop.mockResolvedValue(armed);
+  /** Move the fake recorder, and answer with where it now is. */
+  const settle = (state: string) => {
+    gate.status = { ...gate.status, state, recording: state === "recording" };
+    return { ...gate.status };
+  };
+  recordArm.mockImplementation(async () => settle("armed"));
+  recordRoll.mockImplementation(async () => settle("recording"));
+  recordStop.mockImplementation(async (_save: boolean, rearm?: boolean) =>
+    settle(rearm ? "armed" : "idle"));
   humanTeleopHome.mockResolvedValue({ sides: ["left", "right"] });
   estop.mockResolvedValue({ ok: true });
   humanTeleopStop.mockResolvedValue({ ok: true });
-  recordStart.mockResolvedValue({
-    recording: true, state: "recording", repo_id: "local/t", task: "t",
-    episode_frames: 0, skipped_frames: 0, started_at: null, last_error: null,
-  });
+  // The local-gate ROLL path: /record/start, not /record/roll.
+  recordStart.mockImplementation(async () => settle("recording"));
   hs = fakeHeadset();
   (globalThis as unknown as { WebSocket: unknown }).WebSocket = class {
     readyState = 0;
