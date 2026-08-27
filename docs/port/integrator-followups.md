@@ -307,6 +307,20 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   test asserts BOTH that 20.05 saturates the gate AND that 0.35 does not — pinning only
   the corrected constant would let the same bug back in wearing a different number.
 
+- **Guard an architectural ruling with a source-level tripwire.** The rollout child owns
+  the POLICY and never the bus, so its test suite greps its OWN SOURCE for
+  `follower.connect` / `enable_torque` / `presync_goal_positions` / `SO101Follower` and
+  fails if any appear. Crude on purpose: a ruling is not a behaviour you can assert on,
+  and it is exactly what a future edit violates *quietly* — the code still works, it just
+  works by a forbidden route, so every behavioural test stays green. What this one
+  protects is whether `/estop` can drop torque during a rollout, which cannot be tested
+  from inside the child at all.
+
+- **Fail loudly at an absent dependency rather than falling back.** The same child fails
+  early when the server-side ingest is missing instead of driving the arm directly. A
+  fallback there would have the same shape as a check that cannot fire: it looks like
+  resilience and is a bypass.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
