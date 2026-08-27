@@ -318,6 +318,38 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 > 404, and that nothing lands on disk before ROLL. The test asserts the client
 > makes no call; only the run can see the directory.
 
+> **Backend half MEASURED 2026-08-27 (`haller-ws-3f`)** — live sim backend,
+> `config.bimanual-sim.yaml` on port 8047, the real app and no mocks:
+>
+>     POST /record/arm     404   {"detail":"Not Found"}
+>     POST /record/roll    404   {"detail":"Not Found"}
+>     GET  /record/arm     404   absent path, any method
+>     POST /record/start   422   EXISTS, and rejects a bad body
+>     GET  /record/status  200
+>
+> **The 422 and the 200 are the measurement; the 404s alone are not.** A server
+> that answered 404 to everything reads identically, so without the two controls
+> the result is a fact about the harness and not about the path. `isMissingRoute`
+> takes exactly 404/405 (`VRTeleopPanel.tsx:109-111`), so a real backend's real
+> answer lands on the local-gate branch rather than on the refusal branch.
+>
+> **Nothing on disk before ROLL: 0 entries.** The same `find`, in the same run,
+> then watched `POST /record/start` — which is what ROLL does under a local gate —
+> take it **0 -> 4**, `local/<repo>/meta` among them. An empty directory is also
+> exactly what a harness that cannot write at all produces, so the absence counts
+> as evidence only because the instrument was seen to fire.
+>
+> Run under a scratch `HF_LEROBOT_HOME`, because doing nothing aims at the real
+> unbacked-up datasets — see `integrator-followups.md`. Real-data md5 fingerprint
+> taken before and re-checked after: byte-identical.
+>
+> **Still open, which is why this stays `☐`:** the second PASS needs a backend
+> that DOES mount the routes and none exists yet, so that half becomes runnable
+> only once the integrator mounts Track A's — the mirror of the first half, whose
+> window closes at the same moment. The operator-facing strings (one `toast.info`
+> per session, `◆ ARMED take N (local gate)`) are vitest-pinned but have not
+> been read on the device.
+
 `POST /record/arm` / `/record/roll` are not mounted yet — that is the
 integrator's follow-up, gated on Track A reporting the bodies. Until then the
 client probes once and holds ARMED itself.
