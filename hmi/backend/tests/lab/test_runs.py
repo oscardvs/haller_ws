@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -31,6 +32,9 @@ from pathlib import Path
 import pytest
 
 from haller_hmi.lab import runs
+
+#: `hmi/backend`, so a subprocess can import `haller_hmi` from a clean interpreter.
+BACKEND = Path(__file__).resolve().parents[2]
 
 #: The stand-in runner. Spec keys drive it: `say` (a line on stdout), `metrics`
 #: (rows appended to metrics.jsonl), `checkpoints` (step directories),
@@ -715,3 +719,47 @@ def test_write_result_is_what_load_reads(lab, tmp_path):
 
     assert set(payload) == {"status", "exit_code", "error", "finished_at"}
     assert payload["finished_at"].endswith("+00:00"), "UTC, so two boxes agree"
+
+
+def test_every_runner_target_is_importable():
+    """Each `RUNNERS` value must name a module that EXISTS and runs as `-m`.
+
+    This is the test that was missing, and its absence hid a real defect: every
+    entry read `haller_hmi.runners.train` where the file is `train_runner.py`,
+    so every launch would have died instantly with `No module named
+    'haller_hmi.runners.train'`.
+
+    Nothing else could catch it. The route and launch tests point
+    `$HALLER_LAB_PYTHON` at `/bin/true`, which ignores its arguments and exits
+    0 — so the child "runs", `result.json` never appears, the run reads `died`
+    exactly as a crashed job would, and the run directory is created either way.
+    A launch test built that way cannot distinguish a working target from a
+    misspelled one, which is why this asserts the import directly.
+
+    In a SUBPROCESS: importing the runners here would pull lerobot into the
+    serving-venv test process, and `runners/` is the one package allowed to
+    import it. `-c "import X"` proves the module path resolves without this
+    interpreter keeping it.
+    """
+    for kind, module in runs.RUNNERS.items():
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            capture_output=True, text=True, cwd=str(BACKEND), timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"RUNNERS[{kind!r}] = {module!r} does not import: {result.stderr.strip()}"
+        )
+
+
+def test_every_runner_target_has_a_main_guard():
+    """`launch` runs the child as `python -m <module>`, which executes the module
+    body and nothing else — a runner without `if __name__ == "__main__"` would
+    import cleanly, do nothing, exit 0, and report a successful run that never
+    ran."""
+    for kind, module in runs.RUNNERS.items():
+        path = Path(BACKEND, *module.split(".")).with_suffix(".py")
+        assert path.exists(), f"RUNNERS[{kind!r}] names {path}, which is not there"
+        assert '__name__ == "__main__"' in path.read_text(), (
+            f"{path.name} has no main guard, so `-m` would exit 0 having done nothing"
+        )

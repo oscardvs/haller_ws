@@ -87,11 +87,19 @@ RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 #: 2026-08-21 incident that closed that path. A recording job launched as a
 #: detached child would take the bus with it and leave `/estop` with nothing to
 #: talk to. Do not add it back.
+#: These are the IMPORT PATHS the child is launched with, so each one must name
+#: a module that actually exists and is runnable as `-m`. They carry the
+#: `_runner` suffix because the files do; dropping it here is not a cosmetic
+#: mismatch, it is `No module named 'haller_hmi.runners.train'` on every launch.
+#: `test_every_runner_target_is_importable` pins them, because the route and
+#: launch tests point `HALLER_LAB_PYTHON` at `/bin/true`, which ignores its
+#: arguments and exits 0 — so a launch "succeeds" and its run directory appears
+#: whether or not the module resolves.
 RUNNERS = {
-    "train": "haller_hmi.runners.train",
-    "eval": "haller_hmi.runners.eval",
-    "rollout": "haller_hmi.runners.rollout",
-    "export": "haller_hmi.runners.export",
+    "train": "haller_hmi.runners.train_runner",
+    "eval": "haller_hmi.runners.eval_runner",
+    "rollout": "haller_hmi.runners.rollout_runner",
+    "export": "haller_hmi.runners.export_runner",
 }
 
 #: Seconds to wait for a clean SIGINT shutdown before escalating to SIGTERM.
