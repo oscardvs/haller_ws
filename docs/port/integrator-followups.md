@@ -136,8 +136,29 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   **Commit with an explicit pathspec — `git commit -- <paths>` — or check
   `git diff --cached --name-only` immediately before committing.** Never assume the index
   holds only your own work.
-  Corollary: **never `git stash` in a shared tree.** It takes every session's uncommitted
-  work, not yours.
+  **The protocol** (proposed by Track A, tested in a throwaway repo by Track B,
+  re-verified by the integrator):
+    1. `git commit -F <msgfile> -- <explicit paths>` always — path-limited, ignores the
+       rest of the index.
+    2. A new file needs one `git add`, so add-and-commit IN THE SAME BREATH.
+    3. `git diff --cached --name-only` before committing if in any doubt.
+    4. No `git stash`, ever (below).
+
+  **A path-limited commit has THREE properties, and the third is the one nobody stated
+  until it was tested:** it commits only the pathspec; it leaves another session's staged
+  work untouched; and it also CLEANS YOUR OWN FILE OUT of the shared index. So the
+  exposure window is bounded on *both* sides by the commit, not merely opened by the add
+  — "add and commit in one breath" reads as though the risk continues afterwards, and it
+  does not. Measured:
+      index before: mine.py theirs.py -> commit contains: mine.py
+      index after:  theirs.py          -> mine.py no longer staged
+
+  Corollary: **never `git stash` in a shared tree.** It is not "risky" — it is a silent
+  `rm` of every other session's uncommitted work with a promise to give it back. Eleven
+  modified files existing only inside a stash entry, with two other sessions running
+  commands, is a data-loss window measured in seconds. To check whether a lint finding is
+  pre-existing, use `git show HEAD:<path>` into a scratch copy; it never touches the
+  working tree.
 
 - **The symmetry rule holds only for fixtures standing in for loader OUTPUT.**
   `_load_joint_limits` centres on `(range_min + range_max)/2`, so every window it emits
