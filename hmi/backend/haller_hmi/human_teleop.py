@@ -381,6 +381,45 @@ class HumanTeleopSession:
             "scan_min_range": snap.scan_min_range,
         }
 
+    def idle_sample(self) -> dict | None:
+        """One tick's fields while NO session is driving. The IdleSampler's source.
+
+        Lives here rather than in the lifespan because this class already owns
+        what it takes to sample an arm, and `tick.py` has to stay stdlib-only
+        so the rollout child can read `safety.MIN_RATE_FRACTION` without
+        pulling lerobot in. The mount is then one line.
+
+        Returns None while a session runs: the commit loop owns the tick then,
+        and `publish_once` would refuse anyway. Returning None means the bus is
+        never even asked, which keeps the handover a fact about this method
+        rather than a race the bus has to arbitrate.
+
+        `goal_deg` is the last committed target, which is what `status()`
+        reports while idle too. Nothing is being commanded, and an idle sample
+        cannot reach a dataset row — arming freezes the arm set and a recorder
+        whose teleop has stopped falls back to idle — so this is a readout, not
+        an instruction.
+        """
+        if self.running:
+            return None
+        arms, errors = self._sample_arms()
+        # Stamped after the read, as in the loop: a clock taken before a bus
+        # round trip is stale by however long the round trip took.
+        t_mono = time.perf_counter()
+        t_unix = time.time()
+        with self._lock:
+            goal = {"left": dict(self._committed_left),
+                    "right": dict(self._committed_right)}
+        return {
+            "t_mono": t_mono,
+            "t_unix": t_unix,
+            "arms": arms,
+            "arm_errors": errors,
+            "goal_deg": goal,
+            "base": self._base_block(),
+            "degraded": bool(errors),
+        }
+
     def _sample_arms(self) -> tuple[dict, dict]:
         """One state read per arm, for the moment this tick owns.
 

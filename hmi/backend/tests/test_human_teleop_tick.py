@@ -230,3 +230,65 @@ def test_a_decimating_session_publishes_slower_than_it_commits():
     # is not.
     seqs = [s.seq for s in samples]
     assert seqs == list(range(seqs[0], seqs[0] + len(seqs)))
+
+
+# --- the idle sampler's source ------------------------------------------
+
+def test_the_idle_sample_reads_the_arms_while_nothing_is_driving():
+    arms = {"left": _arm("left", pos=7.0), "right": _arm("right", pos=-7.0)}
+    sess = HumanTeleopSession(_manager(**arms))
+    fields = sess.idle_sample()
+
+    assert fields is not None
+    assert set(fields["arms"]) == {"left", "right"}
+    assert fields["arms"]["left"]["joints"]["shoulder_pan"]["pos"] == 7.0
+    assert fields["degraded"] is False
+    assert fields["t_mono"] > 0.0 and fields["t_unix"] > 0.0
+
+
+def test_the_idle_sample_declines_while_a_session_owns_the_tick():
+    """The handover is a fact about this method, not a race the bus arbitrates."""
+    arms = {"left": _arm("left")}
+    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess.start(left_arm="left", right_arm=None)
+    try:
+        assert sess.idle_sample() is None
+    finally:
+        sess.stop()
+    assert sess.idle_sample() is not None
+
+
+def test_an_idle_sample_reports_a_failed_arm_as_a_hole():
+    arms = {"left": _arm("left", pos=1.0), "right": _arm("right", fail=True)}
+    fields = HumanTeleopSession(_manager(**arms)).idle_sample()
+    assert "right" not in fields["arms"]
+    assert "right" in fields["arm_errors"]
+    assert fields["degraded"] is True
+
+
+def test_the_idle_sampler_drives_the_bus_end_to_end():
+    """The mount, exercised as the lifespan will wire it."""
+    from haller_hmi.tick import IdleSampler
+
+    arms = {"left": _arm("left", pos=4.0)}
+    sess = HumanTeleopSession(_manager(**arms))
+    sampler = IdleSampler(sess.tick_bus, sample=sess.idle_sample, hz=1000.0)
+
+    sampler.tick_once()
+    sample = sess.tick_bus.latest()
+    assert sample is not None
+    assert sample.joints_deg("left")["shoulder_pan"] == 4.0
+
+
+def test_the_idle_sampler_can_measure_a_rate_before_any_session_starts():
+    """`fps` is refused against a measured rate at ARM time, and a recorder can
+    be armed on a cockpit that has never run teleop. If the idle sampler could
+    not accumulate a rate, that refusal would have nothing to measure."""
+    from haller_hmi.tick import RATE_MIN_SAMPLES, IdleSampler
+
+    arms = {"left": _arm("left")}
+    sess = HumanTeleopSession(_manager(**arms))
+    sampler = IdleSampler(sess.tick_bus, sample=sess.idle_sample, hz=1000.0)
+    for _ in range(RATE_MIN_SAMPLES + 5):
+        sampler.tick_once()
+    assert sess.tick_bus.measured_hz() is not None
