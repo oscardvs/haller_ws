@@ -22,7 +22,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { useTelemetry, type TelemetryFrame } from "@/lib/telemetry";
-import { STANCES, useStance } from "@/lib/stance";
+import { STANCES, useSoloHand, useStance } from "@/lib/stance";
 import { DeadManIndicator } from "@/components/DeadManIndicator";
 import { SimViewTile } from "@/components/SimViewTile";
 import {
@@ -153,12 +153,13 @@ function SessionLauncher({
   // Not component state: the stance is remembered across reloads and shared
   // with the headset page in the same browser, so it lives in lib/stance.ts.
   const [stance, pickStance] = useStance();
+  const [soloHand, pickSoloHand] = useSoloHand();
   const [chosen, setChosen] = useState("dual");
   const [hz, setHz] = useState(DEFAULT_HZ);
   const [busy, setBusy] = useState(false);
 
   const armIds = arms.map((a) => a.id);
-  const presets = presetsFor(armIds, stance);
+  const presets = presetsFor(armIds, stance, soloHand);
   // Derived, not mirrored: the arm list comes from /config and the stance can
   // change under a selection, so the chosen preset is resolved at render and
   // falls back to the first one that this rig can actually start.
@@ -266,6 +267,47 @@ function SessionLauncher({
             ))}
           </div>
         </div>
+
+        {selected && selected.id !== "dual" && (
+          <div className="flex flex-col gap-1.5">
+            <span className="label-tracked text-muted-foreground">Hand</span>
+            {/* Which controller drives the solo arm. Auto = the stance rule
+                (lib/stance.ts); the explicit picks exist for a rig whose arm
+                sits under the other hand — and as the bench remedy when the
+                side-identity guess is wrong. Shared with the headset page. */}
+            <div
+              role="radiogroup"
+              aria-label="solo hand"
+              className="flex items-center gap-1 rounded-md bg-muted p-1"
+            >
+              {([
+                [null, "auto (stance)"],
+                ["left", "L hand"],
+                ["right", "R hand"],
+              ] as const).map(([hand, label]) => (
+                <button
+                  key={label}
+                  type="button"
+                  role="radio"
+                  aria-checked={soloHand === hand}
+                  disabled={running}
+                  title={hand === null
+                    ? "the stance decides which hand drives the solo arm"
+                    : `the ${hand} controller drives it, whatever the stance says`}
+                  onClick={() => pickSoloHand(hand)}
+                  className={
+                    "h-6 flex-1 rounded-sm label-micro disabled:opacity-55 " +
+                    (soloHand === hand
+                      ? "bg-card text-foreground"
+                      : "text-muted-foreground hover:text-foreground")
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <span className="label-micro shrink-0 text-muted-foreground">Rate</span>

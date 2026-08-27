@@ -40,7 +40,7 @@ import {
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
-import { useStance, type Pairing } from "@/lib/stance";
+import { useSoloHand, useStance, type Pairing } from "@/lib/stance";
 import {
   ALL_KNOBS, attachRenderScene, axPressed, CAM_TILE_SIZES,
   clampKnob, clusterLayout, controllerRays, cycleIndex, DEFAULT_HUD_ANCHOR,
@@ -105,6 +105,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   // open side by side in one browser can never disagree about where the
   // operator is standing — and there is one pairing rule, not two.
   const [stance, setStance] = useStance();
+  const [soloHand, setSoloHand] = useSoloHand();
   // Which arm a SINGLE-ARM session drives, or null for both. The session
   // accepts a null side, so this is the whole mechanism — the other hand's
   // controller is simply ignored and nothing is ever written to it. This is
@@ -203,7 +204,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   // depending on which screen you started it from. A remembered solo arm the
   // config no longer enables reads as "dual": sending it would earn a 400 from
   // a backend that has never heard of that arm.
-  const presets = presetsFor(armIds, stance);
+  const presets = presetsFor(armIds, stance, soloHand);
   const soloSelected = soloArm && armIds.includes(soloArm) ? soloArm : null;
   const wanted = presets.find(
     (pr) => pr.id === (soloSelected ? `solo-${soloSelected}` : "dual"));
@@ -1188,6 +1189,29 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
             );
           })}
         </div>
+        {selected && selected.id !== "dual" && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-muted-foreground">hand</span>
+            {([
+              [null, "auto (stance)"],
+              ["left", "L hand"],
+              ["right", "R hand"],
+            ] as const).map(([hand, label]) => (
+              <Button
+                key={label}
+                size="sm"
+                variant={soloHand === hand ? "default" : "outline"}
+                disabled={inSession}
+                title={hand === null
+                  ? "the stance decides which hand drives the solo arm"
+                  : `the ${hand} controller drives it, whatever the stance says`}
+                onClick={() => setSoloHand(hand)}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+        )}
         <div className="text-muted-foreground">
           — {selected
               ? selected.detail

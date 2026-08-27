@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 
 import {
   pairingFor, sidesOf, readStance, writeStance, isStance, STANCE_LS_KEY,
+  readSoloHand, writeSoloHand, SOLO_HAND_LS_KEY,
 } from "../lib/stance";
 import {
   describePairing, isSimArm, presetsFor, simLeaderFor,
@@ -119,6 +120,56 @@ describe("pairingFor", () => {
       left_arm: null, right_arm: null,
     });
   });
+
+  it("lets an explicit hand outrank the stance on a solo session", () => {
+    // The field remedy for a wrong side-identity guess, and the answer for a
+    // rig whose one arm sits under whichever controller is charged: the hand
+    // pick wins in EVERY stance, so it cannot be second-guessed at the bench.
+    for (const stance of ["behind", "mirror", "front"] as const) {
+      expect(pairingFor(stance, ["left"], "left", "right")).toEqual({
+        left_arm: null, right_arm: "left",
+      });
+      expect(pairingFor(stance, ["left"], "left", "left")).toEqual({
+        left_arm: "left", right_arm: null,
+      });
+    }
+  });
+
+  it("keeps the stance rule byte-for-byte when the hand is auto", () => {
+    for (const stance of ["behind", "mirror", "front"] as const) {
+      for (const arm of ARMS) {
+        expect(pairingFor(stance, ARMS, arm, null)).toEqual(
+          pairingFor(stance, ARMS, arm),
+        );
+      }
+    }
+  });
+
+  it("ignores the hand override on a dual pairing", () => {
+    // A dual session with both arms on one hand is not a thing this can
+    // express; the override is scoped to solo on purpose.
+    expect(pairingFor("behind", ARMS, null, "left")).toEqual(
+      pairingFor("behind", ARMS),
+    );
+  });
+});
+
+describe("solo hand persistence", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("round-trips a chosen hand, and null clears it", () => {
+    writeSoloHand("left");
+    expect(readSoloHand()).toBe("left");
+    writeSoloHand(null);
+    expect(readSoloHand()).toBeNull();
+    expect(localStorage.getItem(SOLO_HAND_LS_KEY)).toBeNull();
+  });
+
+  it("falls back to auto on garbage, which means the stance decides", () => {
+    expect(readSoloHand()).toBeNull();
+    localStorage.setItem(SOLO_HAND_LS_KEY, "both");
+    expect(readSoloHand()).toBeNull();
+  });
 });
 
 describe("stance persistence", () => {
@@ -188,6 +239,21 @@ describe("presetsFor", () => {
     expect(describePairing({ left_arm: "left", right_arm: null }))
       .toBe("L hand → left");
     expect(describePairing({ left_arm: null, right_arm: null })).toBe("no arm");
+  });
+
+  it("threads the hand override into the solo presets, and only those", () => {
+    const [dual, ...solos] = presetsFor(ARMS, "behind", "left");
+    expect(dual.pairing).toEqual(pairingFor("behind", ARMS));
+    for (const p of solos) {
+      const arm = p.id.slice("solo-".length);
+      expect(p.pairing).toEqual({ left_arm: arm, right_arm: null });
+      expect(p.detail).toBe(describePairing(p.pairing));
+    }
+  });
+
+  it("keeps every preset identical when the hand is auto", () => {
+    expect(presetsFor(ARMS, "behind", null))
+      .toEqual(presetsFor(ARMS, "behind"));
   });
 });
 

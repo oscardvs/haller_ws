@@ -9,7 +9,12 @@
  * The rule itself lives in lib/stance.ts — one implementation, shared with the
  * in-headset panel. This module only decides which sessions to offer.
  */
-import { pairingFor, type Pairing, type Stance } from "@/lib/stance";
+import {
+  pairingFor,
+  type Pairing,
+  type SoloHand,
+  type Stance,
+} from "@/lib/stance";
 
 /** The port a sim arm reports — the fallback test for a backend that predates
  *  the `source` field on `/config` arms. Per-arm either way, because a rig can
@@ -48,10 +53,13 @@ export function describePairing(p: Pairing): string {
 /** Dual first, then one solo preset per configured arm, in the order `/config`
  *  declares them. A solo session leaves the other hand's controller ignored and
  *  never writes to the absent side — and puts its arm on the same hand the dual
- *  session would, so the mapping does not change shape when you drop an arm. */
+ *  session would, so the mapping does not change shape when you drop an arm.
+ *  `soloHand` (the operator's explicit hand pick, lib/stance.ts) overrides
+ *  that inheritance on the solo presets only; null keeps the stance rule. */
 export function presetsFor(
   arms: readonly string[],
   stance: Stance,
+  soloHand: SoloHand = null,
 ): SessionPreset[] {
   const dual = pairingFor(stance, arms);
   const presets: SessionPreset[] = [
@@ -65,7 +73,7 @@ export function presetsFor(
     },
   ];
   for (const arm of arms) {
-    const pairing = pairingFor(stance, arms, arm);
+    const pairing = pairingFor(stance, arms, arm, soloHand);
     presets.push({
       id: `solo-${arm}`,
       label: `solo ${arm}`,

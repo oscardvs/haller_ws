@@ -13,9 +13,12 @@
 # working one on the night, swap the port/calibration_id pair below; nothing
 # else in this file cares which physical arm it is.
 #
-# Which HAND drives it is NOT set here — it is chosen when the session starts
-# (the VR page's "Right hand" selector, or `right_arm` on
-# POST /teleop/human/start). Pick the hand the arm is actually under.
+# Which HAND drives it is NOT set here — it is chosen when the session starts.
+# By default the stance decides (behind: this arm, id "left", lands under the
+# operator's RIGHT hand); the "hand" picker next to the session presets — on
+# the VR page and in the cockpit launcher — overrides it explicitly, and the
+# preset caption always states the exact hand->arm mapping that will be
+# POSTed. Pick the hand the arm is actually under.
 
 motion:
   # The binding speed limit for teleop, and worth knowing about before you

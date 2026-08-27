@@ -100,6 +100,51 @@ export function useStance(): [Stance, (s: Stance) => void] {
   return [stance, writeStance];
 }
 
+/* --- which hand drives a solo arm ----------------------------------------
+ *
+ * By default the stance decides (see pairingFor below) — but on a rig with
+ * one arm the operator holds whichever controller is charged, and a rule
+ * that cannot be overridden reads as a rig that cannot be configured. The
+ * override is also the field remedy for a wrong side-identity guess: flip a
+ * toggle instead of renaming arms in YAML at the bench.
+ *
+ * Same store shape as the stance and for the same reason: cockpit and
+ * headset page in one browser must agree. null = "auto, let the stance
+ * decide", which is byte-for-byte the pre-override behavior.
+ */
+export type SoloHand = "left" | "right" | null;
+
+export const SOLO_HAND_LS_KEY = "haller.vrTeleop.soloHand.v1";
+
+export function readSoloHand(): SoloHand {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(SOLO_HAND_LS_KEY);
+    return raw === "left" || raw === "right" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSoloHand(h: SoloHand): void {
+  try {
+    if (h === null) window.localStorage.removeItem(SOLO_HAND_LS_KEY);
+    else window.localStorage.setItem(SOLO_HAND_LS_KEY, h);
+  } catch {
+    /* private mode — the choice just won't survive a reload */
+  }
+  for (const notify of listeners) notify();
+}
+
+function soloHandServerSnapshot(): SoloHand {
+  return null;
+}
+
+export function useSoloHand(): [SoloHand, (h: SoloHand) => void] {
+  const hand = useSyncExternalStore(subscribe, readSoloHand, soloHandServerSnapshot);
+  return [hand, writeSoloHand];
+}
+
 /** The two sides of a start body: which arm each HAND drives, null for a hand
  *  that drives nothing. */
 export type Pairing = { left_arm: string | null; right_arm: string | null };
@@ -149,12 +194,22 @@ function forStance(
  * "my right hand drives the arm I picked" then means the same thing whether
  * one arm is in the session or two. Picking the robot's left arm in the behind
  * stance puts it under the RIGHT hand, exactly as it would bimanually.
+ *
+ * `hand` overrides that inheritance for a solo session: "this hand, whatever
+ * the stance thinks". Ignored (deliberately) for dual — a dual session with
+ * both arms on one hand is not a thing this can express.
  */
 export function pairingFor(
   stance: Stance,
   arms: readonly string[],
   solo: string | null = null,
+  hand: SoloHand = null,
 ): Pairing {
+  if (solo && hand) {
+    return hand === "left"
+      ? { left_arm: solo, right_arm: null }
+      : { left_arm: null, right_arm: solo };
+  }
   const dual = forStance(stance, sidesOf(arms));
   if (!solo) return dual;
   if (dual.left_arm === solo) return { left_arm: solo, right_arm: null };
