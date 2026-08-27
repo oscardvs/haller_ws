@@ -284,6 +284,54 @@ applies to any probe that prunes, not only to a matrix.
   precondition becomes robust and the BEHAVIOURAL assertions stay exactly as strict —
   loosening the property to fix the precondition removes the reason the test exists.
 
+- **`git status` on a shared tree is a moving target, not a snapshot — and dirty then
+  staged then gone is a COMMIT IN PROGRESS, not abandoned work.** Observed three calls
+  apart during the handover: ` M human_teleop.py` at 14:52, an EMPTY content diff at 14:55
+  (staged, not dirty — the index write had already happened), clean at 14:55:27 with HEAD
+  moved. All of it was one commit landing. An incoming session that "helpfully"
+  investigated files in territory a doc told it was its own would have been reading a
+  half-staged tree and could have committed across it. The existing protocol covers not
+  CLOBBERING the shared index; it did not cover MISREADING it. **Re-read HEAD before acting
+  on anything `git status` shows.** Three sessions hit this window on the same afternoon.
+
+- **A harness that ignores its arguments cannot tell a working target from a misspelled
+  one.** All four runner launch targets named modules that do not exist
+  (`haller_hmi.runners.train`; the file is `train_runner.py`) and every real launch would
+  have died instantly. Nothing caught it because the launch tests point
+  `$HALLER_LAB_PYTHON` at `/bin/true`, which ignores its arguments and exits 0 — so the
+  child "runs", the run directory appears, `result.json` never does, and the run reads
+  `died`, *identical to a genuinely crashed job*. The stand-in was faithful to the failure
+  and blind to the success. Fixed at `f02dd81`; the tests that can now fail assert every
+  `RUNNERS` value imports (subprocess) and has a `__main__` guard. Same family as the
+  vacuous E-STOP assertions: the harness, not the code, decided the outcome.
+
+- **A baseline without a commit beside it is not a baseline.** Within one hour, three
+  sessions honestly reported **1474, 1477 and 1487** backend passes. Nobody was wrong and
+  nobody was careless — each was a correct measurement of a different moment on a tree four
+  sessions were writing to. Measure from a DETACHED WORKTREE at a fixed commit
+  (`git worktree add --detach <scratch> <commit>`; `git worktree` is safe here, `git stash`
+  never is) and publish the commit with the figure. A count taken on the shared tree is a
+  fact about the tree.
+
+- **When a fact has an owning document, the other document links to it.** The plan of
+  record carried its own "Baseline to protect" reading 645 backend / 186 frontend — the
+  PRE-PORT numbers, ~830 tests light, in the document every track is told to read SECOND.
+  A fresh track measuring the real figure against that one cannot tell which is the
+  regression. Deleted rather than updated: two baselines in two documents is the mechanism,
+  and correcting the copy recreates it at the next handover. **Second instance in one day**
+  after the D455 tables, where §Consequences was right while the delivery table someone
+  actually picks work up from was wrong — which makes it a class, not a coincidence.
+
+- **Do not infer an assignment from a name.** Four fresh sessions opened in one minute
+  during a track rotation; one of them, `haller-ws-fd [bfacdc]`, shared a name with the
+  live Track C session `[c29a0a]` and explicitly refused to treat that as Oscar assigning
+  it Track C. All four refused to self-select, on the grounds that a "which track?" message
+  sent to four sessions converges — every honest independent read of the handoff says "take
+  A, it is the only track with work left" — and two sessions inside `human_teleop.py` is the
+  one thing a shared tree cannot absorb. **Disjoint ownership is the safety property, so
+  allocation is the one decision that cannot be made locally.** Corollary: a name that
+  collides is not an address — use the ` [ref]`.
+
 - **The symmetry rule holds only for fixtures standing in for loader OUTPUT.**
   `_load_joint_limits` centres on `(range_min + range_max)/2`, so every window it emits
   is symmetric about zero — but that says nothing about fixtures which are deliberately
