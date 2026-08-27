@@ -9,7 +9,7 @@ export type TabId =
   | "teleop"
   | "calibrate"
   | "cameras"
-  | "dataset"
+  | "data"
   | "settings";
 
 /** The nav, in order. Declared separately from TabId so the set of tabs the
@@ -20,7 +20,7 @@ export const TABS: readonly { id: TabId; label: string }[] = [
   { id: "teleop", label: "Teleop" },
   { id: "calibrate", label: "Calibrate" },
   { id: "cameras", label: "Cameras" },
-  { id: "dataset", label: "Dataset" },
+  { id: "data", label: "Data" },
   { id: "settings", label: "Settings" },
 ];
 

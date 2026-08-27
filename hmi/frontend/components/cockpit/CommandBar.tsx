@@ -152,8 +152,8 @@ function hintFor(
       return "every arm must be in manual before a session starts";
     case "cameras":
       return "the Operate tab's chips pick which of these is the primary view";
-    case "dataset":
-      return "start a teleop session first — the take logs its commanded targets as action";
+    case "data":
+      return "collect · review · train — review sorts and filters server-side";
     case "settings":
       return "config is read-only — edit hmi/backend/config.yaml and restart";
   }

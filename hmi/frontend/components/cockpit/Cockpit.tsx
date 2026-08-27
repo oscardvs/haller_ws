@@ -30,8 +30,8 @@ import { OperateTab } from "./OperateTab";
 import { TeleopTab } from "./TeleopTab";
 import { CalibrateTab } from "./CalibrateTab";
 import { CamerasTab } from "./CamerasTab";
-import { DatasetTab } from "./DatasetTab";
 import { SettingsTab } from "./SettingsTab";
+import { DataTab } from "@/components/lab/DataTab";
 import { useViewport, type PopId, type TabId } from "./lib";
 
 type ConfigBody = Awaited<ReturnType<typeof api.config>>;
@@ -154,8 +154,8 @@ export function Cockpit() {
             )}
             {tab === "calibrate" && <CalibrateTab armIds={armIds} />}
             {tab === "cameras" && <CamerasTab cameras={cams} />}
-            {tab === "dataset" && (
-              <DatasetTab cameras={cams} onCameraRecord={onCameraRecord} />
+            {tab === "data" && (
+              <DataTab cameras={cams} onCameraRecord={onCameraRecord} />
             )}
             {tab === "settings" && <SettingsTab cfg={cfg} cameras={cams} />}
           </div>

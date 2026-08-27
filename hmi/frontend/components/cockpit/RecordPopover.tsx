@@ -94,10 +94,10 @@ export function RecordPopover({
       <div className="mt-2.5 border-t border-border pt-2.5">
         <button
           type="button"
-          onClick={() => onTab("dataset")}
+          onClick={() => onTab("data")}
           className="font-mono text-[11px] hover:text-[var(--haller-live)]"
         >
-          Open dataset workspace →
+          Open data workspace →
         </button>
       </div>
     </Popover>
