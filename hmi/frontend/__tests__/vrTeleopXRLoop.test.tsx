@@ -34,11 +34,14 @@ vi.mock("sonner", () => ({
 
 // vi.hoisted, because vi.mock factories are lifted above the module body and a
 // plain const would not exist yet when the factory runs.
-const { recordArm, recordRoll, recordStop, humanTeleopHome } = vi.hoisted(() => ({
+const { recordArm, recordRoll, recordStop, humanTeleopHome, estop,
+        humanTeleopStop } = vi.hoisted(() => ({
   recordArm: vi.fn(),
   recordRoll: vi.fn(),
   recordStop: vi.fn(),
   humanTeleopHome: vi.fn(),
+  estop: vi.fn(),
+  humanTeleopStop: vi.fn(),
 }));
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -63,12 +66,12 @@ vi.mock("../lib/api", async (importOriginal) => {
         },
       }),
       humanTeleopStart: vi.fn().mockResolvedValue({ ok: true }),
-      humanTeleopStop: vi.fn().mockResolvedValue({ ok: true }),
+      humanTeleopStop,
       humanTeleopHome,
       recordArm,
       recordRoll,
       recordStop,
-      estop: vi.fn().mockResolvedValue({ ok: true }),
+      estop,
     },
   };
 });
@@ -192,6 +195,8 @@ beforeEach(async () => {
   recordRoll.mockResolvedValue({ ...armed, state: "recording", recording: true });
   recordStop.mockResolvedValue(armed);
   humanTeleopHome.mockResolvedValue({ sides: ["left", "right"] });
+  estop.mockResolvedValue({ ok: true });
+  humanTeleopStop.mockResolvedValue({ ok: true });
   hs = fakeHeadset();
   (globalThis as unknown as { WebSocket: unknown }).WebSocket = class {
     readyState = 0;
@@ -298,15 +303,14 @@ describe("the A/X ladder, driven through the XR loop", () => {
     const enter = await screen.findByRole("button", { name: /enter passthrough/i });
     await act(async () => { enter.click(); });
 
-    let t = await holdAX(hs, 1000);
+    const t = await holdAX(hs, 1000);
     // The gate: one hold in, the dataset is open and NOTHING has rolled.
     expect(recordArm).toHaveBeenCalledTimes(1);
     expect(recordRoll).not.toHaveBeenCalled();
 
-    t = await holdAX(hs, t);
+    await holdAX(hs, t);
     expect(recordRoll).toHaveBeenCalledTimes(1);
     expect(recordStop).not.toHaveBeenCalled();
-    void t;
   });
 
   it("needs the full hold — a thumb brush starts nothing", async () => {
@@ -321,5 +325,140 @@ describe("the A/X ladder, driven through the XR loop", () => {
     hs.right.buttons[BUTTON_AX].pressed = false;
     await hs.step(1000 + RECORD_HOLD_MS);
     expect(recordArm).not.toHaveBeenCalled();
+  });
+});
+
+// ---- the E-STOP, the one input a modal may never own -----------------------
+
+/** Press B/Y on one controller for `frames` frames from `t0`, then release. */
+async function pressEstop(
+  hand: "left" | "right", t0: number, frames = 1,
+): Promise<number> {
+  const c = hand === "left" ? hs.left : hs.right;
+  c.buttons[BUTTON_BY].pressed = true;
+  let t = t0;
+  for (let i = 0; i < frames; i++, t += 16) await hs.step(t);
+  c.buttons[BUTTON_BY].pressed = false;
+  await hs.step(t);
+  return t + 16;
+}
+
+async function enterSession(): Promise<void> {
+  render(<VRTeleopPanel arms={ARMS} />);
+  const enter = await screen.findByRole("button", { name: /enter passthrough/i });
+  await act(async () => { enter.click(); });
+}
+
+describe("the E-STOP", () => {
+  it("fires once per press, however long the button is held", async () => {
+    // One press, one POST. A per-frame scan would post at display rate — 72-90
+    // requests a second at the exact moment the rig is in trouble and the
+    // backend is walking every motor in-process.
+    //
+    // The request is made to HANG deliberately. `fireEstop` tears the session
+    // down once it resolves, which stops the loop — so against a fast /estop
+    // this assertion holds no matter what the loop does, and a test that cannot
+    // fail is not evidence. With the request in flight the loop keeps running
+    // under a held button, which is the state that can actually post twice.
+    //
+    // It pins the PROPERTY, not one mechanism: the rising-edge check and the
+    // in-flight guard each prevent the second post on their own. Removing both
+    // fails this test; removing either alone does not, and that is the honest
+    // description of what it covers.
+    estop.mockReturnValueOnce(new Promise(() => {}));
+    await enterSession();
+    await pressEstop("right", 1000, 30);
+    expect(estop).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires from either controller", async () => {
+    // B on the right, Y on the left. Whichever hand is free is the one that
+    // reaches it, and which hand that is depends on what went wrong.
+    await enterSession();
+    await pressEstop("left", 1000, 3);
+    expect(estop).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires while the end-of-take prompt owns both sticks", async () => {
+    // THE ONE THAT MATTERS. The prompt is modal and takes both thumbsticks for
+    // its duration — and the E-STOP is the single input it must never take. A
+    // modal that can swallow the stop is the same class of defect as a stop
+    // that cannot be read, and this page has now had one of those.
+    const t = await intoThePrompt();
+    expect(estop).not.toHaveBeenCalled();
+    await pressEstop("right", t, 3);
+    expect(estop).toHaveBeenCalledTimes(1);
+    // And it did not quietly commit the take on its way out.
+    expect(recordStop).not.toHaveBeenCalled();
+  });
+
+  it("fires while the tuning list is open", async () => {
+    // The other modal. Same rule, less consequence, but a stop that depends on
+    // which menu happens to be up is not a stop.
+    await enterSession();
+    const t = await holdStick(hs, "right", 1000, 700);  // hold = open the list
+    await pressEstop("right", t, 3);
+    expect(estop).toHaveBeenCalledTimes(1);
+  });
+
+  it("is scanned at display rate, not at the 33 ms publish rate", async () => {
+    // A press that begins and ends BETWEEN two publish ticks must still fire.
+    // 33 ms of extra latency on a stop button is 33 ms too many, so the scan
+    // sits above the publish throttle in the loop rather than below it.
+    //
+    // The first frame is what makes this falsifiable: it publishes and sets the
+    // throttle clock. Pressing 10 ms later lands inside the throttle window, so
+    // a scan that had drifted below it would see nothing at all.
+    await enterSession();
+    await hs.step(1000);                  // publishes; throttle clock now 1000
+    await pressEstop("right", 1010, 1);   // 10 ms later — inside the window
+    expect(estop).toHaveBeenCalledTimes(1);
+  });
+
+  it("buzzes both hands hard, because a stop must be felt to have happened", async () => {
+    await enterSession();
+    const l = hs.left.pulses.length;
+    const r = hs.right.pulses.length;
+    await pressEstop("right", 1000, 2);
+    expect(hs.left.pulses.slice(l)).toContainEqual({ intensity: 1.0, durationMs: 300 });
+    expect(hs.right.pulses.slice(r)).toContainEqual({ intensity: 1.0, durationMs: 300 });
+  });
+
+  it("leaves the headset but does NOT stop the backend session", async () => {
+    // After a stop the operator deals with the rig, and re-arming lives on the
+    // 2D panel — so the session is left for them to find rather than torn down
+    // underneath them.
+    await enterSession();
+    await pressEstop("right", 1000, 2);
+    expect(estop).toHaveBeenCalledTimes(1);
+    expect(humanTeleopStop).not.toHaveBeenCalled();
+  });
+
+  it("keeps firing on a fresh press after a failed request", async () => {
+    // The in-flight guard must not latch. A refused or dropped /estop that left
+    // the guard set would make the SECOND press — the one the operator makes
+    // because they saw nothing happen — do nothing at all.
+    //
+    // The panel is deliberately NOT remounted between the two presses: a fresh
+    // mount gets a fresh ref, so it would pass with the guard latched and prove
+    // nothing. Re-entering the session on the same instance is what keeps the
+    // ref under test.
+    estop.mockRejectedValueOnce(new Error("network"));
+    render(<VRTeleopPanel arms={ARMS} />);
+    const enter = await screen.findByRole("button", { name: /enter passthrough/i });
+    await act(async () => { enter.click(); });
+    await pressEstop("right", 1000, 2);
+    expect(estop).toHaveBeenCalledTimes(1);
+
+    // fireEstop tears the session down, so the second press needs a second
+    // session — on the same component, and therefore the same guard.
+    hs = fakeHeadset();
+    (navigator as unknown as { xr: unknown }).xr = {
+      isSessionSupported: () => Promise.resolve(true),
+      requestSession: () => Promise.resolve(hs.session),
+    };
+    await act(async () => { enter.click(); });
+    await pressEstop("right", 2000, 2);
+    expect(estop).toHaveBeenCalledTimes(2);
   });
 });
