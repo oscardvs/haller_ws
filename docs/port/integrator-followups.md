@@ -57,6 +57,18 @@ and dies when that event happens. Add the trigger, not just the task.
 
 ## Standing rules that came out of rulings
 
+- **The message that only matters when something has gone wrong is the one that was
+  not legible.** Two HUD strings were found clipped off the in-headset panel, both in
+  branches that only render in a degraded state — which is exactly why neither was ever
+  seen, since the happy path fits. `B/Y = E-STOP` had been invisible since before this
+  port; `acquiring 1.2s (no tracking)` cut off mid-word, so a hand that stopped tracking
+  during the countdown reported it in a sentence the panel truncated, and the operator's
+  natural read was "broken" rather than "move your hand". Canvas text does not wrap, so
+  every `fillText` site is pinned against its column width in tests (monospace advances
+  at 0.6 em, so it is arithmetic). The PAINTER trims, not the caller: an ellipsis reads
+  as truncation, a mid-glyph clip reads as a rendering fault. Does NOT apply to the
+  desktop cockpit — DOM text wraps, so the failure mode does not exist there.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
