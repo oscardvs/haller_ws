@@ -129,6 +129,44 @@ and dies when that event happens. Add the trigger, not just the task.
   Correct figure: **7 suites, 177 tests**. **The continuity doc doing the opposite of
   continuity: a successor either redoes verified work or distrusts code that is now right.**
 
+- **THE TYPE-VS-WIRE CLASS HAD NO AUTOMATED GUARD AT ALL, AND `tsc` IS NOT THE FIX FOR IT.**
+  Ruled by Oscar 2026-08-27 on Track C's finding. Five defects this port —`started_at`, the
+  checkpoint names, `step: null`, `RecordAlert` at 1-of-8, the `drops` flattening — and the
+  only thing that ever caught one was pointing the real producer at the real consumer.
+
+  **Track C hit a wall, not a weak assertion: TypeScript is ERASED before vitest runs.** They
+  rebuilt the test twice — the second time as `TYPE_KEYS: Record<keyof RecordAlert, true>`
+  asserted through `Object.keys` — and a deliberately reverted type stayed green both times,
+  because no expression a test can evaluate knows what a type declares. `tsc` produced six
+  errors; vitest noticed nothing.
+
+  **What `tsc --noEmit` does and does not buy, stated plainly because the framing misleads:**
+  it checks a type against its CONSUMERS, never against the wire. It would **not** have caught
+  any of the five. `started_at` was internally consistent and compiled clean with its `* 1000`;
+  `RecordAlert` had no consumer at all to disagree with; `step: null` and the checkpoint names
+  are facts about a payload TypeScript never sees. What Track C's mutation actually proved is
+  narrower and still worth having: **once a type is correct, `tsc` defends it and vitest
+  cannot.** Regression defence, not detection.
+
+  **Decided: `tsc --noEmit` joins `npm test`; NOT CI.** Checked before recommending —
+  `feat/kit-port` has never been pushed, and the only workflow is `.github/workflows/docs.yml`
+  on `main` gated to `paths: website/**`, so **CI would do nothing for this branch today.** And
+  the failure mode here is four sessions on ONE working tree between pushes, while CI fires at
+  push, i.e. after every window this port has actually been bitten in. Measured: `tsc` 1.4 s
+  against `vitest` 2.9 s. CI remains the right long-term belt; it is the wrong immediate move.
+
+  **The higher-value half is the payload diff, not the compiler.** `typediff.py` found all
+  five and lived OUTSIDE the repo, in a stood-down session's scratch directory, with a known
+  dead arm in `compat()` — one `rm -rf` from taking the only working instrument with it.
+  **The guardrail was in the artifact and the artifact was not in the tree.** Moved to
+  `hmi/frontend/tools/`, on the condition that it arrives with tests pinning the three modes
+  in which it has produced confident nonsense: importing an instrument with that history and
+  no tests is trading one unguarded contract for another.
+
+  The asymmetry worth carrying: the backend's by-hand `ruff`/`pytest` is a much smaller gap,
+  because 1682 tests actually run there and actually catch things. **The frontend's type layer
+  was the one surface with no automated guard whatsoever.**
+
 - **APPROVING A NEW REACHABLE STATE OBLIGES YOU TO RE-WALK EVERY SURFACE THAT INFERRED THE
   OUTCOME FROM THE ASK.** The integrator approved Track A's extension making a refused re-arm
   a **200** with `state:"idle"` and a reason, deliberately not a 409 — correct, because a 409
