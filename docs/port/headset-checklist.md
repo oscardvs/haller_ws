@@ -25,10 +25,20 @@ were measured and which were not — a partial state that does not say which hal
 a ☐ that has stopped being honest.
 
 **V13 is the only item split ACROSS the mount; V3 and V4 sit wholly on its far side.**
-V3's PASS requires `GET /record/status` to report `state:"armed"`, and the live payload
-measured 2026-08-27 carries ten keys with no `state` at all — so V3 and V4 are BLOCKED
-on the mount rather than merely unrun, and no wording of theirs can be checked before it.
-Nothing else on this list changes character when the routes land.
+V3's PASS requires `GET /record/status` to report `state:"armed"`, and the payload carries
+no `state` key at all — so V3 and V4 are BLOCKED on the mount rather than merely unrun, and
+no wording of theirs can be checked before it. Nothing else on this list changes character
+when the routes land.
+
+> **The key COUNT in that sentence rotted, and it is left here as a warning.** It read
+> *"the live payload measured 2026-08-27 carries ten keys"*, and that was TRUE when written
+> at `e8d6942` — verified, `recorder.status()` returned exactly ten. At `fc3b6c5` the same
+> payload carries **fifteen**, still none of them `state` and none of them `episode_index`.
+> The shape grew under other tracks' commits while the sentence sat still, inside one day.
+> `GET /record/status` returns `recorder.status()` verbatim (`server.py:771-776`, and no
+> `response_model` to filter it), so the key list is readable at source at any commit and
+> never needed a live re-measure. **The ABSENCE of `state` is the claim; the count was
+> decoration, and decoration is what rots.** — `haller-ws-6e`, 2026-08-27
 
 ---
 
@@ -245,8 +255,12 @@ The workflow claim, run as a workflow: arm once, then A/X hold → drive → A/X
 - **Also watch:** the HUD's episode counter. It currently falls back to
   `episodesTotal()`, a guess that exists only to paper over that same buffering,
   and it stalls at 7 while the operator banks their tenth. Once
-  `/record/status` reports a real `episode_index` the guess goes
-  (`integrator-followups.md`).
+  `/record/status` reports a real `episode_index` **the two INDEX fallbacks go —
+  the guess itself stays.** `episode_index` names the take in hand; the row that
+  reads `N in dataset` is a COUNT, and the RAM buffering that stalls it at 7 is a
+  fact about `meta/episodes.jsonl` that no gate index touches. So this stays worth
+  watching after the mount. See `trackD-handoff.md` item 2 — corrected 2026-08-27,
+  because `integrator-followups.md` still says the whole function goes.
 
 ---
 

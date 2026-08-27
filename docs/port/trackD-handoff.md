@@ -14,7 +14,13 @@ they are written to be read.
 Complete and **blocked on Track A's `/record/arm|roll|stop`**, which the integrator mounts
 in `server.py` once A reports the bodies. Baselines to protect:
 
-- **396 frontend vitest** (`npm test` in `hmi/frontend`). Baseline when Track D started was 186.
+- **Track D's own five suites: 191 passed / 5 files**, measured 2026-08-27 at `fc3b6c5`
+  on a clean tree — `vrTeleop`, `vrTeleopProtocol`, `vrTeleopRecord`, `vrTeleopXRLoop`,
+  `humanTeleopClient`. **That is the number that is a property of THIS track.** The tree
+  total was 396 when this line was first written and is **426 / 18 files at `fc3b6c5`**;
+  the 30 in between are Track C's work landing, not a delta to hunt. Baseline when Track D
+  started was 186. **Re-pin a total against the commit you measured it at, or the next
+  session chases somebody else's landing.**
 - **`npx tsc --noEmit` clean.** No CI typecheck exists — run it by hand, every time.
 - **`npx eslint` — 10 errors + 1 warning in `VRTeleopPanel.tsx`, all PRE-EXISTING.** Nine
   `Cannot access refs during render` (the file's deliberate ref-mirroring idiom), one
@@ -50,10 +56,34 @@ a run can see the directory.
 1. **The sim walk of V3–V13**, once the routes are mounted. Every item in
    `headset-checklist.md` carries a note saying which half vitest already holds and what the
    run adds, so this is a short list of backend assertions, not a rediscovery.
-2. **Delete `episodesTotal()` and its five tests** in `lib/vrTeleop.ts`, once
-   `episode_index` is real in `GET /record/status`. It exists only to paper over lerobot
-   buffering ten episodes' metadata in RAM. The HUD already PREFERS `episode_index` and only
-   falls back, so this is a deletion, not a rewrite.
+2. **Retire the `episodesTotal()` FALLBACKS** — not the function — once `episode_index` is
+   real in `GET /record/status`. **Corrected 2026-08-27 by `haller-ws-6e`; the wording below
+   replaces "delete `episodesTotal()` and its five tests", which is not executable.** The
+   same correction is owed to `integrator-followups.md`, which is the integrator's file.
+
+   Two things were wrong with it, and both were checked at `fc3b6c5`:
+
+   - **The tests are not in `lib/vrTeleop.ts`.** The function is
+     (`lib/vrTeleop.ts:1865`); its five tests are `__tests__/vrTeleopProtocol.test.ts:385-415`.
+   - **The deletion is PARTIAL.** Three consumers, and only two of them are fallbacks:
+     `VRTeleopPanel.tsx:1160-1162` (the HUD chip's `episodes`) and `:1226-1227`
+     (`episodeIdx`, which names the take) both prefer `episode_index` and fall back, so
+     both fallback arms go. But `:1221`'s `datasetEpisodes` also feeds `:1348-1349`'s
+     `` `${datasetEpisodes} in dataset` ``, and **that is a COUNT, not an index.**
+     `episode_index` is the gate's index for the take in hand; it is not the number of
+     episodes in the dataset, and after a `delete_episodes` prune it renumbers besides.
+     **Two numbers that coincide on the happy path are not the same fact.**
+
+   All five tests pin the COUNT — the `onDisk` read, the take floor, the fresher-disk-read
+   win, the per-repo baseline, and the null. **Not one of them is about the fallback path**,
+   so every one of them survives `episode_index` landing, and deleting them would strip the
+   only coverage from a function that still has a live caller. The lerobot RAM-buffering
+   this papers over (`lib/vrTeleop.ts:1852-1863`) is not fixed by `episode_index` either —
+   it is a fact about `meta/episodes.jsonl`, and the count stalls at 7 with or without a
+   gate index.
+
+   **So: delete the two fallback arms and whatever pins them. Keep `episodesTotal()`, keep
+   its five tests, keep `DatasetTally` and `refreshEpisodes`.**
 3. **V11 goes FIRST in the hardware session.** Not last. The invariant-5 modal exception
    rests on it, and a lapse found at the start of the evening is a design change with time
    to make it; found at midnight it is a wasted session with new servos on the bench.
