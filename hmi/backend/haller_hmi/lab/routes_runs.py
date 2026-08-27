@@ -159,12 +159,23 @@ def _run_wire(record: dict, *, detail: bool) -> dict:
     differently. `detail=False` is a listing row and `detail=True` the single-run
     view; neither is a subset of the other:
 
-    * a row carries `tags` and `spec_summary` — what the table renders, and the
-      only place a run remembers what it was asked for once its spec has been
-      superseded;
-    * the detail carries `spec`, `argv`, `exit_code` and `error`, which are
-      per-run and would be fifty full training specs on a listing nobody reads
-      them from.
+    * BOTH carry `tags`. They are set at launch, stored on the record, and
+      appear nowhere in `spec` — so the detail omitting them was not a shape
+      decision, it lost the field. `RunDetail.tsx` guards on `run.tags`, which
+      could not fire, and tags are most useful on exactly the screen that was
+      not getting them.
+    * only a row carries `spec_summary`. The detail is showing the spec ITSELF,
+      so a one-line rendering of it beside the real thing is a second answer to
+      one question. Nothing in the detail view reads it.
+    * only the detail carries `spec`, `argv`, `exit_code` and `error`, which
+      are per-run and would be fifty full training specs on a listing nobody
+      reads them from.
+
+    The asymmetry is therefore one-directional and narrower than it looks: the
+    listing omits the bulky per-run fields, and the detail omits one derived
+    string. An earlier version of this docstring said "neither is a subset of
+    the other" and justified it with the fifty-specs argument alone — which
+    only ever supported the first half.
 
     Everything `load()` adds beyond those is dropped: `alive` (already resolved
     into `status`), `pid`, `cwd`, `runner_python`, `log_size`, `metrics_size`
@@ -181,8 +192,10 @@ def _run_wire(record: dict, *, detail: bool) -> dict:
         # `result.json` the runner writes in its `finally`.
         "finished_at": record.get("finished_at"),
     }
+    # On both shapes: `tags` are independent of `spec`, so there is nothing on
+    # the detail for them to duplicate and nothing to go stale against.
+    wire["tags"] = record.get("tags") or []
     if not detail:
-        wire["tags"] = record.get("tags") or []
         wire["spec_summary"] = record.get("spec_summary") or ""
         return wire
     wire["spec"] = record.get("spec") or {}

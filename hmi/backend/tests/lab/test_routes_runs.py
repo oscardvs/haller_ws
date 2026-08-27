@@ -73,7 +73,7 @@ RUN_ROW_KEYS = frozenset({
 #: A `/lab/runs/{id}` body, EXACTLY.
 RUN_DETAIL_KEYS = frozenset({
     "id", "kind", "name", "status", "spec", "argv", "started_at",
-    "finished_at", "exit_code", "error",
+    "finished_at", "exit_code", "error", "tags",
 })
 
 #: What `runs.load()` adds and the wire must NOT carry, on either shape. These
@@ -683,16 +683,73 @@ def test_a_run_detail_carries_the_frozen_keys_and_only_those(store, client):
     assert body["error"] == "CUDA out of memory"
 
 
-def test_the_detail_does_not_carry_the_listings_two_extras(store, client):
-    """`tags` and `spec_summary` are a LISTING shape. The detail view is
-    reading the spec itself, so a second, stale one-line rendering of it beside
-    the real thing is a second answer to the same question."""
+def test_the_detail_omits_spec_summary_but_not_tags(store, client):
+    """Kept and NARROWED rather than deleted, because half of it was right.
+
+    `spec_summary` is a listing shape: the detail is showing the spec itself,
+    so a one-line rendering of it beside the real thing is a second answer to
+    one question, and nothing in the detail view reads it.
+
+    `tags` never belonged in that sentence. They are set at launch, live on the
+    record, and appear nowhere in `spec` — so there was nothing for them to
+    duplicate, and omitting them silently dropped a field the detail screen
+    renders. The old version of this test asserted `"tags" not in body` and so
+    DEFENDED the defect: it was written from the branch structure rather than
+    from the claim, and `Run = RunSummary & {...}` had said otherwise all along.
+    """
     _fabricate(store, "train-a", tags=["nightly"], spec_summary="train · x")
 
     body = client.get("/lab/runs/train-a").json()
 
-    assert "tags" not in body
+    assert body["tags"] == ["nightly"]
     assert "spec_summary" not in body
+
+
+def test_the_detail_carries_every_tag_the_listing_carries(store, client):
+    """Payload against payload, not either against a fixture.
+
+    The two shapes are built by one function down two branches, so the only
+    thing that can prove they agree about tags is reading both for the same run
+    and comparing. A fixture-based assertion would pass against a detail branch
+    that hardcoded the same list.
+    """
+    _fabricate(store, "train-a", tags=["nightly", "sweep"])
+    _fabricate(store, "train-b", tags=[])
+
+    rows = {r["id"]: r for r in client.get("/lab/runs").json()["runs"]}
+    for run_id, row in rows.items():
+        detail = client.get(f"/lab/runs/{run_id}").json()
+        assert detail["tags"] == row["tags"], run_id
+
+
+def test_a_run_recorded_before_tags_existed_reads_as_empty_on_the_detail(
+        store, client):
+    """A `run.json` with no `tags` key renders as `[]` and never as `null`.
+
+    Real case, not hypothetical: the kit-written `run.json` files have no
+    `tags` key at all.
+
+    **This test pins the PROPERTY and cannot isolate the mechanism, which is
+    worth saying rather than leaving for someone to discover.** Two guards
+    independently prevent a `null` here — `runs.load()` defaults the key to
+    `[]` before the wire ever sees the record, and `_run_wire` applies `or []`
+    on top. Mutating either one alone leaves this green, so a surviving
+    single-point mutation here is an EQUIVALENT MUTANT rather than a gap in the
+    assertion. Measured: `load()` on a record with no `tags` key already
+    returns `tags: []`.
+
+    Both are kept. Removing `_run_wire`'s default would make it silently
+    dependent on a behaviour of `load()` that nothing states, and this is a
+    default rather than a safety check — two agreeing defaults cost nothing,
+    where two agreeing safety checks would hide which one fires.
+    """
+    _fabricate(store, "train-a")
+    (store / "train-a" / "run.json").write_text(json.dumps(
+        {k: v for k, v in
+         json.loads((store / "train-a" / "run.json").read_text()).items()
+         if k != "tags"}))
+
+    assert client.get("/lab/runs/train-a").json()["tags"] == []
 
 
 def test_an_unknown_run_id_is_a_404(store, client):
