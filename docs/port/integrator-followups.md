@@ -677,6 +677,37 @@ applies to any probe that prunes, not only to a matrix.
   fallback there would have the same shape as a check that cannot fire: it looks like
   resilience and is a bypass.
 
+- **A correct MECHANISM can be attached to the wrong SYMPTOM, and the diagnosis still
+  reads as sound.** Track D described a `/record/status` reconcile race precisely and
+  correctly — the guard at `VRTeleopPanel.tsx:407` tests `actInFlightRef` at RESOLVE time,
+  so a read ISSUED before a local transition and RESOLVING after it slips past, the flag
+  already back to false. Every particular was right. It simply was not causing the test
+  flake, which turned out to be a disabled `Enter Passthrough` button. The integrator
+  propagated it as the cause and handed it on as a production task on that basis.
+  **Separate the mechanism from its attribution**: a described-and-plausible mechanism is
+  a hypothesis about a symptom, not an explanation of it, however well described. Both
+  halves resolved well — the mechanism was real and is now fixed with evidence (`84ff19d`),
+  and the flake had a different root (`9c2d087`) — but only because someone tested both
+  rather than accepting that one plausible story covered both observations.
+
+- **Two guards over "the same" window are usually over two different windows.**
+  `actInFlightRef` guards the interval DURING a call; nothing guarded a read that
+  PREDATES one. Only the first was covered, and the narrow guard beside it applied solely
+  to `gateServerRef === false` — so the server-gate path, the one that exists the moment
+  the record routes are mounted, was the exposed one. **Name the window a guard covers,
+  in time, at the site.** The fix: every local transition bumps `takeEpochRef`, a read
+  carries the epoch it was issued under, and a read whose epoch has moved is dropped **for
+  reconcile purposes only** — `setRecStatus` still runs so the HUD's frame counters do not
+  stall, which is exactly the dead end the previous session recorded when they tried
+  silencing `recordStatus` wholesale.
+
+- **`clearAllMocks` clears CALLS, not IMPLEMENTATIONS.** A mock implementation living in
+  a `vi.mock` factory survives `clearAllMocks`, so the first test to override it leaks that
+  override into every test after it — order-dependent, and latent until somebody needs the
+  override. Re-establish implementations in `beforeEach`. Found while writing a test that
+  needed the override, which is the usual way: the hazard is invisible until the first
+  caller arrives, and then it is theirs to eat.
+
 - **A one-sided observation cannot support a two-sided claim.** A regression was
   reported from a single observation of the NEW behaviour, with no observation of the old
   one — and the old file was available the whole time. The two resolvers turned out to be
