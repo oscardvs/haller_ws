@@ -733,3 +733,34 @@ carrying only the wrong one.
 The legacy `/record/episodes` entries keep their own `index` unchanged: that is
 a frozen shape with its own meaning and its own tests, and it is not this
 surface.
+
+---
+
+# Addendum — the prune path is verified, not assumed
+
+`runners/export_runner.py` was written against lerobot 0.6.1's `delete_episodes`
+and its refusals were tested, but no real prune had been run: the only real
+dataset on this box has no backup of any kind, so Track B stopped there
+deliberately rather than point a destructive re-encode at it.
+
+**Closed 2026-08-27 by the integrator on a throwaway 709 MB copy. Numbers and
+method are in `docs/port/integrator-followups.md` under "U4 / U5 — ANSWERED" —
+that document owns them; this is a pointer, not a copy.**
+
+What it settles for the code in this package:
+
+* `delete_episodes` handles our v3.0 layout on real recorded data (46 → 35
+  episodes, 29,500 → 21,416 frames, video re-encoded, episode metadata rebuilt).
+* A dataset written by 0.6.1 reads identically under the serving venv's 0.5.1.
+  The interpreter split survives a dataset crossing between the two — which is
+  what makes "cross-version traffic stays FILES, never config objects" a
+  workable rule rather than a hope.
+* **Survivors RENUMBER: `episode_index` runs 0..34 afterwards.** This is the
+  measured confirmation behind `export_runner` clearing review marks after an
+  in-place prune, and behind `review.stale_marks` existing at all. A mark is an
+  index. Every index past the first deletion now names a different episode, so
+  carrying marks across a prune would silently attach old decisions to new
+  demonstrations.
+
+The prune remains destructive and remains a background job because it
+re-encodes. Run it on a throwaway copy first, every time.
