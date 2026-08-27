@@ -305,6 +305,25 @@ applies to any probe that prunes, not only to a matrix.
   `RUNNERS` value imports (subprocess) and has a `__main__` guard. Same family as the
   vacuous E-STOP assertions: the harness, not the code, decided the outcome.
 
+- **Triage before you measure: `git status --short -- <area>` FIRST.** If the failing
+  file is dirty and is not yours, it is someone typing, not a regression. One command, no
+  setup, available to any session immediately — and it answers the question directly rather
+  than by isolating away from it. The detached worktree is the stronger guarantee and costs
+  setup; **the status check is the TRIAGE, the worktree is the MEASUREMENT.** Run the
+  first always, reach for the second only when publishing a number. Track C's frontend read
+  396, then 395/1, then 396 three times, then 376/20, all at the SAME HEAD inside one hour;
+  the status check turned the last of those from alarming into a one-line observation.
+
+- **When a figure you want to record turns out to be a fact about the tree, find the
+  narrower figure that is a fact about your CODE.** Do not add a caveat to the wide one.
+  Track C's handoff pinned "frontend suite 396" and they caught it themselves under the
+  baseline rule — a successor told to expect 396 would have hunted a twenty-test regression
+  that did not exist. Replaced with 150 tests across six named suites, the literal command,
+  and the triage step above: a number that is a property of the track rather than of the
+  minute. Sharpened by Track C into the form to keep: **pin whatever you measure yourself,
+  beside its commit AND its `git status`** — pinning the commit alone still misses a dirty
+  tree at that commit.
+
 - **A baseline without a commit beside it is not a baseline.** Within one hour, three
   sessions honestly reported **1474, 1477 and 1487** backend passes. Nobody was wrong and
   nobody was careless — each was a correct measurement of a different moment on a tree four
