@@ -74,10 +74,17 @@ type Loaded = {
   seriesMissing: boolean;
   /** The metrics request was REFUSED (not absent) — the backend's own sentence.
    *  Kept inside the loaded state on purpose: a refusal here costs the CURVES,
-   *  never the page. A real ACT run logs 12 numeric keys against a cap of 8, so
-   *  this is the ordinary path for the only kind of run worth comparing, and
-   *  throwing it to the outer catch blanked the run list, the legend and the
-   *  hparam diff over a chart nobody could draw. */
+   *  never the page.
+   *
+   *  Measured on the real 60k-step ACT run: it logs 12 numeric keys, of which
+   *  10 are plottable and therefore requested, against `compare.py::MAX_KEYS`
+   *  = 8. So a refusal is the ORDINARY path for the only kind of run worth
+   *  comparing, and throwing it to the outer catch blanked the run list, the
+   *  legend and the hparam diff over a chart nobody could draw. The three
+   *  numbers are spelled out separately because they have moved apart once
+   *  already: `plottableMetricKeys` took the request from 12 to 10, which left
+   *  this comment quoting the logged count as though it were the requested
+   *  one. */
   seriesRefusal: string | null;
 };
 
