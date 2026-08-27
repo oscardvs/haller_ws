@@ -242,8 +242,16 @@ Commit style: `type(scope): lowercase sentence stating the change as a fact`.
   alone** — and **V11 goes FIRST** in the hardware session, because the invariant-5
   exception rests on it and a lapse found at the start is a design change with an evening
   to make it.
-- **USB 2.1**: the D455 negotiates 480 Mb/s, not 5000. Caps colour rate; will bite once
-  `fps` is measured. Cable or port, not software — tell Oscar before the servo session.
+- ~~**USB 2.1**: the D455 negotiates 480 Mb/s, not 5000.~~ **CLOSED 2026-08-27 — it was the
+  PORT, and the original diagnosis said so.** Measured 480 on `1-4`; Oscar re-plugged and it
+  reads **5000 Mb/s on `4-2`**. *"Cable or port, not software"* was right, and the variable
+  was the port. **Record which port a colour-rate figure was taken on** — that number is now
+  port-dependent, so a future 480 reading is a plug and not a regression.
+  Second confirmation in the same moment: `/dev/haller_cam_mast` resolved to `video4` on a
+  port it had never enumerated on before. That is the udev rule doing exactly what the D455
+  retraction credited it with — `ID_USB_INTERFACE_NUM=="03"`, `ATTR{index}=="0"`, landing on
+  the colour node by construction however the kernel renumbers. **First real re-plug test of
+  that claim; it held.**
 
 ---
 
@@ -433,6 +441,30 @@ last.
 means *the integer written to `info.json`* — NOT the operator's requested rate. So a 2d that
 regressed to stamping a request would leave `fps_declared=fps` textually unchanged at `:599`
 and **the diff would read as clean.** Diff `_freeze_fps`'s body, not its call site.
+
+### HARDWARE ON THE BENCH — 2026-08-27 evening, and it changes what is measurable
+
+Oscar's own words, and it moves several things out of the batched hardware session:
+
+- **ONE REAL ARM IS ON THE BUS.** `/dev/haller_arm_leader -> ttyACM0`; the symlink name is
+  legacy — `config.solo-real.yaml` drives that exact port as `id: left, model: so101_follower`.
+  It is the solo rig's driveable arm, not an input device.
+- **THE D455 IS PLUGGED IN AT USB 3.** See the closed item above.
+- **Wrist cameras and the one missing servo are ~1 WEEK OUT.** Oscar's instruction: build
+  ahead with placeholders, log them, one-shot it, he debugs when the hardware lands.
+
+**So U3 is measurable NOW, and it is the last unmeasured premise under the recorder's own
+gate.** `recorder.py:174-181` records that the 29.9 was taken **AT IDLE** — no session, no
+cameras recording, no arm reads under load — against a band of `29.850..30.150`. That is a
+1.5x margin on a figure measured with the load absent, and the loaded figure is the one an
+operator lives with. Tasked to Track A, read-only, torque never enabled.
+
+**Placeholder discipline for the missing hardware.** The third camera still lands in the
+frozen `left_wrist` key, and its stand-in must **announce itself** rather than defaulting
+silently. A placeholder that can be mistaken for a real camera at record time writes a
+dataset nobody can trust afterwards — and the port already has the precedent: a flat-zero
+`observation.effort` column is tolerable ONLY because `recorder.py:78-79` declares what it
+means. An undeclared stand-in is the sparse-false-zero case, which this port refuses.
 
 ### Allocation is name-keyed and names do not survive a resume
 
