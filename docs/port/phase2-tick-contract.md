@@ -24,8 +24,23 @@ another. Mechanisms 1–3 are **one fix**: one sampler that owns the tick.
 
 `haller_hmi/tick.py`:
 
-- **`TickSample`** — frozen. `t_mono`, `seq`, `arms{id: {joints_deg,
-  effort_norm, torque}}`, `goal_deg`, `reasons`, `base`, `clutch`, `collision`.
+- **`TickSample`** — frozen. `t_mono`, `seq`, `arms{id: <state_snapshot() VERBATIM>}`,
+  `goal_deg`, `reasons`, `base`, `clutch`, `collision`.
+
+  **Corrected 2026-08-27: `arms` carries the snapshot VERBATIM, not a
+  `{joints_deg, effort_norm, torque}` projection** as this document first specified.
+  `test_telemetry.py::test_effort_passes_through_the_frame_verbatim` pins that NOTHING
+  between the handle and a subscriber decides which per-joint keys exist — and a
+  projection here would quietly have become that deciding place ONE LAYER ABOVE the test
+  that forbids it, so the next channel added to `state_snapshot()` would be dropped at the
+  producer with the suite still green. Derived views are METHODS on the sample: one
+  representation, no copy to drift.
+
+  **A frozen sample must still be JSON-serialisable.** `MappingProxyType` is not a `dict`
+  subclass, so `json.dumps` refuses it — and a telemetry frame goes straight to
+  `ws.send_json`, so the first bus-backed frame would have 500'd the telemetry socket. No
+  test that stops at reading the values back can see this. `plain()` is the documented
+  inverse of the freeze.
   Frozen because a consumer that can mutate a sample can corrupt every other
   consumer's copy of the same tick, and the whole point is that they all see one
   moment.
