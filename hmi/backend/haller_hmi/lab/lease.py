@@ -172,8 +172,9 @@ def port_holders(device: str) -> list[str]:
 def bus_conflict(device: str, *, recorder, teleop_running: bool) -> str | None:
     """Is it safe to admit a policy source right now? A reason, or None.
 
-    The single question a rollout route asks before letting a child stream
-    targets at the arms. Three ways it is not safe:
+    The single question the SERVER-SIDE INGEST asks at the HANDSHAKE, before
+    admitting a child that wants to stream targets at the arms. Three ways it
+    is not safe:
 
     1. an episode is open — the take would record a policy driving the arm as
        if a human had;
@@ -192,6 +193,19 @@ def bus_conflict(device: str, *, recorder, teleop_running: bool) -> str | None:
     — that skip is what makes this function correct, not a tidiness detail, and
     it is only correct while `lab/` runs in the same process as the arms (it
     does: the whole package is banned from the child venv precisely so it can).
+
+    **The caller is the ingest, NOT `post_rollout`.** Admission is the right
+    event and launch is the wrong one: `routes_runs.py`'s launcher writes a spec
+    and starts a process, and it already declines to re-check what the child
+    owns. `rollout_runner.py::IngestClient.handshake` states the other half —
+    the child cannot see the recorder or the teleop session, so it asks the one
+    process that can and takes the sentence below as its refusal.
+
+    So this has **no production caller yet**, and that is a schedule, not a
+    verdict. It is NOT the `tick.py::rate_ok` case that was deleted at
+    `3ae8320`: same surface shape — a tested check nothing calls — opposite
+    disposition, and what separates them is whether the absent caller is
+    coming. `rate_ok`'s never was. This one's is Track A's ingest.
 
     `teleop_running` arrives as a bool rather than being read off a session, for
     the same reason `dataset_busy` takes its runs list: no import cycle, and
