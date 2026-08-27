@@ -556,6 +556,42 @@ applies to any probe that prunes, not only to a matrix.
   Restart a long-lived probe backend before trusting it, and prefer stopping a rig to
   leaving one that looks alive and answers wrongly.
 
+- **Test a proposed guard for where it STOPS being able to fire, before building it.**
+  Track A proposed the recorder's faithfulness bound at 0.5% and, unprompted, went and
+  found its dead zone: above ~100 Hz int-rounding can only produce `0.5/f < 0.5%`, so the
+  bound becomes arithmetically unreachable. **That is not a check that cannot fire in the
+  bad sense** — it fires across 10-60 Hz where this rig runs, and stops being able to
+  exactly where the hazard it guards has vanished. The distinction is worth the comment at
+  the site, or a later reader sees "never fires at 120 Hz" and loosens it. Applying the
+  check-that-cannot-fire test to a check BEFORE it exists is the cheapest place to apply
+  it.
+
+- **A percentage bound hides how narrow its band is — state the band.** 0.5% against a
+  written 30 refuses anything outside **29.850 .. 30.150**, i.e. ±0.15 Hz. The measured rig
+  reads 29.9, so the margin is 1.50x — but that was measured AT IDLE, with no session, no
+  recorded cameras and no arm reads under load, leaving 0.05 Hz of room. **A ratio and a
+  band are the same fact and only one of them is legible.** Quote both when ruling on a
+  tolerance, and measure the margin under the load the gate will actually see (here: U3,
+  under recording, before the hardware session rather than during it).
+
+- **Two gates over the same two quantities: one of them is unreachable.** The plan said a
+  rollout refuses below "the same 90% constant as the record gate". On append both compare
+  measured rate against the dataset's `fps`, and anything failing 0.9 fails a 0.5%
+  faithfulness bound by twenty times — so the 0.9 branch could never fire, as unreachable
+  code in the safety layer, in the reassuring form where a reader sees a rate gate and
+  believes it. **Split by the QUESTION, not the quantity:** the recorder asks whether the
+  integer in `info.json` is an honest time base for the samples taken; the rollout asks
+  whether a policy's control loop is near its training rate. A policy 10% off its training
+  fps is a live question about dynamics; **a dataset 10% off its own time base is not a
+  judgement call at all.** Only one of the two is a matter of degree. Amended at `c8d23ab`.
+
+- **Record the value that must NOT be used, beside the one that is.** `haller_rate`
+  carries the sampler's TARGET alongside the measurement and the integer written —
+  precisely because `fps = round(measured)` and never the target. Recording the forbidden
+  value is what lets a later reader confirm the two were never confused, which is the exact
+  confusion the block exists to prevent. Generalises: when a design turns on two numbers
+  that must not be swapped, storing both is cheaper than a comment insisting they were not.
+
 - **A drift bound must be a FRACTION, not a duration.** Correcting the integrator's own
   arithmetic: rounding a measured `fps` to lerobot's `int` skews a SYNTHETIC timestamp
   column by `T x (f_true - f_written) / f_written` — note the denominator is the WRITTEN
