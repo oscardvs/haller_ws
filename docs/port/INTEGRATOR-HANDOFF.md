@@ -55,8 +55,19 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1487 passed, 1 xfailed — measured at commit `42d5fa4`**
+- **backend `pytest`: 1563 passed, 1 xfailed — measured at commit `d32cb3b`**
   (was 593 pre-port). **A baseline without a commit beside it is not a baseline.**
+  It RECONCILES, which is the property worth having — every delta is attributable:
+
+        42d5fa4  baseline                        1487
+        a6965dd  tick 2a (Track A)               + 24  -> 1511
+        38ec8d6  tick handover (Track A)         +  7  -> 1518
+        d32cb3b  rollout route + gate (Track B)  + 45  -> 1563
+
+  **Report a suite delta as `base + N = total`, not as a total.** It makes the claim
+  checkable by arithmetic instead of merely true, and it caught a commit the integrator
+  had not been told about — the +7 was the gap between what two tracks reported and what
+  the tree actually held.
 - **frontend `vitest`: 396 passed, FLAKING ~1 IN 5 FULL-SUITE RUNS** (was 186). Cause
   known and named, fix at `8e7ff7a` HALVED it (~40% -> ~20%, ten runs before / five after)
   and did not close it. **Do not report 396 as clean and do not "re-run and see"** — a 20%
