@@ -72,6 +72,28 @@ and dies when that event happens. Add the trigger, not just the task.
   as truncation, a mid-glyph clip reads as a rendering fault. Does NOT apply to the
   desktop cockpit — DOM text wraps, so the failure mode does not exist there.
 
+- **Name the unit at the site, not in a docstring three files away.** Two dimension
+  bugs surfaced in one phase, which is a pattern rather than luck: this codebase carries
+  degrees, radians, ticks, percent and normalised [0,1] on adjacent surfaces, and a
+  float carries none of that with it. Any constant crossing a module boundary is
+  unit-suspect until proven. Both instances were live: lerobot pins the gripper to
+  RANGE_0_100 regardless of `use_degrees`, so `read_joints_deg()["gripper"]` is a
+  PERCENTAGE compared against a DEGREES window — preflight would have dropped a healthy
+  arm limp, hardest right after a calibration, because the sweep ends at the jaw's open
+  stop. And the kit's `last_limit_pressure` is RADIANS where Haller's is DEGREES, so a
+  ported `max(pressure, 0.35)` sat below the 0.5 deg haptic dead zone and would have
+  SILENCED the buzz at the exact pose it was added to raise.
+
+- **A fixture that is not merely simplified but IMPOSSIBLE is worse than no fixture.**
+  The gripper defect survived because a test hardcoded `gripper: (0.0, 100.0)` — a
+  window `_load_joint_limits` can never produce. It converted an untested path into an
+  apparently-tested one. Sweep fixtures for values the real loader could not emit.
+
+- **Anything that drops torque goes through `_release_torque_per_motor`.** lerobot's
+  bulk `disable_torque()` raises on the first refusal and leaves the rest energised —
+  the 2026-08-21 incident verbatim, arriving by a new road. An arm with a latched
+  shoulder alarm ends up HALF LIMP while the report prints "TORQUE STILL ENABLED".
+
 - **A copied fact is only wrong once someone changes it elsewhere — and until then,
   the happy path fits.** Third instance of the legibility class, one level up. Track D's
   HUD carried `declared * 0.9` with a comment asserting it matched the recorder's gate.
