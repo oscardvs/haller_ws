@@ -187,6 +187,20 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   a bare key at the last step — so a camera named for a side and an arm named for a side
   collapse to one confident wrong answer.
 
+- **A smoothed minimum is a value the run never reached.** Compare charts smooth by
+  default (across three overlaid runs you read the SHAPE; on one you read the VALUE), but
+  the BEST/FINAL table reads the RAW points. "Best loss 0.071" has to be a number that
+  actually happened, or the table lies in the direction of flattery and every comparison
+  built on it inherits that. The slider moves the curve, not the figures under it. Nobody
+  would have filed this — it would simply have made every run look slightly better than it
+  was, forever.
+
+- **Make the wrong value unrepresentable, not merely corrected.** The video clamp bug was
+  a hardcoded constant standing in for a per-dataset fact, so the fix threads `fps` as a
+  REQUIRED prop — a silently-assumed 30 no longer compiles. Same instinct as a keyboard
+  table where a binding without an action is a type error rather than a dead key. Family
+  with the cadence sweep and the copied rate gate.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
