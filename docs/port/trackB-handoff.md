@@ -1,7 +1,14 @@
 # Track B — the Lab backend, handoff
 
-Written 2026-08-27 by `haller-ws-ea`. Track B is **COMPLETE**. This file is what
-a successor cannot reconstruct from the code, the commits or the contract.
+Written 2026-08-27 by `haller-ws-ea`; numbers and open items re-verified the
+same evening by `haller-ws-2d` at `b908cf6`. Track B is **COMPLETE**. This file
+is what a successor cannot reconstruct from the code, the commits or the
+contract.
+
+**This file belongs to Track B** (integrator ruling, `abdc52e`): the session that
+can tell whether a handoff line is stale is the one that did the work. Every
+figure below names the commit it was measured at, because a bare number outlives
+the tree it was true of — three of them here already had.
 
 The contract itself is `docs/port/trackb-lab-contract.md` and it is current —
 every shape, every ruling and every measured number lives there. Read it first.
@@ -21,14 +28,22 @@ get backwards.
 | `be9c9c6`, `6d0714a` | rate-probe retarget and its subprocess fix |
 | `f02dd81` | **every runner launch target was a module that does not exist** |
 | `25a56d7` | rate floor imported directly now that Track A published |
+| `d32cb3b` | **`POST /lab/runs/rollout` + check (a)** — the launcher and its gate |
+| `b908cf6` | `bus_conflict`'s docstring named a caller that does not exist |
 
 Mounted in `server.py`; `routes_data.py` and its 31 tests are deleted, on
-differential evidence. 25 paths on the real OpenAPI schema.
+differential evidence. **26 paths** on the real OpenAPI schema — 25 until
+`d32cb3b` added `/lab/runs/rollout`.
 
-**Numbers at handoff, on a settled tree:** `tests/lab/` **789**, backend
-**1477 passed, 1 xfailed**, ruff clean over `haller_hmi/{lab,api,runners}` and
-`tests/lab/`. Do not lint the whole `haller_hmi/` package and report the result
-as yours — other tracks' files have their own findings.
+**Numbers, re-measured at `b908cf6`** from a detached worktree run from inside
+`<worktree>/hmi/backend`: `tests/lab/` **840**, backend **1632 passed, 1
+xfailed**, ruff 0.16.0 clean over `haller_hmi/{lab,api,runners}` and `tests/lab/`.
+That reconciles to the integrator's ladder as `1632 @ 3ae8320 + 0 = 1632 @
+b908cf6` — two docstring commits in between, no test added or removed.
+
+The figures this replaced (`789` / `1477`) were true at `25a56d7` and were read
+as current for a day afterwards. Do not lint the whole `haller_hmi/` package and
+report the result as yours — other tracks' files have their own findings.
 
 ## CLOSED — do not reopen
 
@@ -45,14 +60,16 @@ If a future edit reintroduces a fallback here, that is a regression:
 absence in the source. Before publication a missing constant was normal; after
 it, a lookup that cannot find it is a rename, a move or a typo — never normal.
 
-## OPEN — the one piece of assigned work not started
+## CLOSED — the launcher check is BUILT
 
-**The launcher check, ruled in by `haller-ws-57` and NOT built.**
+**Both checks now exist. This section read "NOT built" for a day after it was.**
 
-Two checks exist and only one is unbuilt:
+    (a) declared control_hz vs the fps the policy was TRAINED at   -> launch time, BUILT d32cb3b
+    (b) measured rate vs declared control_hz                       -> run time,    BUILT
 
-    (a) declared control_hz vs the fps the policy was TRAINED at   -> launch time, OPEN
-    (b) measured rate vs declared control_hz                       -> run time, BUILT
+Check (a) lives in `routes_runs.py::post_rollout` — `_trained_rate(policy_path)`
+at `routes_runs.py:412`, called at `:779`, stamped from `:855`. 32 tests in
+`tests/lab/test_rollout_launch.py`.
 
 **The precondition is already verified — the link exists.** A real ACT
 checkpoint from the kit's own training run carries it:
@@ -72,16 +89,24 @@ nothing may be: the integrator's instruction was that inventing the link — fro
 the run directory, or from whatever dataset is currently selected — would compare
 the declared rate against the WRONG dataset's fps and report agreement.
 
-Disposition when built: refuse at launch on divergence, same as the rate gate —
-refused not warned, an explicit override for someone who means it, and both
-numbers stamped into the run record regardless.
+Disposition, as built: refuses at launch on divergence — refused not warned, an
+explicit `allow_rate_mismatch` override for someone who means it, and both
+numbers stamped into the spec regardless. `control_hz` DEFAULTS to the trained
+rate, so the correct value is the one you get by not choosing and the gate fires
+only on a divergence somebody typed.
 
-**But note where it can live.** There is currently no rollout launch route —
-`POST /lab/runs/train` is the only launcher, and check (a) is about a rollout.
-`lab/runs.py::RUNNERS` can launch a rollout programmatically; nothing exposes it
-over HTTP. Either the check goes in wherever a rollout launch route is added, or
-that route is the prerequisite. **Flag this rather than bolting the check onto
-`/lab/runs/train`, which trains and does not roll out.**
+**Check (a) is EXACT MATCH, two-sided, and does NOT read `MIN_RATE_FRACTION`.**
+That constant absorbs measurement jitter — a physical gap between an intended
+period and an achieved one. There is no such gap between an `int` in `info.json`
+and a declared value, so a tolerance band there would admit only typos and
+deliberate choices, and deliberate choices belong in the override where they get
+stamped.
+
+**The prerequisite this section used to flag is met.** It said "there is
+currently no rollout launch route" and warned against bolting the check onto
+`/lab/runs/train`, which trains and does not roll out. `d32cb3b` added
+`POST /lab/runs/rollout` and the check went there. Nothing was bolted onto
+`train`.
 
 That `dataset.episodes` list being unsorted, incidentally, is the eval-split
 trick surviving into a real trained checkpoint. Do not let anything sort it.
@@ -93,6 +118,24 @@ trick surviving into a real trained checkpoint. Do not let anything sort it.
 NORMAL, REQUIRED state — the child streams targets and the server commits them.
 A check that refused on it would refuse every rollout forever, and would look
 like caution. There is a comment in `lab/lease.py` saying so; keep it.
+
+**`bus_conflict` has NO production caller, and that is a schedule, not a
+verdict.** Its caller is the server-side INGEST, at the HANDSHAKE — Track A's,
+unbuilt. Do NOT wire it into `post_rollout`: that fires at LAUNCH rather than at
+ADMISSION, and is a second copy of a rule that then has to agree with the first.
+`rollout_runner.py::IngestClient.handshake` already states the child's half.
+
+Until `b908cf6` the docstring said "a rollout route asks" it, which named no
+existing caller and pointed at the wrong candidate. A comment asserting a caller
+that does not exist reads as documentation, so it gets none of the scrutiny an
+assertion gets, and the next author obeys it.
+
+**It is NOT the `tick.py::rate_ok` case**, deleted at `3ae8320`. Same surface
+shape — a fully tested check nothing calls — opposite disposition. What separates
+them is whether the absent caller is scheduled: `rate_ok`'s never was, and a
+future author reaching for it got a one-sided floor twenty times looser than the
+recorder refuses at. This one's caller is coming. Deleting it would be deleting a
+real guard because a matrix looked untidy.
 
 **The rollout child owns the POLICY, never the bus.** It loads a checkpoint,
 runs inference, streams degrees. It never opens the serial port. This is
@@ -118,18 +161,38 @@ frames read `episode_index [1,1,1]`, `index [855,856,857]`. The legacy
 `/record/episodes` entries keep their own separate `index`; that is a different
 frozen shape with its own tests and it is not the same field.
 
+## OPEN — one item, genuinely blocked
+
+**Exercise the rollout END TO END.** *Trigger:* Track A's server-side ingest
+lands. Nothing else is open, and "nothing further is worth doing" has been the
+honest answer three times running — do not pad it into work.
+
+The item that used to sit alongside it — "`/estop` must revoke the rollout lease,
+and the lease must be mounted" — carried a trigger that had ALREADY FIRED
+(`lease.py` at `2a92b03`, `rollout_runner.py` at `8585e71`), so it read as
+blocked on the one session that could act on it. Re-tagged by the integrator at
+`abdc52e` to the ingest, so the two rollout items now travel together. **A stale
+trigger is worse than a missing one**, on a list whose whole discipline is "add
+the trigger, not just the task" — a trigger is a claim, and needs checking like
+any other.
+
 ## The honest flag — carry it forward verbatim
 
 **The rollout path has NEVER run end to end, and cannot until Track A's ingest
 exists.**
 
 Verified: the child's preflight, its refusals, the message shape, the handshake,
-the rate gate in both directions, and that it contains no code able to touch the
-bus.
+the rate gate in both directions, check (a) at launch, and that it contains no
+code able to touch the bus.
 
-NOT verified: that the two halves fit. There is no second half. Failing loudly
-at an absent endpoint is the correct failure direction and is **not** the same as
-working. Do not round this up, and do not let anyone else round it up either.
+NOT verified: that the two halves fit. There is no second half. Confirmed again
+at `b908cf6` — `DEFAULT_INGEST_URL = "tcp://127.0.0.1:8781"` at
+`rollout_runner.py:139`, and a repo-wide grep for `8781` returns that one line.
+
+A rollout can currently be REFUSED for a reason that is true; **nothing has ever
+been ACCEPTED.** Failing loudly at an absent endpoint is the correct failure
+direction and is **not** the same as working. Do not round this up, and do not
+let anyone else round it up either.
 
 ## Things that bit, so they do not bite twice
 
