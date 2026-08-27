@@ -221,6 +221,17 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   operator back at preview rather than inviting them to press a button that is guaranteed
   to fail.
 
+- **Spell it the way the storage format spells it.** Ruled on a live collision where the
+  catalog called an episode's index `index` and `/record/status` called it
+  `episode_index` — two spellings for one concept across three tracks, with a red test
+  defending one of them. LeRobot's v3.0 parquet settles it by carrying BOTH as different
+  columns: `episode_index` is which episode, `index` is the GLOBAL FRAME INDEX across the
+  dataset. So `index` was already taken, for something else, on the surface most likely
+  to be read beside a parquet. Matching the format means no surface in this system ever
+  translates a column name. (The test defending the losing spelling was kept and
+  inverted — asserting a payload does not leak the other spelling is the right defence,
+  it was merely pointed the wrong way.)
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
