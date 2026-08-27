@@ -72,6 +72,23 @@ cd hmi/frontend && npm test && npx tsc --noEmit     # no CI typecheck; run it by
 
 Rollback tag: **`baseline-2026-08-27-kit-port`** at `51844b9`.
 
+**RUN IT FROM INSIDE `<worktree>/hmi/backend`, or the isolation is fake.** `haller_hmi`
+is installed EDITABLE into `~/venvs/haller-hmi`, and the finder's mapping is an absolute
+path into the SHARED tree:
+
+```
+~/venvs/haller-hmi/lib/python3.12/site-packages/__editable___haller_hmi_0_1_0_finder.py
+MAPPING = {'haller_hmi': '/home/odesha/haller_ws/hmi/backend/haller_hmi'}
+```
+
+Measured both ways before being trusted: `sys.path` beats the editable finder on
+`sys.meta_path`, under `python -c` AND under pytest's prepend import mode — which are two
+different mechanisms, and only the second is what a baseline actually runs under. So a
+worktree run started from `<worktree>/hmi/backend` genuinely imports the worktree. **A
+worktree run started from any other cwd silently imports the shared tree**, producing a
+number that looks attributable and is not — invisible, because the suite passes either way
+and it only ever surfaces as a mystery red or a mystery green while someone is mid-edit.
+
 **Verify against a DETACHED WORKTREE, not the shared tree.** A full-suite red while other
 tracks are mid-edit measures the tree, not the code: `haller-ws-57` got 36 failures then 17
 on two runs minutes apart, and every failing file was open in another session's editor at
