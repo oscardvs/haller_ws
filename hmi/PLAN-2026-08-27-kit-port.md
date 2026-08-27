@@ -49,36 +49,75 @@ Not "it was flaky". Four specific, separately fixable defects.
    `fps = int(round(1.0 / self.telemetry._period))`. That is the rate telemetry was
    *asked* for. It has never been measured against real hardware with real Feetech
    round trips in the loop. Every `timestamp` in every episode is synthesised from it.
-4. **Every recorded D455 pixel is wrong.** The mast cam is read through OpenCV/v4l2.
-   Measured below.
+4. ~~**Every recorded D455 pixel is wrong.**~~ **RETRACTED 2026-08-27 — see below.**
+   The measurement was real; the attribution was wrong, and it was mine.
 
-Mechanisms 1–3 are one fix, not three: **one sampler that owns the tick**.
+Mechanisms 1–3 are one fix, not three: **one sampler that owns the tick**. Mechanism 4
+does not exist.
 
-## The D455 measurements (same camera, same scene, 2026-08-27)
+## The D455 — a retracted diagnosis (2026-08-27)
 
-| path | brightness (0–255) | magenta bias |
-|---|---|---|
-| OpenCV / v4l2, default | 66.5 | +31.9 |
-| OpenCV + `MJPG` fourcc | 66.5 (no-op) | +27.7 |
-| OpenCV + explicit `COLOR_YUV2BGR_UYVY` | — | +28.9 |
-| **librealsense native** | **126.1** | **+9.7** |
+An earlier version of this document said the mast cam was read through OpenCV/v4l2 at
+66.5/255 with a +31.9 magenta bias against librealsense's 126.1/+9.7, concluded there was
+"no OpenCV-side fix", and OVERTURNED PLAN-2026-08-22 decision 6 on that basis. **All of
+that rested on measuring the wrong sensor.**
 
-Setting `MJPG` is a **no-op**: the node reports UYVY and offers only `GREY` and `UYVY`.
-The conversion is not a fourcc problem and not a colour-conversion problem — there is
-**no OpenCV-side fix**. Half the light is missing and the frame is magenta.
+`/dev/video2` is not the colour camera. It is the stereo module's **infrared imager**. All
+six D455 nodes report an identical `name`, so nothing in `/dev` distinguishes them, and
+`/dev/video2` gets picked because it is the first non-depth node that opens. The RGB
+camera is on USB interface `1-4:1.3`. Verified three ways — sysfs interface numbers,
+librealsense `physical_port`, and `VIDIOC_ENUM_FMT` (video2 offers only GREY+UYVY;
+video4 offers YUYV).
 
-The kit already knew this. `data/record_runner.py` carries the note: *"a whole session
-was recorded as purple sludge before that was understood"*.
+Re-measured on the REAL colour node, same scene:
 
-**PLAN-2026-08-22 decision 6 — "do NOT add `pyrealsense2`" — is OVERTURNED.**
-It was the right call for a €0 teleop view and the wrong call for a dataset. Terms:
+| node | path | mean | magenta bias | **rb_spread** |
+|---|---|---|---|---|
+| `/dev/video2` (IR imager) | OpenCV | 60.2 | +32.0 | **5.4** |
+| `/dev/haller_cam_mast` → video4 (**RGB**) | OpenCV | 99.3 | +23.2 | **18.6** |
+| `/dev/video4` (**RGB**) | librealsense | 101.1 | +18.0 | 27.2 |
 
-- `pyrealsense2` is a **soft** dependency: guarded import, `opencv` source retained and
-  still the default for every non-RealSense camera.
-- A config asking for `source: realsense` on a box without the module fails loudly at
-  load, not silently at first frame.
-- Depth stays out of scope. Colour node only. The budget is still €0 — this costs an
-  import, not hardware.
+**OpenCV decodes the real RGB camera correctly**, within ~0.6 of librealsense on the
+bench run in `docs/port/phase0-runtime.md`. There was never an OpenCV-side bug.
+
+**`rb_spread` is the discriminator, not the bias.** Magenta requires R and B to move
+TOGETHER against G: the broken decode has them 5.4 apart, a merely warm room has them
+18–27 apart. The bias alone separates the two populations by 1.6×; the spread separates
+them by ~5×. A correct path in a warm room reads +23, two thirds of the way to the old
+"+25 means broken" threshold — which is how a good camera got condemned.
+
+**Haller already solved this and its solution measures as well as librealsense.**
+`config.yaml` names no `/dev/videoN`; it uses `/dev/haller_cam_mast`, pinned by
+`scripts/99-haller-devices.rules:56` to `ID_USB_INTERFACE_NUM=="03"`, `ATTR{index}=="0"`.
+That IS the colour node by construction and cannot resolve onto the IR imager however the
+kernel renumbers — and it does renumber: enabling the CSI overlay once moved colour from
+video4 to video6.
+
+### Consequences
+
+- **PLAN-2026-08-22 decision 6 stands. It is NOT overturned.** `pyrealsense2` is not
+  required for correct colour. It remains a *soft*, optional dependency and the serving
+  venv does not need it.
+- **LEAVE THE MAST CAMERA PATH ALONE.** It is correct and deployed. Switching it to
+  librealsense would add a dependency for no measured gain.
+- `haller_hmi/realsense.py` keeps a **smaller** justification: the IR emitter (no V4L2
+  equivalent), a box with no udev rule installed, and the colour-health check. Not
+  "camera truth".
+- Phase 2 shrinks accordingly, and U1/U2 stop gating it.
+
+### Still true, and new
+
+The D455 is negotiating **USB 2.1** here — `/sys/bus/usb/devices/1-4/speed` reads 480,
+not 5000. That caps colour resolution and frame rate and will bite during recording,
+especially once `fps` is a measured number under invariant 10. Cable or port, not
+software.
+
+The emitter figure did not reproduce either: the kit measured Laplacian variance 413→79
+with the projector off; here it is 502.8 vs 504.1, i.e. noise. The projector *was* firing
+(the IR imager saw it). The kit's number was very likely taken on the IR node — the same
+mix-up, independently. Also, the emitter only fires while a DEPTH stream runs, so a
+colour-only pipeline is unaffected regardless. `disable_emitter()` stays because it is
+free and persists, but 413→79 is not a number this rig reproduces.
 
 ## De-risking facts (all verified 2026-08-27)
 
