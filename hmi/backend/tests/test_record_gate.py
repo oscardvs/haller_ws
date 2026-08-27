@@ -447,6 +447,65 @@ async def test_nothing_on_the_event_loop_stalls_while_the_save_flushes():
         thread.join(timeout=2.0)
 
 
+async def test_the_MID_TAKE_auto_save_does_not_stall_the_loop_either():
+    """The same flush, on the path where a stall costs more.
+
+    What most often stops teleop mid-take is `/estop`, and the record loop
+    answers that by saving up to the stop. A synchronous save there holds the
+    event loop for the whole encode at exactly the moment the operator is most
+    likely to press E-STOP AGAIN — and the second press would sit queued behind
+    a video encode. The arms are already de-energised by then, so what is at
+    stake is the HMI looking dead while somebody is reaching for the button.
+
+    Driven through `_run` rather than through `stop_episode`, because that is
+    the only caller of the path under test.
+    """
+    gate = threading.Event()
+    ds = _CountingDataset(on_save=lambda: gate.wait(timeout=5.0))
+    tele = _MutableTeleop(DRIVING)
+    bus = _measured_bus()
+    r = await _armed(dataset=ds, teleop=tele, bus=bus)
+    await r.roll()
+
+    beats = 0
+
+    async def heartbeat():
+        nonlocal beats
+        while True:
+            await asyncio.sleep(0.005)
+            beats += 1
+
+    token = bus.attach_producer("test-mid-take")
+    beat_task = asyncio.create_task(heartbeat())
+    try:
+        for i in range(3):                     # frames before the stop
+            token.publish(t_mono=2000.0 + i * 0.01,
+                          arms={"left": _joints_block(0.0),
+                                "right": _joints_block(0.0)}, goal_deg={})
+            await asyncio.sleep(0.01)
+        tele.status_dict = dict(STOPPED)       # E-STOP, WS grace, manual stop
+        token.publish(t_mono=2000.1,
+                      arms={"left": _joints_block(0.0),
+                            "right": _joints_block(0.0)}, goal_deg={})
+
+        await asyncio.sleep(0.05)
+        assert ds.concurrent_saves == 1, (
+            "the auto-save was never observable in progress — the loop did not "
+            "come back while save_episode was running, which IS the stall")
+        at_flush = beats
+        await asyncio.sleep(0.15)
+        assert beats > at_flush, "the event loop stalled through the auto-save"
+
+        gate.set()
+        await asyncio.wait_for(r._task_handle, timeout=5.0)
+        assert ds.saved == 1                   # the frames before the stop kept
+        assert r._episode_open is False
+        assert r.status()["state"] == IDLE
+    finally:
+        beat_task.cancel()
+        token.detach()
+
+
 # --- C2: an armed recorder is not a consumer -----------------------------
 
 async def test_an_armed_recorder_cannot_manufacture_drop_counts():

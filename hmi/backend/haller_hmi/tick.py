@@ -242,6 +242,19 @@ class TickSubscription:
         A subscriber that is attached but not consuming would otherwise
         overflow continuously and count drops that mean nothing — nothing was
         lost, nothing was going to be written.
+
+        NO PRODUCTION CALLER, ON PURPOSE — and this paragraph is the reason it
+        is not cruft. Contract C2 says an ARMED-but-not-rolling recorder must
+        not manufacture drop counts, and it has two legal answers: subscribe at
+        ARM and drain until ROLL, or do not subscribe until ROLL. Phase 2d took
+        the second (`recorder.arm` takes no subscription at all), so this is the
+        answer that was not used rather than a mechanism nobody needed.
+
+        Left standing because C2 is still in force and subscribing at ARM is the
+        more natural shape — the next consumer that wants a long-lived armed
+        subscription needs exactly this, and rebuilding it from the symptom is
+        how the manufactured drop counts get shipped once first. What is NOT
+        legal is subscribing early and leaving the queue to overflow.
         """
         with self._lock:
             self._draining = bool(draining)

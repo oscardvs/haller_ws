@@ -2188,7 +2188,16 @@ class DatasetRecorder:
                 teleop_running = bool(self.human_teleop.status().get("running"))
                 if teleop_was_running and not teleop_running:
                     logger.info("recorder: teleop stopped mid-take; saving episode")
-                    self._finish_episode(save=True)
+                    # Off the event loop, like the operator's stop path and for
+                    # a sharper reason. The thing that most often stops teleop
+                    # mid-take is `/estop`, and `save_episode` folds stats and
+                    # may encode video — so a synchronous save here holds the
+                    # loop for seconds at the one moment the operator is most
+                    # likely to press E-STOP AGAIN, and a second press would sit
+                    # queued behind a video encode. The arms are already
+                    # de-energised by then; what is at stake is the HMI looking
+                    # dead while the operator is reaching for the button.
+                    await self._finish_episode_async(save=True)
                     break
                 teleop_was_running = teleop_was_running or teleop_running
                 if sample is None:
