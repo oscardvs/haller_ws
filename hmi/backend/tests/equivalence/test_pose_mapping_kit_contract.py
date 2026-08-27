@@ -184,13 +184,23 @@ def test_t11_incremental_equals_absolute_within_the_reach_limit(haller_runs):
 # ---- the divergence the fixture also carries -----------------------------
 
 def test_default_reach_limits_diverge_from_the_kit(golden):
-    """Haller's default `pos_reach_limit` is 0.12 m; the kit's is 0.25 m.
+    """Haller's default `pos_reach_limit` is 0.15 m; the fixture's is 0.25 m.
 
     Recorded, not reconciled. Every T-case above passes its own limits, so
-    the defaults only bind a caller that overrides nothing — and this arm's
-    reach is roughly a third of the DK1 the kit's 0.25 m was chosen on. The
-    test exists so the divergence is a decision someone made rather than
-    something that drifted.
+    the defaults only bind a caller that overrides nothing.
+
+    The 0.25 m in the fixture is the kit's `ClutchPoseMapper` CLASS default,
+    which is also what its DK1 entry point sets — a 6-DoF, bigger arm. The
+    kit's own SO-101 entry point sets 0.15, commented "smaller arm, smaller
+    wall", and that is the one number on this axis with recorded episodes
+    behind it (46 / 29,500 frames). Haller now matches it.
+
+    What this test used to record was 0.12 against 0.25, which framed the
+    divergence against the wrong arm. 0.12 was never measured on Haller — it
+    entered whole with the port-time snapshot (5284be3), and
+    `config.solo-raw.yaml` names it as a defect mechanism: the 12 cm clutch
+    absorbs a fast reach's overshoot for good and the arm stops somewhere
+    the hand is not. The remaining 0.15-vs-0.25 gap is arm size, deliberate.
     """
     names = [str(n) for n in golden["default_names"]]
     kit = dict(zip(names, golden["defaults"].tolist()))
@@ -201,5 +211,5 @@ def test_default_reach_limits_diverge_from_the_kit(golden):
     assert ours.scale == kit["scale"]
     assert ours.scale_rotation == kit["scale_rotation"]
     assert ours.rot_reach_limit == kit["rot_reach_limit"] == 0.6
-    assert ours.pos_reach_limit == 0.12
+    assert ours.pos_reach_limit == 0.15
     assert kit["pos_reach_limit"] == 0.25

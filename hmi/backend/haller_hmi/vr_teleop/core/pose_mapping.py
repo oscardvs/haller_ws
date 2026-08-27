@@ -73,7 +73,12 @@ class ClutchPoseMapper:
             around the wrist the way the operator's own hand does, instead
             of spinning the tool on the spot and dragging the arm after it.
         pos_reach_limit: max distance (m) the position target may run ahead
-            of the arm's CURRENT position. 0/None disables (absolute mapping).
+            of the arm's CURRENT position. 0/None disables (absolute
+            mapping). The 0.15 m default is the reference stack's own SO-101
+            value — "smaller arm, smaller wall" against the 0.25 m it uses
+            on the DK1 — and the only one with recorded episodes behind it
+            (46 / 29,500 frames). The 0.12 it replaces came in with the
+            port-time snapshot and was never measured on this arm.
         rot_reach_limit: max angle (rad) the orientation target may run ahead
             of the arm's CURRENT orientation. 0/None disables.
     """
@@ -82,7 +87,7 @@ class ClutchPoseMapper:
     scale: float = 1.0
     scale_rotation: float = 1.0
     rotation_pivot: np.ndarray | None = None
-    pos_reach_limit: float | None = 0.12
+    pos_reach_limit: float | None = 0.15
     rot_reach_limit: float | None = 0.6
 
     def __post_init__(self) -> None:

@@ -28,10 +28,38 @@ adaptation:
   * There is no wrist gimbal lock to damp. `wrist_roll`'s axis is Rx(θ₄)·ŷ
     and `wrist_flex`'s is x̂, so the two are perpendicular at every pose
     (`so101_kinematics._self_test` pins this). The reference's
-    gimbal-proximity ramp and its near-antipodal park gate both exist for a
-    3-axis wrist that can fold onto itself; neither is portable here, and
-    shipping them as dead code would suggest the arm has a failure mode it
-    does not have.
+    gimbal-proximity ramp exists for a 3-axis wrist that can fold onto
+    itself and is not portable here; shipping it as dead code would suggest
+    the arm has a failure mode it does not have.
+
+  * The reference's near-antipodal park gate IS ported, because it guards a
+    different failure mode. It is a property of the QUATERNION ERROR, not of
+    the wrist's DoF count: `e_rot` is read off a quaternion, so as the error
+    angle approaches π its shortest-way direction is unstable — an
+    arbitrarily small change in the demanded orientation flips it to the
+    opposite side, and chasing that is the 180° come-around where the wrist
+    slams through half a revolution. Past `rot_err_hold` the wrist takes no
+    step at all.
+
+    Ported with one addition the reference does not need: the park EXPIRES
+    after `PARK_MAX_SOLVES`, and only a run of that many solves back inside
+    the hold refunds it. A parked wrist cannot reduce its own orientation
+    error, so an UNBOUNDED park is a fixed point — it latched for a whole
+    5000-solve run (83 s at 60 Hz) on a plain over-reach with an identity
+    orientation demand, wrist pinned on its stop, `last_orient_residual` at
+    1.00 and the haptic alarm saturated throughout. The expiry makes the
+    park a DEBOUNCE: a demand still outside the hold a second later is not
+    quaternion jitter, it is what the operator is asking for, so the arm
+    goes there at its capped rate instead of refusing forever. See
+    `_wrist_step`.
+
+    What normally keeps the demand from ever reaching the antipode is the
+    orientation reach limit. `vr_teleop.config.BOUNDS` permits
+    `rot_reach_limit = 0.0` and `config.solo-raw.yaml` sets exactly that, so
+    on the tracing config this gate is the only backstop left — and that is
+    also the only config in which the latch above is reachable at all, i.e.
+    the diagnostic config, where a stuck wrist reads as the fault under
+    diagnosis.
 
 Two further deliberate deviations from the reference, both measured:
 
@@ -93,6 +121,35 @@ DEFAULT_MAX_DQ_DEG: dict[str, float] = {
 }
 
 
+#: Limit pressure, DEGREES, reported while the antipode gate holds the wrist.
+#: A SENTINEL, not a measurement of joint-stop pressure: a parked wrist takes
+#: no step, so the joint clamp measures exactly zero at the one moment the
+#: wrist has stopped obeying the operator. Its job is to saturate the haptic
+#: mix — `teleop._update_haptic` runs limit pressure through
+#: `_gate(p, *_LIMIT_PRESSURE_GATE)`, currently (0.5, 4.0) deg, so anything
+#: from 4.0 up is a full buzz. The value is the reference stack's 0.35
+#: correctly converted: its pressure is in RADIANS, ours in degrees, and
+#: 0.35 rad = 20.05 deg. 5x the ceiling is deliberate margin — it keeps
+#: saturating if someone raises `_LIMIT_PRESSURE_GATE`.
+PARK_LIMIT_PRESSURE_DEG = 20.05
+
+#: Budget, in solves, that the antipode gate may spend holding the wrist on
+#: one excursion past `rot_err_hold`, and equally the run of solves back
+#: inside the hold that refunds it. 60 at the session's 60 Hz is 1.0 s.
+#:
+#: Sized against what it is refusing. The come-around it guards is a ONE-TIME
+#: commitment, not an oscillation: measured ungated against a near-antipodal
+#: demand jittered by 2°, the wrist travels 160° with ZERO direction
+#: reversals and settles, in ~20 solves at the 8 deg default cap and ~6 at
+#: config.solo-raw's 30. So the only thing a longer hold buys is outlasting a
+#: transient — a dropped tracking frame, a filter spike, a re-anchor — and 60
+#: solves is an order of magnitude more than any of those. Past it the demand
+#: is being held rather than glitched, and a wrist that refuses a held demand
+#: for longer than an operator's own "is it broken?" reflex reads as a crash,
+#: which is the one thing this solver must never look like.
+PARK_MAX_SOLVES = 60
+
+
 class SO101DecoupledIK:
     """One arm's differential IK. One damped step per `solve()`.
 
@@ -102,6 +159,15 @@ class SO101DecoupledIK:
     close, exactly as the reference solver does. Freezing instead would be
     worse: an operator whose arm stops dead has no way to tell "unreachable"
     from "crashed".
+
+    The near-antipodal park gate is the ONE deliberate exception to that,
+    and it is bounded on three sides so it cannot become the freeze the
+    paragraph above rejects. It holds the two WRIST joints only — joints 1-3
+    keep tracking position throughout. It holds for at most
+    `PARK_MAX_SOLVES` per excursion. And while it holds it reports
+    `PARK_LIMIT_PRESSURE_DEG` of limit pressure, which saturates the haptic
+    mix, so the operator is told by a full buzz instead of being left to
+    infer a freeze from an arm that went quiet.
 
     Tunables (all live-settable; the web panel writes them):
         lam_pos     Base DLS damping on the position sub-solve, m/rad —
@@ -116,6 +182,11 @@ class SO101DecoupledIK:
         lam_rot     Base DLS damping on the 2-DoF orientation sub-solve.
                     The wrist Jacobian is orthonormal, so σ = 1 and this is
                     a plain relative attenuation.
+        rot_err_hold
+                    Park the wrist above this orientation error angle, rad —
+                    the antipode gate of the module docstring, for at most
+                    `PARK_MAX_SOLVES` solves per excursion past it. Above π
+                    it can never fire, so anything past 3.15 disables it.
         q_rest_deg  Posture the bias pulls toward near singularities.
         max_dq_deg  Per-joint step cap, degrees. The last safety layer
                     inside this module; the session's rate cap and the arm
@@ -131,6 +202,7 @@ class SO101DecoupledIK:
         w0: float = 0.020,
         mu: float = 0.020,
         lam_rot: float = 0.05,
+        rot_err_hold: float = 2.2,
         q_rest_deg: dict[str, float] | None = None,
         max_dq_deg: dict[str, float] | None = None,
     ) -> None:
@@ -140,6 +212,7 @@ class SO101DecoupledIK:
         self.w0 = float(w0)
         self.mu = float(mu)
         self.lam_rot = float(lam_rot)
+        self.rot_err_hold = float(rot_err_hold)
         self.q_rest = rest_pose_deg(self.limits_deg, q_rest_deg)
         self.max_dq_deg = dict(max_dq_deg or DEFAULT_MAX_DQ_DEG)
 
@@ -155,7 +228,24 @@ class SO101DecoupledIK:
         self.last_singularity_proximity: float = 0.0
         #: Fraction of the demanded rotation the 2-DoF wrist cannot reach,
         #: 0..1. The honest analogue of the reference's gimbal proximity.
+        #: Reads 1.0 while the wrist is parked, which is the truth: none of
+        #: the demand was taken.
         self.last_orient_residual: float = 0.0
+        #: Whether the antipode gate held the wrist still on this step. Read
+        #: by `solve` itself to saturate the limit pressure below. NOT on the
+        #: `ik_state` wire, and `last_orient_residual` is not a stand-in for
+        #: it — the client's cue fires on a RISING crossing of 0.4 with
+        #: hysteresis, and on a 5-DoF arm the residual is routinely already
+        #: past 0.4 while driving, so entering a park often fires nothing.
+        #: The saturated limit pressure below is what the operator actually
+        #: feels; a dedicated wire field is the honest fix.
+        self.last_wrist_parked: bool = False
+        #: The antipode gate's budget, 0..`PARK_MAX_SOLVES`, spent one per
+        #: solve outside `rot_err_hold`; the gate holds the wrist only while
+        #: it is unspent. Refunded in full, and only, after `_park_inside`
+        #: consecutive solves back inside the hold.
+        self._park_spent: int = 0
+        self._park_inside: int = 0
         #: Smallest singular value of the position Jacobian, m/rad.
         self.last_sigma_min: float = 0.0
 
@@ -222,10 +312,21 @@ class SO101DecoupledIK:
         # commanded wrist step is still the one taken in step 4, at the new
         # joints 1-3, so this pre-solve costs one extra FK and changes
         # nothing when the demand is reachable.
+        # The predicted step is CLAMPED to the wrist's own limits, because
+        # the question is "how far over can we get" and a joint stop is part
+        # of the answer. Unclamped it is not: measured over a sweep of
+        # over-reach targets the raw step ran past a stop on 64,321 solves,
+        # by up to 78°, and `R_reachable` was then an orientation no wrist
+        # of this arm can hold — placing the position anchor where the tool
+        # will never be. That fantasy moved the position joints far enough
+        # that the real solve's error angle read 1.74 rad on a tick where
+        # this one read 3.11: the two halves of the antipode gate disagreed
+        # about the same tick and the gate oscillated on a 120-solve period.
         dq_pre = self._wrist_step(frames, R_target)
         pre_pose = dict(seed_pose)
         for j, dv in zip(ORIENTATION_JOINTS, dq_pre / _DEG):
-            pre_pose[j] = seed_pose[j] + float(dv)
+            j_lo, j_hi = self.limits_deg.get(j, (-360.0, 360.0))
+            pre_pose[j] = min(j_hi, max(j_lo, seed_pose[j] + float(dv)))
         R_reachable = fk_frames(pre_pose).tool_R
 
         # ---- 3. Position sub-solve on joints 1-3, against the anchor.
@@ -263,8 +364,17 @@ class SO101DecoupledIK:
         b = J_pos.T @ pos_err + mu2 * (q_rest_rad - q_now_rad)
         dq_pos_rad = np.linalg.solve(A, b)
 
+        lo = np.array([self.limits_deg.get(j, (-360.0, 360.0))[0] for j in POSE_JOINTS])
+        hi = np.array([self.limits_deg.get(j, (-360.0, 360.0))[1] for j in POSE_JOINTS])
         q_next = q.copy()
-        q_next[:3] = q[:3] + dq_pos_rad / _DEG
+        # Clamped here rather than at step 5 alone, so that "the joints 1-3
+        # the arm is about to be at" below is true. Past a stop the raw DLS
+        # step is a pose the arm cannot hold, and solving the wrist against
+        # it is solving for an orientation that will never exist — the whole
+        # error the pre-solve of step 2 was added to remove. Clipping early
+        # cannot change the returned position joints: step 5 clips to the
+        # same bounds regardless.
+        q_next[:3] = np.clip(q[:3] + dq_pos_rad / _DEG, lo[:3], hi[:3])
 
         # ---- 4. Orientation sub-solve on joints 4-5, at the joints 1-3 the
         # arm is about to be at, so the wrist corrects the orientation it
@@ -275,11 +385,23 @@ class SO101DecoupledIK:
         q_next[3:] = q[3:] + dq_rot_rad / _DEG
 
         # ---- 5. Joint limits. Clamp, don't reject: the operator sees the
-        # arm reach as far as its joints allow and feels the pressure.
-        lo = np.array([self.limits_deg.get(j, (-360.0, 360.0))[0] for j in POSE_JOINTS])
-        hi = np.array([self.limits_deg.get(j, (-360.0, 360.0))[1] for j in POSE_JOINTS])
+        # arm reach as far as its joints allow and feels the pressure. Only
+        # the wrist can still be outside them here; joints 1-3 were clipped
+        # at step 3 so that step 4 saw a pose the arm can hold.
         q_reachable = np.clip(q_next, lo, hi)
         self.last_limit_pressure = float(np.linalg.norm(q_next - q_reachable))
+        if self.last_wrist_parked:
+            # A parked wrist takes no step, so the clamp above measures
+            # nothing and the pressure would read ZERO at the exact moment
+            # the wrist stopped obeying the operator — HUD and haptics both
+            # saying everything is fine. Saturate it instead; this is the
+            # operator-feedback half of the gate, not a metric detail.
+            #
+            # UNITS: the sentinel is in DEGREES because this field is —
+            # see `PARK_LIMIT_PRESSURE_DEG`, which carries the conversion
+            # and the dependency on `teleop._LIMIT_PRESSURE_GATE`.
+            self.last_limit_pressure = max(self.last_limit_pressure,
+                                           PARK_LIMIT_PRESSURE_DEG)
 
         # ---- 6. Per-joint step cap, then re-clamp (the cap can only shrink
         # a step, but a seed already outside its limits — a freshly
@@ -303,11 +425,54 @@ class SO101DecoupledIK:
         # tool orientation onto the target — the same frame the rotational
         # Jacobian maps joint rates into.
         e_rot = quat.to_rotvec(quat.from_mat(R_target @ frames.tool_R.T))
+        e_norm = float(np.linalg.norm(e_rot))
         J_rot = jacobian_rotation(frames, ORIENTATION_JOINTS)   # 3x2
-        A_rot = J_rot.T @ J_rot + (self.lam_rot ** 2) * np.eye(2)
-        dq = np.linalg.solve(A_rot, J_rot.T @ e_rot)
+
+        # Antipode gate — see the module docstring. Tested BEFORE the damped
+        # solve, because past the gate it is the DIRECTION of e_rot that is
+        # untrustworthy and no amount of damping fixes a step aimed the wrong
+        # way round. Both calls are gated: a pre-solve that stepped where the
+        # real solve parks would place the position anchor against an
+        # orientation the wrist is never going to take. Worth 3.0 deg on
+        # shoulder_lift and -3.0 on elbow_flex in a SINGLE solve if ungated,
+        # both saturating their step cap, so it is not a tidiness detail.
+        #
+        # The park is a DEBOUNCE, not a veto, and `_park_spent` is what makes
+        # it one. A parked wrist takes no step, so it cannot reduce its own
+        # orientation error: an unbounded park is a FIXED POINT, and on any
+        # demand that stays outside the hold it never releases — measured
+        # latching for a whole 5000-solve run on a plain over-reach. Past the
+        # budget the wrist is let go and takes the come-around at its capped
+        # rate.
+        #
+        # Re-arming needs a SUSTAINED return, not a dip, because the park
+        # makes its own limit cycle otherwise: a held wrist lets the error
+        # grow back over the hold, one step drops it under, and a gate that
+        # re-arms on that alternates every solve. Measured on an
+        # identity-orientation over-reach — re-arm on any dip parked 1164 of
+        # 1200 solves in 13 full-budget bursts; re-arm on a dip lasting one
+        # solve parked 618 in 559 single-solve flickers, half-rate wrist
+        # under a permanent half-strength buzz. Neither is an alarm worth
+        # having.
+        over = e_norm > self.rot_err_hold
+        parked = over and self._park_spent < PARK_MAX_SOLVES
+        if parked:
+            dq = np.zeros(2)
+        else:
+            A_rot = J_rot.T @ J_rot + (self.lam_rot ** 2) * np.eye(2)
+            dq = np.linalg.solve(A_rot, J_rot.T @ e_rot)
+
         if record:
-            e_norm = float(np.linalg.norm(e_rot))
+            # Moved by the recording call only, so both calls within one
+            # solve read the same budget and cannot disagree about the gate.
+            if over:
+                self._park_spent = min(PARK_MAX_SOLVES, self._park_spent + 1)
+                self._park_inside = 0
+            else:
+                self._park_inside += 1
+                if self._park_inside >= PARK_MAX_SOLVES:
+                    self._park_spent = 0
+            self.last_wrist_parked = parked
             # Threshold in radians, well above the ~1e-8 float noise a
             # converged solve leaves behind: dividing that noise by itself
             # produced a saturated "unreachable" reading on a perfectly

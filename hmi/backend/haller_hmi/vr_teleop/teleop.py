@@ -116,6 +116,7 @@ class QuestTeleoperator:
         solver.w0 = cfg.w0
         solver.mu = cfg.mu
         solver.lam_rot = cfg.lam_rot
+        solver.rot_err_hold = cfg.rot_err_hold
         pos, rot = cfg.max_dq_deg_pos, cfg.max_dq_deg_rot
         solver.max_dq_deg = {
             "shoulder_pan": pos, "shoulder_lift": pos, "elbow_flex": pos,
@@ -387,7 +388,7 @@ class QuestTeleoperator:
         s = state.solver
         m = state.mapper
         # Joints being clipped into their stops this step, degrees.
-        i_limit = _gate(s.last_limit_pressure, 0.5, 4.0)
+        i_limit = _gate(s.last_limit_pressure, *_LIMIT_PRESSURE_GATE)
         # Reach limit absorbing travel: the "wall" at the workspace edge.
         # Gated high, because the limit is always partly engaged during fast
         # motion and only means something once it is saturating.
@@ -428,6 +429,15 @@ class QuestTeleoperator:
             "config": self.config.to_dict(),
             "sides": {s: dict(self._diag.get(s) or {}) for s in SIDES},
         }
+
+
+#: Dead zone and saturation for joint-limit pressure, degrees. Named because
+#: something outside this file depends on the ceiling: a wrist parked by the
+#: antipode gate takes no step, so the joint clamp measures nothing, and
+#: `ik.decoupled_ik.PARK_LIMIT_PRESSURE_DEG` (20.05) is reported in its place
+#: PURELY to saturate this ramp. Raise the ceiling past 20.05 and the buzz
+#: goes silent at exactly the pose where the wrist stopped obeying.
+_LIMIT_PRESSURE_GATE = (0.5, 4.0)
 
 
 def _gate(value: float, lo: float, hi: float) -> float:

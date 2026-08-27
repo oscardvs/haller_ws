@@ -15,9 +15,15 @@ from __future__ import annotations
 
 # `xr-standard` gamepad indices. Index, not name, is what the WebXR spec
 # guarantees — the same constants the in-headset client uses.
+#
+# Index 4 (A/X) is deliberately not here. It is the record toggle, and the
+# precision modifier lives on the left stick held away instead (the frontend's
+# `precisionHeld`). Mapping it to precision, as the reference page does, makes
+# every record press multiply both mapping gains by `precision_factor` and
+# re-anchor the mapper twice, once per edge — the converter re-anchors on any
+# change of the precision flag.
 _BUTTON_TRIGGER = 0
 _BUTTON_SQUEEZE = 1
-_BUTTON_AX = 4
 
 
 def normalize_frame(msg: dict) -> dict:
@@ -27,7 +33,7 @@ def normalize_frame(msg: dict) -> dict:
     ctrls = msg.get("controllers") or {}
     out: dict = {
         "type": "vr_keypoints",
-        "ts_ms": int(msg.get("ts_ms") or 0),
+        "ts_ms": _client_ts_ms(msg),
         "stance": msg.get("stance"),
     }
     viewer = msg.get("viewer") or {}
@@ -51,10 +57,35 @@ def normalize_frame(msg: dict) -> dict:
             "orientation": raw.get("orientation") or [0.0, 0.0, 0.0, 1.0],
             "trigger": float(_button(buttons, _BUTTON_TRIGGER, "v", 0.0) or 0.0),
             "squeeze": squeeze,
-            "precision": bool(_button(buttons, _BUTTON_AX, "p", False)),
+            # Never from the button array — see the index block above. Emitted
+            # rather than omitted so both spellings leave the door with one
+            # sample shape; an `xr_frame` client cannot ask for precision at
+            # all, and readers take it as `raw.get("precision", False)`.
+            "precision": False,
         }
     out["dead_man"] = dead_man
     return out
+
+
+def _client_ts_ms(msg: dict) -> int:
+    """The client's own clock, in whole milliseconds.
+
+    One field, two spellings: this repo's page sends `ts_ms` (`Date.now()`,
+    integer epoch ms), the reference page sends `t_client`
+    (`performance.now()`, FLOAT ms since that document's time origin). Same
+    unit, different origins, so the value only ever compares between frames of
+    one connection — staleness is measured on arrival against the server clock,
+    never against this.
+
+    Rounded, not truncated: the field is an int by the native page's contract
+    and every reader re-`int()`s it, so the float has to be collapsed here, and
+    truncating biases every reference-page frame low. Sub-millisecond
+    resolution has no consumer.
+    """
+    ts = msg.get("ts_ms")
+    if ts is None:
+        ts = msg.get("t_client")
+    return round(float(ts or 0))
 
 
 def _button(buttons: list, index: int, field: str, default):

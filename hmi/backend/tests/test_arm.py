@@ -1,4 +1,5 @@
 # hmi/backend/tests/test_arm.py
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -361,6 +362,59 @@ def test_send_goal_seeds_last_commanded_from_a_real_read(monkeypatch):
     assert sent["shoulder_pan"] == pytest.approx(51.2)
 
 
+def test_send_goal_seeds_its_anchor_from_a_median_not_a_single_read(monkeypatch):
+    """The seed becomes limit_step's reference, so a teleported read there does
+    not produce a bounded error — it produces a bounded step away from a
+    garbage reference, i.e. a goal a revolution from where the arm is, sent at
+    whatever speed the servo can manage. The cap is only as good as what it
+    caps from."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = None
+    handle.robot.get_observation.side_effect = [
+        {"shoulder_pan.pos": 50.0},
+        {"shoulder_pan.pos": 50.0 - 360.0},    # the 12-bit wrap, mid-median
+        {"shoulder_pan.pos": 50.0},
+    ]
+
+    sent = handle.send_goal({"shoulder_pan": 100.0})
+
+    assert handle.robot.get_observation.call_count == 3
+    assert sent["shoulder_pan"] == pytest.approx(51.2)
+
+
+def test_the_retry_anchor_takes_a_median_too(monkeypatch):
+    """The retry re-anchors every joint the read returns, not only the one that
+    was missing, so a single corrupted read there is a lunge on all of them. It
+    fires only after a read has already dropped a joint — never on the healthy
+    60 Hz tick, which reads nothing at all."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = None
+    handle.robot.get_observation.side_effect = (
+        # First call: seed, then the retry, both still missing shoulder_pan.
+        [{"gripper.pos": 0.0}] * 6
+        # Second call: the retry measures it, with a wrapped read in the middle.
+        + [{"shoulder_pan.pos": 10.0, "gripper.pos": 1.2},
+           {"shoulder_pan.pos": 10.0 + 360.0, "gripper.pos": 1.2},
+           {"shoulder_pan.pos": 10.0, "gripper.pos": 1.2}]
+    )
+    # Pin the clock so the second call's budget is deterministic — see
+    # test_send_goal_tracks_last_commanded_across_calls.
+    clock = iter([100.0, 100.0 + 1.0 / handle.motion.ramp_hz])
+    monkeypatch.setattr("haller_hmi.arm.time.monotonic", lambda: next(clock))
+
+    first = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
+    assert "shoulder_pan" not in first
+
+    second = handle.send_goal({"shoulder_pan": 100.0, "gripper": 50.0})
+
+    assert handle.robot.get_observation.call_count == 9   # seed + two retries
+    assert second["shoulder_pan"] == pytest.approx(11.2)
+
+
 def test_send_goal_drops_a_joint_the_seed_read_could_not_measure(monkeypatch):
     """A flaky seed read (first call, or right after a torque toggle) can come
     back missing a joint. limit_step's own contract passes a joint absent from
@@ -424,10 +478,21 @@ EFFORT_IDS = {"shoulder_pan": 1, "gripper": 6}
 class _FakeSyncReader:
     """`scservo_sdk.GroupSyncRead`, reduced to what `_read_block` touches.
 
-    The window check in `getData` is the real `isAvailable()` arithmetic
-    verbatim (group_sync_read.py): a register outside the requested block
-    yields 0 rather than raising — which is exactly why a wrong block geometry
-    would look like a servo under no load instead of like a bug.
+    `isAvailable` is the real arithmetic verbatim (group_sync_read.py) and
+    `getData` answers 0 whenever it says no — the SDK's own contract, and
+    exactly why a wrong block geometry would look like a servo under no load
+    instead of like a bug.
+
+    `missing` is the ids the reader holds no bytes for: what a lost race to
+    the shared reader leaves behind (another thread's `clearParam()`, or an
+    `rxPacket` that returned early on the motor before it), and the only thing
+    that separates "this servo reported 0" from "this servo reported nothing".
+
+    `calls` records ("check" | "read", id, addr) in order. `getData` logs its
+    "read" BEFORE the `isAvailable` it runs internally — the SDK's own
+    ordering — so the checks a "read" entry is preceded by are the ones
+    `_read_block` made deliberately, which is what the TOCTOU window is
+    measured in.
     """
 
     def __init__(self, blocks: dict[int, dict[int, int]]):
@@ -435,7 +500,9 @@ class _FakeSyncReader:
         self.start_address = 0
         self.data_length = 0
         self.ids: list[int] = []
+        self.missing: set[int] = set()
         self.comm_result = 0              # COMM_SUCCESS
+        self.calls: list[tuple[str, int, int]] = []
 
     def clearParam(self):
         self.ids = []
@@ -446,9 +513,16 @@ class _FakeSyncReader:
     def txRxPacket(self):
         return self.comm_result
 
+    def isAvailable(self, id_, addr, length):
+        self.calls.append(("check", id_, addr))
+        if id_ in self.missing:
+            return False
+        return not (addr < self.start_address
+                    or self.start_address + self.data_length - length < addr)
+
     def getData(self, id_, addr, length):
-        if addr < self.start_address or \
-           self.start_address + self.data_length - length < addr:
+        self.calls.append(("read", id_, addr))
+        if not self.isAvailable(id_, addr, length):
             return 0
         return self.blocks[id_][addr]
 
@@ -517,6 +591,151 @@ def test_block_read_window_reaches_present_load_and_stops_at_present_current():
     assert reader.getData(EFFORT_IDS["shoulder_pan"], 70, 2) == 0
     # Every motor is in the read, not just the first.
     assert reader.ids == [1, 6]
+
+
+def test_a_raw_zero_tick_decodes_to_the_far_end_of_travel_not_to_zero_degrees():
+    """Why an unavailable motor may not be read as 0, demonstrated on lerobot's
+    real bus rather than on this file's fake.
+
+    `getData` answers 0 for data the reader does not hold, and 0 is a
+    legitimate RAW REGISTER VALUE: through the same `_decode_sign` /
+    `_normalize` chain `_read_block` uses it comes out at -180.0 deg on a
+    full-range SO-101 calibration — the far end of travel. The tick that means
+    zero degrees is the middle of the range, half a revolution away.
+    """
+    from lerobot.motors import Motor, MotorCalibration, MotorNormMode
+    from lerobot.motors.feetech import FeetechMotorsBus
+
+    bus = FeetechMotorsBus(
+        port="/dev/null",   # constructed, never connected: no port is opened
+        motors={"shoulder_pan": Motor(1, "sts3215", MotorNormMode.DEGREES)},
+        calibration={"shoulder_pan": MotorCalibration(
+            id=1, drive_mode=0, homing_offset=0, range_min=0, range_max=4095)},
+    )
+
+    assert bus._normalize(bus._decode_sign("Present_Position", {1: 0}))[1] == -180.0
+    assert bus._normalize(bus._decode_sign("Present_Position", {1: 2048}))[1] == \
+        pytest.approx(0.0, abs=0.05)
+
+
+def test_a_motor_with_no_data_in_the_block_raises_instead_of_reading_zero():
+    """The lost race the docstring used to call harmless. `bus.sync_reader` is
+    shared with the 60 Hz teleop thread with no lock; the thread that re-points
+    it leaves this one holding nothing, and `getData` then answers 0 — which is
+    -180 deg, not "no reading". For live telemetry that is a visible teleport,
+    for a recorded episode a row that teaches a policy a lie. A motor whose
+    data did not arrive must produce no value at all."""
+    from haller_hmi.arm import SyncReaderRace
+
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 0})
+    handle._effort_mode = "block"
+    handle.robot.bus.sync_reader.missing = {EFFORT_IDS["gripper"]}
+
+    with pytest.raises(SyncReaderRace, match="motor id 6 has no data at register 56"):
+        handle._read_block()
+    # ConnectionError, so `_read_state_and_effort`'s existing catch and every
+    # caller that already treats a dead block read as "no effort" are unchanged.
+    assert issubclass(SyncReaderRace, ConnectionError)
+
+
+def test_every_slice_is_checked_before_any_slice_is_read():
+    """The window is the gap between a slice's check and its `getData`, so the
+    check pass must finish before the read pass starts. Checking motor 6 only
+    after motor 1 has already been read widens that gap for nothing."""
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 0})
+    handle._effort_mode = "block"
+    reader = handle.robot.bus.sync_reader
+    reader.calls.clear()
+
+    handle._read_block()
+
+    n_slices = 2 * len(EFFORT_IDS)          # (pos, load) per motor
+    kinds = [k for k, _, _ in reader.calls]
+    assert kinds[:n_slices] == ["check"] * n_slices
+    assert {(i, a) for k, i, a in reader.calls[:n_slices] if k == "check"} == {
+        (i, addr) for i in EFFORT_IDS.values()
+        for addr in (ArmHandle._POS_ADDR, ArmHandle._LOAD_ADDR)}
+
+
+def test_a_race_landing_after_the_checks_is_caught_by_the_second_pass():
+    """One check pass only proves the reader was ours BEFORE the first read.
+    A re-point during the read pass leaves every later `getData` answering 0 —
+    the -180 deg row again — with the first pass already satisfied. So the
+    slices are checked again after the last read."""
+    from haller_hmi.arm import SyncReaderRace
+
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 0})
+    handle._effort_mode = "block"
+    reader = handle.robot.bus.sync_reader
+    real_get = reader.getData
+
+    def _get(id_, addr, length):
+        value = real_get(id_, addr, length)
+        reader.missing = set(EFFORT_IDS.values())   # another thread re-points it
+        return value
+
+    reader.getData = _get
+
+    with pytest.raises(SyncReaderRace):
+        handle._read_block()
+
+
+def test_the_availability_gate_narrows_the_window_it_does_not_close_it():
+    """Pins the docstring's own honesty against the real SDK, because the
+    ORIGINAL defect here was a reassuring claim that was false.
+
+    `getData` re-runs `isAvailable` internally and answers 0 on a miss with NO
+    raise (group_sync_read.py), so a re-point landing between `_read_block`'s
+    check and its `getData` still produces a raw tick 0. The gate makes that
+    window small; it does not make it empty, and nothing in `_read_block` may
+    claim otherwise."""
+    from scservo_sdk.group_sync_read import GroupSyncRead
+
+    reader = GroupSyncRead(None, None, ArmHandle._BLOCK_ADDR, ArmHandle._BLOCK_LEN)
+    reader.addParam(1)
+    reader.data_dict[1] = [7] * ArmHandle._BLOCK_LEN
+    assert reader.isAvailable(1, ArmHandle._LOAD_ADDR, 2) is True
+
+    # The contending thread: lerobot's own sync_read("Present_Position"), which
+    # re-points the shared reader to (56, 2).
+    reader.clearParam()
+    reader.start_address, reader.data_length = ArmHandle._POS_ADDR, 2
+    reader.addParam(1)
+    reader.data_dict[1] = [3, 4]
+
+    assert reader.getData(1, ArmHandle._LOAD_ADDR, 2) == 0     # silent, not a raise
+    # And the common contender IS caught by a check, which is what makes the
+    # gate worth having: (56, 2) cannot serve the load slice at 60.
+    assert reader.isAvailable(1, ArmHandle._LOAD_ADDR, 2) is False
+
+
+def test_a_lost_race_costs_one_tick_of_effort_but_not_the_fast_path():
+    """`_EFFORT_DEMOTE_AFTER` exists so one transient error cannot permanently
+    cost an extra round trip per tick — and this reader is contended by design
+    at 60 Hz, so counting races would hand three raced ticks exactly that
+    permanent demotion. A race says the data did not arrive this tick; it says
+    nothing about whether the bus can serve a block read, which is the only
+    question demotion answers. POSITION still gets read on every one of those
+    ticks, and the races stay visible in a counter rather than being silent."""
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    handle._effort_mode = "block"
+    handle.robot.bus.sync_reader.missing = {EFFORT_IDS["gripper"]}
+    handle.robot.bus.sync_read = lambda name, normalize=True: {"shoulder_pan": 100,
+                                                               "gripper": 0}
+    handle.robot.get_observation.return_value = {"shoulder_pan.pos": 1.0,
+                                                 "gripper.pos": 2.0}
+    # A genuine failure already part-way to a demotion: a race must neither add
+    # to that streak nor clear it.
+    handle._effort_fail_streak = ArmHandle._EFFORT_DEMOTE_AFTER - 1
+
+    for _ in range(ArmHandle._EFFORT_DEMOTE_AFTER * 3):
+        pos, effort = handle._read_state_and_effort()
+        assert effort == {}                    # no effort this tick, deliberately
+        assert pos["shoulder_pan"] == 1.0      # position still read
+
+    assert handle._effort_mode == "block"
+    assert handle._effort_fail_streak == ArmHandle._EFFORT_DEMOTE_AFTER - 1
+    assert handle._effort_race_count == ArmHandle._EFFORT_DEMOTE_AFTER * 3
 
 
 def test_block_read_decodes_sign_magnitude_and_normalises_to_a_fraction():
@@ -592,11 +811,12 @@ def test_probe_walks_down_to_sync_read_then_to_none_without_raising():
 
 
 def test_block_read_failures_demote_after_three_ticks_and_keep_position():
-    """A transient comm error must not permanently cost an extra round trip per
-    tick, and a bus that genuinely cannot serve the block read must not be
-    retried forever. Either way POSITION — the channel telemetry actually needs
-    — keeps being read on every one of those ticks: effort is the optional
-    column, and losing it must never cost the arm's state."""
+    """The other half of the race rule: a race is excused, a bus that genuinely
+    cannot serve the block read is not — or a dead fast path is retried, and
+    timed out on, forever. A transient comm error still must not demote on its
+    own. Either way POSITION — the channel telemetry actually needs — keeps
+    being read on every one of those ticks: effort is the optional column, and
+    losing it must never cost the arm's state."""
     handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
     handle._effort_mode = "block"
     handle.robot.bus.sync_reader.comm_result = -1000          # every block read fails
@@ -611,6 +831,7 @@ def test_block_read_failures_demote_after_three_ticks_and_keep_position():
         assert pos["shoulder_pan"] == 1.0      # position still read
 
     assert handle._effort_mode == "sync_read"
+    assert handle._effort_race_count == 0       # a comm failure is not a race
     pos, effort = handle._read_state_and_effort()
     assert effort == {"shoulder_pan": 0.1, "gripper": 0.0}
     assert pos["shoulder_pan"] == 1.0
@@ -665,7 +886,7 @@ def _fake_robot_with_bus(present: dict[str, int]):
 
 
 def test_park_goal_on_present_writes_raw_present_into_goal():
-    from haller_hmi.arm import _park_goal_on_present
+    from haller_hmi.arm import ANCHOR_READS, _park_goal_on_present
 
     present = {"shoulder_pan": 642, "shoulder_lift": 1095, "elbow_flex": 3715,
                "wrist_flex": 1, "wrist_roll": 3913, "gripper": 3312}
@@ -673,11 +894,66 @@ def test_park_goal_on_present_writes_raw_present_into_goal():
 
     _park_goal_on_present(robot)
 
-    robot.bus.sync_read.assert_called_once_with("Present_Position", normalize=False)
+    # Read ANCHOR_READS times, not once — this is an anchoring read, see
+    # test_park_goal_on_present_parks_on_the_median_not_a_teleported_read.
+    assert robot.bus.sync_read.call_count == ANCHOR_READS
+    robot.bus.sync_read.assert_called_with("Present_Position", normalize=False)
     robot.bus.sync_write.assert_called_once_with("Goal_Position", present, normalize=False)
 
 
-def test_park_goal_on_present_is_raw_not_normalized():
+def test_park_goal_on_present_parks_on_the_median_not_a_teleported_read():
+    """A single Feetech read can come back a whole revolution off, and the tick
+    parked here is the tick the servo drives to the instant torque returns —
+    so one corrupted read re-enters this function's own failure through the
+    read instead of through the register, with nothing downstream to catch it
+    because the goal IS the reference."""
+    from haller_hmi.arm import _park_goal_on_present
+
+    robot = _fake_robot_with_bus({})
+    robot.bus.sync_read.side_effect = [
+        {"shoulder_pan": 642, "elbow_flex": 3715},
+        {"shoulder_pan": 642, "elbow_flex": 3715 + 4096},   # one revolution off
+        {"shoulder_pan": 642, "elbow_flex": 3715},
+    ]
+
+    _park_goal_on_present(robot)
+
+    # Literal 3, not ANCHOR_READS: a test that reads the constant it is meant
+    # to pin passes just as happily when the constant drops to 1.
+    assert robot.bus.sync_read.call_count == 3
+    robot.bus.sync_write.assert_called_once_with(
+        "Goal_Position", {"shoulder_pan": 642, "elbow_flex": 3715}, normalize=False)
+
+
+def test_the_median_absorbs_a_raced_read_whole_without_an_availability_gate():
+    """Why `_median_present_position` needs no `isAvailable` gate of its own,
+    unlike `_read_block`.
+
+    `sync_read` shares `bus.sync_reader`, so a re-point under it makes `getData`
+    answer 0 — and 0 is the MINIMUM raw tick, so a raced read sorts to the
+    outside of a 3-sample median and is discarded structurally, not
+    probabilistically. Being fooled takes the same joint raced in TWO of the
+    three reads. A gate that instead REFUSED to park would have its own failure
+    mode, and it is the worse one: not parking is the lunge this whole function
+    exists to prevent."""
+    from haller_hmi.arm import _park_goal_on_present
+
+    present = {"shoulder_pan": 642, "elbow_flex": 3715, "wrist_flex": 1}
+    robot = _fake_robot_with_bus({})
+    robot.bus.sync_read.side_effect = [
+        dict(present),
+        {j: 0 for j in present},          # the whole read lost the reader
+        dict(present),
+    ]
+
+    _park_goal_on_present(robot)
+
+    # Literal 3, for the reason the test above gives: a test that reads the
+    # constant it pins passes just as happily when the constant drops to 1 —
+    # and at 1 read there is no median left to absorb anything.
+    assert robot.bus.sync_read.call_count == 3
+    robot.bus.sync_write.assert_called_once_with(
+        "Goal_Position", present, normalize=False)
     """Raw both ways, or the calibration offsets make present != goal."""
     from haller_hmi.arm import _park_goal_on_present
 
@@ -792,3 +1068,253 @@ def test_disconnect_all_continues_past_a_failing_arm(monkeypatch):
     mgr.disconnect_all()
 
     assert good.disconnect.called
+
+
+# --- preflight at connect ----------------------------------------------------
+#
+# connect() finishes with the arm energised: lerobot's configure() re-enables
+# torque on its way out, against the goals _park_goal_on_present just set. The
+# checks that decide whether the calibration those goals were read through is
+# believable therefore run here, right after, and before anything commands a
+# motion.
+
+
+def _mgr_with_real_arms(monkeypatch, *ids: str) -> ArmManager:
+    """An ArmManager whose real arms connect against MagicMock robots."""
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
+    monkeypatch.setattr("haller_hmi.arm.ArmHandle._load_joint_limits",
+                        lambda self: {"shoulder_pan": (-120.0, 120.0)})
+    monkeypatch.setattr(
+        "haller_hmi.calibration_bootstrap.ensure_follower_calibrations",
+        lambda configs: None,
+    )
+    return ArmManager([
+        ArmConfig(id=i, model="so101_follower", port="/dev/null", calibration_id=i)
+        for i in ids
+    ])
+
+
+def _stub_preflight(monkeypatch, reports: dict):
+    """Serve a scripted PreflightReport per arm id. A dict value that is an
+    exception instance is raised instead."""
+    def _run(handle, logger=None):
+        report = reports[handle.config.id]
+        if isinstance(report, Exception):
+            raise report
+        return report
+    monkeypatch.setattr("haller_hmi.vr_teleop.preflight.run_preflight", _run)
+
+
+def test_connect_all_preflights_every_arm_and_skips_the_sim_one(monkeypatch):
+    """Real run_preflight, real SimArmHandle: a sim arm has no Feetech
+    calibration to cross-check and no encoder wrap to fear, so the check must
+    be a no-op on it rather than a failure it has no way to pass."""
+    from haller_hmi.arm import ArmManager
+
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower", lambda cfg: MagicMock())
+    monkeypatch.setattr("haller_hmi.arm.ArmHandle._load_joint_limits",
+                        lambda self: {"shoulder_pan": (-120.0, 120.0)})
+    monkeypatch.setattr(
+        "haller_hmi.calibration_bootstrap.ensure_follower_calibrations",
+        lambda configs: None,
+    )
+    cfg_real = ArmConfig(id="right", model="so101_follower",
+                         port="/dev/null", calibration_id="y", source="real")
+    cfg_sim = ArmConfig(id="sim_left", model="so101_follower",
+                        port="(sim)", calibration_id="(sim)",
+                        source="sim", sim_arm_name="left")
+    mgr = ArmManager([cfg_real, cfg_sim])
+
+    mgr.connect_all(teleop_peers=[])
+    try:
+        reports = mgr.preflight_reports()
+        assert set(reports) == {"right", "sim_left"}
+        assert reports["sim_left"].skipped is True
+        assert mgr["sim_left"].guard.mode is Mode.MANUAL   # a skip changes nothing
+        assert reports["right"].skipped is False           # the real arm IS checked
+    finally:
+        mgr.disconnect_all()
+
+
+def test_an_arm_is_on_the_books_before_its_preflight_runs(monkeypatch):
+    """An arm that faults during the check must still be an arm disconnect_all
+    releases: energised and missing from `_handles` is stranded stiff after the
+    backend has exited, which is the 2026-08-21 shutdown failure again."""
+    from haller_hmi.vr_teleop.preflight import PreflightReport
+
+    mgr = _mgr_with_real_arms(monkeypatch, "left")
+    seen: dict[str, bool] = {}
+
+    def _run(handle, logger=None):
+        seen["registered"] = mgr._handles.get(handle.config.id) is handle
+        return PreflightReport(arm_id="left")
+
+    monkeypatch.setattr("haller_hmi.vr_teleop.preflight.run_preflight", _run)
+
+    mgr.connect_all(teleop_peers=[])
+
+    assert seen["registered"] is True
+
+
+def test_a_hard_preflight_failure_stops_that_arm_and_leaves_the_others_alone(
+        monkeypatch):
+    """One arm's bad calibration must not decide the fate of the other — the
+    same rule as disconnect_all and _release_torque_per_motor, one level up.
+    STOP is the refusal: send_goal raises on it, and the mode is already in
+    every state_snapshot the HMI renders."""
+    from haller_hmi.vr_teleop.preflight import PreflightReport
+
+    mgr = _mgr_with_real_arms(monkeypatch, "left", "right")
+    _stub_preflight(monkeypatch, {
+        "left": PreflightReport(
+            arm_id="left",
+            calibration_problems=["elbow_flex: missing from calibration"]),
+        "right": PreflightReport(arm_id="right"),
+    })
+
+    mgr.connect_all(teleop_peers=[])
+
+    assert set(mgr.keys()) == {"left", "right"}
+    assert mgr["left"].guard.mode is Mode.STOP
+    assert mgr["right"].guard.mode is Mode.MANUAL
+    assert mgr["right"].robot is not None
+    with pytest.raises(ModeError):
+        mgr["left"].send_goal({"shoulder_pan": 10.0})
+
+
+def test_a_failed_preflight_does_not_cut_torque_on_an_arm_that_is_holding(
+        monkeypatch):
+    """Deliberate: by the time this runs the arm is energised and holding its
+    own weight. Cutting torque over a report about the calibration FILE drops
+    it onto the bench — the collapse the report exists to prevent. The one case
+    where torque must go is a first reading outside the limits, and preflight
+    drops that itself before returning.
+
+    The absences below are only worth asserting alongside the positives: an
+    arm nobody preflighted at all also has torque on and `disable_torque`
+    uncalled, so on their own they pass just as happily when the check was
+    never wired up."""
+    from haller_hmi.vr_teleop.preflight import PreflightReport
+
+    mgr = _mgr_with_real_arms(monkeypatch, "left")
+    _stub_preflight(monkeypatch, {
+        "left": PreflightReport(arm_id="left",
+                                calibration_problems=["shoulder_pan: barely swept"]),
+    })
+
+    mgr.connect_all(teleop_peers=[])
+
+    # The check RAN and FAILED...
+    assert mgr.preflight_reports()["left"].ok() is False
+    # ...and the refusal it chose is the mode, not the torque.
+    assert mgr["left"].guard.mode is Mode.STOP
+    assert mgr["left"].torque_enabled is True
+    mgr["left"].robot.bus.disable_torque.assert_not_called()
+
+
+def test_a_preflight_that_raises_does_not_strand_the_arms_behind_it(monkeypatch):
+    """run_preflight promises never to raise, but a promise from another module
+    is not a guarantee — and an exception here would leave every arm after this
+    one connected, energised and unchecked, or missing from `_handles` and so
+    never released at shutdown."""
+    from haller_hmi.vr_teleop.preflight import PreflightReport
+
+    mgr = _mgr_with_real_arms(monkeypatch, "left", "right")
+    _stub_preflight(monkeypatch, {
+        "left": RuntimeError("bus fell over mid-check"),
+        "right": PreflightReport(arm_id="right"),
+    })
+
+    mgr.connect_all(teleop_peers=[])
+
+    assert set(mgr.keys()) == {"left", "right"}
+    assert mgr["left"].guard.mode is Mode.STOP
+    assert mgr["right"].guard.mode is Mode.MANUAL
+
+
+def test_an_encoder_wrap_warns_by_arm_and_leaves_the_arm_usable(monkeypatch, caplog):
+    """A ~360 deg recorded span is an encoder wrap, and a wrap with a correct
+    middle pose is a normal calibration — failing it would train operators to
+    re-run a wizard that cannot fix anything. It still has to be visible, and
+    preflight's own per-joint lines do not name the arm."""
+    from haller_hmi.vr_teleop.preflight import PreflightReport
+
+    mgr = _mgr_with_real_arms(monkeypatch, "right")
+    _stub_preflight(monkeypatch, {
+        "right": PreflightReport(
+            arm_id="right",
+            calibration_warnings=[
+                "wrist_roll: recorded range 359 deg exceeds the physical ~320 deg"]),
+    })
+
+    with caplog.at_level(logging.WARNING, logger="haller_hmi.arm"):
+        mgr.connect_all(teleop_peers=[])
+
+    assert mgr["right"].guard.mode is Mode.MANUAL
+    warned = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.WARNING and r.name == "haller_hmi.arm"]
+    assert any("wrist_roll" in m and "right" in m for m in warned)
+
+
+def test_disable_torque_walks_per_motor_and_never_uses_the_bulk_write(monkeypatch):
+    """2026-08-21, arriving by a sixth road.
+
+    lerobot's `bus.disable_torque()` writes Torque_Enable per motor and RAISES
+    ON THE FIRST REFUSAL, leaving every motor after it energised. A servo in a
+    latched alarm refuses every write including "turn your torque off", and the
+    servo most likely to be in alarm is shoulder_lift holding the cantilever —
+    so the one motor that must be released is the one that aborts the sweep.
+
+    Five call sites reach this method (`/arm/{id}/mode` into STOP,
+    `/arm/{id}/torque`, the shutdown walk, `calibration.py`, and the preflight
+    drop), so the walk lives HERE rather than in any of them.
+    """
+    handle = _make_handle(monkeypatch)
+    bus = handle.robot.bus
+
+    def refuse_shoulder_lift(reg, joint, value, **kw):
+        if joint == "shoulder_lift":
+            raise RuntimeError("[RxPacketError] Overload error!")
+    bus.write.side_effect = refuse_shoulder_lift
+
+    refused = handle.disable_torque()
+
+    assert refused == ["shoulder_lift"], "the refusing servo is named, not swallowed"
+    bus.disable_torque.assert_not_called()      # the bulk write is never reached
+    asked = [c.args[1] for c in bus.write.call_args_list if c.args[0] == "Torque_Enable"]
+    assert asked == list(bus.motors), (
+        "every motor must be ASKED, including the four after the refusal — "
+        f"stopped after {asked}")
+    assert handle.torque_enabled is False, (
+        "a stale True renders a part-limp arm as holding, and post_arm_mode "
+        "re-energises on leaving STOP only `if not handle.torque_enabled`")
+
+
+def test_every_window_load_joint_limits_can_emit_is_symmetric(monkeypatch):
+    """The premise behind the fixture rule: `_load_joint_limits` centres each
+    window on its tick mid-point, so EVERY window it can produce is exactly
+    symmetric about zero.
+
+    COROLLARY FOR FIXTURE AUTHORS: any asymmetric window standing in for
+    `ArmHandle.joint_limits_deg` is impossible — the real loader cannot emit
+    it. (`gripper: (0.0, 100.0)` was one such fixture; it happened to be the
+    range lerobot actually uses for that joint, which is why the mismatch was a
+    loader bug and not a test bug.) The rule does NOT apply to limits handed
+    directly to a component that accepts arbitrary ranges — `SO101DecoupledIK`
+    takes whatever it is given, and asymmetric ranges are the point of some of
+    its tests.
+
+    Pinned as the premise rather than as a scan over fixture literals: if the
+    loader ever stops centring, this fails at the root instead of the fixtures
+    quietly becoming legal again.
+    """
+    handle = _make_handle(monkeypatch)
+    for lo_t, hi_t in ((0, 4095), (2045, 3492), (1000, 1200), (7, 4000)):
+        handle.robot.calibration = {
+            j: MagicMock(range_min=lo_t, range_max=hi_t)
+            for j in handle.robot.bus.motors
+        }
+        for joint, (lo, hi) in handle._load_joint_limits().items():
+            assert lo == pytest.approx(-hi), (
+                f"{joint} window ({lo}, {hi}) from ticks {lo_t}..{hi_t} is not "
+                "symmetric — the fixture corollary above no longer holds")

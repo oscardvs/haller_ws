@@ -63,7 +63,14 @@ def test_normalize_frame_reads_what_the_kit_reads(case_name, cases):
         assert ours["orientation"] == pytest.approx(theirs["orientation"])
         assert ours["squeeze"] is theirs["grip"]
         assert ours["trigger"] == pytest.approx(theirs["trigger"])
-        assert ours["precision"] is theirs["precision"]
+        # DIVERGENCE, deliberate, 2026-08-27: precision is the one read-out
+        # Haller does NOT take from the gamepad button array. It sources it
+        # from the LEFT STICK held away (`VRTeleopPanel.tsx:778-783`,
+        # `precisionHeld`) because index 4 (A/X) is the record toggle; keeping
+        # the kit's index-4 mapping made every record press eat a 0.4x gain
+        # plus two mapper re-anchors, one per edge, via `teleop.py:301`.
+        assert ours["precision"] is False, (
+            f"{case_name}/{side}: precision must not come from the buttons")
 
     # `dead_man` is Haller's own summary, not a kit field: either grip.
     expect_dead_man = any(kit[s] is not None and kit[s]["grip"]
@@ -103,18 +110,23 @@ def test_native_frames_pass_through_untouched():
     assert normalize_frame(dict(native)) == native
 
 
-def test_kit_timestamp_field_is_dropped(cases):
-    """DIVERGENCE, recorded not reconciled.
+def test_kit_timestamp_field_is_read(cases):
+    """`client.js` sends `t_client: performance.now()` and no `ts_ms`; the
+    door reads both spellings into `ts_ms`.
 
-    `client.js` sends `t_client: performance.now()`; `normalize_frame` reads
-    `ts_ms` and so reports 0 for every kit frame. Harmless today — nothing
-    downstream of the door uses the client clock, staleness is measured on
-    arrival — but it is a silent zero, and a silent zero is worth having a
-    name for before someone starts trusting it.
+    This test previously asserted the field was DROPPED; that drop was the
+    bug, found 2026-08-27 — every kit-shaped frame timed as 0. The two
+    spellings carry different origins (`Date.now()` against a document time
+    origin), so the value compares only between frames of one connection;
+    nothing downstream measures staleness with it.
+
+    `performance.now()` is float ms and the field is an int, so the door
+    rounds — 12345.678 ms in, 12346 out.
     """
     frame, _ = cases["right_grip"]
     assert "t_client" in frame and "ts_ms" not in frame
-    assert normalize_frame(frame)["ts_ms"] == 0
+    assert frame["t_client"] == pytest.approx(12345.678)
+    assert normalize_frame(frame)["ts_ms"] == 12346
 
 
 def test_button_indices_still_agree_with_the_kit(golden):
@@ -126,4 +138,14 @@ def test_button_indices_still_agree_with_the_kit(golden):
     from haller_hmi.vr_teleop import wire
     assert wire._BUTTON_TRIGGER == idx["trigger"]
     assert wire._BUTTON_SQUEEZE == idx["grip"]
-    assert wire._BUTTON_AX == idx["precision"]
+
+    # DIVERGENCE, deliberate, 2026-08-27: the kit's precision index is the one
+    # Haller refuses to carry. Index 4 (A/X) is the record toggle, and
+    # precision moved to the LEFT STICK held away
+    # (`VRTeleopPanel.tsx:778-783`, `precisionHeld`); keeping the kit's
+    # mapping made every record press eat a 0.4x gain plus two mapper
+    # re-anchors, one per edge, via `teleop.py:301`. Pinned as an absence so
+    # that re-adding the constant surfaces here rather than on the rig.
+    assert idx["precision"] == 4
+    assert not hasattr(wire, "_BUTTON_AX"), (
+        "the door must not carry a constant for a button it must not read")

@@ -53,8 +53,13 @@ class QuestTeleopConfig:
 
     # ---- reach limits (the absorbing clutch) ----
     #: Max distance (m) the position target may run ahead of where the arm
-    #: actually is; overshoot is absorbed. 0 disables.
-    pos_reach_limit: float = 0.12
+    #: actually is; overshoot is absorbed. 0 disables. 0.15 is the reference
+    #: stack's own SO-101 number — "smaller arm, smaller wall" against the
+    #: 0.25 m it uses on the DK1 — and the only value here with recorded
+    #: episodes behind it (46 / 29,500 frames). The 0.12 it replaces arrived
+    #: with the port-time snapshot unmeasured, and absorbed enough of a fast
+    #: reach that the arm stopped somewhere the hand was not.
+    pos_reach_limit: float = 0.15
     #: Max angle (rad) the orientation target may run ahead. 0 disables.
     rot_reach_limit: float = 0.6
 
@@ -64,6 +69,15 @@ class QuestTeleopConfig:
     w0: float = 0.020
     mu: float = 0.020
     lam_rot: float = 0.05
+    #: Park the wrist when the orientation error angle (rad) exceeds this.
+    #: Near the antipode the shortest-way direction of the quaternion error
+    #: is unstable and chasing it is a 180° come-around. With rot_reach_limit
+    #: on, the demand never gets there and this never fires; with it at 0
+    #: (config.solo-raw.yaml) it is the only backstop. Past 3.15 it is off,
+    #: since the error angle cannot exceed π. The park it arms is bounded to
+    #: ik.decoupled_ik.PARK_MAX_SOLVES per excursion, so a demand held past
+    #: the hold is eventually obeyed rather than refused forever.
+    rot_err_hold: float = 2.2
     #: Per-solve step cap, degrees, split into the position joints and the
     #: wrist for the reason the reference stack splits them: one shared cap
     #: holds the wrist back during fine work while position is fine.
@@ -112,6 +126,21 @@ BOUNDS: dict[str, tuple[float, float]] = {
     "w0": (0.001, 0.10),
     "mu": (0.0, 0.20),
     "lam_rot": (0.001, 1.0),
+    # The top of this range is the "off" position, the way 0 is on the reach
+    # limits above: the orientation error angle cannot exceed π, so a hold
+    # past 3.15 can never fire (the reference CLI documents it the same way,
+    # for its no-limit comparison demo). The floor is the DEFAULT
+    # rot_reach_limit, which keeps the gate outside the demand's working
+    # range at the shipped tuning — and that is all it is. It is NOT a
+    # guarantee: rot_reach_limit is a live slider up to 2.0, apply_update
+    # validates every key on its own, and rot_err_hold=0.6 with
+    # rot_reach_limit=2.0 is a legal pair that parks the wrist during
+    # ordinary reaching. Deliberately not cross-clamped — both are operator
+    # tuning knobs, one slider silently moving another is worse than the
+    # misconfiguration, and the park's own expiry
+    # (ik.decoupled_ik.PARK_MAX_SOLVES) bounds that misconfiguration to a
+    # stutter rather than a freeze.
+    "rot_err_hold": (0.6, 3.20),
     # Upper bounds sized against the downstream limiters rather than against
     # comfort: the session's rate cap and `ArmHandle.send_goal`'s
     # max_speed_deg_s both sit below these, so a maxed slider makes the IK
