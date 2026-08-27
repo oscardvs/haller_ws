@@ -7,30 +7,6 @@ and dies when that event happens. Add the trigger, not just the task.
 
 ## Open
 
-- **Retire the two `episodesTotal()` INDEX FALLBACKS. Keep the function.**
-  *Trigger:* Track A's `episode_index` lands in `GET /record/status`.
-  *Owner once triggered:* Track D.
-  **CORRECTED 2026-08-27 by Track D (`51e642d`); this entry said "delete `episodesTotal()`
-  and its 5 tests" and was not executable as written.** Three things were wrong, and the
-  integrator relayed all three to a fresh session before Track D caught it:
-    - the tests are not in `lib/vrTeleop.ts` — the function is (`:1865`), the five tests are
-      `__tests__/vrTeleopProtocol.test.ts:385-415`;
-    - the deletion is **PARTIAL**. Two of three consumers are index fallbacks and do go
-      (`VRTeleopPanel.tsx:1160-1162`, the HUD `episodes` chip, and `:1226-1227`,
-      `episodeIdx`). The third is not: `:1221`'s `datasetEpisodes` feeds `:1348-1349`'s
-      `` `${datasetEpisodes} in dataset` ``, which is a **COUNT**;
-    - **all five tests pin the COUNT, not the fallback**, so every one survives
-      `episode_index` landing, and deleting them strips the only coverage from a function
-      that still has a live caller.
-  **`episode_index` is the index of the take in hand; `episodesTotal()` is the size of the
-  dataset. Two numbers that coincide on the happy path are not the same fact** — and they
-  diverge for real, since `episode_index` renumbers across a `delete_episodes` prune. The
-  lerobot RAM-buffering defect this papers over is a fact about `meta/episodes.jsonl`
-  (`lib/vrTeleop.ts:1852-1863`) and no gate index touches it: **`N in dataset` still stalls
-  at 7 after the mount.**
-  Executable version: delete the two fallback arms and whatever pins them; KEEP
-  `episodesTotal()`, its five tests, `DatasetTally` and `refreshEpisodes`.
-
 - **Mount the record routes in `server.py`.**
   *Trigger:* Track A reports the exact bodies for `POST /record/arm`, `/record/roll`,
   `/record/stop {save, rearm}`.
@@ -152,6 +128,40 @@ and dies when that event happens. Add the trigger, not just the task.
   `__tests__/labRuns.test.tsx` — the 20-test suite guarding all five of those defects.
   Correct figure: **7 suites, 177 tests**. **The continuity doc doing the opposite of
   continuity: a successor either redoes verified work or distrusts code that is now right.**
+
+- **APPROVING A NEW REACHABLE STATE OBLIGES YOU TO RE-WALK EVERY SURFACE THAT INFERRED THE
+  OUTCOME FROM THE ASK.** The integrator approved Track A's extension making a refused re-arm
+  a **200** with `state:"idle"` and a reason, deliberately not a 409 — correct, because a 409
+  reports a banked take as a failure. **What went unwalked: while a refusal was a 409, the ASK
+  was evidence of the OUTCOME, and everything downstream was entitled to read it.** The 200
+  severed that silently and on every consumer at once.
+  Found by Track D, who were asked to look and did: `stopAct` built both toasts from
+  `act.rearm`, so a keep whose re-arm was refused printed
+  *"take 4 saved — 412 frames · armed for the next"* over a gate that was DOWN, **at the one
+  moment the operator is deciding whether to keep driving.** The 250 ms poll repaints
+  `GATE DROPPED` a quarter-second later, so the client self-corrects — but the toast is what
+  is read AT the decision, and it substituted a wrong conclusion rather than withholding one.
+  Same class as the clipped `acquiring 1.2s (no tracking)`, one surface over.
+  The fix carries a distinction worth keeping: read `st.state` under a **server** gate and the
+  ask under a **local** one, because locally `rearm` is never sent and the re-arm is the page's
+  own — so reading `state` there would invent a refusal that never happened. **One field, two
+  provenances, and only the server-gated one is a report.** And the copy leads with `saved`,
+  because *a refused re-arm must not read as a lost take*.
+  Cousin of the correction rule: that one says re-walk what you concluded FROM a changed fact;
+  this says re-walk what CONSUMED a changed guarantee. A ruling is a premise too.
+
+- **ENUMERATE THE FIELD'S READERS, NOT THE FUNCTION'S CALLERS.** Retiring `episodesTotal()`'s
+  fallbacks, Track D reported two consumers and found a third mid-work: `RecorderHudLike.episodes`
+  was read by `takeNaming()` and the `● REC` row as an **INDEX**, and by the idle menu's
+  `hold A/X to ARM  (N in dataset)` as a **COUNT**. The third is reached **through the field,
+  not through the function**, so enumerating `episodesTotal`'s callers could not see it — and
+  it is the reader guaranteed to be handed a null, because `episode_index` is set at ARM and
+  cleared at STOP, i.e. null exactly while IDLE, which is the only state that row paints.
+  **The suite would not have caught the drop: the row's WIDTH was pinned and its CONTENT was
+  not, so a wrong number fits the box perfectly and says nothing.** Split into `episodeIndex`
+  and `datasetCount`, RENAMED rather than reused, so four stale readers broke at the type
+  instead of plausibly painting — the `record_rate_gate` -> `record_rate_tolerance` rule
+  arriving in a third place. **Pin painted strings by content, not only by geometry.**
 
 - **Stamp `control_hz_trained_measured` in the rollout run record. APPROVED, Track B's, not
   urgent.** *Trigger:* the first `haller_rate` dataset exists, i.e. after the mount. Filing it
