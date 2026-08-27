@@ -232,6 +232,26 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   inverted — asserting a payload does not leak the other spelling is the right defence,
   it was merely pointed the wrong way.)
 
+- **An UNOBSERVABLE distinction is not an untested one — say so rather than dressing it
+  up.** A "does not move the anchor on a shift-click" test asserted nothing: mutating the
+  anchor to move unconditionally left the suite green. The reason is the useful part —
+  with an ADD-ONLY range the anchor is always already inside the selection, so a sticky
+  anchor and a moving one union to the same span every time. No better test existed. It
+  was renamed to what it actually guards, and carries a note saying what it cannot detect
+  and that the property becomes observable the day the range REPLACES the selection
+  instead of adding to it — at which point whoever makes that change owes it a real test.
+  **A test that documents its own blind spot is worth more than one that quietly has it.**
+  (The code stayed: it still matches what the operator believes the anchor is. It is
+  simply not load-bearing today, and saying so is the point.)
+
+- **A subordinate widget must not be able to unmount the workspace.** A malformed 200 on
+  `/lab/datasets/trace` — no `names` field — threw inside render and took down the WHOLE
+  review pane, so the operator lost the episode list and the marking controls over a
+  chart. A conforming backend always sends the field, which is exactly why it went
+  unnoticed. The failure mode was wildly out of proportion to the cause; the fix is one
+  predicate narrowing a partial body to `null`, a state both charts already draw. A bad
+  trace now costs a chart.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
