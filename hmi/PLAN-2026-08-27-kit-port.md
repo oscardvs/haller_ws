@@ -308,6 +308,40 @@ Risk notes worth stating rather than discovering:
 - **P7 is high risk for schedule, not safety** — it is new code against hardware that has
   not arrived. It is last for that reason and nothing downstream depends on it.
 
+## House rule — cadence-coupled constants
+
+**A constant expressed in ticks or frames is calibrated for exactly one cadence and
+lies at every other.** Found by Track A's sweep, 2026-08-27, after `frame_age_ms_loss`
+turned out to mean 42 missed frames at 60 Hz and three at 4.8 Hz.
+
+The model to copy is already in the tree: `lpf_tau_s` is a time constant in seconds and
+the loop derives `alpha = 1 - exp(-period / tau)` per tick, commented
+"frequency-independent". Every new constant that governs motion, staleness or a safety
+stop takes that shape.
+
+Found by the sweep, all reachable through `POST /teleop/human/start {hz}` today:
+
+| constant | unit | at 60 Hz | at 10 Hz |
+|---|---|---|---|
+| `_rate_cap_deg_per_tick = 4.0` | per tick | 240 deg/s (headroom, as designed) | **40 deg/s — now the binding limit** |
+| `MAX_CONSECUTIVE_TICK_ERRORS = 50` | ticks | 0.83 s to stop | **2.5 s at 20 Hz, 10.4 s at 4.8 Hz** |
+| `pose_filter_alpha = 0.8` | per frame | ~83 ms | ~1 s from a 4.8 Hz source |
+
+The first **degrades invariant 2**, and needs no exotic setup to reach. `_ramp_cap` uses
+two unit conventions in one function: its FLOOR converts properly
+(`_acquire_rate_deg_s * period`) while its CEILING is the raw per-tick 4.0. So the
+acquisition ramp spans 12:1 at 60 Hz, 4:1 at 20 Hz and 2:1 at 10 Hz — at low hz it
+quietly stops being a ramp. Fixing it makes the two halves of that function agree, which
+they currently do not.
+
+Both corrections are **no-ops at hz=60** — `240 * period` is bit-identical to 4.0 there —
+so they land standalone, ahead of the tick restructure, with the no-op pinned. Folding
+them into Phase 2 would have destroyed regression attributability for both.
+
+Cleared as already correct, so the sweep is auditable rather than a list of hits:
+`ACQUIRE_MS`, `MATCH_DWELL_MS`, `ACQUIRE_RAMP_MS`, `ACQUIRE_RATE_DEG_S`,
+`_ws_disconnect_grace_s` — all in physical time or rate units, measured against `now`.
+
 ## Baseline to protect
 
 - **645 backend pytest pass, 1 xfailed** (593 pre-port + 52 equivalence).
