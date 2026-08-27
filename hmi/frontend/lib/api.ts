@@ -386,10 +386,49 @@ export type RecordDrops = {
   arms?: Record<string, number>;
 };
 
+/**
+ * One entry of `RecordStatus.alerts`, as `recorder.py::_rate_alerts()` emits
+ * it — all eight keys, always present when an alert exists.
+ *
+ * **This type declared `detail` and `since` until 2026-08-27 and the backend
+ * has never sent either.** It matched the wire on `code` alone, 1 key of 8,
+ * and it type-checked the whole time because both phantoms were optional. It
+ * survived because nothing reads it: an unread type cannot render `undefined`,
+ * so the cost was deferred to whoever wrote the first consumer, who would have
+ * reached for `detail` — the only text-shaped field on offer — and drawn an
+ * empty warning row while the operator's sentence sat in `message`.
+ *
+ * The correct shape was in the tree the entire time. `lib/telemetry.ts`
+ * declares the same producer for the telemetry frame and renders it in
+ * `AlertsPopover`; that one works. This is now aligned to the wire, which is
+ * the superset — the telemetry declaration names the four fields that panel
+ * draws, and the four below it does not are the numbers behind the sentence.
+ */
 export type RecordAlert = {
+  /** `"warn"` today. Widened because the popover colours on `error` too. */
+  level: "warn" | (string & {});
   code: "record_rate" | (string & {});
-  detail?: string;
-  since?: number | null;
+  /** Which subsystem raised it — `"recorder"` here. Shown, so alerts from
+   *  different sources stay tellable apart on one list. */
+  source: string;
+  /** The operator-facing sentence, written by the backend and shown verbatim.
+   *  **Not `detail`.** */
+  message: string;
+  /** Null until the tick bus has measured anything — an alert can be raised
+   *  from the declared side before a rate exists. */
+  measured_hz: number | null;
+  /** The DECLARED rate the breach is measured against, never the measured one.
+   *  Non-null whenever an alert exists: `_rate_alerts()` returns `[]` while
+   *  `fps_declared` is None. */
+  fps: number;
+  /** The symmetric half-width the breach exceeded — the same quantity
+   *  `recordRateTolerance()` reads, repeated here so an alert carries the bound
+   *  it was judged against rather than requiring the reader to hold both. */
+  tolerance: number;
+  /** How long the breach has held, in seconds. **Not `since`** — this is a
+   *  duration, not a timestamp, and treating it as one dates the alert to 1970
+   *  plus a few seconds. */
+  held_s: number;
 };
 
 /**

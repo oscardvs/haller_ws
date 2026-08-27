@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   postJson, getJson, api, recordRateTolerance, recordRateFaithful,
-  RATE_DECIMALS, formatHz, type RecordStatus,
+  RATE_DECIMALS, formatHz, type RecordStatus, type RecordAlert,
 } from "../lib/api";
 
 describe("postJson", () => {
@@ -243,5 +243,97 @@ describe("a rate readout shows the band it is judged against", () => {
     expect(at(5, RATE_DECIMALS)).toBe(false);
     expect(at(30, 1)).toBe(false);  // safe at 30 — how it survived
     expect(at(30, 0)).toBe(true);   // and the `RATE 30/30` defect at zero
+  });
+});
+
+describe("RecordAlert against the wire it describes", () => {
+  // Written from the PAYLOAD, not from the type. This is the literal object
+  // `recorder.py::_rate_alerts()` builds — captured from a live
+  // `GET /record/status` on a clean tree, then held here as the claim the type
+  // has to satisfy.
+  //
+  // The type declared `code`, `detail?` and `since?` until 2026-08-27: one key
+  // of eight, with two fields the backend has never sent. It type-checked
+  // throughout, because both phantoms were optional and NOTHING READ THEM. An
+  // unread type cannot render `undefined`, which is why this survived while
+  // five noisier defects on the run surface were found and fixed.
+  const WIRE = {
+    level: "warn",
+    code: "record_rate",
+    source: "recorder",
+    measured_hz: 28.4,
+    fps: 30,
+    tolerance: 0.005,
+    held_s: 3.2,
+    message:
+      "tick rate has been outside 0.5% of fps 30 for 3s (measured 28.40 Hz); "
+      + "timestamps in this take are being written as frame_index/30 regardless",
+  } as const;
+
+  // WHAT THIS SUITE CANNOT DETECT, established by mutation and not by argument:
+  // reverting `RecordAlert` to its old 1-of-8 shape leaves every test in this
+  // describe GREEN. It was mutation-checked twice — once naively, then again
+  // after a deliberate attempt to make the runtime half load-bearing — and it
+  // stayed green both times.
+  //
+  // The reason is not fixable by a better assertion: **TypeScript types are
+  // erased before vitest ever runs.** `TYPE_KEYS` below is annotated
+  // `Record<keyof RecordAlert, true>`, which does force exact key
+  // correspondence in both directions — a dropped field and an invented one
+  // are each a compile error — but at runtime it is only the object literal
+  // written here. No expression vitest can evaluate knows what `RecordAlert`
+  // declares.
+  //
+  // So: **`npx tsc --noEmit` is the guard for this contract, and it is the
+  // only one.** Under the mutation it produced six errors, which is the whole
+  // of the protection. This repo has NO CI typecheck — `tsc` is run by hand —
+  // so a green `npm test` here says nothing about whether the type still
+  // matches the wire. Run both, or the check that reassures you is the one
+  // that cannot fire.
+  //
+  // The runtime assertions below are still worth their lines: they pin the
+  // WIRE fixture, so a future edit that quietly reshapes `WIRE` to agree with
+  // a wrong type has to do it in the open.
+  const TYPE_KEYS: Record<keyof RecordAlert, true> = {
+    level: true, code: true, source: true, message: true,
+    measured_hz: true, fps: true, tolerance: true, held_s: true,
+  };
+
+  it("types every key the recorder emits, and invents none", () => {
+    // Both directions, against the literal key list `_rate_alerts()` builds.
+    // A field dropped from the type fails here; a field the wire never sends
+    // fails here too.
+    expect(Object.keys(TYPE_KEYS).sort()).toEqual([
+      "code", "fps", "held_s", "level", "measured_hz", "message", "source",
+      "tolerance",
+    ]);
+    // ...and the fixture really is that shape, so the list above is the wire's
+    // and not just the type's.
+    expect(Object.keys({ ...WIRE }).sort()).toEqual(Object.keys(TYPE_KEYS).sort());
+  });
+
+  it("carries the sentence in `message`, and a DURATION in `held_s`", () => {
+    // The two phantoms, named. `detail` was the only text-shaped field the old
+    // type offered, so the first consumer would have reached for it and drawn
+    // an empty row. `since` invites `new Date(since * 1000)`; `held_s` is 3.2
+    // seconds of elapsed breach, and read as a timestamp it dates the alert to
+    // January 1970.
+    const alert: RecordAlert = { ...WIRE };
+    expect(alert.message).toContain("tick rate has been outside");
+    expect(alert.held_s).toBe(3.2);
+    // Against TYPE_KEYS, not against the fixture — `"detail" in {...WIRE}` is
+    // false however the type is declared, which is the vacuity described above.
+    expect(TYPE_KEYS).not.toHaveProperty("detail");
+    expect(TYPE_KEYS).not.toHaveProperty("since");
+  });
+
+  it("keeps `fps` as the DECLARED rate, distinct from the measured one", () => {
+    // Two rate-shaped numbers on one object, and the bound is a ratio against
+    // the declared one. Reading `fps` as the measured rate makes the ratio 1.0
+    // and the alert self-justifying.
+    const alert: RecordAlert = { ...WIRE };
+    expect(alert.fps).toBe(30);
+    expect(alert.measured_hz).toBe(28.4);
+    expect(alert.fps).not.toBe(alert.measured_hz);
   });
 });
