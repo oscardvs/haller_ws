@@ -196,6 +196,24 @@ this port adds. These are not goals. They are the pass/fail.
     loaders); training passes the kept set as `--dataset.episodes`; pruning is a
     separate explicit export. Ported from the kit unchanged in principle. *(new)*
 
+## Who is building this
+
+Four sessions, disjoint file ownership, each fanning out to its own Workflow subagents.
+The integrator holds `server.py` (both backend tracks need routes mounted there), git
+integration, verification, and cross-track contract arbitration.
+
+| track | session | territory | phases below |
+|---|---|---|---|
+| **A** realtime core | `haller-ws-d7` | `arm`/`human_teleop`/`telemetry`/`recorder`/`cameras`/`collision`/`config`/`realsense`.py, `vr_teleop/**`, `sim/**`, `tick.py` (new), config yamls | 1, 2, 3, 7 |
+| **B** Lab backend | `haller-ws-ea` | NEW `lab/**`, `api/**`, `runners/**`, `lease.py`, `tests/lab/**` | 4, 6 (backend) |
+| **C** Lab frontend | `haller-ws-fd` | all of `hmi/frontend/**` except Track D's files | 5, 6 (frontend) |
+| **D** headset client | `haller-ws-1a` | `VRTeleopPanel.tsx`, `lib/vrTeleop.ts`, `lib/humanTeleopClient.ts`, `app/teleop/vr/**` + their tests | 5 (HUD half) |
+| — integrator | `haller-ws-13` | `server.py`, this document, git | — |
+
+The phase numbers in this table are **this document's**, and they are authoritative.
+Track briefs sent by the integrator used their own local numbering; where the two
+disagree, the phase NAMES below win.
+
 ## Delivery — eight phases
 
 | P | phase | delivers | risk | gated on |
@@ -227,7 +245,7 @@ Risk notes worth stating rather than discovering:
 
 ## Baseline to protect
 
-- **593 backend pytest pass.**
+- **645 backend pytest pass, 1 xfailed** (593 pre-port + 52 equivalence).
 - **186 frontend vitest pass.**
 
 Backend incantation (the venv fights you — plain `activate` lacks rclpy):
@@ -245,11 +263,20 @@ per-session obligation.
 
 - Work in `/home/odesha/haller_ws` on `feat/kit-port` — verify with
   `git branch --show-current` before the first edit; anything else, STOP and report.
-- **No git write operations.** The orchestrator owns git. Read-only `log`/`show`/`diff`/
-  `status` is fine.
+- **Commit your own territory, scoped.** `git add <explicit paths>` only — never `-A`,
+  never `rebase`/`merge`/`branch`/`tag`, which stay with the integrator. Four tracks
+  funnelling every commit through one session would recreate the bottleneck the extra
+  sessions exist to remove. (This supersedes the original "no git write operations";
+  that rule was written for the single-session plan.)
 - **`~/vr-teleop-kit` is read-only.** Read it, import from its venv, never write it.
+  Checked by both `git status` and mtime.
 - **Touch only files in your ownership list.** A needed change outside it is reported,
-  not made.
+  not made. `hmi/backend/tests/equivalence/**` is read-only to *every* track — it is the
+  oracle that judges the port, so a track that believes a test there is wrong escalates
+  rather than edits. The integrator may grant a narrow exception naming the file, the
+  test and the intended post-state.
+- **`server.py` belongs to the integrator.** Both the realtime and Lab tracks need routes
+  mounted there; report the mount you need rather than making it.
 - Match the house style: terse comments that state **constraints**, not history, with
   measured numbers where they exist. Read the neighbours before writing.
 - Never add `Co-Authored-By` or any similar trailer, anywhere.
