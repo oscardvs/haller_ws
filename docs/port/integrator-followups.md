@@ -126,6 +126,19 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
 
 ## Standing rules that came out of rulings
 
+- **THE GIT INDEX IS SHARED ACROSS ALL FOUR SESSIONS.** Four processes, one working
+  tree, one `.git`. Anything one session `git add`s sits in the same index every other
+  session commits from — so a `git commit` takes whatever is staged, regardless of the
+  pathspec passed to `git add`. This happened: an integration commit swept up another
+  track's staged, mid-remediation `preflight.py` and three other files. Nothing was lost,
+  but the attribution was wrong and it could as easily have committed something
+  half-written.
+  **Commit with an explicit pathspec — `git commit -- <paths>` — or check
+  `git diff --cached --name-only` immediately before committing.** Never assume the index
+  holds only your own work.
+  Corollary: **never `git stash` in a shared tree.** It takes every session's uncommitted
+  work, not yours.
+
 - **The symmetry rule holds only for fixtures standing in for loader OUTPUT.**
   `_load_joint_limits` centres on `(range_min + range_max)/2`, so every window it emits
   is symmetric about zero — but that says nothing about fixtures which are deliberately
