@@ -55,11 +55,13 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1474 passed, 1 xfailed** (was 593 pre-port)
-- **frontend `vitest`: 396 passed** (was 186)
-- Both re-verified by `haller-ws-57` 2026-08-27 pm. The numbers move as tracks land work;
-  re-measure rather than trusting a number in a doc — the 387 above was already stale when
-  it was written here, by two commits.
+- **backend `pytest`: 1487 passed, 1 xfailed — measured at commit `42d5fa4`**
+  (was 593 pre-port). **A baseline without a commit beside it is not a baseline.**
+- **frontend `vitest`: 396 passed** (was 186). One test flakes when Track D is mid-write;
+  395/1 once, 396 on three consecutive re-runs.
+- Measured from a DETACHED WORKTREE, which is the only reason the number means anything.
+  Within one hour three sessions honestly reported **1474, 1477 and 1487** — the tree had
+  moved under each of them. Always pin the commit; always re-measure.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```
