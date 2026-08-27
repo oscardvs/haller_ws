@@ -1042,6 +1042,38 @@ applies to any probe that prunes, not only to a matrix.
   needed the override, which is the usual way: the hazard is invisible until the first
   caller arrives, and then it is theirs to eat.
 
+- **A CORRECTION INVALIDATES EVERY CONCLUSION THAT RESTED ON THE CORRECTED PREMISE, and
+  those conclusions do not announce themselves.** The sharpest rule of the port, and its
+  third instance in one day. When `target != fps` was established, every argument that had
+  quietly assumed `target == fps` travelled on unchanged — because **a re-derived fact and
+  a remembered one are indistinguishable once written down.** Not carelessness; it needs a
+  habit: *re-walk what you concluded FROM the thing you just changed.*
+  The instances, all live: an arm-time refusal message assumed an APPEND after CREATE had
+  been established as a separate case; a git-visibility rule was attached to an instance
+  whose timestamps had not been checked; and "mid-take FAST is unreachable" survived the
+  very correction that made it false.
+  **The last one, worked:** the sleep floor bounds `measured <= target`, but the gate
+  compares `measured` against **`fps`**, and `fps = round(measured)` while `period =
+  1/cfg.hz`. **When rounding goes DOWN, `measured > fps` — that is FAST.**
+
+        arm      29.10 -> fps 29 -> 0.345%  passes   (fast, under the bound)
+        mid-take 29.25 -> fps 29 -> 0.862%  FIRES    (fast, over it)
+
+  `measured` may climb to 29.25 because its ceiling is the TARGET (30), not `fps` (29).
+  It looks unreachable on this rig only because 29.94 rounds UP to 30, so every deviation
+  here is slow — and it becomes reachable in the round-down regime, i.e. any achieved rate
+  whose fractional part is below 0.5, which is plausibly where U3 lands once real Feetech
+  round trips are in the tick. `recorder.py:164` said it in words the whole time ("a
+  measured 29.4 written as 29" is 1.4% ABOVE 29) and `:170`'s `0.5/fps` cap is two-sided
+  for exactly this reason.
+
+  **Corollary on how to defend a decision whose premise died:** the display keeps two
+  decimals and no direction word — but on the surviving argument (`RATE 29.25/29.00 fps`
+  shows fast as plainly as `RATE 29.85/30.00 fps` shows slow: the numbers ARE the direction
+  once they carry decimals), NOT on "the fast case cannot occur". Recording the dead premise
+  matters, because a later edit dropping a decimal to save characters would remove the sole
+  direction channel while citing a reason that was never true.
+
 - **A one-sided observation cannot support a two-sided claim.** A regression was
   reported from a single observation of the NEW behaviour, with no observation of the old
   one — and the old file was available the whole time. The two resolvers turned out to be
