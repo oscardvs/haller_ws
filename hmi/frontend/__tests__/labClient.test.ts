@@ -1,0 +1,408 @@
+// hmi/frontend/__tests__/labClient.test.ts
+//
+// The Lab client's wire discipline and its derived readings.
+//
+// Two classes of thing are tested here, and both are things that fail
+// SILENTLY in a browser. A query param that should have been omitted comes
+// back as an empty result set that looks like an empty dataset. A video slice
+// that is guessed rather than read plays the wrong episode at the operator,
+// who then rejects a demonstration that was fine. Neither throws.
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+import { ApiError } from "@/lib/api";
+import {
+  armGroups, epLabel, gripperGuides, isBusy, isForbidden, isMissing,
+  isGripperChannel, lab, labVideoUrl, metricKeys, metricX, qs, reason,
+  rigLabel, shortChannel, sliceFor, videoSrcKey,
+  type LabEpisode, type MetricRow,
+} from "@/lib/lab";
+
+/** Routes fetch by path so a call's boot requests need not be ordered.
+ *  Mirrors __tests__/cockpitTabs.test.tsx so both read the same way. */
+function routeFetch(routes: Record<string, unknown> = {}) {
+  const calls: { url: string; init?: RequestInit }[] = [];
+  const spy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      for (const [fragment, body] of Object.entries(routes)) {
+        if (!url.includes(fragment)) continue;
+        if (typeof body === "number") {
+          return new Response(JSON.stringify({ detail: "nope" }), { status: body });
+        }
+        return new Response(JSON.stringify(body), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    },
+  );
+  return { calls, spy };
+}
+
+const body = (c: { init?: RequestInit }) =>
+  JSON.parse((c.init as RequestInit).body as string);
+
+function ep(over: Partial<LabEpisode> = {}): LabEpisode {
+  return {
+    index: 0, label: 1, frames: 855, duration_s: 28.5, share: 0.029,
+    task: "Pick up the battery", verdict: "PASS", reasons: [],
+    mark: "unset", note: null, tags: [], ...over,
+  };
+}
+
+beforeEach(() => vi.restoreAllMocks());
+afterEach(() => vi.restoreAllMocks());
+
+describe("qs", () => {
+  it("omits null, undefined and the empty string", () => {
+    // An omitted filter and an empty one are different asks: `filter_mark=`
+    // is a filter FOR the empty mark, and a server would be right to answer
+    // it with nothing — which on screen is indistinguishable from a dataset
+    // with no episodes.
+    expect(qs({ a: 1, b: null, c: undefined, d: "", e: "x" })).toBe("?a=1&e=x");
+  });
+
+  it("returns an empty string rather than a bare ?", () => {
+    expect(qs({ a: null })).toBe("");
+  });
+
+  it("escapes a repo id, which carries a slash", () => {
+    expect(qs({ repo_id: "local/so101_pick_cube" }))
+      .toBe("?repo_id=local%2Fso101_pick_cube");
+  });
+
+  it("keeps a zero and a false — both are real values", () => {
+    expect(qs({ offset: 0, backup: false })).toBe("?offset=0&backup=false");
+  });
+});
+
+describe("error classification", () => {
+  it("separates a missing route from a refusal from a policy", () => {
+    // The three mean different things to the operator: rebuild the backend,
+    // clear the state, or do it from the machine. A UI that cannot tell them
+    // apart has to call all three "failed".
+    expect(isMissing(new ApiError(404, "no"))).toBe(true);
+    expect(isMissing(new ApiError(501, "no"))).toBe(true);
+    expect(isBusy(new ApiError(409, "a run holds it"))).toBe(true);
+    expect(isForbidden(new ApiError(403, "loopback only"))).toBe(true);
+    expect(isMissing(new ApiError(409, "x"))).toBe(false);
+    expect(isBusy(new Error("network"))).toBe(false);
+  });
+
+  it("quotes the backend's own sentence, without the HTTP prefix", () => {
+    expect(reason(new ApiError(409, "a run is using this dataset")))
+      .toBe("a run is using this dataset");
+    expect(reason(new Error("Failed to fetch"))).toBe("Failed to fetch");
+  });
+});
+
+describe("episode numbering", () => {
+  it("labels a stored index 1-based", () => {
+    // Oscar numbers episodes 1-based in conversation and they are stored
+    // 0-based. One implementation, because two is how a dialog offers to
+    // delete the wrong demonstration.
+    expect(epLabel(0)).toBe("Ep 1");
+    expect(epLabel(45)).toBe("Ep 46");
+  });
+});
+
+describe("video slices", () => {
+  const packed = ep({
+    index: 2, label: 3, duration_s: 15.533,
+    videos: {
+      top: { chunk_index: 0, file_index: 1, from_timestamp: 0, to_timestamp: 15.533 },
+    },
+  });
+
+  it("reads the declared slice", () => {
+    expect(sliceFor(packed, "top")).toEqual({
+      chunk_index: 0, file_index: 1, from_timestamp: 0, to_timestamp: 15.533,
+    });
+  });
+
+  it("returns null rather than guessing when none was declared", () => {
+    // The guess would be {0, duration_s}. On the real 46-episode dataset,
+    // episode 1 lives at 28.5..45.93 of a file that starts with episode 0 —
+    // so the guess opens the wrong take and plays it under the right label.
+    expect(sliceFor(ep({ index: 1 }), "top")).toBeNull();
+    expect(sliceFor(packed, "left_wrist")).toBeNull();
+    expect(sliceFor(packed, null)).toBeNull();
+  });
+
+  it("keys the loaded FILE, so a second episode in it is a seek", () => {
+    const a = ep({
+      index: 0,
+      videos: { top: { chunk_index: 0, file_index: 0, from_timestamp: 0, to_timestamp: 28.5 } },
+    });
+    const b = ep({
+      index: 1,
+      videos: { top: { chunk_index: 0, file_index: 0, from_timestamp: 28.5, to_timestamp: 45.93 } },
+    });
+    // Same file: the src must not change, or every J/L keypress re-buffers.
+    expect(videoSrcKey("r", a, "top")).toBe(videoSrcKey("r", b, "top"));
+    // Different file: it must.
+    expect(videoSrcKey("r", packed, "top")).not.toBe(videoSrcKey("r", a, "top"));
+  });
+
+  it("has no key at all without a slice", () => {
+    expect(videoSrcKey("r", ep(), "top")).toBeNull();
+  });
+
+  it("builds a video URL carrying the episode, not a chunk path", () => {
+    const url = labVideoUrl("local/so101_pick_cube", "top", 2);
+    expect(url).toContain("/lab/datasets/video");
+    expect(url).toContain("repo_id=local%2Fso101_pick_cube");
+    expect(url).toContain("key=top");
+    expect(url).toContain("episode=2");
+  });
+});
+
+describe("rig-shaped trace readings", () => {
+  const SOLO = [
+    "shoulder_pan.pos", "shoulder_lift.pos", "elbow_flex.pos",
+    "wrist_flex.pos", "wrist_roll.pos", "gripper.pos",
+  ];
+  const BIMANUAL = [
+    "left_shoulder_pan", "left_shoulder_lift", "left_elbow_flex",
+    "left_wrist_flex", "left_wrist_roll", "left_gripper",
+    "right_shoulder_pan", "right_shoulder_lift", "right_elbow_flex",
+    "right_wrist_flex", "right_wrist_roll", "right_gripper",
+  ];
+
+  it("groups a solo rig under one unprefixed side", () => {
+    expect(armGroups(SOLO)).toEqual([
+      { side: "arm", channels: [0, 1, 2, 3, 4, 5] },
+    ]);
+  });
+
+  it("splits a bimanual rig at the side prefix", () => {
+    // Both real datasets on disk, and the channel COUNT differs between them.
+    // Anything that hardcodes five joints and a gripper is wrong on one.
+    expect(armGroups(BIMANUAL)).toEqual([
+      { side: "left", channels: [0, 1, 2, 3, 4, 5] },
+      { side: "right", channels: [6, 7, 8, 9, 10, 11] },
+    ]);
+  });
+
+  it("finds the gripper by NAME on both rigs", () => {
+    // The kit took state[state.length - 1]: the gripper on a solo arm and the
+    // RIGHT gripper on a bimanual one, so it silently charted one hand.
+    expect(SOLO.filter(isGripperChannel)).toEqual(["gripper.pos"]);
+    expect(BIMANUAL.filter(isGripperChannel))
+      .toEqual(["left_gripper", "right_gripper"]);
+  });
+
+  it("shortens a channel to what the row group does not already say", () => {
+    expect(shortChannel("left_shoulder_pan")).toBe("shoulder pan");
+    expect(shortChannel("shoulder_pan.pos")).toBe("shoulder pan");
+  });
+
+  it("names every rig the backend can report", () => {
+    expect(rigLabel("bimanual")).toBe("bimanual");
+    expect(rigLabel("left")).toBe("solo left");
+    expect(rigLabel("right")).toBe("solo right");
+    expect(rigLabel("solo")).toBe("single arm");
+    expect(rigLabel(null)).toBe("rig unknown");
+  });
+});
+
+describe("gripper guides", () => {
+  it("takes the thresholds the episode was GRADED with", () => {
+    // Measured on disk: the kit's dataset grades at 40.0/70.0, and the
+    // bimanual one — whose gripper is calibrated in DEGREES over
+    // [-9.97, 100.27] — at 34.1254/67.1965. A hardcoded 40/70 would call
+    // every bimanual grasp a failure.
+    const bimanual = ep({
+      arms: [
+        {
+          side: "left", verdict: "PASS", why: "", closes: 1, reopened: true,
+          grip_min: 0, grip_max: 100, tracking: 1.4, sweep_total: 900,
+          closed_below: 34.1254, open_above: 67.1965,
+        },
+        {
+          side: "right", verdict: "PASS", why: "", closes: 1, reopened: true,
+          grip_min: 0, grip_max: 100, tracking: 1.1, sweep_total: 880,
+          closed_below: 34.1254, open_above: 67.1965,
+        },
+      ],
+    });
+    expect(gripperGuides(bimanual)).toEqual([
+      { side: "left", closed_below: 34.1254, open_above: 67.1965 },
+      { side: "right", closed_below: 34.1254, open_above: 67.1965 },
+    ]);
+  });
+
+  it("draws nothing at all when the backend sent no thresholds", () => {
+    // An invented guide is worse than a missing one: it looks like a
+    // measurement, and the verdict beside it would disagree with it.
+    expect(gripperGuides(ep())).toEqual([]);
+    expect(gripperGuides(null)).toEqual([]);
+    expect(gripperGuides(ep({
+      arms: [{
+        side: "", verdict: "PASS", why: "", closes: 1, reopened: true,
+        grip_min: 0, grip_max: 100, tracking: 1, sweep_total: 100,
+      }],
+    }))).toEqual([]);
+  });
+});
+
+describe("metric stream readings", () => {
+  const ROWS: MetricRow[] = [
+    { step: 0, epochs: 0, wall_s: 0, loss: 7.25, lr: 1e-5, grad_norm: 4.2 },
+    { step: 100, epochs: 0.25, wall_s: 5, loss: 3.1, lr: 1e-5, grad_norm: 3.9,
+      eval_loss: 3.6, samples_per_s: 141.2, gpu_mem_gb: 9.4 },
+    { step: 200, epochs: 0.5, wall_s: 10, loss: 0.068, lr: 9e-6, grad_norm: 2.2,
+      note: "not a number", ok: true, missing: null },
+  ];
+
+  it("discovers every numeric key and never a hardcoded list", () => {
+    // The kit charted `loss` and threw the rest of the same JSONL line away.
+    expect(metricKeys(ROWS)).toEqual([
+      "loss", "lr", "grad_norm", "eval_loss", "samples_per_s", "gpu_mem_gb",
+    ]);
+  });
+
+  it("excludes the axes — charting step against step teaches nothing", () => {
+    const keys = metricKeys(ROWS);
+    for (const axis of ["step", "steps", "epoch", "epochs", "wall_s", "t"]) {
+      expect(keys).not.toContain(axis);
+    }
+  });
+
+  it("ignores non-numeric and non-finite values", () => {
+    expect(metricKeys(ROWS)).not.toContain("note");
+    expect(metricKeys(ROWS)).not.toContain("ok");
+    expect(metricKeys(ROWS)).not.toContain("missing");
+    expect(metricKeys([{ loss: NaN }, { loss: Infinity }])).toEqual([]);
+  });
+
+  it("reads each axis, accepting either spelling", () => {
+    expect(metricX(ROWS[1], "step")).toBe(100);
+    expect(metricX(ROWS[1], "epoch")).toBe(0.25);
+    expect(metricX(ROWS[1], "wall")).toBe(10 - 5);
+    expect(metricX({ steps: 4 }, "step")).toBe(4);
+    expect(metricX({ epoch: 2 }, "epoch")).toBe(2);
+    expect(metricX({ elapsed_s: 90 }, "wall")).toBe(90);
+  });
+
+  it("reports null for a row that cannot sit on the chosen axis", () => {
+    // An eval row logged without an epoch is not at epoch 0, and plotting it
+    // there draws a spike at the origin that never happened.
+    expect(metricX({ step: 500, eval_loss: 0.4 }, "epoch")).toBeNull();
+    expect(metricX({ step: 500 }, "wall")).toBeNull();
+  });
+});
+
+describe("lab client — what actually goes on the wire", () => {
+  it("posts a mark without a note key when none was given", () => {
+    // `note: undefined` serialises away, but `note: null` does not — and a
+    // null would clear a note the operator only meant to leave alone.
+    const { calls } = routeFetch({ "/lab/datasets/mark": { ok: true } });
+    void lab.mark("r", 3, "reject");
+    expect(body(calls[0])).toEqual({ repo_id: "r", episode: 3, status: "reject" });
+  });
+
+  it("posts a note when one was given, empty string included", () => {
+    const { calls } = routeFetch({ "/lab/datasets/mark": { ok: true } });
+    void lab.mark("r", 3, "keep", "");
+    expect(body(calls[0]))
+      .toEqual({ repo_id: "r", episode: 3, status: "keep", note: "" });
+  });
+
+  it("omits absent bulk fields rather than sending them as null", () => {
+    // A bulk call that sent `status: null` would clear the marks of every
+    // selected episode when the operator only added a tag.
+    const { calls } = routeFetch({ "/lab/datasets/bulk": { updated: 2 } });
+    void lab.bulk({ repo_id: "r", episodes: [1, 2], tags_add: ["blurry"] });
+    expect(body(calls[0]))
+      .toEqual({ repo_id: "r", episodes: [1, 2], tags_add: ["blurry"] });
+  });
+
+  it("previews autoclassify with a mode and params", () => {
+    const { calls } = routeFetch({ "/autoclass/preview": { token: "t", diff: [] } });
+    void lab.autoclassPreview("r", "knn", { k: 5, min_confidence: 0.6 });
+    expect(body(calls[0])).toEqual({
+      repo_id: "r", mode: "knn", params: { k: 5, min_confidence: 0.6 },
+    });
+  });
+
+  it("applies autoclassify BY TOKEN, never by re-sending the diff", () => {
+    // The token binds the diff to the dataset state it was computed against.
+    // Re-sending a diff would apply decisions to a state the operator never
+    // saw; the server recomputes the token and 409s instead.
+    const { calls } = routeFetch({ "/autoclass/apply": { applied: 9, batch: "b" } });
+    void lab.autoclassApply("r", "tok123");
+    expect(body(calls[0])).toEqual({ repo_id: "r", token: "tok123" });
+  });
+
+  it("prunes with the expected episode set as a guard", () => {
+    // The server refuses if the set moved between the dialog opening and the
+    // click — exactly when a renumbering would delete a different take.
+    const { calls } = routeFetch({ "/lab/datasets/prune": { run_id: "prune-1" } });
+    void lab.prune("r", true, [2, 5, 9]);
+    expect(body(calls[0]))
+      .toEqual({ repo_id: "r", backup: true, expect_episodes: [2, 5, 9] });
+  });
+
+  it("puts the typed confirmation on the wire for a dataset delete", () => {
+    // The gate is on the SERVER, not only in the dialog: `confirm` must equal
+    // `repo_id` byte for byte or it is a 400. There is no undo and this box
+    // has no backup of any kind.
+    const { calls } = routeFetch({ "/lab/datasets": { repo_id: "r", freed_bytes: 1 } });
+    void lab.deleteDataset("local/so101_pick_cube");
+    expect(calls[0].url).toContain("repo_id=local%2Fso101_pick_cube");
+    expect(calls[0].url).toContain("confirm=local%2Fso101_pick_cube");
+    expect((calls[0].init as RequestInit).method).toBe("DELETE");
+  });
+
+  it("wraps a train spec in `spec`", () => {
+    const { calls } = routeFetch({ "/lab/runs/train": { id: "train-1" } });
+    void lab.train({
+      repo_id: "r", policy_type: "act", steps: 20000, batch_size: 8,
+      eval_split: 0.2, eval_seed: 42, eval_mode: "random", eval_steps: 1000,
+      save_freq: 5000, num_workers: 4, device: "cuda", job_name: "act_r",
+      tags: [], episodes: [0, 1, 2],
+    });
+    expect(body(calls[0]).spec.policy_type).toBe("act");
+    expect(body(calls[0]).spec.episodes).toEqual([0, 1, 2]);
+  });
+
+  it("asks for the split rather than computing one", () => {
+    // Two implementations of "which episodes does the trainer not see" drift,
+    // and when they do the val badges lie about which demonstrations the
+    // policy has already learned.
+    const { calls } = routeFetch({
+      "/lab/datasets/split": { order: [], train_episodes: [], eval_episodes: [] },
+    });
+    void lab.split("r", 0.2, 42, "recent");
+    expect(calls[0].url).toContain("eval_split=0.2");
+    expect(calls[0].url).toContain("seed=42");
+    expect(calls[0].url).toContain("mode=recent");
+  });
+
+  it("passes the metrics offset straight back, opaque", () => {
+    const { calls } = routeFetch({ "/metrics": { offset: 900, rows: [] } });
+    void lab.runMetrics("train-1", 512);
+    expect(calls[0].url).toContain("/lab/runs/train-1/metrics?offset=512");
+  });
+
+  it("escapes a run id in the path", () => {
+    const { calls } = routeFetch({ "/lab/runs": { id: "a b" } });
+    void lab.run("a b");
+    expect(calls[0].url).toContain("/lab/runs/a%20b");
+  });
+
+  it("caps compare points, because 200k rows do not fit in 600px", () => {
+    const { calls } = routeFetch({ "/lab/runs/metrics": { runs: {} } });
+    void lab.compareMetrics(["a", "b"], ["loss", "eval_loss"]);
+    expect(calls[0].url).toContain("ids=a%2Cb");
+    expect(calls[0].url).toContain("keys=loss%2Ceval_loss");
+    expect(calls[0].url).toContain("max_points=600");
+  });
+
+  it("surfaces a 409 as an ApiError carrying the detail", async () => {
+    routeFetch({ "/lab/datasets/prune": 409 });
+    await expect(lab.prune("r", true, [1])).rejects.toMatchObject({
+      status: 409, detail: "nope",
+    });
+  });
+});
