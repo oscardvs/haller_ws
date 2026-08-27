@@ -1127,15 +1127,49 @@ applies to any probe that prunes, not only to a matrix.
   mechanical form — `git show HEAD:` as the default reflex for any cross-track read, not a
   step you reach for once you suspect a problem.
 
-- **A DIFF TOOL THAT FLATTENS NESTED KEYS INVENTS TOP-LEVEL FIELDS.** Third failure mode of
-  the same `typediff.py` whose brief already warned it "produces confident nonsense rather
-  than an error" for one-line types. Track C's payload diff reported `arms` as *on the wire,
-  not in the type* — a finding they nearly filed. `arms` is nested: `"drops": {"cameras": ...,
-  "arms": ...}` spans two lines, and a `^\s*"(\w+)":` match hoists the inner key into the
-  top-level set. **The route has never sent `arms` at top level.** Same family as the
-  histogram rule: a shape-blind instrument agrees with reality on the aggregate and lies about
-  the structure. An instrument that cannot represent nesting must refuse a nested input, not
-  flatten it.
+- **THE ARTIFACT THAT READS A PRODUCER'S *SOURCE* CAN INVENT A KEY; THE ONE THAT READS ITS
+  *OUTPUT* CANNOT.** **This entry previously blamed `typediff.py` and that was wrong** —
+  Track C's own misattribution, propagated here by the integrator, corrected by Track C at
+  `1c34f16` after `haller-ws-f3` caught it, and re-verified here rather than accepted:
+  `tools/typediff.py:198` takes its wire side from `json.load` on the HTTP response, so
+  `"drops": {"cameras":…, "arms":…}` is ONE top-level key and the hoist is structurally
+  impossible there. The ghost `arms` came from a hand-rolled `^\s*"(\w+)":` regex over
+  `recorder.py`.
+  **Leaving it filed would have been the expensive kind of wrong: it teaches the next reader
+  to distrust the artifact that cannot make the mistake and reach for the one that can.**
+  Advice outlives incidents, so a misattributed lesson does damage the incident never did.
+  The generalisation survives and is better attached — an instrument that cannot represent
+  nesting must REFUSE a nested input rather than flatten it, which is a property of
+  source-scraping regexes (they genuinely cannot represent nesting) and not of a tool that
+  parses JSON (which represents it for free). **So the rule is not "watch out for the tool",
+  it is "prefer the tool, and treat every top-level key a REGEX reports as unconfirmed."**
+
+  Two things from the same pass, both about the tool being fixed rather than the tool being
+  wrong. `haller-ws-f3` found and fixed four real defects in it, verified **by running it** —
+  including that it executed its whole diff at import time with no `__main__` guard, so
+  importing it fired every HTTP call at a port that had already been stopped. The one worth
+  keeping as a SHAPE is the third: a line-anchored field regex returned `LogPage` as
+  `['offset']`, **silently losing `text` — a field ABSENT, reported as AGREEMENT.** That is
+  the one-line-type fall-through in different clothes, it SURVIVED the fix for that
+  fall-through, and it was caught only by running the result. *Reading a fix is not testing
+  it* — the same argument as mutation-checking a test.
+  And a fifth, found by Track C and reported to `haller-ws-f3` rather than edited into their
+  file, verified here: `compat()` returns `None` from **both** arms of its final conditional
+  (`typediff.py:141`), so the regex is dead code and a genuine mismatch — declared `string`
+  against a wire `object` — prints `? CANNOT JUDGE` instead of `MISMATCH`. It fails safe under
+  the tool's own "never report confident nonsense" rule, but it is **a discriminator that
+  cannot discriminate, inside the very function rewritten so aliases would stop passing by
+  accident.**
+
+- **A RECONCILE INHERITS THE BOUNDARY OF THE SURFACE IT WAS RUN AGAINST — name the surface,
+  or "done" is a guess.** The `5a196a5` payload diff was scoped to the RUN routes and was
+  never pointed at `/record/status`'s alerts array, so `trackC-handoff.md` §2 read as a clean
+  bill for `RecordStatus` entire when it was nothing of the kind. **That, and not "it has no
+  consumer", is the real reason `RecordAlert` survived at one key of eight**: the consumer
+  argument explains why nothing BROKE, the boundary argument explains why nobody LOOKED — and
+  only the second is actionable. Changes what "done" means for the `RecordStatus` reconcile
+  item above: the pass must name every route it covered, or the next reader inherits a
+  boundary nobody stated.
 
 - **A FIELD NAMED FOR ONE QUANTITY WHILE HOLDING ANOTHER MAKES ITS OWN REGRESSION READ AS A
   CLEAN DIFF.** `recorder.py` stores the integer written to `info.json` as **`fps_declared`**,
