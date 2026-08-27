@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && vitest run",
+    "test:tools": "python3 tools/test_typediff.py"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
