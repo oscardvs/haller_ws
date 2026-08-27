@@ -124,11 +124,36 @@ passes against one and fails against the other.** Render both.
 
 ---
 
-## 2. The `RecordStatus` reconcile — one member is a rewrite, not a confirm
+## 2. The `RecordStatus` reconcile — DONE, and what it did not cover
 
-Re-measured 2026-08-27 evening against **committed `b908cf6`** — not the
-working copy, and not reasoned about. See the trap at the end of this section
-for why those are two different mistakes.
+**Closed 2026-08-27 evening at `3e68420`, against a LIVE backend** — sim on a
+throwaway `:8031`, run only once Track A's 2d had landed and `recorder.py` was
+clean and committed at `965fa32`, so the payload was attributable rather than a
+read of another session's editor buffer. See the trap at the end of this
+section for why those are two different mistakes.
+
+**Result: the top level agrees exactly.**
+
+```
+on the wire, NOT in the type:  none
+in the type, NOT on the wire:  none
+? CANNOT JUDGE:  drops, state  — aliases, both resolved by hand:
+                 RecordState = "idle"|"armed"|"recording"  covers the wire's "idle"
+                 RecordDrops                               matches {cameras:{},arms:{}}
+```
+
+All three of Track A's 2d fields — `state`, `episode_index`,
+`invalidated_reason` — are on the wire and correctly typed.
+
+**THE ROUTES THIS PASS COVERED, because a reconcile inherits the boundary of
+the surface it was run against:** `GET /record/status` only — its top-level
+keys and its `alerts[]` member. NOT `/record/arm`, `/record/roll` or
+`/record/stop` (unmounted at the time), and no `/lab` route. And `alerts` came
+back `[]` from an idle recorder, so the member below is a **static read of the
+producer at HEAD**, not a live judgement: populating it needs a rate breach
+during a take, which is a mutating call. Name this boundary in the next pass
+too, or the next reader inherits an unstated one — which is exactly how this
+section came to read as a clean bill for `RecordStatus` entire.
 
 ```
 GET /record/status returns, today:
@@ -147,8 +172,10 @@ halves and `record_rate_tolerance` replaces it (see §4). The three that remain
 are Track A's, they are **optional**, and they arrive with 2d — so the type is
 correct against today's backend and against A's.
 
-**But the top-level key sets matching is not the reconcile finishing.** One
-MEMBER type is wrong today:
+**The top-level key sets matching was not the reconcile finishing.** One
+MEMBER type was wrong, and was the pass's only real defect — fixed at
+`3e68420`. Track A's 462-line 2d rewrite left `_rate_alerts()` untouched, so
+this survived 2d rather than being overtaken by it:
 
 ```
 alerts[] — recorder.py::_rate_alerts() emits:
@@ -172,10 +199,29 @@ and draw an empty warning row. A defect that is unobservable now and certain
 on first use is worse than one that is merely wrong now, because whoever
 trips it will be debugging their own new code.
 
-**The answer already exists eight lines away.** `lib/telemetry.ts:50` declares
+**The answer already existed eight lines away.** `lib/telemetry.ts:50` declares
 the same producer as `{level, code, message, source}` and
-`AlertsPopover.tsx:37-58` renders it and works. So the fix is not "reconcile
-the two" — it is **the working one is right, make the other match it.**
+`AlertsPopover.tsx:37-58` renders it and works. So the fix was not "reconcile
+the two" — it was **the working one is right, make the other match it.** The
+type is now the wire's full eight; the telemetry declaration names the four
+that panel draws, and the four it omits are the numbers behind the sentence.
+
+### A type-vs-wire contract has NO runtime guard — `tsc` is the only one
+
+Established by mutation, twice, and it is not fixable by a better assertion.
+Reverting `RecordAlert` to its old shape leaves **every test in the suite
+green**; `tsc --noEmit` produces six errors. A second attempt — deriving the
+assertion from `Record<keyof RecordAlert, true>` so the type's own key set
+reaches vitest as data — failed identically, because **TypeScript is erased
+before vitest runs** and that object is only the literal someone typed. No
+expression a test can evaluate knows what a type declares.
+
+**This repo has no CI typecheck** — `npx tsc --noEmit` is run by hand. So for
+every type-vs-wire contract in `lib/api.ts` and `lib/lab.ts` — the class that
+produced `started_at`, the identical checkpoint names, `step: null` and
+`RecordAlert`, five defects this port — **a green `npm test` is evidence of
+nothing.** Run both. The suite that reassures you here is the one that cannot
+fire.
 
 **The `5a196a5` payload diff was scoped to the RUN routes**, so read this
 section as a reconcile of what that pass looked at, not as a clean bill for
