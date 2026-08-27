@@ -365,9 +365,27 @@ streaming a recorded episode back — no policy, no checkpoint, no GPU.
 **A rollout below rate is REFUSED, not warned** (corrects an earlier integrator call).
 A policy trained at 30 Hz and run at 4.8 Hz applies action deltas sized for 33 ms over
 208 ms — a different dynamical system, and the same class of error as a declared-not-
-measured fps. Refusing one while tolerating the other is incoherent. Same 90% constant
-as the record gate, refuse below it, alert mid-run, explicit override for someone who
-means it, measured rate stamped into the run record either way. The kit's real failure
+measured fps. Refusing one while tolerating the other is incoherent. Refuse below it,
+alert mid-run, explicit override for someone who means it, measured rate stamped into the
+run record either way.
+
+**AMENDED 2026-08-27 — "the same 90% constant as the record gate" is WITHDRAWN. They are
+two gates over two different questions and sharing a constant would make one of them
+unreachable.** Track A found it while building the recorder's arm-time gate:
+
+- **The RECORDER's arm-time gate is a FAITHFULNESS bound: `|measured - fps| / fps`**,
+  refusing above **0.5%**. It asks whether the integer written to `info.json` is an honest
+  time base for the samples actually taken. A dataset 10% off its own time base is not a
+  judgement call; it is broken.
+- **`MIN_RATE_FRACTION = 0.9` remains the ROLLOUT control-rate gate**, where the quantity
+  genuinely differs: a policy's control loop sitting 10% off its training fps is a live
+  question about dynamics, not about data integrity.
+
+Sharing 0.9 across both would have put **unreachable code in the safety layer**: on append
+both compare the same two quantities, and anything failing 0.9 fails 0.5% by a factor of
+twenty, so the 0.9 branch could never fire — a rate gate a reader would see and believe.
+That is "two gates guarding the same decision means one of them is wrong right now", in
+its reassuring form. The kit's real failure
 was not that a 4.8 Hz run happened; it was that "success" was reported with that number
 attached to nothing.
 
