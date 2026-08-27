@@ -174,6 +174,34 @@ describe("stepTake", () => {
       .toEqual({ state: "armed", act: { do: "stop", save: true, rearm: true } });
   });
 
+  it("banks ten takes without ever passing through idle", () => {
+    // The workflow claim, run as a workflow. ARMED is the resting state of a
+    // recording session, so a solo operator banking 46 episodes climbs the
+    // ladder ONCE and then cycles roll → end → keep. If any decision dropped
+    // through idle, that is a three-rung climb 46 times over, and the whole
+    // reason the gate returns to ARMED is gone.
+    const seen: TakeState[] = [];
+    const stops: { save: boolean; rearm: boolean }[] = [];
+    let state = stepTake("idle", { kind: "ax_hold" }).state;   // the one climb
+    for (let take = 0; take < 10; take++) {
+      const roll = stepTake(state, { kind: "ax_hold" });
+      expect(roll).toEqual({ state: "rolling", act: { do: "roll" } });
+      const prompt = stepTake(roll.state, { kind: "ax_hold" });
+      const done = stepTake(prompt.state, { kind: "choose", choice: "keep" });
+      expect(done.act).toEqual({ do: "stop", save: true, rearm: true });
+      stops.push({ save: true, rearm: true });
+      state = done.state;
+      seen.push(roll.state, prompt.state, state);
+      // The 250 ms poll runs throughout; a reconcile mid-cycle must not move
+      // the operator anywhere they did not ask to go.
+      state = stepTake(state, { kind: "recorder", state: "armed" }).state;
+      seen.push(state);
+    }
+    expect(state).toBe("armed");
+    expect(seen).not.toContain("idle");
+    expect(stops).toHaveLength(10);
+  });
+
   it("closes the prompt when the recorder ends the take underneath it", () => {
     // A fault, or the cockpit stopping it from the other surface: there is no
     // take left to decide about, so the HUD must stop offering the decision.

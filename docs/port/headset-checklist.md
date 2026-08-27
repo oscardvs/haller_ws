@@ -91,12 +91,26 @@ and a weak 0.2 / 60 ms buzz in both hands.
 
 ## 2. The start gate
 
+Each item below carries a **Already pinned in vitest** note saying which half of
+it the suite already holds and what the run genuinely adds. The split is not
+cosmetic: a frontend test can pin what the CLIENT decides and what the HUD says,
+and can never see a frame land on disk. Read the notes before starting — most of
+these items are one backend assertion each once the client half is taken as
+given, and V11 is the only one whose core is device-only.
+
+
 ARMED is the whole reason this port touched the record path. Stock
 lerobot-record starts episode 0 the instant the process boots; Oscar recorded two
 full 60 s episodes of himself getting ready. ARMED is full-rate teleop with the
 dataset open, the schema frozen, and **not one frame written**.
 
 ### V3. ARM writes nothing ☐
+
+> **Already pinned in vitest** — `stepTake` emits exactly `{do:"arm"}` and no
+> other act; the HUD paints `ARMED` and provably not `● REC`; the status column
+> carries `armed — nothing written yet`. **What this run adds:** that the
+> RECORDER writes nothing, which no frontend test can see. That is the whole
+> item; the client half is decoration by comparison.
 
 One A/X hold (500 ms, either controller) from idle.
 
@@ -109,6 +123,10 @@ One A/X hold (500 ms, either controller) from idle.
 
 ### V4. ROLL writes ☐
 
+> **Already pinned** — `armed → rolling` emits `{do:"roll"}`; the chip flips to
+> `● REC ep N · F`. **This run adds:** frames actually landing, starting AT the
+> hold, and the `fps_measured` / `fps_declared` numbers. Record them either way.
+
 Second A/X hold.
 
 - **PASS:** chip flips to `● REC ep N · F` in red, `F` climbs. `GET /record/status`
@@ -119,6 +137,11 @@ Second A/X hold.
   gate refuses below 90% of declared. Record the number either way.
 
 ### V5. The prompt sits over a recorder that is still rolling ☐
+
+> **Already pinned, hard** — forty consecutive `recorder: rolling` reconciles
+> leave the state at `prompt`, and the decision still lands afterwards. That is
+> ten seconds of deliberation at the real poll rate. **This run adds:** only that
+> the real poll behaves like the test's model of it. Low risk, cheap to confirm.
 
 Third A/X hold opens the four-way decision. The recorder does **not** stop.
 
@@ -135,6 +158,10 @@ Third A/X hold opens the four-way decision. The recorder does **not** stop.
 
 ### V6. `keep` — left stick click ☐
 
+> **Already pinned** — `{save:true, rearm:true}`, lands in `armed` and never
+> `idle`, 0.6 / 180 ms cue. **This run adds:** that `GET /record/episodes` gains
+> exactly one and the index advances.
+
 - **PASS:** `GET /record/episodes` gains exactly ONE episode. The index advances.
   The HUD lands back on `◆ ARMED` showing the **next** index — never idle.
   A 0.6 / 180 ms cue in both hands.
@@ -142,6 +169,12 @@ Third A/X hold opens the four-way decision. The recorder does **not** stop.
   makes banking 46 takes a ladder climbed 46 times.
 
 ### V7. `redo` — right stick click ☐
+
+> **Already pinned** — `{save:false, rearm:true}`, lands in `armed`, and its cue
+> is provably distinguishable from `keep`'s though both end in the same state.
+> **This run adds:** that the episode count and the index do NOT move. That is
+> the claim worth the trip — it is a statement about lerobot's buffer, not about
+> this client.
 
 - **PASS:** `GET /record/episodes` gains NOTHING. The index does **not** advance.
   The HUD lands back on `◆ ARMED` showing the **same** index. A 0.3 / 90 ms cue.
@@ -152,13 +185,23 @@ Third A/X hold opens the four-way decision. The recorder does **not** stop.
 
 ### V8. Withdrawing the prompt ☐
 
+> **Already pinned** — `prompt → rolling` with `act: null`, so no REST call is
+> even possible. **This run adds:** an uninterrupted frame count across the
+> withdrawal, and the cue felt.
+
 A/X hold while the prompt is open.
 
 - **PASS:** straight back to rolling. No REST call. The frame count is
   uninterrupted — check it across the withdrawal, not just after. A 0.2 / 60 ms
-  cue, the weakest in the table, because a hold that was a mistake costs nothing.
+  cue — the weakest of the prompt's four outcomes, because a hold that was a
+  mistake costs nothing. (Not the weakest in the whole table: the dropped gate's
+  0.15 / 50 ms is lighter still. Both extremes are pinned in vitest.)
 
 ### V9. The desktop's two stand-down buttons ☐
+
+> **Already pinned** — `keep_stop` → `idle` `{true,false}` and `drop` → `idle`
+> `{false,false}`. **This run adds:** the two backend outcomes, one episode
+> banked and none.
 
 `Keep & stop` and `Discard & stop` exist only on the desktop panel: the headset
 binds the two that return to ARMED, because there is no room on the controller
@@ -168,6 +211,12 @@ for a gesture that does not collide with a trained one.
   `Discard & stop` banked none.
 
 ### V10. Ten takes without leaving ARMED ☐
+
+> **Already pinned, as a sequence** — ten full cycles with a status reconcile
+> inside each, asserting the operator never passes through `idle` and that
+> exactly ten `{save:true, rearm:true}` stops are emitted. **This run adds:** the
+> half that is really about lerobot rather than about us — ten episodes on disk,
+> the index not stalling, and all ten rows reading back after a reload.
 
 The workflow claim, run as a workflow: arm once, then A/X hold → drive → A/X hold
 → L click, ten times. No other gesture.
@@ -189,6 +238,14 @@ The workflow claim, run as a workflow: arm once, then A/X hold → drive → A/X
 ## 3. The trained-gesture refusal
 
 ### V11. Home is refused mid-prompt, and says so ☐
+
+> **Partly pinned.** The SEEN half is a test: the refusal line paints and the
+> box does not change height. The FELT half, the arm not homing, and the
+> release not falling through to `keep` all live in the XR animation loop, which
+> has no headless harness — so conditions 1, 2 and 3 are genuinely device-only.
+> **Do this one on hardware and do it carefully:** it is the item invariant 5's
+> exception is granted on, and if the refusal is felt but not seen, or seen but
+> not felt, the exception lapses.
 
 Hold the LEFT stick past `RESET_HOLD_MS` (≈0.8 s) while the prompt is open. This
 is the trained in-session home gesture, and inside the prompt it is the same
@@ -217,6 +274,11 @@ state.
 
 ### V12. An invalidated gate says why ☐
 
+> **Already pinned** — `GATE DROPPED — <reason>` paints while idle (not only
+> mid-take), and `armed → idle` is provably a tick rather than silence.
+> **This run adds:** that the backend actually emits `invalidated_reason` when
+> the arm set changes under an armed gate.
+
 While ARMED but not rolling, make the freeze stale: change the arm set, or exit
 VR (teleop stopping invalidates an armed gate on the backend's own rule).
 
@@ -233,6 +295,12 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 ## 5. The fallback path
 
 ### V13. Local gate against a backend without `/record/arm` ☐
+
+> **Partly pinned** — the `(local gate)` chip paints. The 404 probe, the
+> one-toast-per-session, and the silent upgrade all need two backends to run
+> against. **Cheap trick:** the second half is testable today by pointing at a
+> backend WITHOUT the routes, which is every backend right now — so V13's first
+> half can go green before Phase 1 lands, and only its upgrade half waits.
 
 `POST /record/arm` / `/record/roll` are not mounted yet — that is the
 integrator's follow-up, gated on Track A reporting the bodies. Until then the
