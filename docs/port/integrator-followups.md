@@ -46,6 +46,18 @@ and dies when that event happens. Add the trigger, not just the task.
   `recorder.py::status()` returns TODAY — before this port added any. Worth one pass to
   confirm the type finally matches the payload rather than merely growing.
 
+## Standing rules that came out of rulings
+
+- **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
+  asked Track A for the fps-refusal threshold instead of picking its own. A UI that
+  invents its own copy of a number is how a dashboard ends up disagreeing with the
+  system it monitors.
+- **A route two shipped surfaces already call is not a new route.** `POST /record/stop`
+  grew `rearm` for the headset state machine; it is OPTIONAL and defaults to false, so
+  `{save}` alone still means stop-save-idle. Required would have broken the cockpit stop
+  button and RecordPopover silently, since desktop callers have no idea the headset grew
+  states.
+
 ## Closed
 
 - ~~Plan doc's phase numbering disagreed with the track briefs~~ — pinned to the doc
