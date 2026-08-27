@@ -524,6 +524,61 @@ applies to any probe that prunes, not only to a matrix.
   ported `max(pressure, 0.35)` sat below the 0.5 deg haptic dead zone and would have
   SILENCED the buzz at the exact pose it was added to raise.
 
+- **`findBy*` answers "does it EXIST", never "can it be USED".** Two independent
+  instances in one afternoon, in two files, by two sessions — which makes it a rule rather
+  than a coincidence. A control rendered DISABLED until something resolves is matched
+  perfectly well by `findByRole`, and **a click on a disabled element is silently
+  swallowed**: no error, no warning, the handler never runs. The test then fails downstream
+  at a timeout, pointing at the assertion rather than the click.
+    - `Enter Passthrough` is `disabled={supported !== true}` until `xrSupported()` resolves
+      — a click inside that window never entered the XR session, so the loop never
+      registered a frame callback and the first `step` read null (`9c2d087`).
+    - `DatasetTab`'s delete-last is `disabled={recording || last === null}` until
+      `/record/episodes` lands — the click is swallowed, `armed` never flips, and the
+      confirm times out at the default 1000 ms (`9e39e99`), which is why it clocked ~1018.
+  **Both presented as flakes with a DIFFERENT test failing each run**, because several
+  tests shared the shape and which one lost the race varied. Wait for ENABLED, not for
+  present, in one helper rather than at each call site.
+
+- **Corroboration is not proof, and say which you have.** `9e39e99` was established by a
+  DETERMINISTIC repro — a deliberately late `/record/episodes` pinning all three steps —
+  and only then measured 40/40 and 16/16. Its author stated it correctly: **40 clean runs
+  against a 4% rate happen about a fifth of the time by luck**, so the repro is the
+  evidence and the runs agree with it. This is the constructive half of the small-n rule:
+  refusing to quote a rate off 2-in-16 is what sends you after a MECHANISM instead of a
+  threshold, and only a mechanism can be fixed.
+
+- **A long-running backend drifts from the tree, invisibly.** A 2h38m-old process answered
+  `/lab/datasets` 200 while `/lab/runs` and `/lab/system` 404'd, so the Lab drew "this
+  backend has no lab" — a real state its code reserves for **an old build with no router
+  mounted**. A stale PROCESS is indistinguishable from a stale BUILD, and since the backend
+  URL is baked at `next build` time it never presents as a connection error either.
+  Restart a long-lived probe backend before trusting it, and prefer stopping a rig to
+  leaving one that looks alive and answers wrongly.
+
+- **A drift bound must be a FRACTION, not a duration.** Correcting the integrator's own
+  arithmetic: rounding a measured `fps` to lerobot's `int` skews a SYNTHETIC timestamp
+  column by `T x (f_true - f_written) / f_written` — note the denominator is the WRITTEN
+  rate. Dividing by `f_true` instead produced a published 408/420 ms pair that implied
+  rounding up and rounding down differ in severity. **They do not: both are ±413.8 ms,
+  identical in magnitude, differing only in SIGN** — rounding down claims more elapsed time
+  than happened, rounding up claims less.
+  The consequence is the rule. **Drift is LINEAR IN TAKE LENGTH** — 414 ms at 30 s, 828 ms
+  at 60 s, 4138 ms at 300 s — so a bound in milliseconds is calibrated for exactly one take
+  length and lies at every other. That is the house rule about tick-denominated constants
+  arriving by a new road. Put the bound on the dimensionless rate error
+  `|f_true - f_written| / f_written`, or equivalently on drift-per-second-of-take, both of
+  which are take-length independent.
+  **And it is already bounded from above without measuring anything:** rounding to nearest
+  means worst-case `|df| = 0.5`, so at ~29 Hz the ceiling is `0.5/29 = 1.72%`, i.e. **17.2
+  ms of drift per second of take, at any take length.** Anything looser than 1.72% CANNOT
+  FIRE, because rounding can never produce it.
+  Corollary for co-training: **two datasets rounded in OPPOSITE directions are worse than
+  two rounded the same way** — 29.4→29 and 28.6→29 both read as a nominal 29 Hz while their
+  time bases run 827 ms apart over a 60 s take. Recording the unrounded figure is what
+  makes that comparison possible at all; without it the two are indistinguishable by their
+  metadata.
+
 - **A fake MORE PERMISSIVE than production is the impossible-fixture rule pointing the
   other way — and it is the more common direction.** The recorded rule says an impossible
   fixture invents a world where the bug cannot EXIST. Its mirror invents one where the bug
