@@ -177,6 +177,14 @@ the same producer as `{level, code, message, source}` and
 `AlertsPopover.tsx:37-58` renders it and works. So the fix is not "reconcile
 the two" — it is **the working one is right, make the other match it.**
 
+**The `5a196a5` payload diff was scoped to the RUN routes**, so read this
+section as a reconcile of what that pass looked at, not as a clean bill for
+`RecordStatus` entire. `RecordAlert` is precisely what fell outside it: the
+diff was never pointed at `/record/status`'s alerts array. **A reconcile
+inherits the boundary of the surface it was run against**, and saying which
+surface is the difference between a finished pass and one that only looks
+finished.
+
 **One non-finding, recorded so it is not "fixed" into a regression:**
 `RecordStatus.started_at` is `number | null` and that is CORRECT.
 `recorder.py:861` stamps `time.time()`, a float. The identically-named field
@@ -197,7 +205,10 @@ type-check:
   being named for a side — one key, two meanings, and the panel reports a
   confident wrong number.
 
-### The diff script, and the two ways it lies
+### The diff script, and which artifact has which blind spot
+
+**Use the tool, not a regex, and the reason is a real asymmetry — not
+preference.**
 
 `/home/odesha/haller-trackC-scratch/tools/typediff.py` parses a TS type out of
 `lib/api.ts` or `lib/lab.ts` and compares a LIVE payload key-by-key AND
@@ -206,21 +217,33 @@ isolated headless chromium over CDP — needed because **the Playwright MCP
 browser profile is contended** and refuses outright with `Browser is already
 in use ... use --isolated`.
 
-Whether you use it or regenerate the four-liner, **both known failure modes
-produce confident nonsense rather than an error:**
+**The four-liner in this section's history hoists nested keys; the tool
+cannot.** A hand-rolled `^\s*"(\w+)":` regex over `recorder.py` reads
+`"drops": {"cameras": ..., "arms": ...}` across two lines and lifts `arms`
+into the top-level wire keys — reporting a field the route has never sent
+there. That happened on the re-measure above and was nearly filed as a
+finding. `typediff.py` takes its wire side from `json.load`, so `drops` is one
+key and `arms` is structurally inside it: **the artifact that reads the
+producer's SOURCE can invent a key; the one that reads its OUTPUT cannot.**
+Reach for the four-liner only when no backend can be stood up, and then treat
+every top-level key it reports as unconfirmed.
 
-- **A one-line `export type X = { ... };` is not matched by the block regex,
-  so it falls through to the NEXT type in the file** and compares your payload
-  against the wrong type's fields. Observed live: `LogPage` is one line, so the
-  log payload was diffed against `Checkpoint` and reported three required
-  fields missing and two unexpected. Check that the names printed belong to the
-  type you asked for.
-- **A nested dict flattens into the top-level key set.** `"drops": {"cameras":
-  ..., "arms": ...}` spans two lines, so a `^\s*"(\w+)":` regex hoists `arms`
-  into the wire keys and reports a field the route has never sent at top level.
-  Hit on the re-measure above; `arms` is not a wire key.
-- It cannot resolve union aliases, so `RunKind` and `RunStatus` flag as
-  `declared RunKind | wire string` on every row. Harmless noise.
+**Its documented failure modes were closed 2026-08-27 evening**, so do not
+inherit the old warnings: the one-line-type fall-through (`LogPage` diffed
+against `Checkpoint`) is fixed by walking braces from the opening one, a
+missing type now RAISES, and a companion bug found only by testing that fix —
+a line-anchored field regex returning `LogPage` as `['offset']` and silently
+losing `text` — is fixed by splitting on top-level `;` at brace depth. That
+one is worth remembering as a shape: **a field silently absent, reported as
+agreement**, which is the fall-through wearing different clothes.
+
+`compat()` now returns **True / False / None, where None means CANNOT JUDGE**,
+and `diff` prints those as `?` lines — so `RunKind`/`RunStatus` read
+`? CANNOT JUDGE` instead of two confident MISMATCH rows, and an inline nested
+object is named `? NOT DESCENDED` rather than being invisible. The governing
+rule, and the one to keep if you edit it: **never report confident nonsense —
+anything it cannot judge prints `?`.** A silent pass from a checker is worth
+less than no checker; it is the check-that-cannot-fire one level up.
 
 **And measure the PRODUCER from `git show HEAD:<path>`, not the working copy.**
 On this tree the file is very likely dirty under another track. Reading
@@ -229,6 +252,15 @@ On this tree the file is very likely dirty under another track. Reading
 editor buffer and in no commit. A payload read off someone else's working copy
 is a fact about their editor and it arrives wearing the authority of a
 measurement.
+
+**This is a DIFFERENT failure from a stale harness, and the two want opposite
+fixes.** A stale process, an old build or a dead `fetch` hook (§6) lags the
+code, and restarting cures it. A dirty working copy runs AHEAD of the
+contract — the file is fresher than anything agreed — and restarting makes it
+worse, because it loads more of the colleague's editor. Same wrong answer,
+opposite sign. `git show HEAD:<path>` is the one move that cures both, which
+is why it is the default for any cross-track read rather than something
+reached for once you suspect a problem.
 
 ---
 
