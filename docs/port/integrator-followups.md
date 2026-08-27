@@ -524,6 +524,44 @@ applies to any probe that prunes, not only to a matrix.
   ported `max(pressure, 0.35)` sat below the 0.5 deg haptic dead zone and would have
   SILENCED the buzz at the exact pose it was added to raise.
 
+- **Grep AFTER the deletion, not only before — the compiler sees neither citation.** The
+  first grep tells you what to DELETE; only the second tells you what BROKE when you did.
+  Two dangling references survived the pre-deletion sweep, both in prose: a doc comment
+  citing `RECORD_RATE_GATE_FALLBACK` as a naming model, and — the one nobody predicted —
+  the REPLACEMENT function's own docstring naming the deleted constant as the
+  tempting-but-wrong fallback. **The documentation explaining why there is no fallback
+  pointed at the fallback being removed.** Neither breaks a build.
+  Sub-rule from fixing the first one: **distinguish the DISCIPLINE a comment cites from the
+  INSTANCE it names.** Naming a constant FALLBACK so it cannot be read as the authority was
+  never rejected; only that specific fallback was, for a reason the same paragraph already
+  gave four lines down. The fix was one clause, not a rewrite — a good paragraph citing a
+  dead symbol is still a good paragraph.
+
+- **An assertion about SHAPE outlives the function that carried it.** The two-sidedness
+  test called `recordRateOk` beside `recordRateFaithful` in one assertion — the cleanest
+  statement that a floor cannot express the bound at any value. With the function deleted it
+  was rewritten as arithmetic (`30.6 >= 30 * 0.9`) rather than dropped, because the claim is
+  about the shape, and **deleting it would have removed the reason the rename happened along
+  with the code.** Distinguish a test that pins an implementation (dies with it) from one
+  that pins a property (survives it, in whatever form still expresses it). Cousin of
+  keeping-and-inverting a defending test.
+
+- **`git stash` stays banned INSIDE a worktree too — the storage is shared even when the
+  working directory is not.** A stale worktree with eight locally-modified files refused a
+  checkout, and the one-command answer is the banned one.
+  `git checkout --force --detach <sha>` **run inside the worktree** discards only that
+  worktree's copies and leaves the main tree untouched — verified immediately afterwards
+  rather than assumed.
+
+- **A migration's ordering can prove itself for free.** Building from a worktree pinned
+  before the consumer's migration, after the producer's deletion, reproduced the exact
+  failure the sequence was arranged to avoid: `Export recordRateGate doesn't exist in target
+  module ./components/VRTeleopPanel.tsx:37`. **Deleting the reader before the call site
+  moves breaks the downstream build** — loud, therefore safe, but it breaks whoever commits
+  second, which is why it was the last step and not the second. A stale checkout is usually
+  a nuisance; here it was a free experiment confirming the order was necessary rather than
+  merely cautious.
+
 - **Rename a key whose MEANING changes; never revalue it.** The recorder's rate
   threshold went from a one-sided FLOOR (`declared * 0.9`) to a symmetric TOLERANCE
   (`|measured - fps| / fps > 0.005`). Publishing 0.005 under the existing
