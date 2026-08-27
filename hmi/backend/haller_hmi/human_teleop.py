@@ -681,7 +681,15 @@ class HumanTeleopSession:
         # between them, and fps is frozen from this number.
         self.tick_bus.reset_rate()
         try:
-            self._tick_token = self.tick_bus.attach_producer("human-teleop")
+            # The rate this session AIMS to publish at. Recorded beside the
+            # measurement and never written as `fps` — see
+            # `recorder._freeze_fps`. `_sample_divisor` is the same conversion
+            # the loop uses, so the two cannot disagree about what the target
+            # is.
+            target = effective_hz / self._sample_divisor(effective_hz,
+                                                         self._sample_hz)
+            self._tick_token = self.tick_bus.attach_producer(
+                "human-teleop", target_hz=target)
         except ProducerConflict:
             # The state was already set to RUNNING under the lock above. A
             # session marked running with no thread and no producer is worse

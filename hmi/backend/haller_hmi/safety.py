@@ -6,19 +6,30 @@ import enum
 import math
 from dataclasses import dataclass
 
-#: How far below its DECLARED rate a loop may run before we refuse to start it.
-#: Dimensionless: measured / declared.
+#: How far below its DECLARED rate a POLICY CONTROL LOOP may run before we
+#: refuse to start it. Dimensionless: measured / declared. Published as
+#: `control_rate_gate`.
 #:
-#: Two surfaces measure different quantities against this one threshold — the
-#: recorder's sample rate and the policy control loop's rate — so it lives
-#: here, in the module both can import, rather than inside either measuring
-#: surface. `safety.py` depends on enum/math/dataclasses and nothing else,
-#: which is what lets the detached rollout child read it without pulling
-#: lerobot in before it means to.
+#: SCOPE NARROWED 2026-08-27, and the history is worth one line because the
+#: commit that introduced this constant ("publish the rate gate where both
+#: measuring surfaces can reach it", fec47cb) records the superseded reasoning.
+#: This was shared with the recorder's sample-rate check. It is not any more:
+#: the recorder uses `recorder.FPS_FAITHFUL_FRACTION`, which is a SYMMETRIC
+#: TOLERANCE (0.005) rather than a floor, and the two gates ask different
+#: questions. A policy's control loop 10% off its training fps is a live
+#: question about dynamics. A dataset 10% off its own time base is not a
+#: judgement call at all — it is broken. Only one of those is a matter of
+#: degree, so only one of them takes a 10% allowance.
 #:
-#: It is published under two payload keys, `record_rate_gate` and
-#: `control_rate_gate`, because the QUANTITIES differ even though the bar does
-#: not. Read this constant; do not copy the number.
+#: Sharing them would also have put unreachable code in the safety layer:
+#: anything failing 0.9 fails 0.005 by twenty times, so a 0.9 branch in the
+#: recorder could never fire while still reading, to anyone scanning it, like
+#: a rate check that was doing something.
+#:
+#: It lives here rather than in the rollout child because `safety.py` depends
+#: on enum/math/dataclasses and nothing else, which is what lets that child
+#: read it without pulling lerobot in before it means to. Read this constant;
+#: do not copy the number.
 #:
 #: 0.9 IS A JUDGEMENT, NOT A MEASUREMENT. Nobody has measured what fraction of
 #: declared rate actually degrades a trained policy; this is the reference

@@ -102,7 +102,6 @@ from pathlib import Path
 import numpy as np
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from .arm import EFFORT_ABSENT, EFFORT_OK, EFFORT_TRANSIENT
@@ -143,6 +142,64 @@ SCORING_INFO_KEY = "haller_scoring"
 # external log. See the feature's comment in `_build_features` for why the
 # column cannot hold an epoch directly.
 WALL_CLOCK_INFO_KEY = "haller_wall_clock"
+
+#: The unrounded rate measurement behind this dataset's integer `fps`, and the
+#: rate the sampler was AIMING at. Both, because they must never be the same
+#: number by accident: `fps` is `round(measured)`, and the target only shapes
+#: where the measurement lands.
+RATE_INFO_KEY = "haller_rate"
+
+#: Arms that wrote a flat 0.0 effort column because they have no effort
+#: channel. Declared so a flat column is never left to be read as "no
+#: contact" — the same reason an unscored dataset carries no reward column at
+#: all rather than a constant zero.
+EFFORT_INFO_KEY = "haller_effort"
+
+#: How far the measured tick rate may sit from the INTEGER written as `fps`,
+#: as a fraction of that integer. 0.005 = 0.5% = 5 ms of drift per second of
+#: take, 300 ms per minute.
+#:
+#: WHY A BOUND EXISTS AT ALL. LeRobot's `timestamp` column is synthetic —
+#: `frame_index / fps` — and `DatasetInfo` types `fps` as an int, so a measured
+#: 29.4 written as 29 encodes a time base that is wrong by 1.4% forever. The
+#: error is LINEAR IN TAKE LENGTH (414 ms over 30 s, 4138 ms over 300 s), which
+#: is why this is a dimensionless rate error and not a millisecond figure: a
+#: bound in ms is calibrated for exactly one take length and lies at every
+#: other, which is the tick-denominated-constant rule arriving by a new road.
+#:
+#: WHY 0.5%. Rounding to nearest caps the error at `0.5/fps` — 1.67% at 30 Hz,
+#: 0.83% at 60 — so the bound sits under the ceiling at every cadence this rig
+#: runs and CAN fire. Above ~100 Hz it becomes unreachable, because rounding
+#: is already tighter than this; that is a precondition made impossible by
+#: arithmetic, not a dead check, and it is not a reason to loosen the number.
+#: The measured idle rate on config.bimanual-sim is 29.9 against a target of
+#: 30 = 0.333%, so a healthy rig clears it by 1.5x.
+#:
+#: 0.5% IS A JUDGEMENT, NOT A MEASUREMENT, exactly like MIN_RATE_FRACTION.
+#: Nobody has measured what timestamp drift degrades a policy. The margin is
+#: also thinner than the percentage sounds — against a written 30 the band is
+#: 29.850..30.150, i.e. +/-0.15 Hz — and the 29.9 above was measured AT IDLE,
+#: with no session and no cameras recording. PROVISIONAL until re-measured
+#: under recording load (U3). If the loaded rate cannot hold the band, the
+#: answer is a target the rig can actually hold, NOT a looser bound.
+#:
+#: This is NOT `safety.MIN_RATE_FRACTION` and must not be folded into it.
+#: Those gates ask different questions: a policy's control loop 10% off its
+#: training fps is a live question about dynamics; a dataset 10% off its own
+#: time base is not a judgement call at all, it is broken. Ruled 2026-08-27.
+FPS_FAITHFUL_FRACTION = 0.005
+
+#: How long the measured rate must sit outside the tolerance before the take
+#: raises an alert, in SECONDS. Seconds rather than ticks: a count would mean
+#: a different amount of real time at every cadence, which is the constant
+#: class this port has already been bitten by twice.
+#:
+#: The DURING-TAKE check uses the same tolerance as the arm-time refusal, and
+#: deliberately so. `fps` is frozen at ARM time, so a rate that drifts mid-take
+#: writes frames whose timestamps are spaced for the frozen integer while they
+#: really arrive at a different rate — the identical corruption, measured
+#: continuously instead of once. Identical corruption, identical bound.
+RATE_ALERT_AFTER_S = 2.0
 
 # Shortest take worth writing — and, much more importantly, the shortest take
 # lerobot 0.5.1 can write WITHOUT corrupting the dataset.
@@ -307,6 +364,10 @@ class RecorderState:
     # `_freeze_fps`.
     fps_declared: int | None = None
     fps_measured_at_open: float | None = None
+    # When the measured rate first left the tolerance band, or None while it
+    # is inside. A timestamp rather than a counter so the alert threshold can
+    # be expressed in seconds.
+    rate_breach_since: float | None = None
 
 
 @dataclass
@@ -408,8 +469,87 @@ class DatasetRecorder:
                              if self.tick_bus is not None else None),
             # Emitted rather than mirrored in the UI, so a dashboard cannot
             # come to disagree with the system it is monitoring.
+            #
+            # NOT `record_rate_gate`, which this replaces. That key meant a
+            # one-sided FLOOR fraction and readers used it as
+            # `declared * gate`. This is a SYMMETRIC TOLERANCE. Publishing
+            # 0.005 under the old name would have left every reader computing
+            # `declared * 0.005` and warning below half a percent of the
+            # declared rate — the warning would not have become wrong, it
+            # would have silently ceased to exist. A different meaning gets a
+            # different name so a stale reader gets `undefined` and falls back
+            # visibly. Same reasoning as `episode_index` never being spelled
+            # `index`.
+            "record_rate_tolerance": FPS_FAITHFUL_FRACTION,
+            # EXPIRES once Track C (`api.ts`, `DatasetTab.tsx`) and Track D
+            # (the HUD painter) have migrated to the key above; the integrator
+            # says when. Published alongside rather than swapped because on a
+            # four-session shared tree three commits do not land in the same
+            # instant, and removing this first drops every current reader onto
+            # its own `0.9` fallback — warning at a 90% FLOOR, silent for
+            # exactly the deviations this recorder now refuses.
+            #
+            # It keeps its ORIGINAL meaning and value while it lives here: a
+            # one-sided floor fraction. Publishing the tolerance under this
+            # name is the one thing that must never happen, because
+            # `declared * 0.005` warns below half a percent of the declared
+            # rate and therefore never fires at all.
             "record_rate_gate": MIN_RATE_FRACTION,
+            "alerts": self._rate_alerts(),
         }
+
+    def _rate_alerts(self) -> list[dict]:
+        """The during-take rate alert, if the breach has lasted long enough.
+
+        Two-sided, like the gate it shares a bound with: LeRobot's `timestamp`
+        is `frame_index / fps`, so running fast is as wrong as running slow —
+        the drift just changes sign.
+        """
+        since = self._state.rate_breach_since
+        if since is None or self._state.fps_declared is None:
+            return []
+        held_s = time.time() - since
+        if held_s < RATE_ALERT_AFTER_S:
+            return []
+        measured = (self.tick_bus.measured_hz()
+                    if self.tick_bus is not None else None)
+        fps = self._state.fps_declared
+        return [{
+            "level": "warn",
+            "code": "record_rate",
+            "source": "recorder",
+            "measured_hz": measured,
+            "fps": fps,
+            "tolerance": FPS_FAITHFUL_FRACTION,
+            "held_s": held_s,
+            "message": (
+                f"tick rate has been outside {FPS_FAITHFUL_FRACTION * 100:.1f}% "
+                f"of fps {fps} for {held_s:.0f}s"
+                + (f" (measured {measured:.2f} Hz)" if measured else "")
+                + "; timestamps in this take are being written as "
+                  f"frame_index/{fps} regardless"
+            ),
+        }]
+
+    def _check_rate(self) -> None:
+        """Start or clear the mid-take breach clock. Called once per tick.
+
+        Deliberately does NOT stop the take. The frames already written are
+        real and the operator may be mid-demonstration; abandoning a take for
+        a rate wobble would cost more than the drift does. The alert is the
+        response, and `haller_rate` records what the rate actually was.
+        """
+        if self.tick_bus is None or self._state.fps_declared is None:
+            return
+        measured = self.tick_bus.measured_hz()
+        if measured is None:
+            return
+        fps = self._state.fps_declared
+        outside = abs(measured - fps) / fps > FPS_FAITHFUL_FRACTION
+        if outside and self._state.rate_breach_since is None:
+            self._state.rate_breach_since = time.time()
+        elif not outside:
+            self._state.rate_breach_since = None
 
     async def start_episode(self, repo_id: str, task: str) -> None:
         """Create/append the dataset and begin recording one episode."""
@@ -425,7 +565,7 @@ class DatasetRecorder:
             logger.warning("recorder: no active cameras — recording state/action/base only")
 
         features = self._build_features(cam_specs)
-        fps = int(round(1.0 / self.telemetry._period))  # telemetry emits at this rate
+        fps, rate = self._freeze_fps(repo_id)
 
         if self._dataset is not None and self._dataset.repo_id != repo_id:
             # A different repo than the open dataset (the operator drafted a
@@ -468,6 +608,11 @@ class DatasetRecorder:
             # False (not None) the moment something is actually watching: "no
             # success yet", as opposed to "nobody is looking".
             success=None if self.task_monitor is None else False,
+            # Set together, always. The gate is a ratio of measured to
+            # declared, so if these two ever come apart the ratio stays 0.005
+            # and quietly starts meaning something else.
+            fps_declared=fps,
+            fps_measured_at_open=float(rate["hz"]),
         )
         # After `self._state`, not with the other two metadata writes above:
         # this block carries the take's start time, which does not exist yet
@@ -476,6 +621,14 @@ class DatasetRecorder:
             self._write_wall_clock_metadata()
         except Exception as e:
             logger.warning("recorder: wall-clock metadata not written: %s", e)
+        # Separate again, and non-fatal for the same reason: losing a
+        # demonstration because a metadata file could not be rewritten would
+        # be the worse trade. The refusal above is what protects the data;
+        # this block only makes the accepted number auditable.
+        try:
+            self._write_rate_metadata(rate, fps)
+        except Exception as e:
+            logger.warning("recorder: rate metadata not written: %s", e)
         self._cam_specs = cam_specs
         self._episode_open = True
         self._task_handle = asyncio.get_event_loop().create_task(self._run())
@@ -509,7 +662,7 @@ class DatasetRecorder:
                 # Generous on purpose: the loop exits within one telemetry
                 # period, but on the auto-stop path it may be mid-save.
                 await asyncio.wait_for(self._task_handle, timeout=10.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._task_handle.cancel()
         self._task_handle = None
 
@@ -586,6 +739,14 @@ class DatasetRecorder:
             logger.info("recorder: saved episode %d (%d frames, success=%s in %d frames)",
                         episode_index, frames,
                         self._state.success, self._state.success_frames)
+            # AFTER the save, because it describes the take that was just
+            # written and only a saved take has one. Non-fatal: an
+            # undeclared flat column is worse than none, but not worse than
+            # losing the episode over a metadata write.
+            try:
+                self._write_effort_metadata()
+            except Exception as e:
+                logger.warning("recorder: effort metadata not written: %s", e)
         else:
             self._dataset.clear_episode_buffer()
             logger.info("recorder: discarded episode (save=%s, frames=%d)", save, frames)
@@ -1115,6 +1276,160 @@ class DatasetRecorder:
                 out[f"{side}_{j}"] = entry
         return out
 
+    def _freeze_fps(self, repo_id: str) -> tuple[int, dict]:
+        """The integer `fps` this episode opens against, and the measurement.
+
+        Invariant 10: measured, or the episode does not open. `fps` was
+        `int(round(1.0 / telemetry._period))` — the rate telemetry was ASKED
+        for, never checked against a clock. That is mechanism 3, and every
+        `timestamp` in every episode was synthesised from it.
+
+        `fps` is `round(measured)`. It is NEVER the target the sampler was
+        aiming at: the target only shapes where the measurement lands, and
+        writing it instead would re-create declared-not-measured inside the
+        machinery built to kill it. The target is recorded beside the
+        measurement so a later reader can confirm the two were never confused.
+
+        Refuses when the measurement sits further than
+        `FPS_FAITHFUL_FRACTION` from the integer, because past that the
+        written time base is materially wrong and invariant 10 would be
+        honoured in letter while broken in spirit.
+
+        Appending compares against the DATASET's existing `fps` rather than a
+        fresh rounding, so two episodes in one dataset cannot carry
+        opposite-signed drift — 28.6 against a dataset written at 29 is 1.38%
+        and refuses.
+
+        There is deliberately no second, coarser gate here.
+        `safety.MIN_RATE_FRACTION` (0.9) governs a POLICY's control rate, a
+        different question; anything failing it fails this by twenty times, so
+        a 0.9 branch in this method could never fire and would sit in the
+        safety layer looking like a check. Ruled 2026-08-27.
+        """
+        if self.tick_bus is None:
+            raise RuntimeError(
+                "no tick bus: fps cannot be measured, so no episode may open "
+                "(invariant 10)")
+        rate = self.tick_bus.rate_detail()
+        if rate is None:
+            raise RuntimeError(
+                "tick rate not measured yet: fps is measured or the episode "
+                "does not open (invariant 10). Wait for the sampler to fill "
+                "its window and try again")
+
+        measured = float(rate["hz"])
+        existing = self._existing_fps(repo_id)
+        fps = existing if existing is not None else round(measured)
+        if fps <= 0:
+            raise RuntimeError(f"measured tick rate {measured:.3f} Hz rounds "
+                               f"to {fps} fps, which cannot time a dataset")
+
+        error = abs(measured - fps) / fps
+        if error > FPS_FAITHFUL_FRACTION:
+            lo = fps * (1.0 - FPS_FAITHFUL_FRACTION)
+            hi = fps * (1.0 + FPS_FAITHFUL_FRACTION)
+            # The remedy differs by CASE, not by direction, and getting that
+            # backwards puts a wrong diagnosis in front of an operator.
+            #
+            # APPENDING: `fps` is fixed by the dataset, so either direction
+            # means this rig is not running at the rate that dataset was
+            # written at.
+            #
+            # CREATING: `fps` is `round(measured)`, so the error is purely how
+            # far the achieved rate sits from the nearest whole number — up to
+            # 0.5/fps, and reachable in EITHER direction (29.4 rounds down to
+            # 29 and is then 1.4% fast). "The rig is running fast" would be a
+            # nonsense remedy here: there is nothing to be fast relative to
+            # except a number derived from the rig's own rate.
+            direction = "slow" if measured < fps else "fast"
+            if existing is not None:
+                why = (f"this dataset was created at {fps} fps and every "
+                       f"timestamp in it is synthesised as frame_index/{fps}. "
+                       f"Match the sampler's target to the dataset, or record "
+                       f"into a new one")
+            else:
+                why = (f"the achieved rate does not sit close enough to a "
+                       f"whole number ({fps} is the nearest). Adjust the "
+                       f"sampler's target so the rate it actually holds lands "
+                       f"near an integer")
+            raise RuntimeError(
+                f"measured {measured:.3f} Hz against fps {fps} is "
+                f"{error * 100:.2f}% {direction}, outside "
+                f"{lo:.3f}..{hi:.3f} Hz — a drift of "
+                f"{error * 1000:.0f} ms per second of take, linear in take "
+                f"length. {why}")
+        return fps, rate
+
+    def _existing_fps(self, repo_id: str) -> int | None:
+        """This dataset's already-written `fps`, if we are appending to it."""
+        ds = self._dataset
+        if ds is None or ds.repo_id != repo_id:
+            return None
+        try:
+            return int(ds.meta.info["fps"])
+        except Exception:
+            return None
+
+    def _write_rate_metadata(self, rate: dict, fps: int) -> None:
+        """Record the UNROUNDED measurement beside the integer that was written.
+
+        `fps` cannot hold it — lerobot types it `int` — so 29.4 -> 29 would
+        otherwise be unrecoverable, and two datasets rounded in OPPOSITE
+        directions would be indistinguishable by their metadata while their
+        time bases ran apart. Within one dataset that is already impossible
+        (see `_freeze_fps`); across two independently recorded ones this block
+        is the only thing that makes the comparison possible at all.
+
+        `target_hz` is here precisely BECAUSE it must never be the written
+        number: recording it beside the measurement is what lets a reader
+        confirm the two were not confused.
+        """
+        assert self._dataset is not None
+        info = self._dataset.meta.info
+        info[RATE_INFO_KEY] = {
+            "fps_written": int(fps),
+            "measured_hz": float(rate["hz"]),
+            "samples": int(rate["samples"]),
+            "window_s": float(rate["window_s"]),
+            "target_hz": rate.get("target_hz"),
+            "faithful_fraction": FPS_FAITHFUL_FRACTION,
+            "note": (
+                "fps is round(measured_hz), never target_hz. LeRobot's "
+                "timestamp column is synthetic (frame_index / fps), so the "
+                "gap between measured_hz and fps_written is a time-base drift "
+                "of |measured_hz - fps_written| / fps_written seconds per "
+                "second of take, linear in take length. Recorded because "
+                "DatasetInfo types fps as an int and cannot hold it."
+            ),
+        }
+        self._persist_info(info)
+
+    def _write_effort_metadata(self) -> None:
+        """Declare any arm whose effort column is flat because it HAS no channel.
+
+        A flat-zero effort column already means "no effort channel on that
+        take" (see this module's docstring). Naming the arms makes that
+        readable instead of inferable, the same way `haller_scoring` says an
+        unscored dataset has no opinion rather than leaving a missing column
+        to be interpreted.
+        """
+        assert self._dataset is not None
+        absent = sorted(self._state.effort_absent_arms)
+        if not absent:
+            return
+        info = self._dataset.meta.info
+        info[EFFORT_INFO_KEY] = {
+            "flat_zero_arms": absent,
+            "note": (
+                "These arms have no effort channel, so their observation.effort "
+                "columns are 0.0 for every frame of the most recent take. That "
+                "is an ABSENT channel, not a measurement of no contact. A "
+                "transient read failure is never recorded as 0.0 — it drops the "
+                "frame instead, counted in drops.arms."
+            ),
+        }
+        self._persist_info(info)
+
     def _write_calibration_metadata(self) -> None:
         """Persist the calibration block into the dataset's own `info.json`.
 
@@ -1497,6 +1812,7 @@ class DatasetRecorder:
                 teleop_was_running = teleop_was_running or teleop_running
                 if sample is None:
                     continue
+                self._check_rate()
                 try:
                     frame = self._build_frame(sample)
                     if frame is None:

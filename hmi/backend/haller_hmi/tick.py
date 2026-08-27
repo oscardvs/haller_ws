@@ -11,8 +11,10 @@ number of episodes corrects.
 This module is the fix's foundation: a producer publishes one `TickSample`, and
 every consumer that reads that sample reads the SAME moment. Invariant 8.
 
-Deliberately light on dependencies (stdlib only). `safety.py` is the one Haller
-import, for `MIN_RATE_FRACTION`, and it is stdlib-only for the same reason.
+STDLIB ONLY, and it must stay that way: the detached rollout child imports
+this without wanting lerobot, which `arm.py` would drag in. That is also why
+`rate_ok` takes its threshold as an ARGUMENT rather than importing one — this
+module never becomes a second home for a number that belongs elsewhere.
 """
 from __future__ import annotations
 
@@ -369,10 +371,14 @@ class TickBus:
         self._rate_min_samples = max(2, int(rate_min_samples))
         self._producer: ProducerToken | None = None
         self._rate_producer: str | None = None
+        # What the current producer is AIMING at. Recorded beside the
+        # measurement and NEVER written as `fps` — see `rate_detail`.
+        self._target_hz: float | None = None
 
     # -- producers ---------------------------------------------------------
 
-    def attach_producer(self, name: str) -> ProducerToken:
+    def attach_producer(self, name: str, *,
+                        target_hz: float | None = None) -> ProducerToken:
         """Claim the bus. Raises `ProducerConflict` if someone already holds it.
 
         NOTE, and it corrects the reasoning in the tick contract rather than
@@ -401,10 +407,11 @@ class TickBus:
                 )
             token = ProducerToken(self, name)
             self._producer = token
-            self._note_producer(name)
+            self._note_producer(name, target_hz)
             return token
 
-    def _note_producer(self, name: str) -> None:
+    def _note_producer(self, name: str,
+                       target_hz: float | None = None) -> None:
         """Caller holds the lock. Drop the rate window when the cadence changes.
 
         The idle sampler and the session run at different rates, so a window
@@ -416,8 +423,10 @@ class TickBus:
         if name != self._rate_producer:
             self._stamps.clear()
             self._rate_producer = name
+        self._target_hz = target_hz
 
-    def publish_once(self, name: str, **fields: Any) -> TickSample | None:
+    def publish_once(self, name: str, *, target_hz: float | None = None,
+                     **fields: Any) -> TickSample | None:
         """Attach, publish one sample, and detach — all under one lock hold.
 
         The idle sampler's whole API, and the reason the handover needs no
@@ -436,12 +445,17 @@ class TickBus:
                 return None
             token = ProducerToken(self, name)
             self._producer = token
-            self._note_producer(name)
+            self._note_producer(name, target_hz)
             try:
                 return self._publish(token, **fields)
             finally:
                 self._producer = None
                 token._live = False
+
+    @property
+    def target_hz(self) -> float | None:
+        with self._lock:
+            return self._target_hz
 
     @property
     def producer_name(self) -> str | None:
@@ -506,13 +520,17 @@ class TickBus:
 
     # -- rate --------------------------------------------------------------
 
-    def measured_hz(self) -> float | None:
-        """Real publish rate over the rolling window, or None while unknown.
+    def rate_detail(self) -> dict | None:
+        """The measurement behind `measured_hz`, with what it was taken from.
 
-        None until `RATE_MIN_SAMPLES` publishes. Invariant 10 — `fps` in
-        `info.json` is measured or the episode does not open — so an
-        unmeasured rate reports as absent rather than as a plausible number.
-        Mechanism 3 was exactly a plausible number.
+        `hz` is unrounded. The recorder writes an INTEGER `fps` and records
+        this beside it, because 29.4 -> 29 is a fact worth being able to see
+        later and lerobot's `fps` field cannot hold it: `DatasetInfo` types it
+        `int`, and every `timestamp` in the episode is synthesised as
+        `frame_index / fps`.
+
+        `samples` and `window_s` are here so a reader can tell a rate measured
+        over two seconds of steady running from one measured across a stall.
         """
         with self._lock:
             if len(self._stamps) < self._rate_min_samples:
@@ -520,7 +538,26 @@ class TickBus:
             span = self._stamps[-1] - self._stamps[0]
             if span <= 0:
                 return None
-            return (len(self._stamps) - 1) / span
+            return {
+                "hz": (len(self._stamps) - 1) / span,
+                "samples": len(self._stamps),
+                "window_s": span,
+                "target_hz": self._target_hz,
+            }
+
+    def measured_hz(self) -> float | None:
+        """Real publish rate over the rolling window, or None while unknown.
+
+        None until `RATE_MIN_SAMPLES` publishes. Invariant 10 — `fps` in
+        `info.json` is measured or the episode does not open — so an
+        unmeasured rate reports as absent rather than as a plausible number.
+        Mechanism 3 was exactly a plausible number.
+
+        Delegates to `rate_detail` rather than recomputing: two
+        implementations of one measurement is how they come to disagree.
+        """
+        detail = self.rate_detail()
+        return None if detail is None else detail["hz"]
 
     def rate_ok(self, declared_hz: float, fraction: float) -> bool | None:
         """Is the measured rate at least `fraction` of `declared_hz`?
@@ -583,7 +620,9 @@ class IdleSampler:
         fields = self._sample()
         if fields is None:
             return None
-        return self._bus.publish_once(self._name, **fields)
+        return self._bus.publish_once(self._name,
+                                      target_hz=1.0 / self._period,
+                                      **fields)
 
     def start(self) -> None:
         if self.running:
