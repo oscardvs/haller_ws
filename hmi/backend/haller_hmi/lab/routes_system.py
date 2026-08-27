@@ -3,8 +3,9 @@
 
 One GET, and most of its design is about what it must NOT do.
 
-    {disk_free_bytes, lerobot_home, runner_python, runner_python_exists,
-     torch_available, lerobot_version}
+    {disk_free_bytes, lerobot_home, runs_dir, runner_python,
+     runner_python_exists, torch_available, lerobot_version,
+     compare_max_runs, compare_max_keys}
 
 **`torch_available` is answered by a CHILD PROCESS, never by importing torch.**
 This module runs in the serving process, which owns the Feetech bus and the
@@ -15,6 +16,24 @@ arms, and cost seconds on a worker thread doing it. So the LAB interpreter is
 asked about itself, over a pipe, and the answer is CACHED. `runs.runner_python`
 documents the same refusal from the other side: it is a path check and never an
 import.
+
+## The compare caps are published, not guessed
+
+`compare_max_runs` and `compare_max_keys` are `lab/compare.py`'s own
+`MAX_RUNS` / `MAX_KEYS`, READ here rather than re-declared. `series()` raises
+above either, so a client that does not know them can only discover the cliff
+by being refused: a real 60k-step ACT run logs 13 numeric keys per row — 12
+chartable once `steps` is spent as the x-axis, and 15 distinct across the run —
+against a cap of 8, so Compare's first honest request is a 400.
+
+The alternative was the frontend hardcoding 8, which is the copied-constant
+failure this port has already paid for twice (the rate gate, and the HUD
+comment that was true when written). A published cap lets the page batch
+`ceil(keys / cap)` requests and stay correct at any future value, including one
+nobody remembers to tell it about.
+
+Importing `compare` costs nothing this module was avoiding: it is `math` and
+`lab/runs` and no more, so the stdlib-only property below is intact.
 
 There is no `_warm_pandas()` here and none is needed — invariant 5c is closed by
 this module importing nothing outside the stdlib at all, at module scope or
@@ -72,6 +91,7 @@ from fastapi import APIRouter
 
 from ..api.deps import LabDeps
 from ..api.errors import as_http
+from . import compare
 from . import runs as runs_mod
 
 logger = logging.getLogger(__name__)
@@ -285,10 +305,19 @@ def build_system_router(deps: LabDeps) -> APIRouter:
             return {
                 "disk_free_bytes": _disk_free_bytes(home),
                 "lerobot_home": str(home),
+                # Resolved for `lerobot_home`'s reason — one spelling, so the
+                # page and the server never compare two names for one
+                # directory. `$HALLER_RUNS` moves it, so it is not derivable
+                # from anything else the payload carries.
+                "runs_dir": str(runs_mod.runs_dir().resolve()),
                 "runner_python": str(python),
                 "runner_python_exists": probe["exists"],
                 "torch_available": probe["torch_available"],
                 "lerobot_version": probe["lerobot_version"],
+                # `lab/compare.py`'s own caps. Re-declaring them here would be
+                # a third copy of a number two surfaces already have to agree on.
+                "compare_max_runs": compare.MAX_RUNS,
+                "compare_max_keys": compare.MAX_KEYS,
             }
 
     return router

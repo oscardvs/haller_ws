@@ -51,7 +51,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from haller_hmi.api.deps import LabDeps
-from haller_hmi.lab import routes_system, runs
+from haller_hmi.lab import compare, routes_system, runs
 from haller_hmi.lab.routes_system import build_system_router
 
 #: The response, EXACTLY. The first four are the frozen contract; the last two
@@ -59,8 +59,9 @@ from haller_hmi.lab.routes_system import build_system_router
 #: a path without "and it is there" answers the wrong half of "why did my run
 #: die instantly", and `lerobot_version` because the probe is already running.
 SYSTEM_KEYS = frozenset({
-    "disk_free_bytes", "lerobot_home", "runner_python",
+    "disk_free_bytes", "lerobot_home", "runs_dir", "runner_python",
     "runner_python_exists", "torch_available", "lerobot_version",
+    "compare_max_runs", "compare_max_keys",
 })
 
 #: A plausible client on Oscar's LAN — the Quest, or the laptop.
@@ -533,3 +534,76 @@ def test_the_lerobot_home_is_resolved(tmp_path):
     body = _system(_client(link))
 
     assert body["lerobot_home"] == str(real.resolve())
+
+
+# ============================================================================
+# the compare caps, and the run store's own path
+# ============================================================================
+
+def test_the_published_caps_follow_compare_rather_than_agreeing_with_it(
+    home, client, monkeypatch,
+):
+    """Publish unusual values and watch the payload follow.
+
+    **An identity assertion (`is`) would prove nothing here, and that is worth
+    stating rather than discovering.** CPython interns small integers, so a
+    payload hardcoding the literal `8` satisfies `body[...] is compare.MAX_KEYS`
+    exactly as a live read does — measured, including across a JSON round trip.
+    It is equality wearing identity's clothes: a check that cannot fire. (The
+    same assertion IS meaningful for `MAX_ROLLOUT_DURATION_S`, which is a float
+    and therefore not interned — the technique is sound, the TYPE is what
+    decides whether it works.)
+
+    So the only thing that separates a live read from a copy is changing one
+    and watching the other move, which is what closed the rate-gate reconcile:
+    two numbers agreeing is not evidence they are connected.
+    """
+    monkeypatch.setattr(compare, "MAX_RUNS", 5)
+    monkeypatch.setattr(compare, "MAX_KEYS", 3)
+
+    body = _system(client)
+
+    assert body["compare_max_runs"] == 5
+    assert body["compare_max_keys"] == 3
+
+
+def test_the_published_cap_is_the_one_a_request_is_actually_refused_above(
+    home, client,
+):
+    """The cap is only worth publishing if it is the number that refuses.
+
+    Pins the payload against `series()`'s own behaviour rather than against the
+    constant twice: one key past the published cap must raise, and exactly the
+    published cap must not. A payload agreeing with a constant nothing enforces
+    would be the check that cannot fire.
+    """
+    cap = _system(client)["compare_max_keys"]
+    keys = [f"k{i}" for i in range(cap + 1)]
+
+    with pytest.raises(ValueError):
+        compare.series([], keys)
+    compare.series([], keys[:cap])
+
+
+def test_the_run_store_path_is_reported_because_the_docstring_promises_it(
+    home, client, monkeypatch, tmp_path,
+):
+    """`runs.runs_dir`'s docstring said `/lab/system` reported this before the
+    field existed. A fabricated fact has no commit that made it wrong, so
+    nothing finds it — this is the assertion that would have.
+    """
+    monkeypatch.setenv(runs.RUNS_DIR_ENV, str(tmp_path / "elsewhere"))
+    assert _system(client)["runs_dir"] == str((tmp_path / "elsewhere").resolve())
+
+
+def test_the_run_store_path_follows_the_environment_and_is_not_a_constant(
+    home, client, monkeypatch, tmp_path,
+):
+    """`$HALLER_RUNS` moves the store, so the reported path has to move with it
+    or it is a decoration. Two different values through one client."""
+    monkeypatch.setenv(runs.RUNS_DIR_ENV, str(tmp_path / "one"))
+    first = _system(client)["runs_dir"]
+    monkeypatch.setenv(runs.RUNS_DIR_ENV, str(tmp_path / "two"))
+    second = _system(client)["runs_dir"]
+    assert first != second
+    assert first.endswith("one") and second.endswith("two")

@@ -140,8 +140,10 @@ def runs_dir() -> Path:
 
     `$HALLER_RUNS` overrides; otherwise `./outputs/runs` relative to the
     process's working directory, which is the repo root in every documented way
-    of starting the HMI. The resolved path is reported by `/lab/system` so it is
-    never a guess.
+    of starting the HMI. `/lab/system` reports the resolved path as `runs_dir`
+    so it is never a guess — that sentence was in this docstring before the
+    field existed, which is the class of fabricated fact no bisect can find
+    because no commit made it wrong.
 
     (The kit reads `VR_TELEOP_RUNS`. Renamed rather than kept: the two backends
     are installed side by side on this box, and sharing one run store would let
