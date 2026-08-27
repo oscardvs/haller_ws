@@ -332,6 +332,41 @@ applies to any probe that prunes, not only to a matrix.
   allocation is the one decision that cannot be made locally.** Corollary: a name that
   collides is not an address — use the ` [ref]`.
 
+- **A fake backend that is LESS CONSISTENT than the real one measures the scheduler.**
+  `vrTeleopXRLoop.test.tsx` failed roughly two runs in five, on a DIFFERENT test each time,
+  which is exactly what made three sessions read it as tree noise — including the
+  integrator, who twice advised re-running past it. It is a real defect: the
+  `/record/status` mock returns a fixed `idle` literal while the test has driven the page
+  to ARMED, so the panel's 250 ms poll reconciles the take machine BACKWARDS and races the
+  assertions. The mock did not simplify the backend, it invented one with different
+  dynamics — a real `/record/status` never contradicts the state you just drove it into.
+  Fixed by moving recorder state into `vi.hoisted` so the mocks READ it rather than each
+  returning a literal. **Fourth instance of the harness-decides-the-outcome class**, beside
+  the in-process `sys.modules` check, the `/bin/true` launch stand-in, and the vacuous
+  E-STOP teardown assertions. **Corollary, learned the embarrassing way: "re-run and see"
+  is not triage.** A 40%-failing test and a scheduling flake are indistinguishable by
+  re-running, and re-running is what hides the one that matters. Read the diff.
+
+- **Hand the territory over BEFORE assigning it, not at the same time.** The integrator
+  assigned Track D to an incoming session while the outgoing one was still live and
+  mid-edit on `vrTeleopXRLoop.test.tsx`, putting two sessions in one territory — the exact
+  failure every incoming session had warned about ten minutes earlier, arriving by
+  assignment rather than by self-selection. Disjoint ownership is the safety property, and
+  it is not preserved by naming an owner; it is preserved by there being ONE. **The
+  outgoing session commits and confirms out of the tree; only then is the successor
+  released.** The incoming session got this right unprompted by refusing to touch a single
+  file until the handover point was confirmed, which is the behaviour to reward: the
+  correct response to an ambiguous ownership boundary is to stop, not to be careful.
+
+- **An untracked file is invisible to git and visible to `ls`.** `git show`, `git log`, a
+  pathspec you did not name, and any detached worktree all report it absent while it sits
+  on disk complete. The handoff docs are precisely the files most likely to exist untracked
+  at the moment a session dies — a successor writes 211 lines and saturates before the
+  `git add`. **For "does the handoff exist?", the check is `ls`.** (Recorded on its own
+  merits: the instance that prompted it turned out to be a file written a minute after the
+  check, not a git-visibility failure — the timestamps settled it. Which is itself the
+  standing rule about observing both sides before claiming one explains the other.)
+
 - **The symmetry rule holds only for fixtures standing in for loader OUTPUT.**
   `_load_joint_limits` centres on `(range_min + range_max)/2`, so every window it emits
   is symmetric about zero — but that says nothing about fixtures which are deliberately
