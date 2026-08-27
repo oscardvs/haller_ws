@@ -554,13 +554,35 @@ applies to any probe that prunes, not only to a matrix.
   now). An operator reading a status code on a fresh cockpit goes hunting for a bad build
   instead of picking a dataset from the selector directly above it.
 
-- **A gate matrix must never be pointed at real data.** Structural, not a slip: a gate
-  matrix has to exercise BOTH halves — the permissive one is the whole point — so it will
-  always contain a mutating call. Pointing one at `HF_LEROBOT_HOME` because the GETs
-  wanted real data to answer is how a 200 on `POST /lab/datasets/mark`, which is the
-  correct result, becomes a write to Oscar's real review file. Use `tmp_path` for every
-  probe regardless of whether the script "only reads" — the script that only reads is the
-  one that grows a write half twenty minutes later without anyone re-deciding.
+- **REAL DATA IS THE DEFAULT ON THIS BOX, AND IT IS INHERITED SILENTLY.**
+  `HF_LEROBOT_HOME=/home/odesha/robot-data/lerobot` is exported from **`~/.profile:32`
+  AND `~/.bashrc:219`**, so every session, every subprocess and every backend started here
+  already points at Oscar's real, unbacked-up datasets — including the 46-episode
+  `so101_pick_cube`. Verified 2026-08-27. `recorder.py:198` reads
+  `environ.get("HF_LEROBOT_HOME", "~/.cache/huggingface/lerobot")`: the FALLBACK is a
+  harmless cache dir and is never what you get. Nobody has to point anything at real data.
+  Doing nothing points at real data.
+
+  **This corrects the lesson previously recorded here.** The old entry said a gate matrix
+  had been "pointed at `HF_LEROBOT_HOME`" and drew the rule "use `tmp_path` for every
+  probe". Both halves were wrong. Nobody pointed it, and **`tmp_path` would not have
+  prevented it**: `tmp_path` aims a probe's OWN scratch files, while the recorder resolves
+  its dataset root from the ENVIRONMENT. They are two different knobs and only the second
+  one aims the recorder. A probe scrupulously using `tmp_path` still writes datasets into
+  `~/robot-data`.
+
+  **The rule that would actually have prevented it:** any probe, test or backend that can
+  reach the recorder sets `HF_LEROBOT_HOME` **explicitly**, and **verifies the value the
+  SERVER received rather than the value the launcher set** —
+  `tr '\0' '\n' < /proc/<pid>/environ`. For an in-process probe, set it BEFORE the
+  lerobot import, since the root is resolved at import. Fingerprint the real data before
+  and after (`find` listing + `md5sum` of `review.json`) whenever a run is
+  destructive-capable, and check it after.
+
+  The structural half of the old entry still stands: a gate matrix has to exercise BOTH
+  halves — the permissive one is the whole point — so it will always contain a mutating
+  call, and the script that "only reads" is the one that grows a write half twenty minutes
+  later without anyone re-deciding. **There is no backup.**
 
 - **The guardrail was in the artefact, not in the habit.** Both near-misses this session
   have this shape. `tests/lab/` points at `tmp_path` and the real-data suite is read-only
