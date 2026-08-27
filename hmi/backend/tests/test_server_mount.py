@@ -15,9 +15,15 @@ too slow and too environment-bound to sit in the default suite.
 """
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 
 from haller_hmi import server
+
+#: Everything in `_lifespan` that must be handed the session's bus. A consumer
+#: built without one does not fail loudly — it reads an empty world forever.
+BUS_CONSUMERS = {"TelemetryBroadcaster", "DatasetRecorder"}
 
 
 def _lifespan_source() -> str:
@@ -62,9 +68,59 @@ def test_the_lifespan_mounts_the_idle_sampler():
 
 
 def test_telemetry_is_wired_to_the_same_bus_the_session_owns():
-    """One moment, published once. A second bus is two moments again."""
+    """One moment, published once. A second bus is two moments again.
+
+    KEPT, and deliberately NOT the whole guarantee — see
+    `test_every_bus_consumer_is_wired_to_the_session_bus` below, which exists
+    because this assertion cannot say WHICH call site got the argument.
+    """
     src = _lifespan_source()
     assert "tick_bus=human_teleop.tick_bus" in src
+
+
+def test_every_bus_consumer_is_wired_to_the_session_bus():
+    """Per CALL, because a substring over `_lifespan` cannot say which one.
+
+    THIS DEFECT WAS LIVE, from 2c until 2d. `DatasetRecorder` was constructed
+    without `tick_bus=`, so `recorder.tick_bus` was None on every real backend,
+    `_freeze_fps` raised "no tick bus: fps cannot be measured", and **every
+    `/record/start` 409'd — recording was dead the whole time.** `fps_measured`
+    was permanently null with it, so `_check_rate` returned early and the rate
+    alert could never fire either.
+
+    The test above stayed green throughout, and could not have done otherwise:
+    it looks for `"tick_bus=human_teleop.tick_bus"` anywhere in the function,
+    and TELEMETRY satisfies it at the first of three call sites. A presence
+    check over a whole function is satisfied by its easiest instance — which is
+    the same shape as an absence assertion in a teardown-on-success path, one
+    level up: the harness, not the code, decided the outcome.
+
+    Parsed rather than grepped, so a `tick_bus` in a comment or a neighbouring
+    call cannot satisfy it, and asserted per constructor rather than in
+    aggregate.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(server._lifespan)))
+    built: dict[str, list[set[str]]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name in BUS_CONSUMERS:
+            built.setdefault(name, []).append({k.arg for k in node.keywords})
+
+    # A loop over zero matches passes every assertion inside it, so pin that we
+    # FOUND them before judging them: a rename would otherwise silently empty
+    # this test rather than fail it.
+    assert set(built) == BUS_CONSUMERS, (
+        f"expected to find {sorted(BUS_CONSUMERS)} constructed in _lifespan, "
+        f"found {sorted(built)} — a rename empties this test rather than "
+        f"failing it, so the mismatch is the finding")
+
+    for name, calls in sorted(built.items()):
+        for kw in calls:
+            assert "tick_bus" in kw, (
+                f"{name} is constructed without tick_bus — it will read an "
+                f"empty world, and for the recorder that means every take 409s")
 
 
 def test_the_base_source_is_set_before_any_sample_is_taken():

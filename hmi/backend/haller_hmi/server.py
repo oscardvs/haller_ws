@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .arm import ArmManager
 from .calibration import (
@@ -147,13 +147,33 @@ class SimTeleopStartBody(BaseModel):
     leader: dict
 
 
+# `extra="forbid"` on all four: a body field the model has never heard of is a 422
+# rather than a silently-dropped key. `{save}` alone stays valid, so both shipped
+# desktop callers are unaffected — forbid rejects UNKNOWN fields, not absent ones.
 class RecordStartBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     repo_id: str          # e.g. "oscardvs/haller_pick_cube"
     task: str             # natural-language instruction logged with every frame
 
 
+class RecordArmBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    repo_id: str
+    task: str
+
+
+class RecordRollBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class RecordStopBody(BaseModel):
+    # `rearm` and `extra="forbid"` LAND TOGETHER, and the order is load-bearing.
+    # Forbid arriving first would 422 the headset's `{save:true, rearm:true}` —
+    # a keep — and the take the operator just drove would be LOST, which is
+    # strictly worse than the silent 200 that dropping `rearm` used to give.
+    model_config = ConfigDict(extra="forbid")
     save: bool = True     # False -> discard the episode buffer (bad take)
+    rearm: bool = False   # OPTIONAL: `{save}` alone keeps its shipped meaning
 
 
 class SimSceneResetBody(BaseModel):
@@ -227,8 +247,15 @@ async def _lifespan(app: FastAPI):
     # episodes are unscored" rather than "these episodes failed": no
     # next.reward/next.done columns at all, and an info.json block that says so.
     # See recorder.py's module docstring.
+    # `tick_bus` is REQUIRED in practice: `_freeze_fps` raises without it, so a
+    # recorder built without one 409s every take (invariant 10 failing closed).
+    # It was omitted here from 2c until 2d and recording was dead the whole time —
+    # see `test_every_bus_consumer_is_wired_to_the_session_bus`, which checks the
+    # argument PER CALL because a substring over this function cannot say which
+    # of three call sites got it.
     recorder = DatasetRecorder(telemetry=telemetry, human_teleop=human_teleop,
-                               cameras=cameras, task_monitor=task)
+                               cameras=cameras, task_monitor=task,
+                               tick_bus=human_teleop.tick_bus)
     yield
     logger.info("haller-hmi backend shutting down")
     if recorder is not None:
@@ -786,11 +813,34 @@ async def post_record_start(body: RecordStartBody):
     return {"ok": True, **recorder.status()}
 
 
+@app.post("/record/arm")
+async def post_record_arm(body: RecordArmBody):
+    # Returns a BARE status, not `{ok: true, **status}` — the headset types
+    # `recordArm`/`recordRoll` as `RecordStatus` and `recordStart`/`recordStop`
+    # as `{ok} & RecordStatus`. Two shapes on one surface, matching the client.
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    try:
+        return await recorder.arm(repo_id=body.repo_id, task=body.task)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/record/roll")
+async def post_record_roll(body: RecordRollBody):
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    try:
+        return await recorder.roll()
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.post("/record/stop")
 async def post_record_stop(body: RecordStopBody):
     if recorder is None:
         raise HTTPException(status_code=503, detail="recorder not ready")
-    status = await recorder.stop_episode(save=body.save)
+    status = await recorder.stop_episode(save=body.save, rearm=body.rearm)
     return {"ok": True, **status}
 
 
