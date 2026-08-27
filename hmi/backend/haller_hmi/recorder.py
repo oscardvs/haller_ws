@@ -105,7 +105,6 @@ import pyarrow.parquet as pq
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from .arm import EFFORT_ABSENT, EFFORT_OK, EFFORT_TRANSIENT
-from .safety import MIN_RATE_FRACTION
 
 try:  # lerobot's own info.json writer — keeps formatting identical to its own
     from lerobot.datasets.io_utils import write_info as _lerobot_write_info
@@ -470,31 +469,17 @@ class DatasetRecorder:
             # Emitted rather than mirrored in the UI, so a dashboard cannot
             # come to disagree with the system it is monitoring.
             #
-            # NOT `record_rate_gate`, which this replaces. That key meant a
-            # one-sided FLOOR fraction and readers used it as
-            # `declared * gate`. This is a SYMMETRIC TOLERANCE. Publishing
-            # 0.005 under the old name would have left every reader computing
-            # `declared * 0.005` and warning below half a percent of the
-            # declared rate — the warning would not have become wrong, it
-            # would have silently ceased to exist. A different meaning gets a
-            # different name so a stale reader gets `undefined` and falls back
-            # visibly. Same reasoning as `episode_index` never being spelled
-            # `index`.
+            # This REPLACED a key called `record_rate_gate`, removed once
+            # every consumer had migrated. That one was a one-sided FLOOR
+            # fraction and readers used it as `declared * gate`; this is a
+            # SYMMETRIC TOLERANCE. Publishing 0.005 under the old name would
+            # have left readers computing `declared * 0.005` and warning below
+            # half a percent of the declared rate — the warning would not have
+            # become wrong, it would have silently ceased to exist. A
+            # different meaning got a different name, so a stale reader gets
+            # nothing and falls back visibly instead of plausibly. Same
+            # reasoning as `episode_index` never being spelled `index`.
             "record_rate_tolerance": FPS_FAITHFUL_FRACTION,
-            # EXPIRES once Track C (`api.ts`, `DatasetTab.tsx`) and Track D
-            # (the HUD painter) have migrated to the key above; the integrator
-            # says when. Published alongside rather than swapped because on a
-            # four-session shared tree three commits do not land in the same
-            # instant, and removing this first drops every current reader onto
-            # its own `0.9` fallback — warning at a 90% FLOOR, silent for
-            # exactly the deviations this recorder now refuses.
-            #
-            # It keeps its ORIGINAL meaning and value while it lives here: a
-            # one-sided floor fraction. Publishing the tolerance under this
-            # name is the one thing that must never happen, because
-            # `declared * 0.005` warns below half a percent of the declared
-            # rate and therefore never fires at all.
-            "record_rate_gate": MIN_RATE_FRACTION,
             "alerts": self._rate_alerts(),
         }
 

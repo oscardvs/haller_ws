@@ -560,15 +560,30 @@ class TickBus:
         return None if detail is None else detail["hz"]
 
     def rate_ok(self, declared_hz: float, fraction: float) -> bool | None:
-        """Is the measured rate at least `fraction` of `declared_hz`?
+        """Is the measured rate at least `fraction` of `declared_hz`? A FLOOR.
 
         None while the rate is not yet known — which is NOT a pass. Callers
         refuse on None; a gate that treats "do not know" as "fine" is a check
         that cannot fire.
 
         `fraction` is passed in rather than read here so this module never
-        becomes a second home for `safety.MIN_RATE_FRACTION`. One threshold,
-        one home, read by both measuring surfaces.
+        becomes a second home for a threshold that belongs elsewhere.
+
+        ONE-SIDED, AND THE RECORDER MUST NOT USE IT. This asks only whether
+        the rate is fast ENOUGH. The recorder's question is symmetric —
+        `|measured - fps| / fps` against `recorder.FPS_FAITHFUL_FRACTION` —
+        because lerobot's `timestamp` is `frame_index / fps`, so running fast
+        is exactly as wrong as running slow. A floor cannot express that in
+        either direction: it passes every fast rate, and for a slow one it
+        passes everything down to 90%, twenty times looser than the recorder
+        refuses at.
+
+        The docstring here used to end "one threshold, one home, read by both
+        measuring surfaces". That was true when the recorder shared
+        `safety.MIN_RATE_FRACTION`, and stopped being true when the two gates
+        were split on 2026-08-27 — a comment that rotted on a later commit of
+        my own, found by grepping for what CITED the thing that changed rather
+        than for the thing itself.
         """
         measured = self.measured_hz()
         if measured is None or declared_hz <= 0:

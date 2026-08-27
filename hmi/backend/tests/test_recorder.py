@@ -1907,19 +1907,34 @@ async def test_the_unrounded_measurement_is_recorded_beside_the_integer(tmp_path
 
 # ---- the published gate keys --------------------------------------------
 
-def test_the_tolerance_is_published_and_is_not_the_rollout_floor():
+def test_the_tolerance_is_published_and_a_floor_could_not_have_expressed_it():
     """A symmetric tolerance and a one-sided floor are different quantities.
-    Publishing 0.005 under the floor's name would leave readers computing
-    `declared * 0.005` — warning below half a percent of the declared rate,
-    which never fires. The warning would not become wrong, it would vanish."""
+
+    The removed `record_rate_gate` was a floor and readers used it as
+    `declared * gate`. Publishing 0.005 under that name would have left them
+    warning below half a percent of the declared rate: the warning would not
+    have become wrong, it would have silently ceased to exist. The old key is
+    now absent, so a stale reader gets nothing and falls back visibly.
+
+    The SHAPE claim below outlives the key that used to carry it. It was one
+    assertion comparing the two published numbers; with the floor gone it is
+    the same claim as arithmetic, because deleting it would have removed the
+    reason the rename happened along with the code.
+    """
     from haller_hmi.safety import MIN_RATE_FRACTION
 
     r = _recorder({"running": False})
     status = r.status()
     assert status["record_rate_tolerance"] == FPS_FAITHFUL_FRACTION
-    assert status["record_rate_tolerance"] != MIN_RATE_FRACTION
-    # Still published, with its ORIGINAL meaning, until C and D migrate.
-    assert status["record_rate_gate"] == MIN_RATE_FRACTION
+    assert "record_rate_gate" not in status
+
+    # A floor has nothing to say about either failure this bound catches.
+    # Both cases are REACHABLE: 29.7 under a 30 Hz target is a rig not keeping
+    # up, and 29.25 against a dataset written at 29 is the round-down regime,
+    # also well under its target.
+    for measured, fps in ((29.7, 30), (29.25, 29)):
+        assert abs(measured - fps) / fps > FPS_FAITHFUL_FRACTION, "tolerance refuses"
+        assert measured >= fps * MIN_RATE_FRACTION, "a floor would have passed it"
 
 
 def test_the_gate_reads_the_constant_rather_than_a_copy_of_its_value(monkeypatch):
