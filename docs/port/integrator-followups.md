@@ -313,6 +313,37 @@ applies to any probe that prunes, not only to a matrix.
   `RUNNERS` value imports (subprocess) and has a `__main__` guard. Same family as the
   vacuous E-STOP assertions: the harness, not the code, decided the outcome.
 
+- **`is` catches a copied FLOAT and misses a copied small INT — the technique is
+  decided by the TYPE.** The integrator suggested extending the `MAX_ROLLOUT_DURATION_S`
+  identity assertion to the compare caps; Track B refused it as a check that cannot fire,
+  and they were right. Measured across two real modules:
+
+        FLOAT  live read is owner : True      copy is owner : False   <- catches it
+        INT    live read is owner : True      copy is owner : True    <- MISSES it
+        INT    through JSON       : True                              <- and over the wire
+
+  CPython interns small integers, so a payload hardcoding `8` satisfies
+  `body["compare_max_keys"] is compare.MAX_KEYS` exactly as a live read does. **Worse than
+  plain equality, because it READS as the stronger assertion.** `is` is sound for
+  `MAX_ROLLOUT_DURATION_S` because 900.0 is a float and the two names are module
+  attributes. (Note `900.0 is 900.0` inside ONE code object is True via constant folding —
+  the property that matters is cross-module identity, which is what the table above tests.)
+  **For interned values the only live-read proof is the rate-gate method: publish a
+  DIFFERENT value and watch the reader follow.** Track B pinned the caps by publishing 5
+  and 3; a mutation hardcoding today's 12/8 is caught by that and invisible to `is`.
+
+- **The shared-resource list on this box is longer than the git tree**, and the process
+  table is the one with no lock, no warning and no undo. It is the index, the working tree,
+  the shared `.next`, the Playwright MCP browser profile, and the processes.
+  **`pkill -f` is the `git stash` of process management:** it matches more than you are
+  thinking about, and its blast radius is other sessions by default. A `pkill -f
+  "next-server"` intended for one session's own port took down two other sessions' dev
+  servers and a third that respawned. Use explicit PIDs. Third instance of *a safe habit
+  that does not extend to the one-off command is not a safe habit* — the same session had
+  been careful with the index, careful not to rebuild the shared `.next`, and careful to
+  copy the run store rather than link it, then reached for a pattern kill to save one
+  lookup.
+
 - **A quiet uncommitted file is a countdown, and the person holding it is the last to
   know.** Forty lines sat uncommitted in the shared tree for ~25 minutes while the session
   holding them stayed alive and busy, blocking two other sessions and holding the frontend
