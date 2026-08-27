@@ -1058,6 +1058,18 @@ applies to any probe that prunes, not only to a matrix.
   cap is the next thing that will move them. The copied-fact rule is usually aimed at
   someone else's rotted comment; audit your OWN from today.
 
+- **A FIELD NAMED FOR ONE QUANTITY WHILE HOLDING ANOTHER MAKES ITS OWN REGRESSION READ AS A
+  CLEAN DIFF.** `recorder.py` stores the integer written to `info.json` as **`fps_declared`**,
+  and its value is `round(measured)` — "declared" there means *written*, not *requested*. The
+  two senses are opposites in the one file built to kill declared-not-measured `fps`
+  (mechanism 3). Consequence, found while writing the pre-mount predicate for 2d: a
+  regression that stamped the operator's requested rate instead of the measurement would
+  leave the assignment `fps_declared=fps` textually IDENTICAL, so the diff at the call site
+  is clean and the defect lives one function away in `_freeze_fps`. **A reviewer diffing the
+  call site sees agreement; the provenance is the only thing that moved.** Sibling of "name
+  the unit at the site" — same failure, one level up: not the wrong unit, the wrong SOURCE,
+  under a name that asserts the source. Diff the producer, not the assignment.
+
 - **A FABRICATED CITATION SURVIVES INTO THE COMMIT THAT REMOVES ONE — and only checking the
   SYMBOL catches it.** Track B, fixing `lease.py:175` for naming a caller that does not exist,
   wrote a first draft citing `rollout_runner.py::PolicyClient.handshake`. The class is
@@ -1069,6 +1081,9 @@ applies to any probe that prunes, not only to a matrix.
   citation is the one kind of prose with a mechanical check available — grep the symbol — and
   it is the kind that gets none, because it reads as documentation. The remedy is not more
   care; it is the grep.
+  **Track B's narrowing, worth keeping verbatim:** it applies to any prose naming a symbol,
+  **including a commit message**, and the check costs one grep against **the tree you are
+  committing to, not the tree you remember.**
 
 - **Deleting a stale OPEN section makes a doc say "nothing is open", which is a different
   false claim.** Track B removed a `## OPEN` block in `trackB-handoff.md` claiming the

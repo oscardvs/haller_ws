@@ -337,6 +337,41 @@ the LOCAL-gate branch. The ruling extended the identical risk onto the SERVER-ga
 point.** A hazard that is guarded on the path you are looking at, and unguarded on the path
 your change creates.
 
+### The pre-mount read the integrator owes — the PREDICATE, not a vibe
+
+Handed over by Track B so it does not have to be reconstructed, and it is narrower than
+"did `fps` change". **Check (a) is `float(declared) == float(trained_fps)`**
+(`routes_runs.py:480`), against `catalog.dataset_fps(repo_id)` off the trained dataset's
+`info.json`.
+
+- **The loud case is fine and needs no watching.** A fractional `fps` in `info.json` makes
+  exact match refuse every rollout, immediately and visibly. LeRobot types the field `int`,
+  so the constraint holds by the FORMAT rather than by anyone remembering it, and a
+  regression announces itself within one rollout attempt.
+- **The silent case is the one to read for: does 2d still write a MEASURED `fps`, or a
+  declared one?** If ARM-time freezing regresses to stamping the operator's requested rate,
+  check (a) compares a declaration against a copy of the same declaration. **It passes, it
+  stamps both numbers into the run record, and it reports agreement** — a check that cannot
+  fail in either direction, in the reassuring form. Nothing in Track B's code can detect it:
+  both sides are still integers and they still match.
+
+**So the question of 2d's bodies is not what TYPE `fps` is, but where the NUMBER COMES
+FROM.** That is mechanism 3, closed at `95d2507`; check (a) sits DOWNSTREAM of it and is not
+a second guard against it. Track B's gate assumes invariant 10 and cannot verify it.
+
+**The "before" side, read at `537f39b` from committed HEAD** (`recorder.py` is dirty under
+Track A, so `git show HEAD:` is the only honest source). `_freeze_fps` (`recorder.py:1264`)
+takes `fps` from exactly two places and never a third:
+
+        CREATE:  fps = round(measured),  measured = float(tick_bus.rate_detail()["hz"])
+        APPEND:  fps = self._existing_fps(repo_id)   # fixed by the dataset; must not be re-derived
+
+**AND THE FIELD NAME CAMOUFLAGES THE REGRESSION.** The frozen integer is stored as
+`fps_declared` (`:364`, set at `:599` from `_freeze_fps`'s return). In this file "declared"
+means *the integer written to `info.json`* — NOT the operator's requested rate. So a 2d that
+regressed to stamping a request would leave `fps_declared=fps` textually unchanged at `:599`
+and **the diff would read as clean.** Diff `_freeze_fps`'s body, not its call site.
+
 ### Allocation is name-keyed and names do not survive a resume
 
 The evening rotation's preventative "you are not assigned" note went to three sessions. **All
