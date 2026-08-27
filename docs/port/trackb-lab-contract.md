@@ -817,3 +817,156 @@ choices belong in the override where they get stamped.
 **Still true and not to be rounded up:** the rollout path has never run end to end and
 cannot until Track A's ingest exists. What is new is that a rollout can now be REFUSED
 before it starts, for a reason that is true.
+
+---
+
+# Addendum — item 1's acceptance criteria, written BLIND
+
+Written 2026-08-27 by Track B (`haller-ws-2d`), approved by the integrator
+(`haller-ws-84`), **before Track A's ingest exists and before any of its code
+has been read.** That is the entire point of the timing and it cannot be
+recovered later.
+
+Every instance in `integrator-followups.md` of "the test inherited the code's
+blind spot" was caught afterwards. The counter-rule — *write the assertion from
+the CLAIM, in the claim's own terms, before reading the implementation* — has
+never been applied in the window where it is free. Item 1 exists to establish
+that two independently-built halves fit; criteria written after seeing one half
+would verify that half against its own assumptions.
+
+**This does not unblock item 1.** This is the yardstick, not the measurement.
+
+## The claim being tested
+
+> A policy action produced by a detached child reaches the server's commit
+> chain and moves the arm through it, and the server keeps the bus throughout.
+
+## The inbound shapes Track A must send — undocumented until now
+
+The outbound messages carry "FROZEN: exactly these keys" docstrings. **The
+inbound ones never had a written shape at all**, only type spellings. Found
+while verifying C1 below, and it is the more urgent half.
+
+```json
+{"type": "policy_hello_ack", "ok": true, "server_pid": 12345}
+{"type": "policy_refused", "detail": "<a sentence naming the condition>"}
+```
+
+| key | read at | absent → |
+| --- | --- | --- |
+| `ok` | `rollout_runner.py:582` | defaults `true`. Permissive by design; an ack IS an acceptance. |
+| `detail` | `:579`, `:585` | a generic "the server refused this rollout". Costs the operator the reason. |
+| **`server_pid`** | `:586` | **a safety check silently stops working. See below.** |
+
+**`server_pid` is REQUIRED and its absence is silent.** The child filters its
+own bus-holder walk against the server's pid, because the server holding
+`/dev/ttyACM0` is the normal required state and must never be read as a
+conflict. With no `server_pid`:
+
+    :620   if not device or server_pid is None: return []
+
+`foreign_port_holders` returns EMPTY — "no foreign holders" — so `if holders:`
+at `:868` never fires and the check passes for every process on the bus. The
+permissive direction, with no error and no warning: **a check that cannot fire
+in either direction**, which this port rates as worse than a bug because it
+reassures.
+
+Note the asymmetry: `ok` and `detail` degrade toward MORE refusal or less
+information. `server_pid` degrades toward LESS refusal, on the one check that
+guards two processes writing one Feetech bus.
+
+The `MIN_RATE_FRACTION` precedent settles how to treat it. Before publication a
+missing constant was normal; after it, a lookup that cannot find it is a
+rename, a move or a typo — never normal. `server_pid` is now published, so an
+ack without it is a contract violation and not a state to tolerate. **Whether
+the child should therefore REFUSE such an ack rather than proceed with a dead
+check is with the integrator; it is a behaviour change and Track A is mid-build.**
+
+## C0 — the distinction the whole thing rests on
+
+**An ACCEPTANCE must be observable, and it is not the absence of a refusal.**
+
+Today a rollout can be REFUSED for a reason that is true, and nothing has ever
+been ACCEPTED. Those two states are not complements. A run that fails to refuse
+could equally be a run where the refusal path did not fire, the child never
+connected, the ingest silently dropped the message, or a listener accepted
+bytes nobody parsed. Every one of those looks like success from the launch
+route, which sees a run directory and a live pid either way.
+
+So no criterion below is met by a non-error. Each names a POSITIVE artefact
+that cannot exist unless the thing happened.
+
+## C1 — the handshake is answered, not merely survived
+
+* The child sends `policy_hello` with exactly its five frozen keys and receives
+  a `policy_hello_ack` **whose content it acted on** — the server's pid is
+  taken from the ack (`rollout_runner.py`'s bus-holder filter reads it), so a
+  run whose `port_holders` walk excludes the right pid is evidence the ack was
+  parsed rather than counted.
+* A hello the server should refuse produces `policy_refused` **with a sentence
+  naming which condition** — an episode open, a teleop session driving, or a
+  foreign holder of the bus. `lease.bus_conflict` composes those sentences and
+  has never had a caller; C1 is the first event that gives it one.
+* Not sufficient: a connection that opens. TCP accept proves a listener, not a
+  reader.
+
+## C2 — a refusal still refuses, for a reason that is true
+
+Every refusal verified in isolation must fire again with the ingest present:
+the trained-rate mismatch at launch, the duration ceiling, the rate floor, and
+each `bus_conflict` branch. **A working ingest must not turn any of them off.**
+
+This is the direction nobody watches. Adding the accepting half is exactly when
+a gate that used to fire stops firing, because the failure now looks like the
+success everyone is waiting for.
+
+## C3 — one action reaches the commit chain, evidenced not asserted
+
+The load-bearing criterion. It is met by a POSITIVE observation on the SERVER
+side, and it must distinguish "the chain ran" from "a number arrived":
+
+* A `policy_action` carrying a target the commit chain will visibly ALTER —
+  one outside a workspace floor, or stepping further than the per-tick rate cap
+  allows. The committed value must differ from the sent value **in the
+  direction the chain imposes**. An action that passes through unchanged proves
+  transport, not commitment: it is indistinguishable from a bypass.
+* The altered value must be attributable to a NAMED stage — floor, clamp, rate
+  cap, collision guard — not merely "different".
+* Sending N actions must move the arm N times, not once: a single accepted
+  frame is consistent with a handshake that captured one message and stalled.
+
+## C4 — the server still owns the bus, during and after
+
+* `/estop` walks every motor **in-process** while a rollout is streaming, and
+  drops torque. This is the trade the port's central ruling refused to give up,
+  and it has never been exercised with a policy running.
+* `/estop` revokes the rollout lease — the second follow-up item, which fires
+  with this one.
+* `lease.port_holders` shows the serving process holding `/dev/ttyACM0`
+  throughout, and the child never appears. The source tripwire proves no code
+  CAN open the bus; C4 proves none did.
+
+## C5 — the gates measure the real thing
+
+* Gate (b) compares a rate measured over a real stream, not a synthetic one.
+  The kit's own rollout ran at **4.8 Hz against a 30 Hz target**, so the first
+  honest end-to-end run is the first chance to learn whether this architecture
+  is anywhere near its declared rate. **A measured rate that refuses is a
+  PASS for C5** — the criterion is that the number is real and acted on, not
+  that it is high.
+* `control_hz_declared` and `control_hz_measured` land in the run record, and
+  `control_hz_trained_measured` says whether the trained figure meant anything.
+
+## What must be reported, whatever happens
+
+The honest flag is retired ONLY by C3 — a policy action demonstrably reaching
+the commit chain. C1, C2, C4 and C5 can all pass while the flag stands.
+
+If C3 cannot be met, the correct report is that it was not met, naming which
+half. The fallback of record is already written: rollout stays a CLI operation
+with the HMI stopped, taken **only after measuring**, and the integrator is
+told first.
+
+**A criterion listed here and skipped is reported as skipped.** The reason this
+document exists is that "we ran it and it worked" is exactly the sentence the
+kit produced about a 4.8 Hz rollout.

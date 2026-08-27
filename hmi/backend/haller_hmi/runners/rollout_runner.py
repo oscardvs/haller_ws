@@ -41,10 +41,21 @@ so it would need the calibrated range shipped over the wire or re-read from
 disk, and two copies that drift are wrong in the same direction as the bug
 being fixed, with two conversions where the honest path has zero.
 
-**THE SERVER SIDE DOES NOT EXIST YET.** Track A owns the ingest. Every inbound
-spelling below (`ACK_TYPE`, `REFUSED_TYPE`, `OBSERVATION_TYPE`) is a named
-placeholder pending their publication. The rate floor is NOT a placeholder
-any more: `safety.MIN_RATE_FRACTION` landed 2026-08-27 and is imported directly.
+**THE SERVER SIDE DOES NOT EXIST YET, BUT THE WIRE IS NO LONGER A GUESS.**
+Track A owns the ingest and is building it now. Every spelling below — inbound
+and outbound — plus the endpoint is FROZEN by the integrator's ruling of
+2026-08-27: Track A adopts what this file already spells. The rate floor was
+settled the same way and earlier: `safety.MIN_RATE_FRACTION` landed 2026-08-27
+and is imported directly.
+
+**Frozen by ruling is not the same as demonstrated connected, and the
+difference is this port's most expensive lesson.** `MIN_RATE_FRACTION` was
+proven by republishing `0.5` and watching the resolver follow, because two
+names agreeing is not evidence that one reads the other. Nothing equivalent has
+happened here: no message this file spells has ever been read by a server.
+Establishing that is item 1's whole job — see the acceptance criteria in
+`docs/port/trackb-lab-contract.md`.
+
 When nothing is listening this child REFUSES, loudly, naming the endpoint. It
 does not fall back to driving the arm, and it does not stand up a server of its
 own.
@@ -123,10 +134,18 @@ ACTION_TYPE = "policy_action"
 #: than a conversion — which is the server's check to make, not this side's.
 ACTION_UNIT = "deg"
 
-#: Inbound message types. **Track A's to publish; these are placeholders.**
-#: The ingest does not exist yet, so this child names what it expects rather
-#: than guessing silently: an unrecognised inbound type is ignored, and a
-#: handshake that never gets acknowledged is a refusal naming the endpoint.
+#: Inbound message types. **FROZEN by the integrator's ruling 2026-08-27** —
+#: these were this child's named guesses, and Track A adopts them rather than
+#: publishing a second set for this side to follow. Changing either half is now
+#: a message to the integrator, exactly like the outbound pair above.
+#:
+#: Left as guesses they would have been worse than wrong: had Track A happened
+#: to spell them the same way, the file would still have read "placeholder"
+#: while the system depended on it, and no later reader could tell a settled
+#: contract from an unclaimed coincidence.
+#:
+#: An unrecognised inbound type is ignored; a handshake that never gets
+#: acknowledged is a refusal naming the endpoint.
 ACK_TYPE = "policy_hello_ack"
 REFUSED_TYPE = "policy_refused"
 OBSERVATION_TYPE = "policy_observation"
@@ -135,7 +154,9 @@ OBSERVATION_TYPE = "policy_observation"
 #: loopback TCP socket, chosen because it is the only transport both
 #: interpreters already speak: the lab venv has no WebSocket client, and adding
 #: one is a new third-party dependency in the venv that runs the GPU.
-#: **Placeholder pending Track A publishing the real endpoint.**
+#: **FROZEN by the same ruling** — Track A listens here. Until `9360e8b` this
+#: was the only occurrence of the port in the whole tree, which is what made it
+#: readable as settled when it was not.
 DEFAULT_INGEST_URL = "tcp://127.0.0.1:8781"
 
 #: Environment override, for a box running the HMI somewhere else.
