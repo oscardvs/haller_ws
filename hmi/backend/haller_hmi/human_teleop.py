@@ -410,14 +410,10 @@ class HumanTeleopSession:
             except Exception as e:  # noqa: BLE001  (any bus fault is a hole)
                 errors[arm_id] = str(e)
                 continue
-            joints = snap.get("joints", {})
-            arms[arm_id] = {
-                "joints_deg": {j: float(v["pos"]) for j, v in joints.items()},
-                "effort_norm": {j: float(v.get("effort", 0.0))
-                                for j, v in joints.items()},
-                "torque": bool(snap.get("torque", False)),
-                "mode": snap.get("mode"),
-            }
+            # Verbatim. Projecting here would make this loop the thing that
+            # decides which per-joint keys exist, and telemetry has a test
+            # saying nothing between the handle and a subscriber may do that.
+            arms[arm_id] = snap
         return arms, errors
 
     def _reset_clutch_state(self) -> None:

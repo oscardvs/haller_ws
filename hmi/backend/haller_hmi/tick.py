@@ -79,6 +79,30 @@ def _freeze(value: Any) -> Any:
     return value
 
 
+def plain(value: Any) -> Any:
+    """The inverse of `_freeze`: read-only views back to plain containers.
+
+    Any consumer that SERIALISES part of a sample must call this first.
+    `MappingProxyType` is not a `dict` subclass, so `json.dumps` raises
+    `Object of type mappingproxy is not JSON serializable` — and the telemetry
+    frame goes straight to `ws.send_json`. Without this the first bus-backed
+    frame would 500 the telemetry socket, and no unit test that stops short of
+    serialising would see it.
+
+    Returns fresh containers, so what a consumer hands onward is theirs to
+    mutate and cannot reach back into a sample other consumers hold.
+    """
+    if isinstance(value, Mapping):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, (str, bytes)):
+        return value
+    if isinstance(value, (tuple, list)):
+        return [plain(v) for v in value]
+    if isinstance(value, frozenset):
+        return {plain(v) for v in value}
+    return value
+
+
 @dataclass(frozen=True)
 class TickSample:
     """One moment. Every consumer of a given `seq` sees exactly these values.
@@ -97,8 +121,19 @@ class TickSample:
     seq: int
     t_mono: float
     t_unix: float
-    #: {arm_id: {"joints_deg": {j: deg}, "effort_norm": {j: frac},
-    #:           "torque": bool}}
+    #: {arm_id: the handle's `state_snapshot()`, VERBATIM}.
+    #:
+    #: Verbatim rather than a {joints_deg, effort_norm, torque} projection, and
+    #: the reason is a property telemetry already has a test for: the
+    #: broadcaster owns no part of the per-joint dict, so a new key inside
+    #: `joints` reaches subscribers untouched (`test_telemetry.py::
+    #: test_effort_passes_through_the_frame_verbatim`). A projection here would
+    #: silently become the place that decides which per-joint keys exist, and
+    #: the next channel added to `state_snapshot()` would be dropped at the
+    #: producer with every test still green.
+    #:
+    #: Derived views are METHODS below, never stored fields — one
+    #: representation, so there is no copy to drift from the original.
     arms: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     #: {side: {joint: degrees}} — the commanded target, the recorder's `action`.
     goal_deg: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
@@ -116,6 +151,23 @@ class TickSample:
     #: DROPPED frame, never a recorded one, and the flag is what lets a
     #: consumer tell "degraded" from "never happened".
     degraded: bool = False
+
+    def joints_deg(self, arm_id: str) -> dict[str, float]:
+        """{joint: degrees} for one arm, derived from its snapshot."""
+        joints = self.arms.get(arm_id, {}).get("joints", {})
+        return {j: float(v["pos"]) for j, v in joints.items()}
+
+    def effort_norm(self, arm_id: str) -> dict[str, float]:
+        """{joint: signed fraction of torque limit} for one arm.
+
+        0.0 for a joint whose snapshot carries no effort. Read
+        `recorder.py`'s `observation.effort` docstring before using this: a
+        flat-zero column means "no effort channel on that take", not "no
+        contact", which is why a transient degradation is a dropped frame
+        rather than a zero.
+        """
+        joints = self.arms.get(arm_id, {}).get("joints", {})
+        return {j: float(v.get("effort", 0.0)) for j, v in joints.items()}
 
     def __post_init__(self) -> None:
         for name in ("arms", "goal_deg", "reasons", "arm_errors", "base",

@@ -108,9 +108,12 @@ def test_every_published_sample_carries_every_arm_the_manager_reports():
     assert samples, "no samples published at all"
     for s in samples:
         assert set(s.arms) == {"left", "right"}
-        assert s.arms["left"]["joints_deg"]["shoulder_pan"] == 5.0
-        assert s.arms["right"]["joints_deg"]["shoulder_pan"] == -5.0
-        assert s.arms["left"]["effort_norm"]["gripper"] == 0.25
+        assert s.joints_deg("left")["shoulder_pan"] == 5.0
+        assert s.joints_deg("right")["shoulder_pan"] == -5.0
+        assert s.effort_norm("left")["gripper"] == 0.25
+        # Verbatim: the per-joint dict reaches a consumer with every key the
+        # handle put there, including the ones nothing here knows about.
+        assert s.arms["left"]["joints"]["gripper"]["min"] == -90.0
         assert s.degraded is False
         assert dict(s.arm_errors) == {}
 
@@ -131,7 +134,7 @@ def test_a_sample_pairs_state_and_goal_from_one_tick():
         sess.stop()
 
     s = samples[-1]
-    assert set(s.arms["left"]["joints_deg"]) == set(JOINTS)
+    assert set(s.joints_deg("left")) == set(JOINTS)
     assert set(s.goal_deg["left"]) == set(JOINTS)
     assert s.t_mono > 0.0 and s.t_unix > 0.0
 
@@ -155,7 +158,7 @@ def test_an_arm_whose_read_fails_is_a_hole_not_a_number():
     assert "right" not in s.arms
     assert "right" in s.arm_errors
     assert s.degraded is True
-    assert s.arms["left"]["joints_deg"]["shoulder_pan"] == 5.0
+    assert s.joints_deg("left")["shoulder_pan"] == 5.0
 
 
 def test_the_session_owns_the_bus_only_while_it_runs():

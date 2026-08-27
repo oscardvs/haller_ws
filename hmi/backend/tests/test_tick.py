@@ -25,6 +25,7 @@ from haller_hmi.tick import (
     ProducerConflict,
     TickBus,
     TickSample,
+    plain,
 )
 
 
@@ -475,3 +476,75 @@ def test_the_idle_sampler_stands_aside_for_a_session_and_returns_after():
 
     assert sampler.tick_once() is not None
     assert calls["n"] == 3, "the source is still asked, the bus just refuses"
+
+
+def test_a_sample_carries_the_handles_snapshot_verbatim():
+    """Nothing between the handle and a consumer decides which keys exist.
+
+    Telemetry already has a test for this property on its own frame; the
+    producer is now upstream of it, so the property has to hold here or the
+    guarantee is gone one layer earlier with that test still green.
+    """
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    token = bus.attach_producer("test")
+    _publish(token, arms={"left": {
+        "mode": "manual", "torque": True,
+        "joints": {"gripper": {"pos": 1.0, "min": 0.0, "max": 100.0,
+                               "torque": True, "effort": -0.42,
+                               "a_channel_added_later": 7}},
+    }})
+    sample = sub.drain()[0]
+    assert sample.arms["left"]["joints"]["gripper"]["a_channel_added_later"] == 7
+    assert sample.arms["left"]["joints"]["gripper"]["effort"] == -0.42
+
+
+def test_the_derived_views_are_computed_rather_than_stored():
+    """One representation, so there is no copy to drift from the original."""
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    token = bus.attach_producer("test")
+    _publish(token, arms={"left": {"joints": {
+        "j1": {"pos": 3.0, "effort": 0.5},
+        "j2": {"pos": -3.0},            # no effort channel on this joint
+    }}})
+    sample = sub.drain()[0]
+    assert sample.joints_deg("left") == {"j1": 3.0, "j2": -3.0}
+    assert sample.effort_norm("left") == {"j1": 0.5, "j2": 0.0}
+    assert sample.joints_deg("nonexistent-arm") == {}
+
+
+def test_a_sample_can_be_serialised_after_plain():
+    """The telemetry frame goes to `ws.send_json`, and a frozen map cannot.
+
+    `MappingProxyType` is not a dict subclass, so `json.dumps` refuses it. A
+    bus-backed telemetry frame would 500 the socket on its first send, and a
+    test that stopped at reading the values back would never see it.
+    """
+    import json
+
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    token = bus.attach_producer("test")
+    _publish(token, arms={"left": {"joints": {"g": {"pos": 1.0}}}},
+             goal_deg={"left": {"g": 2.0}})
+    sample = sub.drain()[0]
+
+    with pytest.raises(TypeError):
+        json.dumps({"arms": sample.arms})
+
+    round_tripped = json.loads(json.dumps({"arms": plain(sample.arms)}))
+    assert round_tripped["arms"]["left"]["joints"]["g"]["pos"] == 1.0
+
+
+def test_plain_hands_back_containers_the_caller_may_keep():
+    """What a consumer passes onward must not reach back into a shared sample."""
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    token = bus.attach_producer("test")
+    _publish(token, arms={"left": {"joints": {"g": {"pos": 1.0}}}})
+    sample = sub.drain()[0]
+
+    copy = plain(sample.arms)
+    copy["left"]["joints"]["g"]["pos"] = 99.0
+    assert sample.arms["left"]["joints"]["g"]["pos"] == 1.0
