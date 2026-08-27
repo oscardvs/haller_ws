@@ -530,6 +530,41 @@ applies to any probe that prunes, not only to a matrix.
   the 2026-08-21 incident verbatim, arriving by a new road. An arm with a latched
   shoulder alarm ends up HALF LIMP while the report prints "TORQUE STILL ENABLED".
 
+- **When a claim is unverifiable WHERE IT IS WRITTEN, say so IN the claim.** The
+  missing half of the copied-fact rule, and the sharpest thing said all day. Compare:
+
+        the backend writes `time.time()`, so it is multiplied here
+        assumed unix seconds — no /lab/runs exists yet to check against
+
+  Identical information, **not equally safe.** The second is *falsifiable on sight* with
+  no producer in existence — a reader refutes it by noticing it is an assumption. The
+  first can only be refuted by observing a system that did not yet exist. So the rule is
+  not "verify before you assert", which is often impossible at the moment of writing: it
+  is to convert an unfalsifiable CITATION into a falsifiable ADMISSION, for the cost of
+  one clause. It also makes the class **greppable** — "assumed" is searchable, "the
+  backend writes" is not.
+
+- **A test that greps prose is measuring the documentation.** Found in the integrator's
+  own mount test, which asserted `idle_sampler.stop()` precedes `arms.disconnect_all()`
+  by indexing `inspect.getsource`, and FAILED against correct code — because the comment
+  explaining the constraint says *"BEFORE `arms.disconnect_all()`"* and matched ~300 chars
+  ahead of the call. **The better the comment, the more wrong the test**, since the
+  comment exists to describe the very ordering under test. Ordering and presence
+  assertions over source read a comment-stripped copy. (Sibling of the source-level
+  tripwire pattern, which is otherwise sound: greping your own source is the right tool
+  for a wiring fact, but only against code.)
+
+- **A comment can rot inside its own author's two-commit window.** `ComparePane` said
+  "a real ACT run logs 12 numeric keys against a cap of 8" — true when written, and the
+  author's NEXT commit added a plottable-keys filter that took the request from 12 to 10.
+  A number describing the refusal quietly became a number describing something else, in
+  under two hours, by the same hand. Nobody would have filed it; the next reader would
+  simply have debugged a request size that no longer existed. Fixed by spelling out the
+  three quantities that had been collapsed into two — **12 logged, 10 plottable and
+  requested, 8 allowed** — because they had already moved apart once and the published
+  cap is the next thing that will move them. The copied-fact rule is usually aimed at
+  someone else's rotted comment; audit your OWN from today.
+
 - **A FABRICATED fact is worse than a rotted one, because no commit made it wrong.**
   The copied-fact class assumes a comment that was TRUE when written and rotted on
   somebody else's commit — you can find the commit and learn something. `lib/api.ts` typed
