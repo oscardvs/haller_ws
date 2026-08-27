@@ -57,6 +57,19 @@ and dies when that event happens. Add the trigger, not just the task.
 
 ## Known-bad data
 
+- **`local/so101_pick_cube/review.json` is a MIXED-VERSION file, and that is fine.**
+  Written to accidentally on 2026-08-27 by an ad-hoc gate probe pointed at real data.
+  Verified afterwards: all 46 marks intact, 35 keep / 11 reject unchanged, no decision
+  lost. What changed: `version` 1 -> 2, a `batches: []` key, and episode 0 gaining
+  `"frames": 855` — which is CORRECT (episode 1's first frames carry global `index` 855,
+  so episode 0 is frames 0-854). Ruled: **leave it.** Byte-exact restoration was not
+  available, so a semantic rewrite would look like restoration without being one; it is a
+  second write to undo a harmless first; the workspace upgrades this file to v2 on first
+  real use anyway; and one mark with `frames` beside forty-five without is a state the
+  staleness check handles by design. Recorded so the mixed version is a known fact rather
+  than a future mystery.
+
+
 - **`local/haller_pick_the_red_cube_and_place_it_in_the_box` must never be trained on.**
   2 sim episodes / 997 frames. Already suspect (one arm never moved, per the grader), and
   now definite: its gripper column was recorded through the compressed mapping below, so
@@ -346,6 +359,21 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   400 as a prompt with the move that clears it (no dataset open yet — a property of right
   now). An operator reading a status code on a fresh cockpit goes hunting for a bad build
   instead of picking a dataset from the selector directly above it.
+
+- **A gate matrix must never be pointed at real data.** Structural, not a slip: a gate
+  matrix has to exercise BOTH halves — the permissive one is the whole point — so it will
+  always contain a mutating call. Pointing one at `HF_LEROBOT_HOME` because the GETs
+  wanted real data to answer is how a 200 on `POST /lab/datasets/mark`, which is the
+  correct result, becomes a write to Oscar's real review file. Use `tmp_path` for every
+  probe regardless of whether the script "only reads" — the script that only reads is the
+  one that grows a write half twenty minutes later without anyone re-deciding.
+
+- **The guardrail was in the artefact, not in the habit.** Both near-misses this session
+  have this shape. `tests/lab/` points at `tmp_path` and the real-data suite is read-only
+  by construction — the discipline existed, it just lived in the tests and not in the
+  person writing a one-off script. Likewise the integrator warned everyone the git index
+  was shared and then ran `git stash`. **A safe habit that does not extend to the one-off
+  command is not a safe habit.**
 
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
