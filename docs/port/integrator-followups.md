@@ -153,6 +153,18 @@ and dies when that event happens. Add the trigger, not just the task.
   Correct figure: **7 suites, 177 tests**. **The continuity doc doing the opposite of
   continuity: a successor either redoes verified work or distrusts code that is now right.**
 
+- **No RUNNING run has ever been rendered. `RunDetail`'s whole `status === "running"` branch
+  has never executed.** *Trigger:* a long-lived run exists to watch — Track B exercising the
+  rollout, or any train launch. *Owner:* Track C.
+  Every run in the store is TERMINAL, so the 1 s poll, the growing log tail, metric-stream
+  resume, `now`-based elapsed, `onChanged` and the STOP button have never run against a
+  backend. **Ranked ABOVE the rollout-detail gap below by `haller-ws-f3` — the previous Track
+  C — and the current Track C accepted the re-ranking of their own finding.** The reasoning
+  is right: a branch that has never executed is a wider unknown than a branch that executes
+  and renders the wrong six fields. Note this is the DEGRADED-STATE rule in a new costume —
+  the happy path here is *terminal*, so everything that only renders mid-flight is exactly
+  what nobody has seen.
+
 - **A rollout run has no render path in `RunDetail`. REASONED, NOT MEASURED.**
   *Trigger:* Track B exercises the rollout end to end. *Owner:* Track C, who found it.
   Flagged by Track C as a PREDICTION and labelled as one — nothing has been rendered,
@@ -1057,6 +1069,41 @@ applies to any probe that prunes, not only to a matrix.
   requested, 8 allowed** — because they had already moved apart once and the published
   cap is the next thing that will move them. The copied-fact rule is usually aimed at
   someone else's rotted comment; audit your OWN from today.
+
+- **IF TWO TRACKS' ISOLATED SUITE COUNTS DO NOT SUM TO THE TREE'S, ONE OF THEM HAS ANNEXED A
+  FILE.** Track C's partition, measured at `b908cf6` on a clean `hmi/frontend`:
+
+        Track C territory   235 / 13 files
+        Track D's five      191 /  5 files
+        ---------------------------------
+                            426 / 18 files    = the tree baseline, exactly
+
+  Nothing double-counted, nothing orphaned. **This is `base + N = total` pointed at OWNERSHIP
+  instead of at history**, and it is cheaper than re-reading a territory list: the list is
+  prose that two sessions can each read favourably, while the sum either closes or names the
+  discrepancy. It would have caught the `lib/api.ts` boundary error that cost a round trip
+  earlier today. Run it whenever a territory boundary is in doubt, and publish both halves
+  beside the total.
+
+- **A rule can claim its second instance within the hour, against its own author.** The
+  `git show HEAD:` rule — measure a contract from committed HEAD while another track owns the
+  producer — was filed in Track C's words at `f92cc41`. Inside the hour they hit it again and
+  said so: their FIRST read of `recorder.py::status()` had been of the dirty file, so they had
+  already taken Track A's editor buffer for the contract before triaging, and only the
+  re-check from HEAD stopped it becoming a report. **The rule is not "remember to check"; the
+  people writing these rules are the ones tripping them.** Which is the argument for the
+  mechanical form — `git show HEAD:` as the default reflex for any cross-track read, not a
+  step you reach for once you suspect a problem.
+
+- **A DIFF TOOL THAT FLATTENS NESTED KEYS INVENTS TOP-LEVEL FIELDS.** Third failure mode of
+  the same `typediff.py` whose brief already warned it "produces confident nonsense rather
+  than an error" for one-line types. Track C's payload diff reported `arms` as *on the wire,
+  not in the type* — a finding they nearly filed. `arms` is nested: `"drops": {"cameras": ...,
+  "arms": ...}` spans two lines, and a `^\s*"(\w+)":` match hoists the inner key into the
+  top-level set. **The route has never sent `arms` at top level.** Same family as the
+  histogram rule: a shape-blind instrument agrees with reality on the aggregate and lies about
+  the structure. An instrument that cannot represent nesting must refuse a nested input, not
+  flatten it.
 
 - **A FIELD NAMED FOR ONE QUANTITY WHILE HOLDING ANOTHER MAKES ITS OWN REGRESSION READ AS A
   CLEAN DIFF.** `recorder.py` stores the integer written to `info.json` as **`fps_declared`**,
