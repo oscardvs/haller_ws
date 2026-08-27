@@ -1,7 +1,7 @@
 # Integrator handoff — the kit port
 
 Written 2026-08-27 by `haller-ws-13`, handing the integrator role on. Integrator is now
-`haller-ws-57`. **Sessions saturate and are replaced — that is normal here; the docs are
+`haller-ws-b7`'s successor (see **Live state** below). **Sessions saturate and are replaced — that is normal here; the docs are
 the continuity, not the sessions.** Four fresh track sessions were opened 2026-08-27 pm. **Read this first, then
 `hmi/PLAN-2026-08-27-kit-port.md`, then `docs/port/integrator-followups.md`.**
 
@@ -55,21 +55,15 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1632 passed, 1 xfailed at `95d2507`** (was 593 pre-port), detached
-  worktree, clean tree. **A baseline without a commit beside it is not a baseline**, and it
-  must RECONCILE — report `base + N = total`, never a bare total:
-
-        f67ddbf  previous pinned baseline              1611
-        54bf6fd  mechanism 1 dead     (Track A)        + ..
-        95d2507  mechanism 3 dead     (Track A)        + ..   -> 1632
-        (the other 9 commits in that range are docs or frontend-only)
-
-  **Track A reports Phase 2 against `42d5fa4` + Phase 2 alone (1487 + 89 = 1576).** That is
-  a legitimate TRACK delta and it is not the tree — it excludes Track B's and the
-  integrator's commits. Both numbers are right; say which base you mean.
-- **frontend `vitest`: 424 passed, 18 files at `c2a4a15`**, `tsc --noEmit` clean.
-  **No known flake** — 0 red in 12 consecutive runs from the integrator's worktree,
-  independently of the sessions that wrote the fixes.
+- **backend `pytest`: 1633 at `c0cab73`**; Track A reports **1577 = 1487 + 90** at
+  `8ce2ede` against their own `42d5fa4`+Phase-2 tree. **Both are right — say which base.**
+  A track delta excludes other tracks' commits; the tree total does not.
+- **frontend `vitest`: 426 passed, 18 files at `80984b6`**, `tsc` clean, **0 red in 12
+  consecutive runs from the integrator's worktree**, independently of the sessions that
+  wrote the fixes. 426 not 427 is the migration's pinning test dying with what it pinned.
+- **Re-measure after any landing.** `base + N = total`, never a bare total, and name the
+  base COMMIT — "+N on top" silently assumes nothing landed in between, and something
+  always has.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```
@@ -237,3 +231,44 @@ recommendation rather than a survey. **They have corrected the integrator at lea
 times and each correction improved the plan.** Reward that explicitly; it is the reason
 this has held together. Ask for the honest answer over the clean report, and when a track
 says "nothing further is worth doing", believe them.
+
+---
+
+## Live state — 2026-08-27 evening, at `5238478`
+
+**All four "why it failed here" mechanisms are CLOSED.** 1 (three uncoordinated samplers)
+died at `54bf6fd`; 2 (`isAvailable()`) in Phase 1; 3 (declared-not-measured `fps`) at
+`95d2507`; 4 was retracted as a mis-attributed sensor. **The port's central thesis is now
+testable rather than argued.**
+
+**Phase 2 is at 2c-complete.** Next is **2d — `/record/arm|roll|stop`**, Track A's, and it
+is the last blocker in the port.
+
+### The one promise the integrator owes
+
+**Track D gets WARNED BEFORE the record routes are mounted, in this order:** Track A
+reports committed bodies -> integrator tells Track D -> Track D confirms ready -> mount.
+V13 is the only checklist item split ACROSS the mount: its first PASS needs the routes
+ABSENT and its second needs them MOUNTED, so **no session can ever tick it whole** and
+mounting destroys the half that is still measurable. `server.py` is the integrator's.
+
+### The rate-gate migration — COMPLETE, all four steps
+
+`record_rate_gate` (a one-sided FLOOR, 0.9) became `record_rate_tolerance` (a symmetric
+TOLERANCE, 0.005) via **expand -> migrate -> contract**, across three tracks:
+`95d2507` both keys -> `c2a4a15` accessor added beside the old -> `c0cab73` HUD flipped ->
+`80984b6` + `8ce2ede` old pair deleted both sides. **The recorder now imports nothing from
+`safety.py`**, which is the strongest guarantee the rollout's floor cannot creep back into
+a surface needing a tolerance.
+
+### OPEN — one ruling, one dead function
+
+**`tick.py::rate_ok` has NO production caller** and should be deleted with its four
+assertions in `test_tick.py`. It is a one-sided FLOOR sitting on the bus with a plausible
+name, where the only backend surface measuring a record rate needs a symmetric tolerance —
+so a future author reaching for the obvious helper gets a check twenty times looser than
+the recorder refuses at. **Dead code shaped like a safety check**, which this port rates as
+worse than a bug. Track A neutralised the misuse risk in its docstring rather than deleting
+it, deliberately, because it touched the integrator's file and possibly Track B's plans.
+Both are now clear: the integrator's citation was fixed at `5238478`, and Track B's rollout
+gates on `MIN_RATE_FRACTION` imported directly, with no bus. **Ruling: delete it.**
