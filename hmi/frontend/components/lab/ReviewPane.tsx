@@ -49,6 +49,7 @@ import {
   Button, Chip, Empty, MARK_COLOR, MarkBar, Note, Panel, PanelHead, Refusal,
 } from "@/components/lab/ui";
 import { DatasetShelf } from "@/components/lab/DatasetShelf";
+import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { EpisodePlayer, type EpisodePlayerHandle } from "@/components/lab/EpisodePlayer";
 import { EpisodeList } from "@/components/lab/EpisodeList";
 import {
@@ -724,6 +725,7 @@ export function ReviewPane({
       <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_27rem] gap-2 overflow-hidden p-2">
         {/* LEFT: one episode, three views of it, sharing a playhead. */}
         <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto] gap-2 overflow-hidden">
+          <PaneBoundary what="the player">
           <EpisodePlayer
             ref={playerRef}
             repoId={repoId}
@@ -737,23 +739,28 @@ export function ReviewPane({
             fps={detail?.fps ?? 0}
             onTime={onTime}
           />
+          </PaneBoundary>
 
           <div className="flex min-h-0 shrink-0 flex-col gap-2">
             {traceError && <Refusal>{traceError}</Refusal>}
-            <GripperChart
-              trace={trace}
-              playheadT={playheadT}
-              guides={gripperGuides(selected)}
-            />
+            <PaneBoundary what="the gripper chart">
+              <GripperChart
+                trace={trace}
+                playheadT={playheadT}
+                guides={gripperGuides(selected)}
+              />
+            </PaneBoundary>
           </div>
 
           <div className="flex min-h-0 flex-col gap-1.5 overflow-hidden">
-            <TraceChart
-              trace={trace}
-              playheadT={playheadT}
-              overlay={overlay}
-              onOverlay={setOverlay}
-            />
+            <PaneBoundary what="the joint traces">
+              <TraceChart
+                trace={trace}
+                playheadT={playheadT}
+                overlay={overlay}
+                onOverlay={setOverlay}
+              />
+            </PaneBoundary>
             <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-0.5">
               {BINDINGS.map((b) => (
                 <span key={b.label} className="inline-flex items-center gap-1">

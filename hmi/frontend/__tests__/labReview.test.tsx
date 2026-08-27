@@ -22,6 +22,7 @@ import {
   DEFAULT_FILTERS, EpisodeFilters, type EpisodeFilterState,
 } from "@/components/lab/EpisodeFilters";
 import { EpisodeRow } from "@/components/lab/EpisodeRow";
+import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { PruneDialog } from "@/components/lab/PruneDialog";
 import { ReviewPane } from "@/components/lab/ReviewPane";
 import type { AutoclassPreview, LabEpisode, Mark } from "@/lib/lab";
@@ -857,5 +858,65 @@ describe("ReviewPane — shift-range selection", () => {
     fireEvent.click(rows[3].box);
     fireEvent.click(rows[4].box, { shiftKey: true });
     await waitFor(() => expect(selectedCount()).toBe(2));
+  });
+});
+
+/* ─── the blast radius of a widget that throws ────────────────────────── */
+
+describe("PaneBoundary", () => {
+  // The rule this exists to enforce: a subordinate widget must not be able to
+  // unmount the workspace. There is no other error boundary in this app, so
+  // without it ANY render-phase throw takes the whole cockpit tab tree —
+  // episode list, mark buttons and dialogs included — over a chart nobody was
+  // looking at.
+  function Boom(): React.ReactElement {
+    throw new Error("names is undefined");
+  }
+
+  let logged: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    // React logs the caught error itself; silenced so a passing run is not
+    // full of red that means nothing.
+    logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("contains the throw and leaves its siblings mounted", () => {
+    render(
+      <div>
+        <span>the episode list</span>
+        <PaneBoundary what="the joint traces">
+          <Boom />
+        </PaneBoundary>
+        <span>the mark buttons</span>
+      </div>,
+    );
+
+    // The workspace survived.
+    expect(screen.getByText("the episode list")).toBeInTheDocument();
+    expect(screen.getByText("the mark buttons")).toBeInTheDocument();
+  });
+
+  it("names what failed and quotes the throw, rather than rendering a tidy blank", () => {
+    // A boundary that renders nothing is how a broken backend goes unnoticed
+    // for a week. This is damage control and has to look like it.
+    render(
+      <PaneBoundary what="the joint traces">
+        <Boom />
+      </PaneBoundary>,
+    );
+
+    expect(screen.getByText(/the joint traces could not be drawn/i)).toBeInTheDocument();
+    expect(screen.getByText(/names is undefined/)).toBeInTheDocument();
+    expect(logged).toHaveBeenCalled();
+  });
+
+  it("passes healthy children straight through", () => {
+    render(
+      <PaneBoundary what="the joint traces">
+        <span>a chart</span>
+      </PaneBoundary>,
+    );
+    expect(screen.getByText("a chart")).toBeInTheDocument();
+    expect(screen.queryByText(/could not be drawn/i)).not.toBeInTheDocument();
   });
 });

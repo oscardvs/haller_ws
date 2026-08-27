@@ -24,6 +24,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { CompareChart } from "@/components/lab/charts/CompareChart";
 import { fmtNum, seriesColor } from "@/components/lab/charts/svg";
 import { HparamDiff } from "@/components/lab/HparamDiff";
+import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { Empty, Note, Panel, PanelHead, Refusal, Segmented } from "@/components/lab/ui";
 import {
   isBusy, isMissing, lab, metricKeys, reason,
@@ -314,6 +315,7 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
 
           <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(26rem,1fr))]">
             {shared.map((key) => (
+              <PaneBoundary key={key} what={`the ${key} chart`}>
               <CompareChart
                 key={key}
                 metricKey={key}
@@ -327,6 +329,7 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
                   points: state?.series[r.id]?.[key] ?? [],
                 }))}
               />
+              </PaneBoundary>
             ))}
           </div>
 

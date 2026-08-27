@@ -32,6 +32,7 @@ import { useSticky } from "@/components/cockpit/lib";
 import { TrainLauncher } from "@/components/lab/TrainLauncher";
 import { RunFilters, DEFAULT_RUN_FILTERS, type RunFilterState } from "@/components/lab/RunFilters";
 import { RunList, runLabel } from "@/components/lab/RunList";
+import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { RunDetail } from "@/components/lab/RunDetail";
 
 /** The same cadence `RunDetail` polls one run at. Matching it deliberately:
@@ -325,12 +326,14 @@ export function TrainPane({
               metric rows, the log text, the armed delete — and a remount
               resets the whole set at once rather than a list of resets that
               has to be kept in step with the state above it. */}
-          <RunDetail
-            key={selected ?? "none"}
-            runId={selected}
-            onChanged={onRunChanged}
-            onDeleted={onDeleted}
-          />
+          <PaneBoundary what="the run detail">
+            <RunDetail
+              key={selected ?? "none"}
+              runId={selected}
+              onChanged={onRunChanged}
+              onDeleted={onDeleted}
+            />
+          </PaneBoundary>
         </div>
       </div>
     </div>
