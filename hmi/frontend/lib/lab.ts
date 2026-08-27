@@ -767,3 +767,35 @@ export function metricX(row: MetricRow, axis: MetricAxis): number | null {
   if (axis === "wall") return pick("wall_s", "elapsed_s", "t");
   return pick("step", "steps");
 }
+
+/** Every axis a row could be placed on. Ordered as the picker shows them. */
+const METRIC_AXES: MetricAxis[] = ["step", "epoch", "wall"];
+
+/**
+ * The keys worth CHARTING — those with at least one sample that can be placed
+ * on some axis.
+ *
+ * `metricKeys` answers "what did this run log"; this answers "what can be
+ * drawn", and they differ because of lerobot's bookkeeping rows. The first
+ * line of a training `metrics.jsonl` is
+ * `{"kind":"split","train_episodes":28,"eval_episodes":7}` — real numbers with
+ * no step, no epoch and no wall, so they sit on NO axis and never will.
+ * Charting them drew two permanently empty cells labelled with metrics the run
+ * does not measure over time.
+ *
+ * The filter is "unplottable on EVERY axis", not "on the current one", and the
+ * difference is the whole point: a key that draws on `step` but not `epoch`
+ * keeps its chart, so the "no samples on this axis" message stays a true
+ * statement with a remedy behind it. Dropping per-axis would make charts
+ * appear and vanish as the operator switches axes, and would turn a message
+ * that means "look on another axis" into one that had silently become a lie.
+ */
+export function plottableMetricKeys(rows: MetricRow[]): string[] {
+  return metricKeys(rows).filter((key) =>
+    rows.some((row) => {
+      const v = row[key];
+      if (typeof v !== "number" || !Number.isFinite(v)) return false;
+      return METRIC_AXES.some((axis) => metricX(row, axis) !== null);
+    }),
+  );
+}

@@ -21,7 +21,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { CheckpointList, checkpointName } from "@/components/lab/CheckpointList";
 import { ComparePane } from "@/components/lab/ComparePane";
 import { epochSeconds, fullWhen, shortWhen } from "@/components/lab/RunList";
-import type { Checkpoint, Run } from "@/lib/lab";
+import {
+  metricKeys, metricX, plottableMetricKeys,
+  type Checkpoint, type MetricRow, type Run,
+} from "@/lib/lab";
 
 /* ─── the wire, verbatim ──────────────────────────────────────────────────
  * Captured from `GET /lab/runs` on a real backend serving Oscar's real ACT
@@ -167,6 +170,47 @@ describe("CheckpointList renders lerobot's `last` symlink", () => {
     mountWith([ck({ step: null, path: CK_LAST_PATH })]);
     await waitFor(() => expect(screen.getByText("last")).toBeTruthy());
     expect(screen.queryByText("latest")).toBeNull();
+  });
+});
+
+/* ─── only chart what can be drawn ────────────────────────────────────── */
+
+describe("a chart is offered only for a key that can sit on an axis", () => {
+  // The first line of a real training `metrics.jsonl` is bookkeeping, not a
+  // sample. Verbatim from the run this file is written against:
+  const SPLIT: MetricRow = { kind: "split", train_episodes: 28, eval_episodes: 7 };
+  const TRAIN: MetricRow = {
+    kind: "train", steps: 200, loss: 7.25, grad_norm: 159.6, lr: 1e-5,
+  };
+  const EVAL: MetricRow = { kind: "eval", steps: 5000, eval_loss: 0.453 };
+
+  it("drops keys that sit on NO axis", () => {
+    const rows = [SPLIT, TRAIN, EVAL];
+    // They ARE logged, and `metricKeys` is right to say so...
+    expect(metricKeys(rows)).toContain("train_episodes");
+    // ...but they have no step, epoch or wall, so they can never be drawn.
+    // Two permanently empty cells labelled with metrics the run does not
+    // measure over time.
+    expect(plottableMetricKeys(rows)).not.toContain("train_episodes");
+    expect(plottableMetricKeys(rows)).not.toContain("eval_episodes");
+  });
+
+  it("keeps every key that has a real sample", () => {
+    // The other half of the claim, and the one that stops this from being a
+    // filter that quietly eats data.
+    const keys = plottableMetricKeys([SPLIT, TRAIN, EVAL]);
+    expect(keys).toEqual(expect.arrayContaining(["loss", "grad_norm", "lr", "eval_loss"]));
+  });
+
+  it("keeps a key drawable on SOME axis but not the current one", () => {
+    // The distinction the filter turns on. `eval_loss` here carries a step but
+    // no epoch: on the epoch axis it draws nothing, and the grid says "no
+    // samples on this axis" — which is TRUE and has a remedy. Filtering
+    // per-axis instead would delete the chart and, with it, the only hint
+    // that the metric exists at all.
+    expect(plottableMetricKeys([EVAL])).toContain("eval_loss");
+    expect(metricX(EVAL, "epoch")).toBeNull();
+    expect(metricX(EVAL, "step")).toBe(5000);
   });
 });
 

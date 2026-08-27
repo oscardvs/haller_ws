@@ -6,7 +6,8 @@
  * The kit charted `loss` and threw the rest of the row away — `lr`,
  * `grad_norm`, `samples_per_s`, `gpu_mem_gb`, `l1_loss`, `kld_loss` and
  * `epochs` were all sitting in the same JSONL line and none of them were ever
- * drawn. So nothing here is hardcoded: `metricKeys()` discovers the keys, and
+ * drawn. So nothing here is hardcoded: `plottableMetricKeys()` discovers the
+ * keys that can actually be placed on an axis, and
  * a policy that logs one nobody has heard of gets a chart like everything
  * else. `loss`/`eval_loss` lead when they exist, which is an ORDER preference
  * and not a filter.
@@ -26,7 +27,7 @@
 import { useMemo, useState } from "react";
 
 import {
-  metricKeys, metricX, type MetricAxis, type MetricRow,
+  metricX, plottableMetricKeys, type MetricAxis, type MetricRow,
 } from "@/lib/lab";
 import { Empty, Note, Segmented } from "@/components/lab/ui";
 import {
@@ -107,7 +108,7 @@ export function MetricGrid({
    *  which every consumer downstream assumes — `nearestIndex` binary-searches
    *  them and the shared x domain reads the ends. */
   const cells = useMemo<Cell[]>(() => {
-    const keys = metricKeys(rows);
+    const keys = plottableMetricKeys(rows);
     if (keys.length === 0) return [];
 
     const seriesFor = (key: string, color: string): BaseSeries => {

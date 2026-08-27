@@ -27,7 +27,7 @@ import { HparamDiff } from "@/components/lab/HparamDiff";
 import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { Empty, Note, Panel, PanelHead, Refusal, Segmented } from "@/components/lab/ui";
 import {
-  isBusy, isMissing, lab, metricKeys, reason,
+  isBusy, isMissing, lab, plottableMetricKeys, reason,
   type CompareMetrics, type Run, type RunStatus,
 } from "@/lib/lab";
 
@@ -528,7 +528,7 @@ async function runOrNull(id: string): Promise<Run | null> {
 
 async function keysOrNone(run: Run): Promise<string[]> {
   try {
-    return metricKeys((await lab.runMetrics(run.id, 0)).rows);
+    return plottableMetricKeys((await lab.runMetrics(run.id, 0)).rows);
   } catch (e) {
     if (isMissing(e)) return [];
     throw e;
