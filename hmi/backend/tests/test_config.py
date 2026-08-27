@@ -241,3 +241,80 @@ def test_load_config_reads_motion_block(tmp_path):
     assert cfg.motion.max_speed_deg_s == 30.0
     assert cfg.motion.large_move_deg == 20.0
     assert cfg.motion.ramp_hz == 50.0
+
+
+def test_lpf_tau_defaults_and_rejects_non_positive():
+    """The session smoothing time constant: 0.100 s unless a config says
+    otherwise (config.solo-raw.yaml says 0.02 — see the compounding note on
+    MotionConfig.lpf_tau_s)."""
+    assert MotionConfig().lpf_tau_s == 0.100
+    assert MotionConfig(lpf_tau_s=0.02).lpf_tau_s == 0.02
+    with pytest.raises(ValueError, match="lpf_tau_s"):
+        MotionConfig(lpf_tau_s=0.0)
+    with pytest.raises(ValueError, match="lpf_tau_s"):
+        MotionConfig(lpf_tau_s=-0.1)
+
+
+def test_teleop_section_loads_allowed_keys(tmp_path):
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "arms: []\ncameras: []\n"
+        "teleop:\n  pose_filter_alpha: 1.0\n  pos_reach_limit: 0.0\n"
+        "  floor_enabled: false\n  stance: behind\n"
+    )
+    cfg = load_config(p)
+    assert cfg.teleop == {
+        "pose_filter_alpha": 1.0,
+        "pos_reach_limit": 0.0,
+        "floor_enabled": False,
+        "stance": "behind",
+    }
+
+
+def test_teleop_section_defaults_to_empty(tmp_path):
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text("arms: []\ncameras: []\n")
+    assert load_config(p).teleop == {}
+
+
+def test_teleop_section_rejects_unknown_keys(tmp_path):
+    """A typo'd knob silently meaning 'default' is exactly the 'the change
+    didn't take' trap the section exists to end — so it is a LOAD error, and
+    the message points at the session-side home of the one knob people will
+    reach for here (motion.lpf_tau_s)."""
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text("arms: []\ncameras: []\nteleop:\n  reach_limit: 0.0\n")
+    with pytest.raises(ValueError, match="reach_limit"):
+        load_config(p)
+    p.write_text("arms: []\ncameras: []\nteleop:\n  lpf_tau_s: 0.02\n")
+    with pytest.raises(ValueError, match="motion.lpf_tau_s"):
+        load_config(p)
+
+
+def test_shipped_solo_raw_config_loads_and_is_actually_raw():
+    """config.solo-raw.yaml is the tracing config: every advisory shaping
+    stage off, the motion envelope and joint limits kept. Pinned so a future
+    knob rename cannot quietly turn one of its neutralizations back into a
+    default."""
+    from haller_hmi.config import load_config
+    cfg = load_config(
+        Path(__file__).resolve().parents[1] / "config.solo-raw.yaml")
+    assert cfg.motion.max_speed_deg_s == 90.0
+    assert cfg.motion.lpf_tau_s == 0.02
+    assert cfg.collision.enabled is False
+    # Both derived floors land below the arm's reachable minima (tip
+    # -0.297 m, wrist -0.132 m): geometrically inert even if floor_enabled
+    # were flipped back on from the panel.
+    assert cfg.collision.table_z_m == -0.40
+    t = cfg.teleop
+    assert t["pose_filter_alpha"] == 1.0
+    assert t["scale_rotation"] == 1.0
+    assert t["pos_reach_limit"] == 0.0 and t["rot_reach_limit"] == 0.0
+    assert t["floor_enabled"] is False and t["yaw_on_engage"] is False
+    # And every key must survive apply_update unclamped — a raw value the
+    # bounds quietly pull back would be the trap all over again.
+    from haller_hmi.vr_teleop.config import QuestTeleopConfig, apply_update
+    assert apply_update(QuestTeleopConfig(), dict(t)) == t

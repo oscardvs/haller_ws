@@ -19,6 +19,10 @@
 # the VR page and in the cockpit launcher — overrides it explicitly, and the
 # preset caption always states the exact hand->arm mapping that will be
 # POSTed. Pick the hand the arm is actually under.
+#
+# When teleop misbehaves and you need to know WHICH stage is bending it, run
+# config.solo-raw.yaml (up.sh --solo --raw) — same rig, every advisory
+# shaping stage off.
 
 motion:
   # The binding speed limit for teleop, and worth knowing about before you

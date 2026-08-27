@@ -74,7 +74,8 @@ if not _collision_guard.enabled:
     logger.warning("collision guard starts DISABLED (config collision.enabled="
                    "%s, available=%s)", cfg.collision.enabled,
                    _collision_guard.available)
-human_teleop = HumanTeleopSession(arms, collision_guard=_collision_guard)
+human_teleop = HumanTeleopSession(arms, collision_guard=_collision_guard,
+                                  lpf_tau_s=cfg.motion.lpf_tau_s)
 sim_teleop = SimLeaderTeleop(arms)
 # Bilateral session lock between every pair — any one running blocks the others.
 teleop.attach_peer(human_teleop)
@@ -1013,11 +1014,18 @@ def _make_quest_teleoperator():
     """One `QuestTeleoperator` per connection — the clutch anchors are
     connection state, exactly as long-lived as the operator's socket."""
     from .vr_teleop import QuestTeleopConfig, QuestTeleoperator
-    return QuestTeleoperator(
-        human_teleop, arms,
-        QuestTeleopConfig(min_tip_z=_tip_floor_m(),
-                          min_wrist_z=_wrist_floor_m()),
-    )
+    from .vr_teleop.config import apply_update
+    qcfg = QuestTeleopConfig(min_tip_z=_tip_floor_m(),
+                             min_wrist_z=_wrist_floor_m())
+    if cfg.teleop:
+        # The YAML `teleop:` section, through the same clamps a headset
+        # write gets. After the floor seeding above, on purpose: a config
+        # explicit enough to carry `teleop:` keys outranks the derived
+        # floors (note min_tip_z/min_wrist_z clamp at BOUNDS' -0.20 here;
+        # a rig that needs floors OFF says `floor_enabled: false` instead).
+        applied = apply_update(qcfg, cfg.teleop)
+        logger.info("teleop config seeded from YAML: %s", applied)
+    return QuestTeleoperator(human_teleop, arms, qcfg)
 
 
 def run() -> None:

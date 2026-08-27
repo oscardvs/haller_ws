@@ -63,11 +63,23 @@ class MotionConfig:
     # (ArmHandle.send_goal), before a real inter-call gap exists to measure.
     # See __post_init__ for the floor this places on ramp_hz.
     ramp_hz: float = 50.0
+    # Time constant of the teleop session's one-pole smoothing filter,
+    # seconds. This filter sits AFTER the IK's per-solve step cap, so the two
+    # compound: at the default 0.100 s the session closes only ~28% of each
+    # 30 Hz solve's (already capped) step before the next one arrives, and the
+    # effective joint speed lands well under every configured limiter. Lower
+    # it (e.g. 0.02) to make max_speed_deg_s the actual binding limit; the
+    # cost is passing more controller jitter through to the servos.
+    lpf_tau_s: float = 0.100
 
     def __post_init__(self) -> None:
         if self.max_speed_deg_s <= 0:
             raise ValueError(
                 f"max_speed_deg_s must be positive, got {self.max_speed_deg_s!r}"
+            )
+        if self.lpf_tau_s <= 0:
+            raise ValueError(
+                f"lpf_tau_s must be positive, got {self.lpf_tau_s!r}"
             )
         if self.large_move_deg <= 0:
             raise ValueError(
@@ -244,6 +256,15 @@ class Config:
     cameras: list[CameraConfig] = field(default_factory=list)
     motion: MotionConfig = field(default_factory=MotionConfig)
     collision: CollisionConfig = field(default_factory=CollisionConfig)
+    # Startup values for the VR teleoperator's live-tunable knobs
+    # (vr_teleop/config.py) — the same keys a headset `config_update` may
+    # write, applied through the same bounds at connection setup. Exists so a
+    # debug config can neutralize the mapping-side shaping (reach limits,
+    # pose filter, dq caps, floors) without someone in the headset re-doing
+    # it from the tuning list every session. Keys outside the allow-list are
+    # a load error, not a warning: a typo here silently reverting to defaults
+    # is exactly the "the change didn't take" trap this file exists to end.
+    teleop: dict = field(default_factory=dict)
     sim_leader: SimLeaderConfig | None = None
     # Cubes dealt onto the sim workbench at world build; ignored unless at
     # least one arm is source: sim.
@@ -263,6 +284,26 @@ class Config:
     sim_task: str = "cubes"
 
 
+def _teleop_from(raw: dict | None) -> dict:
+    """Validate the `teleop:` section's keys against the live-tunable
+    allow-list. Values are clamped later by `apply_update` exactly as a
+    headset write would be; only the key set is checked here, at load, where
+    a typo can still stop the boot instead of silently meaning "default"."""
+    raw = dict(raw or {})
+    # Local import: vr_teleop pulls in the IK stack, which a config-only tool
+    # (calibration bootstrap, tests) has no business importing at module load.
+    from .vr_teleop.config import BOOL_KEYS, BOUNDS, ENUM_KEYS
+    allowed = set(BOUNDS) | set(BOOL_KEYS) | set(ENUM_KEYS)
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(
+            f"teleop: unknown key(s) {unknown} — not one of the live-tunable "
+            f"knobs ({sorted(allowed)}). Note the session-side knobs live "
+            "elsewhere: the smoothing time constant is motion.lpf_tau_s."
+        )
+    return raw
+
+
 def load_config(path: Path | None = None) -> Config:
     cfg_path = Path(path or os.environ.get("HALLER_HMI_CONFIG", DEFAULT_CONFIG_PATH))
     raw = yaml.safe_load(cfg_path.read_text())
@@ -274,6 +315,7 @@ def load_config(path: Path | None = None) -> Config:
         cameras=_cameras_from(raw.get("cameras", [])),
         motion=MotionConfig(**raw.get("motion", {})),
         collision=_collision_from(raw.get("collision")),
+        teleop=_teleop_from(raw.get("teleop")),
         sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
         sim_cubes=int(raw.get("sim_cubes", 0)),
         sim_task=str(raw.get("sim_task", "cubes")),

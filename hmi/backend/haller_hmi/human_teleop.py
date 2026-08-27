@@ -190,6 +190,7 @@ class HumanTeleopSession:
         match_dwell_ms: float = MATCH_DWELL_MS,
         acquire_rate_deg_s: float = ACQUIRE_RATE_DEG_S,
         acquire_ramp_ms: float = ACQUIRE_RAMP_MS,
+        lpf_tau_s: float = 0.100,
         collision_guard=None,
     ):
         self._arms = arms
@@ -225,6 +226,10 @@ class HumanTeleopSession:
         self._steps_right: dict[str, JointStep] = {}
         self._hz_override = hz_override
         self._rate_cap_deg_per_tick = 4.0
+        # Smoothing time constant for the commit loop's one-pole filter,
+        # config motion.lpf_tau_s. It compounds with the IK's per-solve step
+        # cap — see MotionConfig.lpf_tau_s for the arithmetic.
+        self._lpf_tau_s = lpf_tau_s
         # T8: tracking-loss + WS disconnect grace
         self._frame_age_ms_loss = frame_age_ms_loss
         self._ws_disconnect_grace_s = ws_disconnect_grace_s
@@ -873,8 +878,8 @@ class HumanTeleopSession:
         left = self._arms[cfg.left_arm] if cfg.left_arm else None
         right = self._arms[cfg.right_arm] if cfg.right_arm else None
         period = 1.0 / max(1.0, cfg.hz)
-        # Smoothing time constant ≈ 100 ms (frequency-independent).
-        tau_s = 0.100
+        # Smoothing time constant (frequency-independent), default ≈ 100 ms.
+        tau_s = self._lpf_tau_s
         alpha = 1.0 - math.exp(-period / tau_s) if period > 0 else 1.0
         consecutive_errors = 0
         while not self._stop_flag.is_set():

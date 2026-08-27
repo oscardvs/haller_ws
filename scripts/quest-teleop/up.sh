@@ -59,6 +59,7 @@ set -eo pipefail
 SIM=0
 LOCAL=0
 SOLO=0
+RAW=0
 TAILSCALE=0
 SIM_CFG="config.bimanual-sim.yaml"
 # A loop, not the old if/elif on $1: --tailscale picks the ORIGIN and the
@@ -74,10 +75,14 @@ while [ $# -gt 0 ]; do
         --insertion) SIM=1; SIM_CFG="config.bimanual-insertion.yaml" ;;
         --local)     LOCAL=1 ;;
         --solo)      LOCAL=1; SOLO=1 ;;
+        # Solo with every advisory shaping stage neutralized — the tracing
+        # config. Modifies --solo rather than implying it, so the flag reads
+        # as what it is: a variant of the solo bring-up, not a fifth rig.
+        --raw)       RAW=1 ;;
         --tailscale) TAILSCALE=1 ;;
         *)
             printf 'up.sh: unknown option %s\n' "$1" >&2
-            printf 'usage: up.sh [--sim|--insertion|--local|--solo] [--tailscale]\n' >&2
+            printf 'usage: up.sh [--sim|--insertion|--local|--solo [--raw]] [--tailscale]\n' >&2
             exit 2
             ;;
     esac
@@ -192,10 +197,18 @@ elif [ "$SIM" = 1 ] || [ "$LOCAL" = 1 ]; then
         BACKEND_CFG="$SIM_CFG"
         say "starting SIM backend on :$BACKEND_PORT ($BACKEND_CFG — MuJoCo bimanual, no hardware)"
     elif [ "$SOLO" = 1 ]; then
-        BACKEND_CFG="${HALLER_HMI_CONFIG:-config.solo-real.yaml}"
-        say "starting SOLO backend on :$BACKEND_PORT ($BACKEND_CFG — ONE real arm, no Jetson)"
-        say "  collision guard starts OFF in this config; the workspace floor,"
-        say "  joint limits, rate caps and motion envelope all stay on."
+        if [ "$RAW" = 1 ]; then
+            BACKEND_CFG="${HALLER_HMI_CONFIG:-config.solo-raw.yaml}"
+            say "starting SOLO RAW backend on :$BACKEND_PORT ($BACKEND_CFG — ONE real arm, tracing config)"
+            say "  reach limits, pose filter, floors, rotation gain: ALL OFF."
+            say "  Only the joint limits and the ${BACKEND_CFG} motion envelope"
+            say "  protect the bench — hand on the E-STOP."
+        else
+            BACKEND_CFG="${HALLER_HMI_CONFIG:-config.solo-real.yaml}"
+            say "starting SOLO backend on :$BACKEND_PORT ($BACKEND_CFG — ONE real arm, no Jetson)"
+            say "  collision guard starts OFF in this config; the workspace floor,"
+            say "  joint limits, rate caps and motion envelope all stay on."
+        fi
     else
         BACKEND_CFG="${HALLER_HMI_CONFIG:-config.desktop-real.yaml}"
         say "starting LOCAL backend on :$BACKEND_PORT ($BACKEND_CFG — real arms, no Jetson)"
