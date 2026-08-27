@@ -68,6 +68,7 @@ __all__ = [
     "DataDependencyError",
     "DatasetBusyError",
     "dataset_detail",
+    "dataset_fps",
     "dataset_root",
     "delete_dataset",
     "episode_trace",
@@ -141,6 +142,35 @@ def _info(root: Path) -> dict | None:
         return json.loads((root / "meta" / "info.json").read_text())
     except Exception:  # noqa: BLE001 - see above; any failure means "skip it"
         return None
+
+
+def dataset_fps(repo_id: str) -> int | None:
+    """A dataset's declared `fps`, or None when it cannot be read.
+
+    **This one never defaults, and that is the whole point of it existing
+    separately.** `list_datasets` and `_build_detail` both fall back to 30 when
+    `info.json` has no `fps`, which is right for a listing row — a display that
+    says 30 on a malformed dataset is harmless, and a page that renders is
+    better than a page that 500s over one bad directory.
+
+    It is exactly wrong for a gate. The rollout launcher compares a declared
+    control rate against the rate the policy was TRAINED at, and a silent 30
+    there means comparing against a number nobody measured and reporting
+    agreement. A gate that cannot fire is worse than no gate: it passes every
+    test, reassures every reader, and protects nothing. So absence returns
+    None, and the caller says so out loud.
+    """
+    root = dataset_root(repo_id)
+    if not root.exists():
+        return None
+    info = _info(root)
+    if not info:
+        return None
+    try:
+        fps = int(info["fps"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return fps if fps > 0 else None
 
 
 def _dir_size(root: Path) -> int:

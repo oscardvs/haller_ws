@@ -32,27 +32,35 @@ Four properties shape every handler below, and none of them is a preference.
   declaration order, `metrics` satisfies `RUN_ID_RE`, and the failure of
   getting it wrong is a cross-run chart answering `404 no run metrics`.
 
-`require_local` gates EXACTLY three routes — `POST /lab/runs/train`, `POST
-/lab/runs/{id}/stop`, `DELETE /lab/runs/{id}` — and no GET. `--host 0.0.0.0` is
+`require_local` gates EXACTLY four routes — `POST /lab/runs/train`, `POST
+/lab/runs/rollout`, `POST /lab/runs/{id}/stop`, `DELETE /lab/runs/{id}` — and
+no GET. `--host 0.0.0.0` is
 how the Quest reaches the HMI; reaching it must not also mean launching an
 hours-long GPU job or killing one. Watching a run from the headset is exactly
 what the LAN is for.
 
 ## What this module does not launch
 
-Only `train`. There is no `record` kind anywhere in this port (recording owns
-the Feetech bus and the bus stays in the serving process — `lab/runs.py` has
-the 2026-08-21 incident that closed that path), and rollout is not on this
-surface yet. When it lands it is a `/lab/runs` route like any other and NOT a
-bus handover: the contract's rollout addendum rules that the detached child
-loads the checkpoint and runs INFERENCE ONLY, streaming target joint angles to
-the server, which keeps the bus and commits them through the same LPF → rate
-cap → clamp → collision guard → floors → E-STOP chain every other input goes
-through. So nothing here ever hands a resource to a child, and `stop` never
-escalates past SIGTERM.
+`train` and `rollout`. There is no `record` kind anywhere in this port —
+recording owns the Feetech bus and the bus stays in the serving process
+(`lab/runs.py` carries the 2026-08-21 incident that closed that path).
+
+**`rollout` is a `/lab/runs` route like any other and NOT a bus handover.** The
+contract's rollout addendum rules that the detached child loads the checkpoint
+and runs INFERENCE ONLY, streaming target joint angles to the server, which
+keeps the bus and commits them through the same LPF → rate cap → clamp →
+collision guard → floors → E-STOP chain every other input goes through. So
+nothing here ever hands a resource to a child, and `stop` never escalates past
+SIGTERM.
+
+The rollout launcher carries the one check neither side can do alone: the
+DECLARED control rate against the rate the policy was TRAINED at. The child is
+handed `control_hz` and never opens `info.json`, so it can record both numbers
+but cannot compare them. See `post_rollout`.
 """
 from __future__ import annotations
 
+import math
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -90,6 +98,17 @@ DEFAULT_SAVE_FREQ = 20_000
 DEFAULT_NUM_WORKERS = 4
 DEFAULT_EVAL_SEED = 42
 DEFAULT_EVAL_MODE = "random"
+
+#: How long a rollout runs when the caller does not say. A bounded default
+#: rather than "until stopped", because this loop moves a real arm from a
+#: browser button.
+#:
+#: The CEILING is deliberately NOT mirrored here. `rollout_runner` owns it
+#: (`MAX_DURATION_S`) and refuses past it, and `lab/` must not import
+#: `runners/` — so a copy of that number in this module would be a second
+#: fact that must agree with the first and would eventually not. The cost is
+#: that an over-long duration dies in the child instead of arriving as a 400.
+DEFAULT_ROLLOUT_DURATION_S = 60.0
 
 #: Points the loss chart should end up with whatever the run's length, which is
 #: what `log_freq` is scaled to. LeRobot's fixed default of 200 means a 40-step
@@ -332,19 +351,120 @@ def _requested_episodes(payload: dict, detail: dict) -> list[int] | None:
     return wanted
 
 
-def _spec_of(payload: dict) -> dict:
-    """The training spec out of the request body.
+def _positive_float(payload: dict, key: str, default: float) -> float:
+    """A positive float, or a 400 naming the field and what arrived.
+
+    `None` and a missing key take the default; anything present and unusable is
+    refused rather than coerced, because the coercion nobody sees is the one
+    that runs the arm at a rate the operator did not choose.
+    """
+    raw = (payload or {}).get(key)
+    if raw is None:
+        return float(default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} must be a number, not {raw!r}") from None
+    # `isfinite` first: NaN fails every comparison, so `value <= 0` alone lets
+    # it through and it would reach the arm as a period of nan seconds.
+    if not math.isfinite(value) or value <= 0:
+        raise HTTPException(
+            status_code=400, detail=f"{key} must be greater than 0, not {raw!r}")
+    return value
+
+
+def _spec_of(payload: dict, marker: str = "repo_id") -> dict:
+    """The job spec out of the request body.
 
     The frozen line reads `POST /lab/runs/train {spec}` and does not say
     whether the spec IS the body or sits under a `spec` key, so both are
     accepted. A client that guessed the other way would otherwise be told
     `repo_id is required` by a request that plainly carries one, which is the
     least actionable 400 this route could produce.
+
+    `marker` is the field that tells a flat spec from a wrapper: whatever the
+    route's own required key is (`repo_id` to train, `policy_path` to roll
+    out). Passing the wrong one would make `{"spec": {...}}` unwrap correctly
+    and a flat body unwrap to nothing, so it names the route's key rather than
+    defaulting to a shape.
     """
     inner = (payload or {}).get("spec")
-    if isinstance(inner, dict) and "repo_id" not in (payload or {}):
+    if isinstance(inner, dict) and marker not in (payload or {}):
         return inner
     return payload or {}
+
+
+def _trained_rate(policy_path: str) -> dict:
+    """The rate the checkpoint at `policy_path` was TRAINED at.
+
+    `{fps, repo_id, source, reason}`. `fps` is None exactly when a link of the
+    chain could not be read and `reason` then names which one — see
+    `runs.trained_dataset` for why no link is ever guessed around, and for the
+    check that nothing in a checkpoint carries a rate directly.
+
+    Both halves are here because this is the only place both are in scope. The
+    rollout child is handed `control_hz` in its spec and never opens
+    `info.json`, so it can record the two numbers but cannot compare them —
+    which makes a divergence reconstructible after the fact rather than
+    detected before the arm moves.
+    """
+    found = runs_mod.trained_dataset(policy_path)
+    repo_id = found["repo_id"]
+    if not repo_id:
+        return {"fps": None, "repo_id": None, "source": None,
+                "reason": found["reason"]}
+    try:
+        fps = catalog.dataset_fps(repo_id)
+    except ValueError as e:
+        # `dataset_root` refuses a repo-id that escapes the cache. Arriving from
+        # a file on disk rather than from a URL makes that stranger, not safer.
+        return {"fps": None, "repo_id": repo_id,
+                "source": found["config_path"], "reason": str(e)}
+    if fps is None:
+        return {
+            "fps": None, "repo_id": repo_id, "source": found["config_path"],
+            "reason": (
+                f"this policy was trained on {repo_id}, which cannot be read "
+                "here — renamed, pruned or deleted — so the rate it was trained "
+                "at cannot be recovered from it"
+            ),
+        }
+    return {"fps": fps, "repo_id": repo_id, "source": found["config_path"],
+            "reason": ""}
+
+
+def _rate_matches(declared: float, trained_fps: int) -> bool:
+    """Does a declared control rate match the rate the policy was trained at?
+
+    **Exact, not a tolerance, and two-sided.**
+
+    Two-sided because declaring is a free choice in both directions and both
+    directions are the same error: a policy trained at 30 Hz and stepped at 15
+    applies action deltas sized for 33 ms over 67 ms, and stepped at 60 applies
+    them over 17. The child's run-time gate is one-sided only because a loop
+    that sleeps to its declared period cannot MEASURE faster than it declared,
+    which is physics rather than policy.
+
+    Exact because there is no noise source between these two numbers. Gate
+    (b)'s 0.9 absorbs the real physical gap between an intended period and an
+    achieved one; here `fps` is an `int` in lerobot's own `DatasetInfo` and
+    `control_hz` is a declared spec value, so nothing between them can produce
+    27 or 33 by accident. A +/-10% band would admit exactly two things — typos,
+    and deliberate choices. A typo should be refused, and a deliberate choice
+    belongs in the override where it is stamped into the run record rather than
+    slipping under a threshold that leaves no evidence. **Reading
+    `MIN_RATE_FRACTION` here would make one constant answer two questions**,
+    and the day it is tuned for jitter it would silently widen a typo gate.
+
+    Structural note, so this is not revisited blindly: invariant 10 requires
+    `fps` to be MEASURED, and a fractional fps would make exact match refuse
+    every rollout. LeRobot's schema types the field `int`, so a measured rate
+    is rounded before it is stored — the constraint holds by the format, not by
+    anyone remembering it here.
+    """
+    return float(declared) == float(trained_fps)
 
 
 def _query_list(values: list[str] | None) -> list[str]:
@@ -584,6 +704,195 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
             # The id ONLY. The page follows the run through the routes below,
             # so returning the whole record here would be a second spelling of
             # `GET /lab/runs/{id}` that no rename could ever reach.
+            return {"id": record["id"]}
+
+    @router.post("/lab/runs/rollout", dependencies=local_only)
+    def post_rollout(payload: JsonBody):
+        """Run a trained policy, refusing a control rate it was not trained for.
+
+        **The child owns the policy and never the bus.** It loads the
+        checkpoint, runs inference, and streams target joint angles to this
+        server over loopback; the server keeps the bus and commits them through
+        the same LPF -> rate cap -> clamp -> collision guard -> workspace floors
+        -> E-STOP chain every other input goes through. Nothing is handed to a
+        child here. This route writes a spec and starts a process.
+
+        **Check (a) — declared `control_hz` against the rate the policy was
+        TRAINED at — lives here because this is the only place both numbers are
+        in scope.** The child is handed `control_hz` in its spec and never opens
+        `info.json`, so it can stamp both numbers but cannot compare them: that
+        makes a divergence reconstructible after the arm has moved, not detected
+        before it does. Its own gate (b), measured-vs-declared, is a different
+        check on a different event and both exist.
+
+        The chain is `<checkpoint>/train_config.json` -> `dataset.repo_id` ->
+        that dataset's `meta/info.json` -> `fps`, and it is the ONLY route to
+        the number: nothing in a checkpoint records a rate directly. So a broken
+        link REFUSES rather than falling back — inferring the dataset from the
+        run directory or from whatever the operator has selected would compare
+        the declared rate against the wrong dataset's fps and report agreement,
+        which is worse than no check because it reassures.
+
+        `control_hz` defaults to the trained rate, so the correct value is the
+        one you get by not choosing, and the gate fires only on a divergence
+        somebody typed. Both numbers are stamped into the spec either way,
+        override or not.
+
+        What this route deliberately does NOT re-check: the child's own spec
+        contract — the duration ceiling, the ingest scheme, the rig/side
+        agreement. Those are `rollout_runner`'s, and `lab/` cannot import
+        `runners/`, so every one of them re-checked here would be a second copy
+        of a rule that has to agree with the first.
+        """
+        spec_in = _spec_of(payload, marker="policy_path")
+        policy_path = str(_need(spec_in, "policy_path")).strip()
+        duration_s = _positive_float(
+            spec_in, "duration_s", DEFAULT_ROLLOUT_DURATION_S)
+        if duration_s > runs_mod.MAX_ROLLOUT_DURATION_S:
+            # The SAME constant the child refuses on, read rather than copied,
+            # so the two can never disagree. Refused here as well as there
+            # because a browser button that launches a doomed run and reports it
+            # dead two minutes later is worse than a refusal at the door.
+            raise HTTPException(status_code=400, detail=(
+                f"duration_s {duration_s:g} exceeds the "
+                f"{runs_mod.MAX_ROLLOUT_DURATION_S:g} s ceiling: a policy loop "
+                "started from a browser button must not be able to run until "
+                "someone notices."
+            ))
+        override = bool(spec_in.get("allow_rate_mismatch"))
+        action_names = spec_in.get("action_names")
+
+        with as_http():
+            trained = _trained_rate(policy_path)
+            trained_fps = trained["fps"]
+
+            if trained_fps is None and spec_in.get("control_hz") is None:
+                raise HTTPException(status_code=400, detail=(
+                    f"cannot tell what rate this policy was trained at, and the "
+                    f"request declares no control_hz: {trained['reason']}. Pass "
+                    "control_hz to say what rate to run it at."
+                ))
+            # The default is the trained rate itself, so the only way to reach
+            # the gate below is to have asked for something else. Unreachable
+            # when `trained_fps` is None — the guard above required the key.
+            declared_by = (
+                "request" if spec_in.get("control_hz") is not None
+                else "trained_fps")
+            declared = _positive_float(
+                spec_in, "control_hz", float(trained_fps or 0.0))
+
+            if trained_fps is None:
+                matches = False
+                refusal = (
+                    f"refusing to roll out at {declared:g} Hz: "
+                    f"{trained['reason']}. Nothing in a checkpoint records the "
+                    "rate it was trained at, so there is no second source to "
+                    "check against."
+                )
+            else:
+                matches = _rate_matches(declared, trained_fps)
+                refusal = (
+                    f"refusing to roll out at {declared:g} Hz a policy trained "
+                    f"at {trained_fps:g} Hz on {trained['repo_id']}: that is a "
+                    "different dynamical system, not a faster or slower one — "
+                    "the action deltas are sized for "
+                    f"{1000.0 / trained_fps:.0f} ms steps and would be applied "
+                    f"over {1000.0 / declared:.0f} ms. Declare "
+                    f"{trained_fps:g} Hz, or leave control_hz out to get it."
+                )
+            if not matches and not override:
+                raise HTTPException(
+                    status_code=400,
+                    detail=refusal + " Set allow_rate_mismatch to launch anyway.")
+
+            # ONE source for the joint layout — and the predicate is whether
+            # the dataset could be READ, not whether the checkpoint names one.
+            # A checkpoint naming a dataset that has since been pruned or
+            # deleted has no rig source either, so `action_names` is required
+            # there rather than forbidden. Keying this off `repo_id` refused the
+            # only spec that case can produce.
+            readable = trained["fps"] is not None
+            # The child prefers `action_names` over `repo_id`, so accepting both
+            # would let the rig come from one dataset and the rate from another
+            # with nothing comparing them.
+            if readable and action_names:
+                raise HTTPException(status_code=400, detail=(
+                    f"this checkpoint records the dataset it was trained on "
+                    f"({trained['repo_id']}), so the joint layout comes from "
+                    "there; passing action_names as well would give the rig and "
+                    "the rate two different sources. Drop action_names."
+                ))
+            # Not a duplicate of the child's rig check but a check that the spec
+            # about to be written is runnable at all: with neither key the child
+            # cannot know what the action vector holds, and launching would buy
+            # a run directory that dies in its first second.
+            if not readable and not action_names:
+                raise HTTPException(status_code=400, detail=(
+                    "nothing says what joints this policy's action vector holds: "
+                    f"{trained['reason']}, and the request carries no "
+                    "action_names. Pass action_names to name them explicitly."
+                ))
+
+            spec = {
+                "policy_path": policy_path,
+                "control_hz": declared,
+                # Both numbers, stamped either way — the ruling is that an
+                # override is recorded, not that it is unrecorded. A run whose
+                # rates disagreed says so in its own spec forever.
+                "control_hz_trained": trained_fps,
+                # WHERE the declared rate came from. Without it every run reads
+                # as a deliberate agreement between two numbers and a later
+                # reader cannot tell whether the operator chose 30 or got it for
+                # free. Same instinct as stamping the measured rate either way.
+                "control_hz_declared_by": declared_by,
+                "control_hz_trained_repo_id": trained["repo_id"],
+                "control_hz_trained_source": trained["source"],
+                "control_hz_trained_reason": trained["reason"],
+                "control_hz_mismatch_override": override,
+                "duration_s": duration_s,
+                "device": str(spec_in.get("device") or DEFAULT_DEVICE),
+                "side": str(spec_in.get("side") or ""),
+                # Gate (b)'s override, which is the child's and a different
+                # decision: this one says the DECLARED rate may differ from the
+                # trained one, that one says the MEASURED rate may fall under
+                # the declared one. Passed through untouched.
+                "allow_slow": bool(spec_in.get("allow_slow")),
+            }
+            # The rig is derived from the dataset the policy was TRAINED on,
+            # never from whatever the operator has open — a rollout whose
+            # observation space differs from the recording is a policy being
+            # shown a world it has never seen.
+            if readable:
+                spec["repo_id"] = trained["repo_id"]
+            if action_names:
+                spec["action_names"] = [str(n) for n in action_names]
+            for key in ("task", "robot_type", "ingest_url", "port"):
+                if spec_in.get(key) is not None:
+                    spec[key] = str(spec_in[key])
+
+            bits = ["rollout"]
+            # `_policy_label` rather than a second copy of its rule: every
+            # checkpoint directory is named `pretrained_model`, so identifying
+            # one takes the two segments above it.
+            label = trained["repo_id"] or runs_mod._policy_label(spec)
+            if label:
+                bits.append(str(label))
+            bits.append(f"{declared:g} Hz")
+            bits.append(f"{duration_s:g} s")
+            if override:
+                # Visible in the listing forever, because the whole failure this
+                # gate exists for is a run reported as a success with a rate
+                # attached to nothing.
+                bits.append(
+                    f"rate override ({trained_fps:g} Hz trained)"
+                    if trained_fps is not None else "rate override (rate unknown)")
+
+            record = runs_mod.launch(
+                "rollout",
+                spec,
+                name=str(trained["repo_id"] or "").split("/")[-1],
+                spec_summary=" · ".join(bits),
+            )
             return {"id": record["id"]}
 
     # ---- one run ----------------------------------------------------------

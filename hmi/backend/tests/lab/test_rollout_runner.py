@@ -357,9 +357,9 @@ def test_a_duration_past_the_ceiling_is_refused(tmp_path):
     """A policy loop started from a browser button must not be able to run
     until someone notices."""
     with pytest.raises(SystemExit) as excinfo:
-        rr.build_plan(make_spec(tmp_path, duration_s=rr.MAX_DURATION_S + 1))
+        rr.build_plan(make_spec(tmp_path, duration_s=rr.MAX_ROLLOUT_DURATION_S + 1))
 
-    assert str(int(rr.MAX_DURATION_S)) in str(excinfo.value)
+    assert str(int(rr.MAX_ROLLOUT_DURATION_S)) in str(excinfo.value)
 
 
 def test_a_checkpoint_that_is_not_there_is_named(tmp_path):

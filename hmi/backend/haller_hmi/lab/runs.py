@@ -58,6 +58,7 @@ import time
 from pathlib import Path
 
 __all__ = [
+    "MAX_ROLLOUT_DURATION_S",
     "RUNNERS",
     "RUN_ID_RE",
     "STOP_GRACE_S",
@@ -73,6 +74,7 @@ __all__ = [
     "runs_dir",
     "stop",
     "tail_log",
+    "trained_dataset",
     "write_result",
 ]
 
@@ -101,6 +103,19 @@ RUNNERS = {
     "rollout": "haller_hmi.runners.rollout_runner",
     "export": "haller_hmi.runners.export_runner",
 }
+
+#: Ceiling on how long one rollout may run. A policy loop started from a
+#: browser button must not be able to run until somebody notices.
+#:
+#: It lives HERE, in `lab/`, rather than beside the loop it bounds, so that the
+#: launch route and the child read ONE number. `runners/` already imports
+#: `lab/` (`lab.lease`, `lab.schema`, `lab.catalog`) and nothing under `lab/`
+#: imports `runners/`, so the dependency runs this way already and this costs no
+#: new coupling. The alternative was a copy in the route, which is the failure
+#: mode where two numbers must agree and one day do not — and the route needs it
+#: to refuse an over-long duration AT THE DOOR, rather than launching a run that
+#: is already doomed and reporting it dead two minutes later.
+MAX_ROLLOUT_DURATION_S = 900.0
 
 #: Seconds to wait for a clean SIGINT shutdown before escalating to SIGTERM.
 #: LeRobot's `ProcessSignalHandler` and its training loop both handle
@@ -529,6 +544,77 @@ def checkpoints(run_id: str) -> list[dict]:
     # them by name, so the newest real checkpoint is always row one.
     found.sort(key=lambda c: (c["step"] is None, -(c["step"] or 0), c["name"]))
     return found
+
+
+#: LeRobot writes the training job's fully-resolved config beside the weights,
+#: and it is the ONLY record of what a checkpoint was trained on. Verified
+#: against the kit's real ACT run 2026-08-27 by walking every key of both
+#: files: `config.json` carries the policy ARCHITECTURE and the safetensors
+#: carry weights, and **nothing anywhere in a checkpoint records an fps or a
+#: control rate**. So the rate a policy was trained at is reachable by exactly
+#: one route —
+#:
+#:     <checkpoint>/train_config.json -> dataset.repo_id
+#:                                    -> <that dataset>/meta/info.json -> fps
+#:
+#: which is a chain and not a preference. That is why a broken link is reported
+#: rather than worked around: there is no second source to fall back to, so any
+#: fallback would be an invention.
+TRAIN_CONFIG = "train_config.json"
+
+
+def trained_dataset(policy_path: str | Path) -> dict:
+    """What the checkpoint at `policy_path` was trained on.
+
+    Returns `{repo_id, episodes, config_path, reason}`. `repo_id` is None
+    exactly when the link could not be read, and `reason` then names WHICH link
+    broke in the operator's own terms — no checkpoint there, a checkpoint with
+    no `train_config.json`, JSON that will not parse, or a config naming no
+    dataset.
+
+    **A broken link is not an exception.** A hand-copied checkpoint, or one
+    from a run older than this metadata, is a legitimate thing to be holding;
+    what the caller does about it is the caller's decision. This function's one
+    job is to refuse to invent the answer. Inferring the dataset from the run
+    directory or from whatever the operator happens to have selected would
+    compare a declared rate against the WRONG dataset's fps and report
+    agreement — worse than no check at all, because it reassures (ruled
+    2026-08-27).
+
+    `episodes` is LeRobot's own training list and is returned in its original
+    ORDER, unsorted and undeduped: the eval split is that list's tail, so
+    sorting it here would silently describe a holdout that never happened.
+    """
+    model_dir = Path(policy_path)
+    config_path = model_dir / TRAIN_CONFIG
+    unknown = {"repo_id": None, "episodes": None, "config_path": str(config_path)}
+
+    if not model_dir.exists():
+        return {**unknown, "reason": f"no checkpoint at {model_dir}"}
+    try:
+        config = json.loads(config_path.read_text())
+    except FileNotFoundError:
+        return {**unknown, "reason": (
+            f"{model_dir} carries no {TRAIN_CONFIG}, so nothing records which "
+            "dataset this policy was trained on"
+        )}
+    except (OSError, ValueError) as e:
+        return {**unknown, "reason": f"{config_path} could not be read: {e}"}
+
+    dataset = config.get("dataset")
+    if not isinstance(dataset, dict):
+        return {**unknown, "reason": f"{config_path} carries no 'dataset' block"}
+    repo_id = str(dataset.get("repo_id") or "").strip()
+    if not repo_id:
+        return {**unknown, "reason": f"{config_path} names no dataset.repo_id"}
+
+    episodes = dataset.get("episodes")
+    return {
+        "repo_id": repo_id,
+        "episodes": [int(e) for e in episodes] if isinstance(episodes, list) else None,
+        "config_path": str(config_path),
+        "reason": "",
+    }
 
 
 def delete_run(run_id: str) -> dict:

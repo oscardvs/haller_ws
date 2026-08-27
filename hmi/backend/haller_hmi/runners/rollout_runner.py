@@ -70,6 +70,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..lab.lease import port_holders
+from ..lab.runs import MAX_ROLLOUT_DURATION_S
 from ..lab.schema import RigSpec
 from ..safety import MIN_RATE_FRACTION
 from ._common import load_spec, run_guarded
@@ -83,7 +84,7 @@ __all__ = [
     "HANDSHAKE_TIMEOUT_S",
     "HELLO_TYPE",
     "INGEST_URL_ENV",
-    "MAX_DURATION_S",
+    "MAX_ROLLOUT_DURATION_S",
     "MIN_RATE_FRACTION",
     "OBSERVATION_TYPE",
     "RATE_ALERT_UNDER_S",
@@ -159,11 +160,6 @@ RATE_ALERT_UNDER_S = 2.0
 #: the gate is deciding — measure first, then commit.
 RATE_WARMUP_TICKS = 20
 
-#: Hard ceiling on a single rollout, in seconds. Duration is ALWAYS bounded: a
-#: policy loop started from a browser button must not be able to run until
-#: somebody notices. 15 minutes is well past any demonstrated task on this rig
-#: and well short of "until the battery dies".
-MAX_DURATION_S = 900.0
 
 #: Where the two rate numbers land. `lab/runs.write_result` carries exactly
 #: four keys and is shared with `load()`, so it is not the place to add fields;
@@ -337,9 +333,10 @@ def build_plan(spec: dict) -> dict:
     duration_s = float(spec.get("duration_s") or 0.0)
     if duration_s <= 0:
         raise SystemExit("duration_s must be > 0 — a rollout is always bounded.")
-    if duration_s > MAX_DURATION_S:
+    if duration_s > MAX_ROLLOUT_DURATION_S:
         raise SystemExit(
-            f"duration_s {duration_s:g} exceeds the {MAX_DURATION_S:g} s ceiling: "
+            f"duration_s {duration_s:g} exceeds the "
+            f"{MAX_ROLLOUT_DURATION_S:g} s ceiling: "
             "a policy loop started from a browser button must not be able to run "
             "until someone notices."
         )

@@ -103,6 +103,7 @@ RUN_ROUTES = frozenset({
     ("GET", "/lab/runs"),
     ("GET", "/lab/runs/metrics"),
     ("POST", "/lab/runs/train"),
+    ("POST", "/lab/runs/rollout"),
     ("GET", "/lab/runs/{run_id}"),
     ("GET", "/lab/runs/{run_id}/metrics"),
     ("GET", "/lab/runs/{run_id}/log"),
@@ -468,6 +469,9 @@ def test_the_gate_is_built_from_deps_for_every_gated_sub_router(home):
         "/lab/datasets", params={"repo_id": REPO, "confirm": REPO})
     assert refused.status_code == 403, refused.text
     assert client.post("/lab/runs/train", json={"repo_id": REPO}).status_code == 403
+    # The worse one to leave open: `train` burns a GPU, `rollout` MOVES THE ARM.
+    assert client.post(
+        "/lab/runs/rollout", json={"policy_path": "/nope"}).status_code == 403
     assert client.delete(f"/lab/runs/{run_id}").status_code == 403
 
     # Ungated on purpose, from the same LAN client: triage from inside the
