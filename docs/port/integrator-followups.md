@@ -512,6 +512,36 @@ applies to any probe that prunes, not only to a matrix.
   producer at the real consumer does. The fixed pane now reads `RAN 53m 10s` for a
   19:33:50 -> 20:27:00 run — arithmetic nobody put in the code.
 
+  **The mechanism, self-reported by its author, and it is sharper than the class name.**
+  Verified: the comment landed at `231620c` (12:42) and `lab/runs.py` did not exist until
+  `2a92b03`. It asserted a specific implementation detail **of code that had not been
+  written**, as established fact, and justified a `* 1000` with it.
+
+  > **A comment asserting what another system does is a claim requiring evidence, exactly
+  > like a test assertion — and it gets none of the scrutiny, because it reads as
+  > documentation.**
+
+  Their diagnosis of why it survived review is the transferable part: *"My type said
+  `number | null`, which is a guess and LOOKS like one. The comment said 'the backend
+  writes `time.time()`', which is a CITATION of something nobody could have observed. I
+  would have caught the guess. I did not catch the citation, because citations look like
+  they came from somewhere."* And the register made it worse rather than better — the
+  comment correctly names that a units error here masquerades as a formatting bug, then
+  commits that exact error in the other direction, so anyone debugging the `—` cells would
+  have gone looking at the backend's clock instead of at the type. **Confident,
+  mechanism-first prose is what makes these comments worth reading and is exactly what
+  makes a fabricated one dangerous.**
+
+  The honest form was available and free: *"assumed unix seconds — no `/lab/runs` backend
+  exists yet to check against."* Write the citation you can support, or mark it an
+  assumption. **A comment that later silently changes its story teaches nothing**, so the
+  fix at `5a196a5` names `runs.py::_now()` and says *it never was* rather than quietly
+  correcting.
+
+  Provenance note, offered by the author and worth keeping: it came from a subagent in a
+  fan-out, was reviewed, and carried the track's voice. **A delegated claim inherits your
+  register and your credibility without inheriting your evidence.**
+
 - **A column whose job is telling rows apart needs a DISTINCTNESS assertion; no
   per-item check can see it.** All thirteen checkpoint rows rendered `pretrained_model`,
   because the wire sends the MODEL directory (what a rollout is pointed at) and the step
