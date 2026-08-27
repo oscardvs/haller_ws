@@ -156,8 +156,9 @@ input, 403 remote-refused, 503 dependency missing.
 GET  /lab/datasets                    -> {datasets:[{repo_id,task,episodes,frames,duration_s,
                                           size_bytes,marks:{keep,reject,unset},is_backup,rig}]}
 GET  /lab/datasets/detail?repo_id     -> {repo_id,root,fps,robot_type,video_keys,features,rig,
-                                          episodes:[{index,label,frames,duration_s,share,task,
-                                                     verdict,reasons,arms,mark,note,tags,videos}]}
+                                          episodes:[{episode_index,label,frames,duration_s,share,
+                                                     task,verdict,reasons,arms,mark,note,tags,
+                                                     videos}]}
 GET  /lab/datasets/episodes?repo_id&sort&order&filter_mark&filter_verdict&tag&q&offset&limit
                                       -> {total, episodes:[...]}     # sort/filter SERVER-side
 GET  /lab/datasets/trace?repo_id&episode -> {names,t,action,state,gripper}
@@ -561,3 +562,174 @@ DECLARED rate. Recorded here so it is not rediscovered as a mystery demotion.
 If streaming inference proves unworkable for a reason nobody has seen yet,
 rollout stays a CLI operation with the HMI stopped — which is what the kit does
 today. Take that only after MEASURING, and tell the integrator first.
+
+---
+
+# Addendum — the video slice, measured
+
+Verified against the real `local/so101_pick_cube` on 2026-08-27 with ffmpeg and
+ffprobe, because a clamp that is reasoned about and never watched is the kind
+that ships. Reviewing is the one workflow where a silent wrong answer costs
+data rather than time: a wrong clamp does not throw, it shows the wrong
+demonstration, and the operator rejects it.
+
+## The metadata is trustworthy
+
+Across all 7 mp4 files: the last episode's `to_timestamp` equals the real
+container duration to **0.0000 s**. All 46 episodes are frame-exact —
+`(to − from) * fps == length` for every one — and consecutive episodes are
+**butt-joined**, with no gaps and no overlaps: episode N's `to_timestamp` IS
+episode N+1's `from_timestamp`, exactly.
+
+| file | episodes | duration | last `to_timestamp` |
+| --- | --- | --- | --- |
+| file-000 | 2 | 45.933 | 45.933 |
+| file-001 | 5 | 82.567 | 82.567 |
+| file-002 | 8 | 238.400 | 238.400 |
+| file-003 | 5 | 126.467 | 126.467 |
+| file-004 | 13 | 268.333 | 268.333 |
+| file-005 | 1 | 29.167 | 29.167 |
+| file-006 | 12 | 192.467 | 192.467 |
+
+## `to_timestamp` is EXCLUSIVE, and the clamp is one frame period
+
+An episode occupies frames whose PTS is in `[from, to)`. The last real frame
+sits at exactly `to − 1/fps`. Because episodes are butt-joined, playing to
+`to_timestamp` itself shows the FIRST FRAME OF THE NEXT EPISODE — confirmed by
+decoding at 60.5666 and 60.567 in file-001 (episode 6's end, episode 7's start)
+and getting different checksums.
+
+So a clamp is required. **It must be `to_timestamp − 1/fps`, not a small
+constant.** One frame period at 30 fps is 0.0333 s, so a 0.01 s clamp does not
+reach the previous frame. Bisected on file-001, whose last episode ends at the
+container duration:
+
+```
+seek 82.567   (to_timestamp)          -> NO FRAME
+seek 82.557   (to_timestamp - 0.01)   -> NO FRAME
+seek 82.540                           -> NO FRAME
+seek 82.534                           -> NO FRAME
+seek 82.533   (to_timestamp - 1/30)   -> frame decoded
+```
+
+`ffprobe` confirms the last frame's PTS is 82.533333 = `to − 1/fps`.
+
+A clamp smaller than a frame period lands past the last frame and the player
+shows nothing — on the LAST episode of each file, which is 7 of 46 here. And
+`− 1/fps` is the LARGEST clamp that still cannot leak into the next episode, so
+it is the correct value rather than merely a working one.
+
+## Seek, don't re-buffer
+
+Compare on `(chunk_index, file_index)` to tell "same file, different episode"
+from "different file". The win is real on this dataset: file-001 holds 5
+consecutive episodes and file-004 holds 13.
+
+---
+
+# Addendum — the grader was independently reproduced
+
+2026-08-27. Recorded here because it is evidence about the SOURCE rather than
+about either implementation, and that kind of fact evaporates if it only ever
+lives in a conversation.
+
+Two implementations of the kit's grading ladder were written from the kit's own
+`grade.py` by two sessions that never saw each other's code and shared none:
+
+* `haller_hmi/lab/grade.py` — this port, per arm off a `RigSpec`.
+* Track C's rendering fixture — an independent reimplementation in a scratchpad.
+
+Both were then compared against `tests/lab/fixtures/kit_verdicts_so101_pick_cube.json`,
+which is the KIT'S OWN unmodified `catalog.dataset_detail` output captured under
+the serving venv against the real 46-episode `local/so101_pick_cube`.
+
+**Per episode, not in aggregate.** 12 fields × 46 episodes = 552 comparisons:
+
+| field | agreement |
+| --- | --- |
+| label, frames, verdict, **why**, closes, reopened | exact |
+| grip_min, grip_max, tracking | within 5e-4 |
+| sweep_total | within 5e-3 |
+| share | within 5e-6 |
+
+`why` is the load-bearing field. A histogram match (28 PASS / 9 SUSPECT /
+9 FAIL) is weak evidence: two implementations can produce identical counts while
+disagreeing about WHICH episodes are which — a swapped pair leaves every count
+unchanged, and the two rungs most likely to be implemented differently
+(`closes > 1` and `not reopened`) are ADJACENT in the ladder, so a boundary
+error moves episodes between them in both directions at once. Matching `why`
+per episode means the ladder took the SAME BRANCH on the same episode 46 times,
+em-dashes and the degree sign included.
+
+One difference in 552, and it was not the grader: `status` on stored index 2.
+`status` is a review MARK, not a grader output — no rung produces it — and it
+had been changed by hand in a browser triage test against an in-memory mock.
+The real `review.json` was verified untouched afterwards: md5
+`7c53ee1d56657437b45046e308e759e3`, mtime unchanged, still 35 keep / 11 reject,
+and no `.review-*.json` temp file left in the dataset root.
+
+Worth recording about how the second implementation behaved, because it is what
+makes the agreement mean something: it got the measures WRONG first — `max`
+instead of `mean` for tracking, and summed `|diff|` instead of range for sweep —
+and graded 46/46 FAIL. The failure was LOUD. A silent partial agreement was
+never on the table, which is exactly the property that makes the eventual match
+informative rather than reassuring.
+
+## One shape difference from the kit, expected
+
+The kit appends the dominant-share note INLINE to its single `why`. This port
+emits it as its own `reasons` entry, because with two arms there is no single
+`why` to append to. A naive string compare against the kit therefore differs on
+any PASS episode over 0.30 share. None of `so101_pick_cube`'s 46 episodes
+exceeds that share (the largest is ~0.06), which is why the 46/46 match holds
+without rejoining — but a smaller dataset would need the rejoin before
+comparing.
+
+
+---
+
+# Addendum — the episode index is `episode_index`, never `index`
+
+Ruled by haller-ws-13 2026-08-27, OVERRIDING this document's original `index`.
+The earlier spelling was wrong and the correction is a fact, not a preference.
+
+**LeRobot's own v3.0 parquet carries BOTH, as DIFFERENT columns.** Verified on
+both real datasets in `~/robot-data/lerobot`:
+
+```
+features -> ['frame_index', 'episode_index', 'index', 'task_index']
+
+episode 1's first three frames, local/so101_pick_cube:
+  episode_index = [1, 1, 1]        which episode
+  frame_index   = [0, 1, 2]        the frame's number WITHIN the episode
+  index         = [855, 856, 857]  the GLOBAL FRAME INDEX across the dataset
+```
+
+So `index` is already taken, by the storage format, for a different quantity.
+Spelling an episode index `index` does not merely stutter differently from
+`episode_index` — it **collides with an existing column that means something
+else**, on the exact surface most likely to be read next to frame data. Anyone
+joining a catalog row to frame data would meet two `index` fields meaning two
+things.
+
+The argument the original spelling rested on — "the row IS an episode, so
+`index` is unambiguous" — is true in isolation and would have beaten a stutter
+objection. It does not survive the column already existing.
+
+**If a global frame index is ever exposed anywhere, spell it `index`**, matching
+the format exactly, so no surface in this system ever translates a LeRobot
+column name.
+
+The trace's duration moves with it: `seconds` -> `duration_s`, matching
+`/lab/datasets` and a detail episode. One API spelling one quantity two ways
+makes every reader ask which one this route uses.
+
+`tests/lab/test_routes_datasets.py::test_the_trace_does_not_carry_the_catalog_spellings`
+guards all four halves — `episode_index` present, `index` ABSENT, `duration_s`
+present, `seconds` absent. Asserting only presence would pass forever on a
+payload carrying both spellings, which is a payload that will one day start
+carrying only the wrong one.
+
+The legacy `/record/episodes` entries keep their own `index` unchanged: that is
+a frozen shape with its own meaning and its own tests, and it is not this
+surface.
