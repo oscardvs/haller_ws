@@ -247,6 +247,51 @@ disagree, the phase NAMES below win.
 | 6 | **Train + rollout** | detached runners on `haller-lab`; export of a pruned dataset; `lerobot_rollout` reachable; cross-version round-trip proven | **MED** | U5, U7 |
 | 7 | **Bimanual build** | `BiQuestTeleoperator`'s per-hand structure married to `SO101IKSolver` over stock `BiSOFollower`; sim-verified through `SimArmHandle` | **HIGH** | P1, P3 |
 
+**Sequencing amendment (2026-08-27, Track A's argument, adopted).** The rollout
+ingest runs **after P1–P2 and BEFORE P3 and P7**, scoped SOLO:
+
+    P1 -> P2 -> rollout ingest (solo) -> P3 -> P7
+
+It must be after P2 because it needs the settled commit chain and the TickBus's
+measured rate; building it against the three-sampler world means building it twice.
+It must NOT wait for P7 because **the rollout ingest is what closes the loop, and
+nothing else does.** Until a policy trained on the new data drives the arm, this
+port's whole thesis — that the kit's acquisition discipline comes in and the data
+gets good — is unfalsified, and P3 doubles the schema and P7 doubles the arms on top
+of an unverified premise. Closing it solo and early is also cheap: the kit's proven
+end-to-end path *is* single-arm (its bimanual file is DK1), so the first useful
+rollout is solo by construction, and gating the one proven path on the one brand-new
+path that is waiting on hardware inverts the risk order.
+
+Not blocked on training: the ingest is verifiable against a fake action source
+streaming a recorded episode back — no policy, no checkpoint, no GPU.
+
+**A rollout below rate is REFUSED, not warned** (corrects an earlier integrator call).
+A policy trained at 30 Hz and run at 4.8 Hz applies action deltas sized for 33 ms over
+208 ms — a different dynamical system, and the same class of error as a declared-not-
+measured fps. Refusing one while tolerating the other is incoherent. Same 90% constant
+as the record gate, refuse below it, alert mid-run, explicit override for someone who
+means it, measured rate stamped into the run record either way. The kit's real failure
+was not that a 4.8 Hz run happened; it was that "success" was reported with that number
+attached to nothing.
+
+**Policy actions are DEGREES on every joint**, declared once at lease time, never
+per-message. Normalising in the child would put a calibrated range on both sides of an
+interpreter boundary — two things that must match exactly and eventually will not — and
+a per-message unit that can flip mid-rollout is a footgun with no legitimate caller.
+Convert at the door, as `wire.py::normalize_frame` already does. Related defect being
+fixed with it: `human_teleop.py::_to_degrees` clamps the gripper to [0,1] and scales
+onto the calibrated range, so a policy emitting degrees collapses to two values —
+failing toward DROP THE OBJECT. That [0,1] scaling moves out of the session into the VR
+converter that produces it, so nothing inside the session knows one input dialect
+normalises one joint.
+
+**Constants tuned against the Quest's cadence must be re-read once a second source
+exists.** `frame_age_ms_loss = 700` is ~42 missed frames at 60 Hz but three frames at a
+legitimate 4.8 Hz, so a healthy slow policy would trip tracking-loss and be demoted
+mid-rollout with a symptom pointing nowhere near the cause. Staleness budgets are
+relative to the source's DECLARED rate.
+
 **P7-H — the hardware batch.** Not a phase; a gate. Per decision 4 everything above is
 built and verified in sim first, then ONE hardware session with the new servos clears
 U3 (re-measured on the real bus), U6, U8, and the bimanual real-arm pass. Nothing waits
