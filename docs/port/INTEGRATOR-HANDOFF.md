@@ -56,15 +56,23 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1632 passed + 1 xfailed at `3ae8320`.** The ladder, every rung
+- **backend `pytest`: 1632 passed + 1 xfailed at `f92cc41`.** The ladder, every rung
   measured from a detached worktree run from inside `<worktree>/hmi/backend`:
 
         1633  c0cab73  settled baseline (haller-ws-b7)
         +  0  8ce2ede, 5238478, fc3b6c5  — bodies, docstrings and docs; no test added or removed
         1633  fc3b6c5  (haller-ws-84; independently re-measured by Track B, same figure)
         -  1  3ae8320  `rate_ok` deleted — one pure-`rate_ok` test dies with it (Track A)
-        ----
         1632  3ae8320  (haller-ws-84, and Track A independently)
+        +  0  51e642d, abdc52e, c236371, f92cc41  — docs, plus one test DOCSTRING (abdc52e)
+        +  0  b908cf6  — `lease.py` docstring only (Track B)
+        +  0  2202e7c  — `trackB-handoff.md` only (Track B)
+        ----
+        1632  f92cc41  (haller-ws-84, detached worktree; Track B measured 1632 @ b908cf6)
+
+  Two rungs are asserted from commit SCOPE rather than re-run, and say so: `2202e7c` is
+  one docs file, and `abdc52e`'s only code touch is a test docstring (`test_server_mount.py`
+  re-run alone, 5 passed). Everything else on the ladder was measured.
 
   Track A's older **1577 = 1487 + 90** at `8ce2ede` is also right — it is a TRACK delta
   against their own `42d5fa4`+Phase-2 tree, which excludes other tracks' commits. **Say

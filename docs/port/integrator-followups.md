@@ -1058,6 +1058,30 @@ applies to any probe that prunes, not only to a matrix.
   cap is the next thing that will move them. The copied-fact rule is usually aimed at
   someone else's rotted comment; audit your OWN from today.
 
+- **A FABRICATED CITATION SURVIVES INTO THE COMMIT THAT REMOVES ONE — and only checking the
+  SYMBOL catches it.** Track B, fixing `lease.py:175` for naming a caller that does not exist,
+  wrote a first draft citing `rollout_runner.py::PolicyClient.handshake`. The class is
+  `IngestClient` (`:453`). They caught it on verification and fixed it before committing, and
+  their own account is the transferable half: *"I'd written a fabricated citation into the very
+  commit removing one, which is a fair measure of how easily that class survives. Verifying the
+  symbol I was citing is what caught it; reading it back would not have."*
+  **Re-reading a sentence checks whether it is well-formed, not whether it is true.** A
+  citation is the one kind of prose with a mechanical check available — grep the symbol — and
+  it is the kind that gets none, because it reads as documentation. The remedy is not more
+  care; it is the grep.
+
+- **Deleting a stale OPEN section makes a doc say "nothing is open", which is a different
+  false claim.** Track B removed a `## OPEN` block in `trackB-handoff.md` claiming the
+  launcher check was "ruled in and NOT built" — it shipped at `d32cb3b` with 32 tests — and
+  then noticed that removal left the file with no signpost at all. **A stale open item and an
+  absent one both misinform; only the first announces itself.** They replaced it with a real
+  one-item section naming its trigger. Same instinct as the two-baselines ruling: the fix for
+  a wrong statement of record is a right one, not a gap.
+  With it, the move worth copying: **they recorded the old warning as MET rather than deleting
+  it.** It had said "do not bolt this onto `/lab/runs/train`, which trains and does not roll
+  out"; the route now exists and the check went to the right place. *A warning that was heeded
+  is evidence; a deleted one is silence.* Cousin of keeping and inverting a defending test.
+
 - **A FABRICATED fact is worse than a rotted one, because no commit made it wrong.**
   The copied-fact class assumes a comment that was TRUE when written and rotted on
   somebody else's commit — you can find the commit and learn something. `lib/api.ts` typed
