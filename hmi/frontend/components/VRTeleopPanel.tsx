@@ -34,7 +34,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
 import {
-  api, ApiError, cameraStreamUrl, recordRateGate, type CameraInfo,
+  api, ApiError, cameraStreamUrl, recordRateFaithful, type CameraInfo,
   type HumanTeleopStatus, type RecordDrops, type RecordStatus,
 } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
@@ -1150,7 +1150,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
             fpsDeclared: rs?.fps_declared ?? null,
             // The recorder publishes the gate it is actually refusing at, so the
             // HUD reads it instead of holding a second copy that can drift.
-            rateGate: recordRateGate(rs),
+            rateFaithful: recordRateFaithful(rs),
             invalidatedReason: rs?.invalidated_reason ?? null,
             localGate: gateServerRef.current === false,
             takes: takesRef.current,

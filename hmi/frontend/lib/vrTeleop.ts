@@ -551,10 +551,12 @@ export type RecorderHudLike = {
    *  worth abandoning early. */
   fpsMeasured?: number | null;
   fpsDeclared?: number | null;
-  /** The fraction of declared the RECORDER is actually refusing at, published
-   *  by it rather than copied here — a HUD holding its own threshold drifts
-   *  from the 409 and the two end up telling the operator different stories. */
-  rateGate?: number | null;
+  /** The recorder's own verdict on whether the measured rate is FAITHFUL to
+   *  the declared one — `recordRateFaithful`, not a threshold. The panel reads
+   *  it; this painter holds no band of its own, so it cannot drift from the
+   *  refusal the operator gets at arm time. `null` means NOT ANSWERABLE: the
+   *  rate is unmeasured, or the backend publishes no tolerance. */
+  rateFaithful?: boolean | null;
   /** Why an ARMED gate fell back to idle. Not an error — the gate saying why
    *  it dropped. Silent un-arming is the failure the gate exists to prevent. */
   invalidatedReason?: string | null;
@@ -589,16 +591,18 @@ function recHealthLine(
   rec: RecorderHudLike,
 ): { text: string; color: string } | null {
   if (!rec) return null;
-  const measured = rec.fpsMeasured;
-  const declared = rec.fpsDeclared;
-  // The recorder's own refusal threshold, read rather than assumed. 0.9 is the
-  // fallback for a backend that does not publish one.
-  const gate = typeof rec.rateGate === "number" && rec.rateGate > 0
-    ? rec.rateGate : 0.9;
-  if (typeof measured === "number" && typeof declared === "number"
-      && measured < declared * gate) {
+  const measured = typeof rec.fpsMeasured === "number" ? rec.fpsMeasured : null;
+  const declared = typeof rec.fpsDeclared === "number" ? rec.fpsDeclared : null;
+  // TWO decimals, and it is arithmetic rather than taste. The recorder refuses
+  // at |measured - fps| / fps > tol, so at d decimals the two numbers can print
+  // IDENTICALLY while this line is red whenever `fps < 10^(2-d)`: below 100 Hz
+  // at d=0 — which is how `RATE 30/30 fps` shipped against a 30 fps take — and
+  // below 10 Hz at d=1. d=2 is the first that is not calibrated for one
+  // cadence, and `fps` is round(measured) off a settable float `hz`, so no
+  // cadence here is pinned by anything but habit.
+  if (measured !== null && declared !== null && rec.rateFaithful === false) {
     return {
-      text: `RATE ${measured.toFixed(0)}/${declared.toFixed(0)} fps`,
+      text: `RATE ${measured.toFixed(2)}/${declared.toFixed(2)} fps`,
       color: "#f28b82",
     };
   }
@@ -621,6 +625,17 @@ function recHealthLine(
       text: rec.localGate
         ? "armed locally — nothing written yet"
         : "armed — nothing written yet",
+      color: "#fdd663",
+    };
+  }
+  // Last, below every real problem and below the gate's own reassurance: the
+  // backend publishes no tolerance, so this page has no band. Naming that beats
+  // inventing one — a fallback fraction read as a tolerance is a threshold the
+  // HUD made up wearing the recorder's authority, and 0.9 read as a tolerance
+  // means +/-90%, which cannot fire in either direction.
+  if (measured !== null && declared !== null && rec.rateFaithful == null) {
+    return {
+      text: `RATE ${measured.toFixed(2)} fps — no band published`,
       color: "#fdd663",
     };
   }

@@ -473,14 +473,16 @@ describe("paintHud and the start gate", () => {
       .toEqual(plain.calls.map((c) => [c.x, c.y]));
   });
 
-  it("puts a sagging rate above every other complaint", () => {
+  it("puts an unfaithful rate above every other complaint", () => {
     // One line, worst first: a health strip that lists everything is a strip
-    // nobody reads while driving. 90% of declared is the backend's own refusal
-    // threshold, so the HUD and the 409 tell one story.
+    // nobody reads while driving. WHETHER the rate is unfaithful is the
+    // recorder's verdict; what this pins is the ORDER, which is the HUD's own
+    // decision and the only half of it this file owns.
     const { ctx, text } = stubCtx();
     paintHud(ctx, {}, { ...rollingRec, fpsMeasured: 21, fpsDeclared: 30,
+                        rateFaithful: false,
                         worstDrop: "left_wrist", skipped_frames: 40 }, menu);
-    expect(text()).toContain("RATE 21/30 fps");
+    expect(text()).toContain("RATE 21.00/30.00 fps");
     expect(text()).not.toContain("dropping: left_wrist");
     expect(text()).not.toContain("40 frames dropped");
   });
@@ -488,6 +490,7 @@ describe("paintHud and the start gate", () => {
   it("names the one cable to go and check when the rate is fine", () => {
     const { ctx, text } = stubCtx();
     paintHud(ctx, {}, { ...rollingRec, fpsMeasured: 29, fpsDeclared: 30,
+                        rateFaithful: true,
                         worstDrop: "left_wrist", skipped_frames: 40 }, menu);
     expect(text()).toContain("dropping: left_wrist");
     expect(text()).not.toContain("RATE");
@@ -787,25 +790,46 @@ describe("worstDropSource", () => {
   });
 });
 
-describe("the rate gate the HUD warns at", () => {
-  const at = (measured: number, rateGate?: number) => {
+describe("the rate line the HUD warns on", () => {
+  const at = (
+    measured: number, declared: number, rateFaithful?: boolean | null,
+  ) => {
     const { ctx, text } = stubCtx();
     paintHud(ctx, driving, {
-      ...rollingRec, fpsMeasured: measured, fpsDeclared: 30, rateGate,
+      ...rollingRec, fpsMeasured: measured, fpsDeclared: declared, rateFaithful,
     }, menu);
     return text();
   };
 
-  it("warns at the threshold the RECORDER published, not a copy of it", () => {
-    // The recorder refuses a take below its own gate. A HUD holding a second
-    // copy drifts from the 409 and the two tell the operator different
-    // stories — so a backend running a stricter gate must move this line too.
-    expect(at(28, 0.95)).toContain("RATE 28/30");
-    expect(at(28, 0.9)).not.toContain("RATE");
+  it("renders the recorder's verdict and holds no band of its own", () => {
+    // The HUD can no longer drift from the arm-time refusal, because it has no
+    // threshold to drift with: the SAME two numbers warn or stay quiet purely
+    // on the verdict the recorder published.
+    expect(at(29.85, 30, false)).toContain("RATE 29.85/30.00 fps");
+    expect(at(29.85, 30, true)).not.toContain("RATE 29.85/30.00");
   });
 
-  it("falls back to 0.9 for a backend that publishes no gate", () => {
-    expect(at(26)).toContain("RATE 26/30");
-    expect(at(28)).not.toContain("RATE");
+  it("keeps the two numbers distinct at every fps a take can hold", () => {
+    // THE reason for two decimals, and the assertion that fails if anyone
+    // trims one. The warning fires at |measured - fps| / fps > tol, so at d
+    // decimals the numbers print IDENTICALLY while the line is red whenever
+    // fps < 10^(2-d). `RATE 30/30 fps` is d=0 at fps=30 and it shipped; d=1
+    // does the same below 10 fps. A 5 fps take is unusual, not impossible —
+    // `hz` is a float — and a red line whose two numbers match reads as a
+    // broken HUD, which is an answer, and the wrong one.
+    expect(at(4.97, 5, false)).toContain("RATE 4.97/5.00 fps");
+    expect(at(4.97, 5, false)).not.toContain("5.0/5.0");   // d=1 would collide
+    expect(at(29.85, 30, false)).not.toContain("30/30");   // d=0 did collide
+  });
+
+  it("names the missing band instead of inventing one", () => {
+    // A backend publishing no tolerance leaves this page with no band at all.
+    // The old 0.9 fallback is worse than nothing here: read as a TOLERANCE it
+    // means +/-90% and cannot fire in either direction — a check that
+    // reassures and protects nothing, sitting beside a readout an operator
+    // trusts.
+    const t = at(26, 30, null);
+    expect(t).toContain("no band published");
+    expect(t).not.toContain("RATE 26.00/30.00");
   });
 });
