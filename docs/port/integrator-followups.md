@@ -1,6 +1,7 @@
 # Integrator follow-ups — the kit port
 
-Cross-track items the integrator (`haller-ws-13`) owes, or must chase once another
+Cross-track items the integrator (`haller-ws-57`, from `haller-ws-13` 2026-08-27) owes,
+or must chase once another
 track lands its half. Not a backlog: everything here is blocked on a specific event,
 and dies when that event happens. Add the trigger, not just the task.
 
@@ -20,14 +21,6 @@ and dies when that event happens. Add the trigger, not just the task.
   `server.py` is the integrator's precisely because both backend tracks need routes
   there.
 
-- **Mount Track B's Lab router in `server.py`, then delete `routes_data.py`.**
-  *Trigger:* Track B reports `build_router(...)`'s signature and its four
-  compatibility paths answer with the old shapes.
-  The factory must take ZERO-ARG CALLABLES (`get_cameras=lambda: cameras`, …), not
-  values: `server.py` mounts routers at import time but builds `cameras`/`recorder`
-  inside `lifespan`, so a router closing over the values captures `None` and 503s
-  forever. This bit the 08-22 unification; do not rediscover it.
-
 - **`/estop` must revoke the rollout lease, and the lease must be mounted.**
   *Trigger:* Track B lands `lease.py` and the streaming-inference child.
   Ruled 2026-08-27: the rollout child owns the POLICY, never the bus. It streams
@@ -39,6 +32,19 @@ and dies when that event happens. Add the trigger, not just the task.
   trustworthy than a practised hand, so it should get MORE of the commit chain, not
   less. Fallback if streaming inference proves unworkable: rollout stays CLI-only with
   the HMI stopped, which is what the kit does today. Only after measuring.
+
+- **The launcher must check declared `control_hz` against the dataset's `fps`.**
+  *Trigger:* Track B (`haller-ws-ea`) confirms a checkpoint carries the `repo_id` it
+  was trained on. *Owner:* Track B, at `POST /lab/runs/*`, ruled 2026-08-27.
+  Two different checks, and only the second existed: (a) declared vs the rate the policy
+  was TRAINED at — launch time; (b) measured vs declared — run time, already built. The
+  rollout child cannot do (a): it is handed `control_hz` in its spec and never opens
+  `info.json`, so recording both numbers makes a divergence RECONSTRUCTIBLE, not
+  DETECTED. A check belongs where both quantities are in scope.
+  **If a checkpoint does not record its training `repo_id`, report that rather than
+  inventing the link.** Inferring it from the run directory or the currently-selected
+  dataset would compare the declared rate against the wrong dataset's fps and report
+  agreement — worse than no check.
 
 - **Rewrite the A/X take protocol in the operator docs.**
   *Trigger:* Track A's `/record/arm|roll|stop` land and are committed.
@@ -240,6 +246,43 @@ applies to any probe that prunes, not only to a matrix.
   commands, is a data-loss window measured in seconds. To check whether a lint finding is
   pre-existing, use `git show HEAD:<path>` into a scratch copy; it never touches the
   working tree.
+
+- **Correct in isolation, wrong in the suite — and the isolation is what made it look
+  right.** A test asserted `"lerobot" not in sys.modules` IN-PROCESS to prove a module
+  imports no lerobot. It passes in `tests/lab/` alone and fails in the full backend suite,
+  because by then other modules have imported the world into that interpreter. The correct
+  pattern — a subprocess — was sitting eleven tests up the same file with a docstring
+  already saying why: "pytest has already imported half the world into this one and
+  `sys.modules` here would prove nothing". Same class as the vacuous E-STOP assertions:
+  the HARNESS state, not the code, decided the outcome. Any assertion about process-global
+  state (`sys.modules`, env, cwd, open handles) is a subprocess assertion or it is nothing.
+
+- **A fix whose own verification still points at the old name is a fix plus a new blind
+  spot.** When the rate probe was retargeted, two tests set the constant by SPELLED-OUT
+  name — so they would have gone on passing while setting an attribute nobody reads and
+  asserting about a name that no longer existed, green against the wrong constant by the
+  same invisibility that hid the original defect. Tests now derive module and attribute
+  from the probe's own tuple so they cannot drift, and publish a value that is NOT the
+  fallback. Track A's phrasing is the one to keep: **"a test that passes on the fallback
+  path cannot tell the two apart."** Corollary, from proving the fix: when two numbers
+  agree, agreement is not evidence of connection — change one and watch the other follow.
+
+- **A silent fallback is right before publication and wrong after it.** "Not published
+  yet is the NORMAL case" is true until the constant exists, after which a probe that
+  cannot find it is a rename, a move, or a typo, and swallowing it hides the exact drift
+  the probe was built to prevent. The expiry belongs in the docstring at the time the
+  fallback is written, and the trigger is the other half landing. Deletion beats a WARNING
+  log: a warning still resolves to a number and still runs, while an absent import fails
+  at module load, which is the loudest and earliest it can be.
+
+- **A wall-clock rate assertion is unreliable while several sessions share the box.**
+  `test_the_first_commanded_step_is_not_a_jump` runs a session thread at 200 Hz, pumps
+  0.4 s and asserts `len(sent) > 20` — a THROUGHPUT precondition tolerating 4x slowdown,
+  which two concurrent full suites can still starve. One red in a full run that passes in
+  isolation is that shape. **Re-run before reporting it as a regression**, or it becomes a
+  false regression report from the person whose job is verification. When fixing one, the
+  precondition becomes robust and the BEHAVIOURAL assertions stay exactly as strict —
+  loosening the property to fix the precondition removes the reason the test exists.
 
 - **The symmetry rule holds only for fixtures standing in for loader OUTPUT.**
   `_load_joint_limits` centres on `(range_min + range_max)/2`, so every window it emits
@@ -454,6 +497,37 @@ applies to any probe that prunes, not only to a matrix.
   states.
 
 ## Closed
+
+- ~~Mount Track B's Lab router in `server.py`, then delete `routes_data.py`~~ — done by
+  `haller-ws-13` before the handover, **verified independently** by `haller-ws-57` rather
+  than accepted on report: `routes_data.py` and `tests/test_routes_data.py` both gone,
+  `server.py:34` imports `build_lab_router`, `:247` mounts it with `get_cameras=lambda:
+  cameras` / `get_recorder=lambda: recorder`, and the comment names the import-time-vs-
+  `lifespan` capture that would 503 forever. The evidence was a differential test mounting
+  BOTH routers over the same fakes and the same tmp dataset asserting equal status and
+  equal JSON, plus the old file's own 31 tests run unmodified against the new router with
+  only the builder swapped — green with both live, and only THEN all three deleted
+  together. Deleting the evidence first and trusting the memory of it throws the proof
+  away unread.
+
+- ~~Track A's control-rate constant vs Track B's `MIN_CONTROL_HZ_FRACTION` placeholder~~ —
+  **the two halves did NOT agree, and the value was the only half that did.** A published
+  `tick.py::MIN_RATE_FRACTION`; B probed `haller_hmi.safety::POLICY_MIN_CONTROL_HZ_FRACTION`
+  under `except Exception: return <own copy>`. Both 0.9, so every reading agreed while
+  nothing connected. Ruled: the constant lives in **`safety.py`** (stdlib-only — `enum`,
+  `math`, `dataclasses` — while `tick.py` reaches `arm.py` and therefore lerobot, which the
+  rollout child must not import), under **A's name**. The measurement and the threshold are
+  two different facts: two surfaces measure different quantities against ONE threshold, so
+  it cannot live inside either measuring surface. Landed `fec47cb` / `be9c9c6`; verified by
+  publishing 0.5 and watching the resolver follow, because 0.9 resolving to 0.9 is exactly
+  the reading that cannot tell a live probe from a fallback.
+
+- ~~Plan doc carried the pre-retraction D455 position in its tables~~ — caught by Track D,
+  amended `29c095e`. §Consequences said U1/U2 stop gating P2 and the mast-cam path is left
+  alone, while the unverified table, the delivery table and the risk notes still described a
+  guarded-`pyrealsense2` source gated on both probes. **The delivery table is where someone
+  picks up a phase; nobody reads a §Consequences section to find out what P2 builds.** Rows
+  marked SUPERSEDED rather than deleted — the measurements behind them are real record.
 
 - ~~Plan doc's phase numbering disagreed with the track briefs~~ — pinned to the doc
   (`633bbdb`), briefs are track-local.
