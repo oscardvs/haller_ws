@@ -21,7 +21,7 @@ import { toast } from "sonner";
 import { useTelemetry } from "@/lib/telemetry";
 import { useRecorder } from "@/lib/recorder";
 import {
-  api, ApiError, cameraStreamUrl,
+  api, ApiError, cameraStreamUrl, recordRateGate, recordRateOk,
   type CameraInfo, type EpisodesResponse, type RepoInfo,
 } from "@/lib/api";
 import { repoIdFor } from "./CommandBar";
@@ -71,6 +71,12 @@ export function DatasetTab({
   const frames = useRecorder((s) => s.status?.episode_frames ?? 0);
   const skipped = useRecorder((s) => s.status?.skipped_frames ?? 0);
   const lastError = useRecorder((s) => s.status?.last_error ?? null);
+  // The rate pair. Optional on the wire, so a backend that predates the
+  // measured sampler simply draws no rate row rather than an em-dash.
+  const fpsMeasured = useRecorder((s) => s.status?.fps_measured ?? null);
+  const fpsDeclared = useRecorder((s) => s.status?.fps_declared ?? null);
+  const rateOk = useRecorder((s) => recordRateOk(s.status));
+  const gate = useRecorder((s) => recordRateGate(s.status));
   const liveRepo = useRecorder((s) => s.status?.repo_id ?? null);
   const busy = useRecorder((s) => s.busy);
   const teleopRunning = useTelemetry((s) => s.lastFrame?.human_teleop?.running ?? false);
@@ -199,6 +205,41 @@ export function DatasetTab({
                 </span>
               )}
             </div>
+
+            {/* MEASURED against DECLARED, both of them, always.
+
+                `fps` used to be `1 / telemetry._period` — the rate telemetry was
+                ASKED for, never measured against a real bus — and every
+                timestamp in every episode was synthesised from it. Printing one
+                number here would reproduce that: it would look like a
+                measurement whichever of the two it was. The gap between them IS
+                the defect, so the gap is what is drawn. The threshold is the
+                recorder's own, read from its status rather than chosen here. */}
+            {typeof fpsDeclared === "number" && (
+              <div className="flex items-baseline gap-2.5 font-mono text-[11px]">
+                <span className="label-micro text-muted-foreground">rate</span>
+                {fpsMeasured === null || fpsMeasured === undefined ? (
+                  <span className="text-muted-foreground">
+                    measuring… <span data-num className="tabular-nums">{fpsDeclared}</span> declared
+                  </span>
+                ) : (
+                  <span
+                    className="tabular-nums"
+                    style={rateOk === false ? { color: "var(--haller-warn)" } : undefined}
+                    title={
+                      rateOk === false
+                        ? `below ${(gate * 100).toFixed(0)}% of the declared rate — ` +
+                          "the recorder refuses to open an episode here"
+                        : "measured / declared"
+                    }
+                  >
+                    <span data-num>{fpsMeasured.toFixed(1)}</span>
+                    <span className="text-muted-foreground"> / </span>
+                    <span data-num>{fpsDeclared}</span> Hz
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Warning, not a block: the backend does not enforce this, so a
                 disabled button here would look like an invariant without being

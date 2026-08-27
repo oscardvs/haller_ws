@@ -152,8 +152,30 @@ export const api = {
   recordStatus: () => getJson<RecordStatus>("/record/status"),
   recordStart: (repoId: string, task: string) =>
     postJson<{ ok: true } & RecordStatus>("/record/start", { repo_id: repoId, task }),
-  recordStop: (save: boolean) =>
-    postJson<{ ok: true } & RecordStatus>("/record/stop", { save }),
+  /** Open the dataset and hold the start gate: schema, camera set and arm set
+   *  frozen, measured fps written into info.json, episode index resolved, and
+   *  no frames written yet. Every refusal lives here — colliding camera keys,
+   *  an unknown repo, a rate below the gate — because a refusal at the moment
+   *  the operator commits to a take is a lost take. */
+  recordArm: (repoId: string, task: string) =>
+    postJson<RecordStatus>("/record/arm", { repo_id: repoId, task }),
+  /** Begin writing frames. 409 unless armed. */
+  recordRoll: () => postJson<RecordStatus>("/record/roll", {}),
+  /**
+   * End the take. `rearm` is OPTIONAL and defaults false, so `{save}` alone
+   * means exactly what it has always meant — the cockpit's stop button and the
+   * Record popover both call it that way and predate the headset's state
+   * machine.
+   *
+   *   save  rearm   result
+   *   true  false   save            -> idle,  index advances
+   *   false true    re-record       -> armed, SAME index
+   *   false false   discard         -> idle,  index unchanged
+   *   true  true    save + go again -> armed, next index
+   */
+  recordStop: (save: boolean, rearm?: boolean) =>
+    postJson<{ ok: true } & RecordStatus>("/record/stop",
+      rearm === undefined ? { save } : { save, rearm }),
   /** Episodes already on disk, read from the dataset meta. `repoId` omitted
    *  means the recorder's current-or-last repo. */
   recordEpisodes: (repoId?: string | null) =>
@@ -289,6 +311,25 @@ export type CollisionStatus = {
   margin_m?: number;
 };
 
+/**
+ * Where a take is in the arm -> roll cycle.
+ *
+ * `armed` is the kit's start gate: full-rate teleop with the dataset open, the
+ * camera set, feature schema and arm set frozen, and ZERO frames written. It
+ * exists so the first second of every episode is not the operator reaching for
+ * a controller.
+ *
+ * There are exactly three, and `"recording"` is spelled that way so
+ * `recording === (state === "recording")` holds — every call site that already
+ * reads the boolean stays correct. The headset's end-of-take PROMPT is NOT one
+ * of these: the server does not know the operator is looking at a prompt, and
+ * frames are still being written throughout it, so a UI that modelled it as a
+ * server state would draw a stopped take that is still recording.
+ *
+ * Optional because a backend that predates the gate reports only the boolean.
+ */
+export type RecordState = "idle" | "armed" | "recording";
+
 export type RecordStatus = {
   recording: boolean;
   repo_id: string | null;
@@ -298,7 +339,96 @@ export type RecordStatus = {
   skipped_frames: number;
   started_at: number | null;
   last_error: string | null;
+  /** Whether anything scored this take at all. False means `success` is null
+   *  rather than false — the cockpit must not print FAILED for a rig that
+   *  never had an opinion. Returned by recorder.py today. */
+  auto_scored?: boolean;
+  success?: boolean | null;
+  success_frames?: number;
+  state?: RecordState;
+  /** Which index the next save lands on. Shown 1-based beside it everywhere. */
+  episode_index?: number | null;
+  /** Why the take in progress can no longer be saved — a degraded read, a
+   *  stale camera. Set means the frames so far are not a demonstration. */
+  invalidated_reason?: string | null;
+  /** The MEASURED sample rate against the real bus, and the rate the recorder
+   *  was ASKED for. They are shown side by side rather than one being
+   *  reported as the truth: `fps` used to be `1 / telemetry._period`, a number
+   *  that was declared and never measured, and every timestamp in every
+   *  episode was synthesised from it. A gap between these two is the bug
+   *  becoming visible. */
+  fps_measured?: number | null;
+  fps_declared?: number | null;
+  /** Ticks dropped, ATTRIBUTED to the source that dropped them.
+   *
+   *  Nested rather than one flat map, for two reasons. "Which camera is
+   *  starving the take" and "which arm went stale" are different questions
+   *  with different fixes, and a flat map throws that attribution away at the
+   *  type level. And the two namespaces can collide: the arms are `left` and
+   *  `right`, and nothing stops a camera being named for a side — one key,
+   *  two meanings, last writer wins, and the panel reports a confident wrong
+   *  number. */
+  drops?: RecordDrops;
+  /** Advisory, mid-take. `record_rate` means the take is sparser than declared
+   *  — the rows written are honest rows with real timestamps, so saving still
+   *  works and whether it is worth keeping is the operator's call. */
+  alerts?: RecordAlert[];
+  /** The gate the RECORDER is actually using, published so this UI reads it
+   *  rather than holding a copy. See `recordRateGate`. */
+  record_rate_gate?: number;
 };
+
+export type RecordDrops = {
+  cameras?: Record<string, number>;
+  arms?: Record<string, number>;
+};
+
+export type RecordAlert = {
+  code: "record_rate" | (string & {});
+  detail?: string;
+  since?: number | null;
+};
+
+/**
+ * Fallback gate: the measured rate must reach this fraction of the declared
+ * rate. Below it, `POST /record/arm` refuses — at ARM time, because a refusal
+ * at the moment the operator commits is a lost take — and mid-take a
+ * sustained shortfall (> 2 s) raises a `record_rate` alert.
+ *
+ * Only a FALLBACK. The recorder owns this number and publishes it as
+ * `record_rate_gate`; this constant is what to use against a backend that
+ * predates the field. A copy of someone else's constant plus a promise to
+ * keep it in sync is the weak form of "the surface that owns a fact publishes
+ * it" — reading it is the strong one, and it is the reason this file has a
+ * `recordRateGate()` and not just a number.
+ */
+export const RECORD_RATE_GATE_FALLBACK = 0.9;
+
+/** The gate this backend is actually using. */
+export function recordRateGate(status: RecordStatus | null | undefined): number {
+  const g = status?.record_rate_gate;
+  return typeof g === "number" && Number.isFinite(g) && g > 0
+    ? g
+    : RECORD_RATE_GATE_FALLBACK;
+}
+
+/**
+ * Whether the measured rate clears the gate.
+ *
+ * `null` means NOT YET KNOWN, which is not the same as "too slow" and must
+ * never be drawn as it: `fps_measured` is null until 30 samples have been
+ * seen, and an operator who is shown a rate warning during the first second
+ * after boot learns to ignore rate warnings. A number that is not trustworthy
+ * mid-take is worth nothing.
+ */
+export function recordRateOk(status: RecordStatus | null | undefined): boolean | null {
+  const measured = status?.fps_measured;
+  const declared = status?.fps_declared;
+  if (typeof measured !== "number" || typeof declared !== "number" || declared <= 0) {
+    return null;
+  }
+  return measured >= declared * recordRateGate(status);
+}
 
 /** One episode as the dataset meta records it. */
 export type EpisodeInfo = {
