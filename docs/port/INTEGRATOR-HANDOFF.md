@@ -57,8 +57,13 @@ its 5 tests once `episode_index` is real.
 
 - **backend `pytest`: 1487 passed, 1 xfailed — measured at commit `42d5fa4`**
   (was 593 pre-port). **A baseline without a commit beside it is not a baseline.**
-- **frontend `vitest`: 396 passed** (was 186). One test flakes when Track D is mid-write;
-  395/1 once, 396 on three consecutive re-runs.
+- **frontend `vitest`: 396 passed, FLAKING ~1 IN 5 FULL-SUITE RUNS** (was 186). Cause
+  known and named, fix at `8e7ff7a` HALVED it (~40% -> ~20%, ten runs before / five after)
+  and did not close it. **Do not report 396 as clean and do not "re-run and see"** — a 20%
+  failure hides under a re-run exactly as well as a 40% one. Residual is a real production
+  glitch, not only a test one: a `/record/status` read in flight when an A/X hold changes
+  state resolves afterwards and reconciles the take machine BACKWARDS, so the HUD reads
+  IDLE for one 250 ms poll while the recorder is already ARMED. Owned by Track D.
 - Measured from a DETACHED WORKTREE, which is the only reason the number means anything.
   Within one hour three sessions honestly reported **1474, 1477 and 1487** — the tree had
   moved under each of them. Always pin the commit; always re-measure.

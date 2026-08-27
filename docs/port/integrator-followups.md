@@ -305,6 +305,18 @@ applies to any probe that prunes, not only to a matrix.
   `RUNNERS` value imports (subprocess) and has a `__main__` guard. Same family as the
   vacuous E-STOP assertions: the harness, not the code, decided the outcome.
 
+- **A quiet uncommitted file is a countdown, and the person holding it is the last to
+  know.** Forty lines sat uncommitted in the shared tree for ~25 minutes while the session
+  holding them stayed alive and busy, blocking two other sessions and holding the frontend
+  suite red for everyone. Their own account is the mechanism rather than the outcome:
+  *"mid-experiment on two fixes that both turned out to be wrong, and my instinct was to
+  finish before committing."* That instinct is correct in a private tree and lethal in a
+  shared one, and **nothing about it feels like risk from the inside** — which is why the
+  first nudge did nothing and the second, carrying a number (25 minutes, 20 failing tests,
+  two sessions blocked), moved it immediately. **Nudge with the cost, not the request.**
+  Commit WIP; a WIP commit costs one line in the log, and the alternative cost here would
+  have been the fix for a defect failing two runs in five, with nobody knowing it existed.
+
 - **Triage before you measure: `git status --short -- <area>` FIRST.** If the failing
   file is dirty and is not yours, it is someone typing, not a regression. One command, no
   setup, available to any session immediately — and it answers the question directly rather
