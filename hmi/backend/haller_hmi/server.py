@@ -30,6 +30,7 @@ from .ros_bridge import RosBridge
 from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
+from .tick import IdleSampler
 from .recorder import DatasetRecorder, lerobot_home
 from .lab.routes import build_lab_router
 from .sim.scene import SceneController
@@ -199,9 +200,29 @@ async def _lifespan(app: FastAPI):
     cameras = CameraManager(cfg.cameras, world=arms.world())
     cameras.connect_all()
     ros.start()
+    human_teleop.set_base_source(ros)
     telemetry = TelemetryBroadcaster(arms, ros, hz=cfg.telemetry.hz,
-                                     teleop=teleop, human_teleop=human_teleop, calibration=calibration)
+                                     teleop=teleop, human_teleop=human_teleop,
+                                     calibration=calibration,
+                                     tick_bus=human_teleop.tick_bus)
     telemetry.start()
+    # The idle sampler owns the tick whenever no session does, so ONE moment is
+    # published at every moment. Not cosmetic: arming refuses against a MEASURED
+    # rate (invariant 10), and with no producer while idle `measured_hz()` is
+    # None exactly when the gate first reads it — which refuses. So this is what
+    # makes arming possible on a fresh backend, not what makes idle look tidy.
+    # A local, not a global: `_lifespan` is one async generator, so a name bound
+    # before `yield` is still in scope after it.
+    # Measured on config.bimanual-sim: `measured_hz()` is None for ~0.98 s / 30
+    # samples after start, then settles at 29.9. So arming REFUSES for about a
+    # second after the backend comes up, which is the safe direction and is far
+    # below the time it takes an operator to reach for A/X — but it is a real
+    # window, not zero, and a caller that arms programmatically on boot will see
+    # it.
+    idle_sampler = IdleSampler(human_teleop.tick_bus,
+                               sample=human_teleop.idle_sample,
+                               hz=cfg.telemetry.hz)
+    idle_sampler.start()
     # `task` is None on an all-real rig, and the recorder treats that as "these
     # episodes are unscored" rather than "these episodes failed": no
     # next.reward/next.done columns at all, and an info.json block that says so.
@@ -214,6 +235,11 @@ async def _lifespan(app: FastAPI):
         if recorder.status()["recording"]:
             await recorder.stop_episode(save=True)
         recorder.close()
+    # BEFORE arms.disconnect_all(): a daemon thread doing per-arm reads, and
+    # disconnecting underneath it throws on every remaining tick. Caught and
+    # logged rather than fatal, so the cost is a shutdown full of noise that
+    # reads as a fault. Synchronous — a bounded thread join, not an asyncio task.
+    idle_sampler.stop()
     if telemetry is not None:
         await telemetry.stop()
     # Signal every in-flight ramp to stop FIRST, before the three sessions'
