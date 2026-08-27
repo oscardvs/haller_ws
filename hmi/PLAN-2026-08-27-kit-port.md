@@ -406,21 +406,24 @@ Cleared as already correct, so the sweep is auditable rather than a list of hits
 `ACQUIRE_MS`, `MATCH_DWELL_MS`, `ACQUIRE_RAMP_MS`, `ACQUIRE_RATE_DEG_S`,
 `_ws_disconnect_grace_s` — all in physical time or rate units, measured against `now`.
 
-## Baseline to protect
+## Baseline — deliberately NOT recorded here
 
-- **645 backend pytest pass, 1 xfailed** (593 pre-port + 52 equivalence).
-- **186 frontend vitest pass.**
+**The baseline lives in `docs/port/INTEGRATOR-HANDOFF.md`, and only there.**
 
-Backend incantation (the venv fights you — plain `activate` lacks rclpy):
+This section used to carry its own copy and it read 645 backend / 186 frontend — the
+PRE-PORT numbers, roughly 830 tests light, in the document every track is told to read
+second. A fresh track measuring the real number against that one has no way to tell which
+of the two is the regression.
 
-```
-source ~/venvs/haller-hmi/bin/activate-haller-hmi
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MUJOCO_GL=egl python -m pytest -p asyncio <scope> -q
-```
+Two baselines in two documents is the mechanism, not the stale figures, so the fix is
+deletion rather than an update. Same shape as the D455 tables: the authoritative prose was
+right while the table someone actually picks work up from was wrong. Twice in one day makes
+it a class — **when a fact has an owning document, the other document links to it.**
 
-Frontend: `npm test` (vitest) plus the repo's typecheck, scoped where possible.
-`scripts/vr_smoke.py` against a cold sim backend remains the integration pass, not a
-per-session obligation.
+Measure it yourself before trusting any written number, **from a detached worktree at a
+fixed commit** (`git worktree add --detach <scratch> <commit>`). Three sessions reported
+1474, 1477 and 1487 within one hour of each other; all three were honest and the tree had
+simply moved under each. A full-suite count taken on the shared tree measures the tree.
 
 ## Rules for every session on this branch
 
