@@ -1,9 +1,8 @@
 // hmi/frontend/__tests__/api.test.ts
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
-  postJson, getJson, api, recordRateGate, recordRateOk, recordRateTolerance,
-  recordRateFaithful, RECORD_RATE_GATE_FALLBACK, RATE_DECIMALS, formatHz,
-  type RecordStatus,
+  postJson, getJson, api, recordRateTolerance, recordRateFaithful,
+  RATE_DECIMALS, formatHz, type RecordStatus,
 } from "../lib/api";
 
 describe("postJson", () => {
@@ -148,7 +147,7 @@ describe("the record rate band", () => {
   // The recorder's gate became a FAITHFULNESS BOUND: `|measured − fps| / fps >
   // 0.005` refuses. That is a symmetric tolerance, not a floor, and the key was
   // renamed rather than revalued for one reason — publishing 0.005 under
-  // `record_rate_gate` would make every existing caller compute
+  // the now-removed `record_rate_gate` would have made every caller compute
   // `declared * 0.005` and warn below half a percent of the declared rate. The
   // warning would not become wrong; it would stop firing.
   const st = (over: Partial<RecordStatus>): RecordStatus => ({
@@ -169,8 +168,6 @@ describe("the record rate band", () => {
     expect(recordRateTolerance(st({}))).toBeNull();
     expect(recordRateTolerance(null)).toBeNull();
     expect(recordRateTolerance(st({ record_rate_tolerance: 0 }))).toBeNull();
-    // And specifically NOT the floor fallback wearing a tolerance's clothes.
-    expect(recordRateTolerance(st({}))).not.toBe(RECORD_RATE_GATE_FALLBACK);
   });
 
   it("refuses a rate that is too FAST, which a floor never could", () => {
@@ -179,9 +176,10 @@ describe("the record rate band", () => {
     // as dishonest as ones it undershot.
     const fast = st({ record_rate_tolerance: 0.005, fps_declared: 30, fps_measured: 30.6 });
     expect(recordRateFaithful(fast)).toBe(false);
-    // The old one-sided reading calls the same take fine, which is exactly why
-    // the key had to be renamed rather than revalued.
-    expect(recordRateOk({ ...fast, record_rate_gate: 0.9 })).toBe(true);
+    // The floor this replaced calls the same take FINE. Written as arithmetic
+    // rather than a call because the function is gone — the claim is about the
+    // SHAPE, and it is the reason the key was renamed rather than revalued.
+    expect(30.6 >= 30 * 0.9).toBe(true);
   });
 
   it("pins the boundary on both sides, not just the fixed value", () => {
@@ -204,17 +202,6 @@ describe("the record rate band", () => {
     expect(recordRateFaithful(st({ fps_declared: 30, fps_measured: 30 }))).toBeNull();
   });
 
-  it("leaves the OLD accessor meaning exactly what it meant", () => {
-    // `recordRateGate` still has a caller in the headset client, which applies
-    // it as `declared * gate`. Keeping the symbol and changing what it returns
-    // would compile everywhere, warn nowhere, and move the silent window into
-    // the migration rather than closing it — so its floor semantics are pinned
-    // here until the key it reads is removed.
-    expect(recordRateGate(st({ record_rate_gate: 0.95 }))).toBe(0.95);
-    expect(recordRateGate(st({}))).toBe(RECORD_RATE_GATE_FALLBACK);
-    // A tolerance on the wire must NOT leak into the floor reader.
-    expect(recordRateGate(st({ record_rate_tolerance: 0.005 }))).toBe(RECORD_RATE_GATE_FALLBACK);
-  });
 });
 
 describe("a rate readout shows the band it is judged against", () => {

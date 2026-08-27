@@ -373,13 +373,6 @@ export type RecordStatus = {
    *  — the rows written are honest rows with real timestamps, so saving still
    *  works and whether it is worth keeping is the operator's call. */
   alerts?: RecordAlert[];
-  /** The gate the RECORDER is actually using, published so this UI reads it
-   *  rather than holding a copy. See `recordRateGate`.
-   *
-   *  SUPERSEDED by `record_rate_tolerance` and kept only for the migration
-   *  window. It is a one-sided FLOOR FRACTION and keeps that meaning until it
-   *  is removed; the tolerance must never be published under this name. */
-  record_rate_gate?: number;
   /** The recorder's faithfulness bound: a take is refused when
    *  `|measured − fps| / fps` exceeds this. A SYMMETRIC TOLERANCE — a
    *  half-width, not a floor — so it is read by `recordRateTolerance` and
@@ -400,55 +393,15 @@ export type RecordAlert = {
 };
 
 /**
- * Fallback gate: the measured rate must reach this fraction of the declared
- * rate. Below it, `POST /record/arm` refuses — at ARM time, because a refusal
- * at the moment the operator commits is a lost take — and mid-take a
- * sustained shortfall (> 2 s) raises a `record_rate` alert.
- *
- * Only a FALLBACK. The recorder owns this number and publishes it as
- * `record_rate_gate`; this constant is what to use against a backend that
- * predates the field. A copy of someone else's constant plus a promise to
- * keep it in sync is the weak form of "the surface that owns a fact publishes
- * it" — reading it is the strong one, and it is the reason this file has a
- * `recordRateGate()` and not just a number.
- */
-export const RECORD_RATE_GATE_FALLBACK = 0.9;
-
-/** The gate this backend is actually using. */
-export function recordRateGate(status: RecordStatus | null | undefined): number {
-  const g = status?.record_rate_gate;
-  return typeof g === "number" && Number.isFinite(g) && g > 0
-    ? g
-    : RECORD_RATE_GATE_FALLBACK;
-}
-
-/**
- * Whether the measured rate clears the gate.
- *
- * `null` means NOT YET KNOWN, which is not the same as "too slow" and must
- * never be drawn as it: `fps_measured` is null until 30 samples have been
- * seen, and an operator who is shown a rate warning during the first second
- * after boot learns to ignore rate warnings. A number that is not trustworthy
- * mid-take is worth nothing.
- */
-export function recordRateOk(status: RecordStatus | null | undefined): boolean | null {
-  const measured = status?.fps_measured;
-  const declared = status?.fps_declared;
-  if (typeof measured !== "number" || typeof declared !== "number" || declared <= 0) {
-    return null;
-  }
-  return measured >= declared * recordRateGate(status);
-}
-
-/**
  * The recorder's faithfulness tolerance, or `null` if it does not publish one.
  *
  * **`null` is deliberate and there is no fallback number.** The obvious one —
- * reuse `RECORD_RATE_GATE_FALLBACK` — is the worst available answer: `0.9`
- * read as a TOLERANCE means ±90%, a band no real rate can fall outside, so the
- * warning would not become wrong, it would stop existing. A check that cannot
- * fire in either direction is dead code shaped like a safety check, and this
- * one sits next to a readout an operator trusts.
+ * reusing the `0.9` floor fraction this file carried until the gate became a
+ * tolerance — is the worst available answer: `0.9` read as a TOLERANCE means
+ * ±90%, a band no real rate can fall outside, so the warning would not become
+ * wrong, it would stop existing. A check that cannot fire in either direction
+ * is dead code shaped like a safety check, and this one sits next to a readout
+ * an operator trusts.
  *
  * That is the same fallback question the compare cap answers the other way,
  * and the difference is what happens when the fallback is WRONG. A stale
@@ -465,13 +418,15 @@ export function recordRateTolerance(
 }
 
 /**
- * Whether the measured rate is FAITHFUL to the declared one — the two-sided
- * form of `recordRateOk`, and the shape the recorder now enforces.
+ * Whether the measured rate is FAITHFUL to the declared one — the shape the
+ * recorder enforces.
  *
  * `null` means NOT ANSWERABLE, and it covers two different unknowns that must
- * both stay off the screen as warnings: the rate is not measured yet (as in
- * `recordRateOk`), or the backend publishes no tolerance, in which case this
- * UI has no band and must say so rather than invent one.
+ * both stay off the screen as warnings: `fps_measured` is null until 30
+ * samples have been seen — and an operator shown a rate warning in the first
+ * second after boot learns to ignore rate warnings — or the backend publishes
+ * no tolerance, in which case this UI has no band and must say so rather than
+ * invent one.
  *
  * Two-sided because `|measured − fps| / fps > tol` refuses a rate that is too
  * FAST as readily as one too slow, and `measured >= declared * g` cannot

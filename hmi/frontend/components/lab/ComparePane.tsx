@@ -47,8 +47,7 @@ const X_LABEL = "step";
  * `/lab/system` since `f7b862c`, and `capFor` below reads it. This constant
  * exists so a backend older than that still batches instead of sending one
  * oversized request, and it is named FALLBACK so it cannot be read as the
- * authority — the same discipline as `RECORD_RATE_GATE_FALLBACK`, and for the
- * same reason: a UI that keeps its own copy of a number is how a dashboard
+ * authority: a UI that keeps its own copy of a number is how a dashboard
  * comes to disagree with the system it monitors.
  *
  * A stale value here is self-correcting rather than silent: too high and the
