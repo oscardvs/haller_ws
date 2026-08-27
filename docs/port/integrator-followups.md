@@ -495,6 +495,15 @@ applies to any probe that prunes, not only to a matrix.
   DIFFERENT value and watch the reader follow.** Track B pinned the caps by publishing 5
   and 3; a mutation hardcoding today's 12/8 is caught by that and invisible to `is`.
 
+- **`kill $!` on `python -m uvicorn` does not free the port.** Twice in two hours from the
+  same invocation, so it is the pattern and not an accident: the parent dies and a child keeps
+  the socket bound. Both times the fix was chasing the actual listener **by explicit PID** —
+  which is also the third instance today of that habit holding under time pressure, against a
+  documented near-miss where a careful session reached for `pkill -f` to save one lookup.
+  Worth knowing because **the next person reads `EADDRINUSE` as somebody else's server**, on a
+  box where that is usually the right guess and here is not. Verify the port is actually free
+  before concluding you are being contended with.
+
 - **The shared-resource list on this box is longer than the git tree**, and the process
   table is the one with no lock, no warning and no undo. It is the index, the working tree,
   the shared `.next`, the Playwright MCP browser profile, and the processes.
@@ -1282,6 +1291,20 @@ applies to any probe that prunes, not only to a matrix.
   **do not `next build` the shared `.next`** while other sessions serve from it — build in
   a detached worktree with its OWN `node_modules`, because Turbopack rejects a symlinked
   one pointing outside the project root.
+
+- **PROVE THE PROBE CANNOT SEE THE REAL DATA *BEFORE* YOU WRITE, USING THE SURFACE'S OWN READ
+  ROUTE.** The sharpening of the copy rule below, from Track C walking the newly-mounted
+  record routes: `/record/arm` CREATES a dataset, and `HF_LEROBOT_HOME` points at Oscar's
+  real unbacked-up data by default from `~/.profile` and `~/.bashrc`. They started the
+  backend against a scratch root and then called **`GET /record/repos` first**, getting
+  `{"root": "<scratch>", "repos": []}`.
+  **An empty repo list from a scratch root is the only cheap proof available BEFORE a write
+  that the mutating calls cannot reach the 46-episode datasets.** Checking afterwards tells
+  you what happened; it does not prevent it. And it is stronger than reading the launcher's
+  env, because it is the SERVER's own answer about the SERVER's own root — the same reason
+  the existing rule says to verify via `/proc` rather than trusting what you exported.
+  **The copy is the mechanism; the empty list is the evidence, and it costs one GET.** Look
+  for the read route that shares the mutating route's root, and call it first.
 
 - **A probe of any surface that owns a mutating call gets a COPY, never a link.** The
   gate-matrix rule generalises past matrices. The runs surface has `DELETE /lab/runs/{id}`
