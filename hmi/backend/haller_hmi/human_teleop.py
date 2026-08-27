@@ -100,6 +100,42 @@ ACQUIRE_RATE_DEG_S = 20.0
 #: enough to absorb a handover the anchor somehow did not zero — 30° at
 #: ACQUIRE_RATE_DEG_S closes inside it.
 ACQUIRE_RAMP_MS = 1500.0
+#: The session's normal joint-rate ceiling, DEGREES PER SECOND.
+#:
+#: Expressed as a rate and converted per tick, not stored as degrees-per-tick:
+#: a per-tick constant is calibrated for exactly one cadence and lies at every
+#: other. `hz` is a field of `POST /teleop/human/start`, so this was reachable
+#: — at the hard-coded 4 deg/tick it meant 240 deg/s at hz=60 but 80 deg/s at
+#: hz=20, silently taking over the binding-speed-limit role that belongs to
+#: motion.max_speed_deg_s.
+#:
+#: It also made `_ramp_cap` disagree with itself: its floor was already a
+#: proper `ACQUIRE_RATE_DEG_S * period` conversion while its ceiling was the
+#: raw per-tick number, so the acquisition ramp spanned 12:1 at hz=60 and 2:1
+#: at hz=10 — and invariant 2 calls that ramp load-bearing. Both ends are
+#: rates now and the ramp is the same ratio at every cadence.
+#:
+#: 240 deg/s IS 4 deg/tick at 60 Hz exactly, so this changes nothing at the
+#: only cadence ever driven on hardware. `lpf_tau_s` is the model: a physical
+#: constant, converted at the point of use.
+RATE_CAP_DEG_S = 240.0
+
+#: Bounds on the session tick rate a caller may request.
+#:
+#: The floor is set by the acquisition ramp, not by speed: ACQUIRE_RAMP_MS is
+#: 1.5 s, so below 10 Hz the ramp gets fewer than 15 ticks and stops being a
+#: ramp — and invariant 2 calls it load-bearing. The ceiling is the Feetech
+#: bus: past ~120 Hz the round trips cannot be served and the loop only burns
+#: CPU discovering that.
+#:
+#: Note this bound is WEAKER than it needed to be before the rate cap became a
+#: rate. While the cap was degrees-per-TICK, `hz` silently reconfigured the
+#: speed limit and the safety-stop budget; now it changes tick RESOLUTION and
+#: nothing else, so the bound is about the ramp having enough samples rather
+#: than about the envelope moving underneath the operator.
+MIN_SESSION_HZ = 10.0
+MAX_SESSION_HZ = 120.0
+
 #: How many consecutive failed ticks the 60 Hz loop tolerates before it stops
 #: the session outright. A failed tick sleeps 50 ms and retries, which rides
 #: through transient bus glitches; a PERMANENT fault (a dead arm handle) would
@@ -225,7 +261,10 @@ class HumanTeleopSession:
         self._steps_left: dict[str, JointStep] = {}
         self._steps_right: dict[str, JointStep] = {}
         self._hz_override = hz_override
-        self._rate_cap_deg_per_tick = 4.0
+        self._rate_cap_deg_s = RATE_CAP_DEG_S
+        # Set from cfg.hz when the loop starts. The default matters only
+        # for `_smooth_step` called outside a running session.
+        self._period = 1.0 / 60.0
         # Smoothing time constant for the commit loop's one-pole filter,
         # config motion.lpf_tau_s. It compounds with the IK's per-solve step
         # cap — see MotionConfig.lpf_tau_s for the arithmetic.
@@ -420,6 +459,10 @@ class HumanTeleopSession:
                 raise ValueError("at least one of left_arm/right_arm is required")
             if left_arm and right_arm and left_arm == right_arm:
                 raise ValueError("left_arm and right_arm must be different")
+            if not (MIN_SESSION_HZ <= hz <= MAX_SESSION_HZ):
+                raise ValueError(
+                    f"hz must be between {MIN_SESSION_HZ:g} and "
+                    f"{MAX_SESSION_HZ:g}; got {hz:g}")
             arm_ids = {side: arm_id
                        for side, arm_id in (("left", left_arm),
                                             ("right", right_arm))
@@ -731,7 +774,7 @@ class HumanTeleopSession:
         RATE-CAP while the ramp is biting, which is the truth), and it cannot
         make `committed` disagree with what was actually written.
         """
-        full = self._rate_cap_deg_per_tick
+        full = self._rate_cap_deg_s * period
         acq = self._acq[side]
         if acq.authority is not SideAuthority.DRIVING or acq.driving_since_perf is None:
             return full
@@ -828,7 +871,7 @@ class HumanTeleopSession:
         cap: float | None = None,
     ) -> dict[str, JointStep]:
         out: dict[str, JointStep] = {}
-        cap = self._rate_cap_deg_per_tick if cap is None else cap
+        cap = (self._rate_cap_deg_s * self._period) if cap is None else cap
         for joint, lo_hi in limits.items():
             lo, hi = lo_hi
             cur = committed.get(joint, 0.0)
@@ -878,6 +921,9 @@ class HumanTeleopSession:
         left = self._arms[cfg.left_arm] if cfg.left_arm else None
         right = self._arms[cfg.right_arm] if cfg.right_arm else None
         period = 1.0 / max(1.0, cfg.hz)
+        # `_smooth_step`'s default cap converts against this; the loop
+        # always passes an explicit cap, so this is for callers outside it.
+        self._period = period
         # Smoothing time constant (frequency-independent), default ≈ 100 ms.
         tau_s = self._lpf_tau_s
         alpha = 1.0 - math.exp(-period / tau_s) if period > 0 else 1.0

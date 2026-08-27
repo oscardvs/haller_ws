@@ -751,7 +751,13 @@ def test_the_first_commanded_step_is_not_a_jump():
         _pump(sess, _off_pose_frame(), 0.4)
         sent = [c.args[0]["shoulder_pan"]
                 for c in arms["left"].send_goal.call_args_list]
-        assert len(sent) > 20, "not enough commits to judge the trajectory"
+        # A wall-clock THROUGHPUT precondition, not a property: it guards the
+        # early-window assertion below. `_ramp_cap` is driven by elapsed time
+        # rather than tick count, so a starved run samples the same ramp with
+        # fewer points and every assertion after this stays valid. Tolerant
+        # because four sessions share this box and a loaded 200 Hz loop can
+        # miss its rate — a starved run must not read as a ramp regression.
+        assert len(sent) > 10, "not enough commits to judge the trajectory"
         assert sent[0] == pytest.approx(0.0, abs=0.5), (
             f"first commit jumped to {sent[0]} deg from an arm at 0"
         )
@@ -783,7 +789,16 @@ def test_commit_records_the_commanded_pose_not_the_requested_one():
         _pump(sess, _off_pose_frame(), 0.4)
         requested = [c.args[0]["shoulder_pan"]
                      for c in arms["left"].send_goal.call_args_list]
-        assert max(abs(v) for v in requested) > 1.0, (
+        # The ramp must have opened BEYOND its starting rate, or the test is
+        # not exercising anything. Stated against the ramp floor rather than a
+        # magic number: the old `> 1.0` was silently calibrated against a
+        # rate cap of 4 deg/TICK, which at this test's hz_override=200 meant
+        # 800 deg/s. With the cap expressed as 240 deg/s the same ramp asks
+        # for proportionally less per tick, and a fixed threshold would read
+        # the correction as a failure.
+        from haller_hmi import human_teleop as ht
+        floor_deg_per_tick = ht.ACQUIRE_RATE_DEG_S / 200.0
+        assert max(abs(v) for v in requested) > floor_deg_per_tick, (
             "test is meaningless unless the ramp actually asked for motion"
         )
         reported = sess.status()["goal_deg"]["left"]["shoulder_pan"]
@@ -999,5 +1014,60 @@ def test_intermittent_tick_faults_do_not_stop_the_session(monkeypatch):
             assert sess.status()["running"], "intermittent faults tripped the breaker"
             _time.sleep(0.05)
         assert calls["n"] > 4, "the loop should have ticked (and faulted) repeatedly"
+    finally:
+        sess.stop()
+
+
+def test_the_rate_cap_is_unchanged_at_the_only_cadence_ever_driven():
+    """240 deg/s IS 4 deg/tick at 60 Hz, to the float.
+
+    The cap moved from a hard-coded degrees-per-TICK constant to a rate
+    converted per tick. That is a units correction, and at the default cadence
+    it must be provably inert — otherwise it is a behaviour change wearing a
+    refactor's clothes. Pinned to exact equality, not approx.
+    """
+    from haller_hmi import human_teleop as ht
+
+    assert ht.RATE_CAP_DEG_S * (1.0 / 60.0) == 4.0
+
+    # And it now scales, which is the whole point: the old constant meant
+    # 240 deg/s at 60 Hz but 80 deg/s at 20 Hz, silently taking over the
+    # binding-speed-limit role that belongs to motion.max_speed_deg_s.
+    for hz in (10.0, 20.0, 120.0):
+        assert ht.RATE_CAP_DEG_S * (1.0 / hz) * hz == pytest.approx(240.0)
+
+
+def test_the_acquisition_ramp_spans_the_same_ratio_at_every_cadence():
+    """`_ramp_cap`'s floor was already a converted rate while its ceiling was
+    a raw per-tick number, so the ramp spanned 12:1 at 60 Hz and 2:1 at 10 Hz.
+    Invariant 2 calls that ramp load-bearing; a ramp whose range depends on the
+    tick rate is not one ramp."""
+    from haller_hmi import human_teleop as ht
+
+    ratios = {hz: (ht.RATE_CAP_DEG_S * (1.0 / hz)) / (ht.ACQUIRE_RATE_DEG_S * (1.0 / hz))
+              for hz in (10.0, 20.0, 60.0, 120.0)}
+    assert len({round(r, 9) for r in ratios.values()}) == 1, ratios
+    assert ratios[60.0] == pytest.approx(ht.RATE_CAP_DEG_S / ht.ACQUIRE_RATE_DEG_S)
+
+
+@pytest.mark.parametrize("hz", [0.0, 1.0, 9.9, 120.1, 1000.0])
+def test_start_refuses_an_hz_that_would_reshape_the_ramp(hz):
+    """`hz` is a field of POST /teleop/human/start with no stated bound. An
+    unbounded field that reconfigures a safety envelope is the same class of
+    problem as a constant counted in ticks."""
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    with pytest.raises(ValueError, match="hz must be between"):
+        sess.start(left_arm="left", right_arm="right", hz=hz)
+    assert sess.state is HumanState.IDLE
+
+
+@pytest.mark.parametrize("hz", [10.0, 60.0, 120.0])
+def test_start_accepts_the_cadences_inside_the_bound(hz):
+    mgr, _ = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm="right", hz=hz)
+    try:
+        assert sess.status()["running"] is True
     finally:
         sess.stop()
