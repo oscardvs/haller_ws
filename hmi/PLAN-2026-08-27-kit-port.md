@@ -241,6 +241,23 @@ this port adds. These are not goals. They are the pass/fail.
    No exceptions, including inside a safety check whose whole purpose is to make the arm
    safe.
 
+5c. **Every heavy import happens on the MAIN thread, at build time — never lazily
+   inside a request handler.** FastAPI runs plain `def` handlers on anyio worker threads,
+   and a first `import pandas` on one worker while another reads a parquet **SEGFAULTS
+   the process**. Reproduced 3/3 on this box with no Haller code involved; a main-thread
+   pre-import survives 5/5.
+
+   This is an invariant rather than a performance note because of *which* process it is.
+   The HMI owns the Feetech bus with torque enabled, and SIGSEGV is not an exception:
+   no `finally`, no `atexit`, no `_release_torque_per_motor`, and `/estop` unreachable
+   because the server is gone. The arms stay energised holding their last goal, and the
+   thing that ends that is a human at the bench PSU. **A page load must never be able to
+   take the arms down.**
+
+   Applies to any plain-`def` route doing a deferred heavy import — pandas, pyarrow,
+   anything with C extensions. The cost of closing it is a fraction of a second at
+   startup.
+
 6. **Single-arm sessions**: the absent side never acquires, is never written, reports
    `reason:"no_arm"`, cannot be homed. Now also: produces a dataset with no columns for
    that side, distinguishable by names alone.
