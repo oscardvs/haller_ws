@@ -105,7 +105,27 @@ export function rigLabel(rig: Rig | string | null | undefined): string {
   }
 }
 
-export type DatasetMarks = { keep: number; reject: number; unset: number };
+export type DatasetMarks = {
+  keep: number;
+  reject: number;
+  unset: number;
+  /**
+   * What the trainer will actually be handed: `keep + unset`.
+   *
+   * An UNSET episode counts as keep — "I have not judged this" is not
+   * "throw it away" — so `keep` alone understates the training set the moment
+   * anything is unmarked. This is the number that answers "how much am I
+   * about to train on". Optional: a backend that predates it omits it, and
+   * `trainableCount` falls back.
+   */
+  train?: number;
+};
+
+/** How many episodes a run on this dataset would see. See `DatasetMarks.train`. */
+export function trainableCount(marks: DatasetMarks | null | undefined): number {
+  if (!marks) return 0;
+  return typeof marks.train === "number" ? marks.train : marks.keep + marks.unset;
+}
 
 /** One dataset as the shelf and the picker show it. */
 export type DatasetSummary = {
@@ -697,7 +717,15 @@ export function isGripperChannel(name: string): boolean {
  *  Bookkeeping columns are excluded: they are the axes, not series. Charting
  *  `step` against `step` is a diagonal line that teaches nothing. */
 const AXIS_KEYS = new Set([
-  "step", "steps", "epoch", "epochs", "wall_s", "t", "elapsed_s", "timestamp",
+  // LeRobot's MetricsTracker.to_dict emits FOUR counters before any metric —
+  // read off lerobot 0.6.1: {steps, samples, episodes, epochs, ...metrics}.
+  // All four climb monotonically forever, so charting one against steps draws
+  // a perfect diagonal: not wrong, just a chart that can never say anything.
+  // `episodes` is the trap, because the word means something else everywhere
+  // else in this UI — here it counts episode-passes the trainer has consumed,
+  // not the dataset's episode list.
+  "steps", "samples", "episodes", "epochs",
+  "step", "epoch", "wall_s", "t", "elapsed_s", "timestamp",
 ]);
 
 export function metricKeys(rows: MetricRow[]): string[] {

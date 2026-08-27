@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ApiError } from "@/lib/api";
 import {
   armGroups, epLabel, isBusy, isDrawableTrace, isForbidden, isMissing,
+  trainableCount,
   isGripperChannel, lab, labVideoUrl, metricKeys, metricX, qs, reason,
   rigLabel, shortChannel, sliceFor, videoSrcKey,
   type LabEpisode, type MetricRow, type Trace,
@@ -240,6 +241,29 @@ describe("gripper channels", () => {
   });
 });
 
+describe("the trainable count", () => {
+  it("counts unset episodes in, because unset is not reject", () => {
+    // An unset episode is handed to the trainer: "I have not judged this" is
+    // not "throw it away". `keep` alone understates the training set the
+    // moment anything is unmarked, and that number is the answer to "how much
+    // am I about to train on".
+    expect(trainableCount({ keep: 35, reject: 11, unset: 0, train: 35 })).toBe(35);
+    expect(trainableCount({ keep: 20, reject: 5, unset: 21, train: 41 })).toBe(41);
+  });
+
+  it("falls back to keep + unset when the backend does not publish it", () => {
+    expect(trainableCount({ keep: 20, reject: 5, unset: 21 })).toBe(41);
+    expect(trainableCount(null)).toBe(0);
+  });
+
+  it("prefers the backend's own sum over recomputing it", () => {
+    // If the two ever disagree the backend is right — it owns what the run
+    // will actually be handed. Recomputing would make the badge argue with
+    // the runner.
+    expect(trainableCount({ keep: 1, reject: 0, unset: 1, train: 99 })).toBe(99);
+  });
+});
+
 describe("metric stream readings", () => {
   const ROWS: MetricRow[] = [
     { step: 0, epochs: 0, wall_s: 0, loss: 7.25, lr: 1e-5, grad_norm: 4.2 },
@@ -254,6 +278,19 @@ describe("metric stream readings", () => {
     expect(metricKeys(ROWS)).toEqual([
       "loss", "lr", "grad_norm", "eval_loss", "samples_per_s", "gpu_mem_gb",
     ]);
+  });
+
+  it("excludes ALL FOUR of MetricsTracker's counters", () => {
+    // Read off lerobot 0.6.1: MetricsTracker.to_dict returns
+    // {steps, samples, episodes, epochs, ...metrics}. All four climb
+    // monotonically forever, so charting one against steps is a perfect
+    // diagonal — a chart that can never say anything. `episodes` is the trap:
+    // everywhere else in this UI the word means the dataset's episode list,
+    // and here it counts episode-passes the trainer has consumed.
+    const rows: MetricRow[] = [
+      { steps: 100, samples: 800, episodes: 12, epochs: 0.25, loss: 3.1 },
+    ];
+    expect(metricKeys(rows)).toEqual(["loss"]);
   });
 
   it("excludes the axes — charting step against step teaches nothing", () => {

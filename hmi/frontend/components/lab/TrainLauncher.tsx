@@ -21,14 +21,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
-  REMOTE_REFUSED,
   epLabel,
   isBusy,
   isForbidden,
   isMissing,
   lab,
   reason,
+  REMOTE_REFUSED,
   rigLabel,
+  trainableCount,
   type DatasetDetail,
   type DatasetSummary,
   type PolicyType,
@@ -231,8 +232,10 @@ export function TrainLauncher({
     return m;
   }, [detail, repoId]);
 
-  const keptCount =
-    keptIdx?.length ?? (picked ? picked.marks.keep + picked.marks.unset : 0);
+  // `keep + unset`, because an unset episode is handed to the trainer — "I
+  // have not judged this" is not "throw it away". The backend publishes the
+  // same sum as `marks.train`; `trainableCount` prefers it and falls back.
+  const keptCount = keptIdx?.length ?? trainableCount(picked?.marks);
 
   const derivedName = useMemo(() => {
     const tail = repoId ? repoId.split("/").pop() || repoId : "";
@@ -330,7 +333,7 @@ export function TrainLauncher({
             )}
             {trainable.map((d) => (
               <option key={d.repo_id} value={d.repo_id}>
-                {d.repo_id} · {d.marks.keep} kept of {d.episodes}
+                {d.repo_id} · {trainableCount(d.marks)} of {d.episodes} to train on
               </option>
             ))}
           </Select>
