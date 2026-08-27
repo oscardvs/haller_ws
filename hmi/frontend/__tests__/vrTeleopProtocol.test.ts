@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { pairingFor } from "../lib/stance";
 import {
-  clampKnob, DEFAULT_WRIST_PIVOT_M, episodesTotal, formatKnob, HAPTIC_FLOOR,
-  ikHapticCues, ORIENT_DEFICIT, parseVrSocketMessage, precisionHeld,
-  PRECISION_STICK_Y, sampleVRFrame, stepTuning, stickAxes,
-  TUNING_KNOBS, TUNING_REPEAT_MS, WRIST_PIVOT_KEY,
+  applyServerConfig, clampKnob, DEFAULT_WRIST_PIVOT_M, episodesTotal,
+  formatKnob, HAPTIC_FLOOR, ikHapticCues, ORIENT_DEFICIT, parseVrSocketMessage,
+  precisionHeld, PRECISION_STICK_Y, reconcileConfig, sampleVRFrame, stepTuning,
+  stickAxes, TUNING_KNOBS, TUNING_REPEAT_MS, WRIST_PIVOT_KEY,
   BUTTON_SQUEEZE, BUTTON_TRIGGER,
   type IkSides, type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
 } from "../lib/vrTeleop";
@@ -412,5 +412,84 @@ describe("episodesTotal", () => {
 
   it("is null with nothing read, so the HUD falls back instead of showing 0", () => {
     expect(episodesTotal(null, 4)).toBeNull();
+  });
+});
+
+// ---- who owns a tuned value --------------------------------------------------
+
+/** `QuestTeleopConfig` lives PER CONNECTION and HumanTeleopClient reconnects
+ *  after 50 ms, so a blip the operator never sees hands every knob they moved
+ *  back to the server's defaults — mid-take, and a gain that quietly halves
+ *  feels exactly like an arm that has started lagging. These pin the whole
+ *  path with the real functions: the socket's own reader into the reconcile,
+ *  and the re-assert that goes straight back out. */
+describe("the settings round-trip", () => {
+  /** Where the page stands when the socket drops: the operator has walked
+   *  translation gain up, everything else sits where the robot put it. */
+  const local = {
+    scale_translation: 2.4,
+    scale_rotation: 1.6,
+    lam_pos: 0.01,
+    [WRIST_PIVOT_KEY]: DEFAULT_WRIST_PIVOT_M,
+  };
+  const dirty = ["scale_translation"];
+
+  /** What the fresh connection answers `request_settings` with — a brand-new
+   *  dataclass, the stance enum and a boolean riding along with the numbers. */
+  const fresh = parseVrSocketMessage(JSON.stringify({
+    type: "settings",
+    config: {
+      scale_translation: 1, scale_rotation: 1, lam_pos: 0.02,
+      stance: "behind", collision_guard: true,
+    },
+  }));
+  const server = fresh?.config ?? null;
+
+  it("keeps the tuned knob and lets its untouched neighbours revert", () => {
+    expect(fresh?.kind).toBe("ik_state");
+    const { values } = reconcileConfig(local, dirty, server);
+    expect(values.scale_translation).toBe(2.4);
+    // The server owns everything the operator did not move, whatever number
+    // the page happens to still be holding for it.
+    expect(values.scale_rotation).toBe(1);
+    expect(values.lam_pos).toBe(0.02);
+    // Only the numbers are knobs.
+    expect(values.stance).toBeUndefined();
+    expect(values.collision_guard).toBeUndefined();
+  });
+
+  it("re-asserts exactly the key the operator moved, and nothing else", () => {
+    // Narrow on purpose: the kit re-broadcast its whole slider snapshot on
+    // connect and so became the de-facto source of truth for values nobody
+    // had touched. One knob moved, one key sent.
+    const { reassert } = reconcileConfig(local, dirty, server);
+    expect(reassert).toEqual({ scale_translation: 2.4 });
+  });
+
+  it("never sends the wrist pivot back, marked or not", () => {
+    // The pivot is applied to the grip pose on this side and the server has
+    // no field for it, so a `local` knob that leaked into a config_update is
+    // at best refused — and on a stricter backend takes the message with it.
+    const moved = { ...local, [WRIST_PIVOT_KEY]: 0.12 };
+    const { values, reassert } = reconcileConfig(
+      moved, [...dirty, WRIST_PIVOT_KEY],
+      { ...(server ?? {}), [WRIST_PIVOT_KEY]: DEFAULT_WRIST_PIVOT_M },
+    );
+    expect(values[WRIST_PIVOT_KEY]).toBe(0.12);
+    expect(reassert).not.toHaveProperty(WRIST_PIVOT_KEY);
+    expect(TUNING_KNOBS.find((k) => k.key === WRIST_PIVOT_KEY)?.local).toBe(true);
+  });
+
+  it("lets a clamp land on a dirty key, and re-asserts what the robot took", () => {
+    // The ask was past the backend's BOUNDS. Whatever the robot took IS the
+    // value: re-asserting the unclamped number on every reconnect would fight
+    // a box that has already snapped, for the rest of the session.
+    const asked = { ...local, scale_translation: 4.5 };
+    const echo = parseVrSocketMessage({ type: "config_applied",
+                                        config: { scale_translation: 4 } });
+    const values = applyServerConfig(asked, echo?.config ?? null);
+    expect(values.scale_translation).toBe(4);
+    const { reassert } = reconcileConfig(values, dirty, server);
+    expect(reassert).toEqual({ scale_translation: 4 });
   });
 });

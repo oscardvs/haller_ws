@@ -534,8 +534,30 @@ export type HudStatusLike = {
  *  index, and an operator mid-run wants to know how many good ones are in
  *  the bag. */
 export type RecorderHudLike = {
+  /** Where the take is. Absent on a backend that predates the start gate, in
+   *  which case `recording` alone still paints. */
+  state?: TakeState;
   recording: boolean;
   episode_frames: number;
+  /** Ticks seen and NOT written. A degraded read is a dropped frame, not a
+   *  recorded one (port invariant 9) — so a take shedding rows has to say so
+   *  while it is still being driven, not in review. */
+  skipped_frames?: number;
+  /** The single worst drop source, already reduced: "left_wrist", not a
+   *  table. An operator needs a cable to go check. */
+  worstDrop?: string | null;
+  /** Measured against declared. `fps` in info.json is measured or the episode
+   *  does not open (port invariant 10); a rate that has sagged is a take
+   *  worth abandoning early. */
+  fpsMeasured?: number | null;
+  fpsDeclared?: number | null;
+  /** Why an ARMED gate fell back to idle. Not an error — the gate saying why
+   *  it dropped. Silent un-arming is the failure the gate exists to prevent. */
+  invalidatedReason?: string | null;
+  /** True while the page is holding ARMED itself because the backend has no
+   *  /record/arm yet: nothing is written before ROLL, but the schema is not
+   *  frozen, the 409s arrive late and the episode index is a guess. */
+  localGate?: boolean;
   /** Takes this page has saved — the fallback count, and the floor under the
    *  dataset-wide one. */
   takes?: number;
@@ -545,6 +567,76 @@ export type RecorderHudLike = {
    *  a fresh repo, or the endpoint refused. */
   episodes?: number | null;
 } | null;
+
+/** How a take is named. The dataset-wide index when there is one — "ep 34" is
+ *  what an operator reconciles against the dataset browser afterwards, where
+ *  "take 3" is only ever true of this page-load. */
+function takeNaming(rec: RecorderHudLike): string {
+  const ep = rec?.episodes;
+  return typeof ep === "number" ? `ep ${ep}` : `take ${(rec?.takes ?? 0) + 1}`;
+}
+
+/** The one thing wrong with the recorder that the operator most needs, or
+ *  null. Worst first and never more than one line: a health strip that lists
+ *  everything is a strip nobody reads while driving. The gate line is last
+ *  but shows while IDLE too — a gate that dropped is exactly what an operator
+ *  standing there wondering why nothing is armed has to be told. */
+function recHealthLine(
+  rec: RecorderHudLike,
+): { text: string; color: string } | null {
+  if (!rec) return null;
+  const measured = rec.fpsMeasured;
+  const declared = rec.fpsDeclared;
+  // 90% of declared is the backend's own refusal threshold; matching it keeps
+  // the HUD and the 409 telling one story.
+  if (typeof measured === "number" && typeof declared === "number"
+      && measured < declared * 0.9) {
+    return {
+      text: `RATE ${measured.toFixed(0)}/${declared.toFixed(0)} fps`,
+      color: "#f28b82",
+    };
+  }
+  if (rec.worstDrop) return { text: `dropping: ${rec.worstDrop}`, color: "#fdd663" };
+  const skipped = rec.skipped_frames ?? 0;
+  if (skipped > 0 && (rec.state === "rolling" || rec.recording)) {
+    return { text: `${skipped} frames dropped`, color: "#fdd663" };
+  }
+  if (rec.invalidatedReason) {
+    return {
+      text: `GATE DROPPED — ${rec.invalidatedReason}`.slice(0, STATUS_MAX_CHARS),
+      color: "#fdd663",
+    };
+  }
+  // Last, because anything above it is a problem and this is not — but it is
+  // the whole claim the gate makes, and an operator who cannot see it has
+  // been given the gate's extra button press without its reassurance.
+  if (rec.state === "armed") {
+    return {
+      text: rec.localGate
+        ? "armed locally — nothing written yet"
+        : "armed — nothing written yet",
+      color: "#fdd663",
+    };
+  }
+  return null;
+}
+
+/** Which hand drives which arm this session. Null on a hand with no arm: an
+ *  absent side is a fact about the rig, not a fault, and the operator must be
+ *  able to see the arm set from inside the headset — a session started on the
+ *  wrong preset is otherwise only discovered 60 s into a take. */
+export type ArmSetLike = { left: string | null; right: string | null } | null;
+
+/** The arm set in the operator's terms, from the very pairing the session was
+ *  started with — never recomputed, because a HUD that describes one mapping
+ *  while the session runs another is invisible until an arm moves. */
+export function describeArmSet(set: ArmSetLike): string {
+  if (!set) return "none";
+  const sides: string[] = [];
+  if (set.left) sides.push(`L→${set.left}`);
+  if (set.right) sides.push(`R→${set.right}`);
+  return sides.length ? sides.join(" · ") : "none";
+}
 
 /**
  * Repaint the in-scene HUD. Layout: workspace camera on top (when a frame is
@@ -564,19 +656,56 @@ export type VrMenuLike = {
    *  operator must be able to SEE which mapping their hands are wired to —
    *  a wrong stance reads as "the arm goes the opposite way". */
   stance?: "behind" | "mirror" | "front";
+  /** Which hand drives which arm this session, when the pairing is known. */
+  armSet?: ArmSetLike;
   /** The live-tuning list, when the operator has it open. */
   tuning?: {
     open: boolean;
     index: number;
     values: Readonly<Record<string, number>>;
+    /** Knobs the operator moved this page-load — the ones the page re-asserts
+     *  over the server's per-connection defaults. Marked, because a value that
+     *  survives a reconnect while its neighbours revert is otherwise
+     *  witchcraft. */
+    dirty?: readonly string[];
   } | null;
   /** True while the precision modifier is held. Shown prominently: a
    *  modifier you cannot see is one you leave on. */
   precision?: boolean;
-  /** The end-of-take decision is open — save or discard. Modal: it takes
-   *  over the menu box and both stick clicks until the operator picks. */
+  /** The end-of-take decision is open. Modal: it takes over the menu box and
+   *  both stick clicks until the operator picks. Four outcomes exist — keep,
+   *  keep_stop, redo, drop — but the headset binds only the two that return
+   *  to ARMED, because in a session whose point is banking takes the next one
+   *  is always the expected next thing. Standing down is the desktop's, where
+   *  a button costs nothing and collides with no trained gesture. */
   endPrompt?: boolean;
+  /** True for a moment after the operator held the left stick during the
+   *  prompt — the trained in-session home gesture, which must not fire
+   *  through the tail of a take they may be about to keep. Answered rather
+   *  than silently dropped: a gesture the operator has trained gets told no. */
+  homeRefused?: boolean;
 } | null;
+
+/* Character budgets, and why they are numbers rather than a measureText call.
+ *
+ * The panel canvas is 1024 wide. The status column is clipped at 563 px and
+ * the menu box has 392 px between its padding and its right-aligned value
+ * column. Monospace advances at 0.6 em, so a row's width is (chars × 0.6 ×
+ * fontPx) and the budgets below fall straight out of that:
+ *
+ *     status  22px from x=24 → 515 / 13.2 = 39 chars
+ *     menu    18px body      → 392 / 10.8 = 36 chars
+ *     menu    20px title     → 392 / 12.0 = 32 chars
+ *
+ * measureText is not used because this runs inside the XR loop at ~10 Hz and
+ * the answer is a compile-time property of the copy, not of the frame. The
+ * budgets are pinned by tests instead, which is where a too-long line should
+ * be caught — not on someone's face in a headset, where the failure mode is
+ * silent truncation of whatever sits at the end of the row.
+ */
+export const STATUS_MAX_CHARS = 39;
+export const MENU_MAX_CHARS = 36;
+export const MENU_TITLE_MAX_CHARS = 32;
 
 /** Repaint the status/menu PANEL — text only. The workspace camera is not
  *  composited here any more: it renders as its own quad, textured at native
@@ -614,17 +743,27 @@ export function paintHud(
   const col = status?.collision;
   ctx.fillStyle = "#e8eaed";
   ctx.fillText(state, 24, y);
-  if (rec?.recording) {
+  if (rec && (rec.state === "armed" || rec.state === "rolling" || rec.recording)) {
     // Right-aligned to the column's edge so it cannot collide with the
     // state: the one line that must be readable at a glance while driving.
-    ctx.fillStyle = "#f28b82";
     ctx.textAlign = "right";
-    const ep = rec.episodes;
-    ctx.fillText(
-      typeof ep === "number"
-        ? `● REC ep ${ep} · ${rec.episode_frames}`
-        : `● REC ${rec.episode_frames}`,
-      leftW, y);
+    if (rec.state === "armed") {
+      // ARMED must never read like REC: it is loaded and writing nothing, and
+      // an operator who cannot tell the two apart at a glance has been given
+      // the gate's cost without its benefit. Its own colour, its own glyph.
+      ctx.fillStyle = "#fdd663";
+      ctx.fillText(
+        `◆ ARMED ${takeNaming(rec)}${rec.localGate ? " (local gate)" : ""}`,
+        leftW, y);
+    } else {
+      ctx.fillStyle = "#f28b82";
+      const ep = rec.episodes;
+      ctx.fillText(
+        typeof ep === "number"
+          ? `● REC ep ${ep} · ${rec.episode_frames}`
+          : `● REC ${rec.episode_frames}`,
+        leftW, y);
+    }
     ctx.textAlign = "left";
   }
   if (col?.enabled) {
@@ -638,6 +777,16 @@ export function paintHud(
         ? `COLLISION HOLD ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`
         : `clearance ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`,
       24, y);
+  }
+  // 22px like the hint row below, not the column's 28px: the longest thing
+  // this line says is "armed locally — nothing written yet", and at 28px that
+  // ran past the clip.
+  const health = recHealthLine(rec);
+  if (health) {
+    y += 38;
+    ctx.font = "22px monospace";
+    ctx.fillStyle = health.color;
+    ctx.fillText(health.text, 24, y);
   }
   ctx.font = "28px monospace";
   // Per side: authority, then the solver's own reading of how the arm is
@@ -673,19 +822,30 @@ export function paintHud(
         && (d?.orient_residual ?? 0) > ORIENT_DEFICIT) {
       y += 32;
       ctx.fillStyle = "#fdd663";
-      ctx.fillText("wrist is out of twist — MOVE your hand", 120, y);
+      // At x=24, not indented under the side: the indent left 419 px, and
+      // this line needs 502 px at the column's own 28 px. It is a callout,
+      // and a callout the clip eats says nothing.
+      ctx.font = "22px monospace";
+      ctx.fillText("wrist is out of twist — MOVE your hand", 24, y);
+      ctx.font = "28px monospace";
     }
   }
   y += 38;
+  // 22px, not the column's 28px, and E-STOP FIRST. The status column is
+  // clipped at leftW, and at 28px this row ran to 790 px against 515 px of
+  // room — so the tail was being cut off, and the tail was `B/Y = E-STOP`.
+  // A binding that is only legible when nothing has gone wrong is not a
+  // binding the operator has.
+  ctx.font = "22px monospace";
   if (status?.last_error) {
     ctx.fillStyle = "#f28b82";
-    ctx.fillText(status.last_error.slice(0, 60), 24, y);
+    ctx.fillText(status.last_error.slice(0, STATUS_MAX_CHARS), 24, y);
   } else if (menu?.precision) {
     ctx.fillStyle = "#8ab4f8";
-    ctx.fillText("◆ PRECISION — gains scaled down while held", 24, y);
+    ctx.fillText("◆ PRECISION — gains scaled down", 24, y);
   } else {
     ctx.fillStyle = "#9aa0a6";
-    ctx.fillText("grips = drive · trigger = gripper · B/Y = E-STOP", 24, y);
+    ctx.fillText("B/Y = E-STOP · grip = drive · trigger", 24, y);
   }
   ctx.restore();
 
@@ -712,10 +872,13 @@ function paintMenu(
   const pad = 18;
   const lineH = 30;
   const tuningOpen = Boolean(menu.tuning?.open);
-  const rows = menu.endPrompt ? 5
+  const rows = menu.endPrompt ? 6
+    // title + the window of knobs + the one-row ownership footer.
     : tuningOpen ? TUNING_WINDOW + 2
-    // views (or the "no cameras" line), SIZE, REC, reset, grab, tune hint.
-    : Math.max(1, menu.views.length) + 6 + (menu.stance ? 1 : 0);
+    // views (or the "no cameras" line), SIZE, REC, reset, grab, tune hint,
+    // plus a row each for the stance and the arm set when they are known.
+    : Math.max(1, menu.views.length) + 6 + (menu.stance ? 1 : 0)
+      + (menu.armSet ? 1 : 0);
   const boxW = Math.round(W * 0.42);
   const boxH = rows * lineH + pad * 2;
   const x = W - boxW - 24;
@@ -732,33 +895,55 @@ function paintMenu(
 
   ctx.textAlign = "left";
   const y0 = yTop + pad + 22;
-  if (menu.endPrompt) paintEndPrompt(ctx, rec, x + pad, y0, lineH);
+  // The box gets the same clip the status column has. The copy is written to
+  // MENU_MAX_CHARS and should never need it — but an arm id, a repo name or a
+  // camera label is arbitrarily long, and a row that escapes the box lands on
+  // top of the workspace view this panel deliberately hangs BELOW.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, yTop, boxW, boxH);
+  ctx.clip();
+  if (menu.endPrompt) paintEndPrompt(ctx, rec, menu, x + pad, y0, lineH);
   else if (tuningOpen) paintTuning(ctx, menu, x, x + pad, y0, boxW, lineH);
   else paintViewMenu(ctx, menu, rec, x + pad, y0, lineH);
+  ctx.restore();
 }
 
 /** How many knob rows the in-headset list shows at once. More than this and
  *  the box starts covering the view it hangs beside. */
 const TUNING_WINDOW = 8;
 
+/** Two gestures, both back to ARMED — and they are the two the sticks already
+ *  carry. `redo` is a first-class outcome, not a failure: 11 of the kit's 46
+ *  episodes were rejected, a rate only visible because both outcomes exist. */
 function paintEndPrompt(
   ctx: CanvasRenderingContext2D, rec: RecorderHudLike,
-  x: number, yStart: number, lineH: number,
+  menu: NonNullable<VrMenuLike>, x: number, yStart: number, lineH: number,
 ): void {
   let y = yStart;
-  ctx.font = "bold 24px monospace";
+  ctx.font = "bold 20px monospace";
   ctx.fillStyle = "#f28b82";
   ctx.fillText(`TAKE ENDED · ${rec?.episode_frames ?? 0} frames`, x, y);
   y += lineH;
-  ctx.font = "22px monospace";
+  ctx.font = "18px monospace";
   ctx.fillStyle = "#81c995";
-  ctx.fillText("L stick click = SAVE", x, y);
+  ctx.fillText("L click = KEEP  (save, arm next)", x, y);
   y += lineH;
-  ctx.fillStyle = "#f28b82";
-  ctx.fillText("R stick click = DISCARD", x, y);
+  ctx.fillStyle = "#fdd663";
+  ctx.fillText("R click = REDO  (bin, same ep)", x, y);
   y += lineH;
   ctx.fillStyle = "#9aa0a6";
   ctx.fillText("hold A/X = keep rolling", x, y);
+  y += lineH;
+  // The refusal takes the mnemonic's row rather than adding one: a box that
+  // changes height under the operator reads as a fault of its own.
+  if (menu.homeRefused) {
+    ctx.fillStyle = "#fdd663";
+    ctx.fillText("home refused mid-take — pick first", x, y);
+    ctx.fillStyle = "#9aa0a6";
+  } else {
+    ctx.fillText("L = keep · R = redo", x, y);
+  }
   y += lineH;
   // Said out loud because it is the one surprising part: `/record/stop`
   // takes the save decision AT stop time, so there is no way to end the
@@ -771,13 +956,14 @@ function paintTuning(
   boxX: number, x: number, yStart: number, boxW: number, lineH: number,
 ): void {
   const tuning = menu.tuning!;
+  const dirty = new Set(tuning.dirty ?? []);
   const index = Math.min(Math.max(tuning.index, 0), TUNING_KNOBS.length - 1);
   let y = yStart;
-  ctx.font = "bold 24px monospace";
+  ctx.font = "bold 20px monospace";
   ctx.fillStyle = "#e8eaed";
   ctx.fillText("TUNE  (R stick walks / adjusts)", x, y);
   y += lineH;
-  ctx.font = "22px monospace";
+  ctx.font = "18px monospace";
   const first = Math.max(
     0, Math.min(index - Math.floor(TUNING_WINDOW / 2),
                 TUNING_KNOBS.length - TUNING_WINDOW));
@@ -792,12 +978,19 @@ function paintTuning(
     ctx.fillStyle = on ? "#e8eaed" : "#9aa0a6";
     ctx.fillText(`${on ? "▸" : " "} ${knob.label}`, x, y);
     ctx.textAlign = "right";
-    ctx.fillText(formatKnob(tuning.values[knob.key]), boxX + boxW - 20, y);
+    // ◆ = the operator moved this one, so the page re-asserts it over the
+    // server's per-connection default on every reconnect. A value that
+    // survives a blip while its neighbours revert is otherwise witchcraft.
+    const mine = dirty.has(knob.key);
+    if (mine) ctx.fillStyle = "#8ab4f8";
+    ctx.fillText(
+      `${mine ? "◆ " : ""}${formatKnob(tuning.values[knob.key])}`,
+      boxX + boxW - 20, y);
     ctx.textAlign = "left";
     y += lineH;
   }
   ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("hold R stick = close", x, y);
+  ctx.fillText("◆ = yours · hold R stick = close", x, y);
 }
 
 function paintViewMenu(
@@ -805,12 +998,12 @@ function paintViewMenu(
   rec: RecorderHudLike, x: number, yStart: number, lineH: number,
 ): void {
   let y = yStart;
-  ctx.font = "bold 24px monospace";
+  ctx.font = "bold 20px monospace";
   ctx.fillStyle = "#e8eaed";
   ctx.fillText(`VIEW  (L stick click = next)`, x, y);
   y += lineH;
 
-  ctx.font = "22px monospace";
+  ctx.font = "18px monospace";
   for (const v of menu.views) {
     const on = v.id === menu.activeViewId;
     ctx.fillStyle = on ? "#8ab4f8" : "#9aa0a6";
@@ -833,23 +1026,35 @@ function paintViewMenu(
     y += lineH;
   }
 
-  const recording = Boolean(rec?.recording);
+  if (menu.armSet) {
+    ctx.fillText(`ARMS  ${describeArmSet(menu.armSet)}`, x, y);
+    y += lineH;
+  }
+
   const takes = rec?.takes ?? 0;
   const ep = rec?.episodes;
-  // The dataset-wide index when we have one — "ep 34" is what an operator
-  // reconciles against the dataset browser afterwards, where "take 3" is only
-  // ever true of this page-load.
-  const naming = typeof ep === "number" ? `ep ${ep}` : `take ${takes + 1}`;
+  const naming = takeNaming(rec);
+  // Three-way, because ARM and ROLL are two different commands on the same
+  // button and the operator has to know which one the next hold fires. A
+  // backend that predates the gate reports only `recording`.
+  const takeState: TakeState = rec?.state ?? (rec?.recording ? "rolling" : "idle");
+  const rolling = takeState === "rolling" || takeState === "prompt";
   const idle = typeof ep === "number"
-    ? `hold A/X to START a take  (${ep} in dataset)`
+    ? `hold A/X to ARM  (${ep} in dataset)`
     : takes
-      ? `hold A/X to START a take  (${takes} saved)`
-      : "hold A/X to START a take";
-  ctx.fillStyle = recording ? "#f28b82" : "#9aa0a6";
+      ? `hold A/X to ARM a take  (${takes} saved)`
+      : "hold A/X to ARM a take";
+  ctx.fillStyle = rolling ? "#f28b82"
+    : takeState === "armed" ? "#fdd663" : "#9aa0a6";
   ctx.fillText(
-    recording
-      ? `● REC ${naming} · ${rec?.episode_frames ?? 0} fr — hold A/X to END`
-      : idle,
+    rolling
+      ? `● REC ${naming} · ${rec?.episode_frames ?? 0} fr — A/X to END`
+      // The menu says which button, the status column says which state — see
+      // `recHealthLine`, which carries "nothing written yet". Splitting them
+      // is what keeps both rows inside their own box.
+      : takeState === "armed"
+        ? `◆ ARMED ${naming} — A/X to ROLL`
+        : idle,
     x, y);
   y += lineH;
 
@@ -861,9 +1066,9 @@ function paintViewMenu(
   y += lineH;
 
   ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("hold L stick = reset arms · hold R stick = tune", x, y);
+  ctx.fillText("hold L stick = home · hold R = tune", x, y);
   y += lineH;
-  ctx.fillText("point + trigger (grip open) = move HUD", x, y);
+  ctx.fillText("point + trigger = move HUD", x, y);
 }
 
 function poseToPair(pose: XRPose | null | undefined) {
@@ -1172,6 +1377,118 @@ export function hapticCues(
   return cues;
 }
 
+// ---- the take machine -------------------------------------------------------
+
+/** Where a take is in its life.
+ *
+ *  ARMED is the start gate: full-rate teleop, the dataset open and its schema
+ *  frozen, and NOT ONE FRAME WRITTEN. Stock lerobot-record starts episode 0 the
+ *  instant the process boots, which is unusable solo in a headset. */
+export type TakeState = "idle" | "armed" | "rolling" | "prompt";
+
+/** What the operator decided about a take that just ended. `redo` is a
+ *  first-class outcome, not a failure: 11 of the kit's 46 episodes were
+ *  rejected, a rate only visible because both outcomes exist.
+ *
+ *  The two that return to ARMED are the headset's, because the next take is
+ *  always the expected next thing in a session whose point is banking them.
+ *  The two that stand down to IDLE are desktop-only — there is no room on the
+ *  controller for a gesture that does not collide with a trained one. */
+export type EndChoice = "keep" | "keep_stop" | "redo" | "drop";
+
+export type TakeEvent =
+  | { kind: "ax_hold" }
+  | { kind: "choose"; choice: EndChoice }
+  /** The recorder's own state, from the status poll. Truth outranks the
+   *  client's guess — a take that ended some other way takes the prompt with
+   *  it, and a gate that was invalidated must not keep saying ARMED. */
+  | { kind: "recorder"; state: TakeState; invalidated?: boolean }
+  /** Session teardown: whatever was on the HUD dies with it. */
+  | { kind: "abort" };
+
+/** The REST act a transition demands, or null. */
+export type TakeAct =
+  | { do: "arm" }
+  | { do: "roll" }
+  | { do: "stop"; save: boolean; rearm: boolean };
+
+export type TakeTransition = { state: TakeState; act: TakeAct | null };
+
+/**
+ * Step the take machine. Pure: the caller fires `act` and commits `state`.
+ *
+ * `ev.invalidated` deliberately does not change the transition — an
+ * invalidated gate lands in `idle` exactly as a stand-down does. It rides
+ * along so the caller can tell the two apart and SAY which happened: silent
+ * un-arming is the precise failure the gate exists to prevent.
+ */
+export function stepTake(state: TakeState, ev: TakeEvent): TakeTransition {
+  if (ev.kind === "abort") return { state: "idle", act: null };
+  if (ev.kind === "recorder") {
+    // Reconcile, never act. The recorder has no concept of a prompt and must
+    // never invent one.
+    if (ev.state === "prompt") return { state, act: null };
+    // The prompt is a client-side overlay on a recorder that is genuinely
+    // still rolling — `/record/stop` takes the save decision AT stop time —
+    // so a "rolling" report must not slam it shut four times a second.
+    if (ev.state === "rolling" && state === "prompt") {
+      return { state: "prompt", act: null };
+    }
+    return { state: ev.state, act: null };
+  }
+  if (ev.kind === "choose") {
+    // Only the prompt takes a decision; anywhere else this is a stale click.
+    if (state !== "prompt") return { state, act: null };
+    const save = ev.choice === "keep" || ev.choice === "keep_stop";
+    const rearm = ev.choice === "keep" || ev.choice === "redo";
+    return { state: rearm ? "armed" : "idle", act: { do: "stop", save, rearm } };
+  }
+  // ax_hold — the one gesture the headset spends on the recorder, and it
+  // keeps the binding it has today.
+  if (state === "idle") return { state: "armed", act: { do: "arm" } };
+  if (state === "armed") return { state: "rolling", act: { do: "roll" } };
+  if (state === "rolling") return { state: "prompt", act: null };
+  // Withdraw: a hold that was a mistake costs nothing, and no REST call.
+  return { state: "rolling", act: null };
+}
+
+// ---- recorder haptics -------------------------------------------------------
+
+/** What the hands feel when the recorder moves. Both hands get it: inside a
+ *  headset the haptic is the fastest channel there is, and "did that take
+ *  actually start" is a question the operator must never have to guess at.
+ *  Pure, and keyed on the transition rather than the state, so a steady state
+ *  buzzes nothing. Returns null when nothing changed. */
+export function recorderHapticCue(
+  prev: TakeState, next: TakeState, choice?: EndChoice | null,
+): { intensity: number; durationMs: number } | null {
+  if (prev === next) return null;
+  // Loaded, nothing written.
+  if (prev === "idle" && next === "armed") return { intensity: 0.35, durationMs: 90 };
+  // Frames are landing. The firmest cue in the vocabulary, deliberately: this
+  // is the only moment that costs data if it is missed.
+  if (prev === "armed" && next === "rolling") return { intensity: 0.8, durationMs: 220 };
+  if (prev === "rolling" && next === "prompt") return { intensity: 0.45, durationMs: 120 };
+  if (prev === "prompt" && next === "rolling") return { intensity: 0.2, durationMs: 60 };
+  if (prev === "prompt" && next === "armed") {
+    // Banked and binned both land in ARMED, so the HUD alone cannot tell them
+    // apart while the operator's eyes are on the workspace. The hands can.
+    if (choice === "keep") return { intensity: 0.6, durationMs: 180 };
+    if (choice === "redo") return { intensity: 0.3, durationMs: 90 };
+    return null;
+  }
+  if (prev === "prompt" && next === "idle") {
+    if (choice === "keep_stop") return { intensity: 0.6, durationMs: 180 };
+    // `drop`, or the recorder ending it underneath us — same weight, because
+    // from the operator's side it is the same outcome.
+    return { intensity: 0.25, durationMs: 80 };
+  }
+  // The gate dropped: invalidated, or the session ended. Weak, but never
+  // silent — un-arming without a word is the failure the gate prevents.
+  if (prev === "armed" && next === "idle") return { intensity: 0.15, durationMs: 50 };
+  return null;
+}
+
 // ---- the backend's ik_state push --------------------------------------------
 //
 // The socket answers every frame batch with the teleoperator's own view of
@@ -1421,6 +1738,66 @@ export function stepTuning(
     return { nav: { index, lastStepMs: now }, patch: { key: knob.key, value: next } };
   }
   return { nav: { ...nav, index }, patch: null };
+}
+
+// ---- who owns a tuned value -------------------------------------------------
+
+/** Merge the server's clamped echo (`config_applied`). Whatever the robot took
+ *  IS the value — a box that snaps to a different number is the robot telling
+ *  you what it accepted, and re-asserting the unclamped ask would fight it. */
+export function applyServerConfig(
+  local: Readonly<Record<string, number>>,
+  server: TuningValues | null,
+): Record<string, number> {
+  const values: Record<string, number> = { ...local };
+  if (!server) return values;
+  for (const [key, v] of Object.entries(server)) {
+    // The wire carries booleans and the stance enum alongside the numbers;
+    // only the numbers are knobs.
+    if (typeof v === "number" && Number.isFinite(v)) values[key] = v;
+  }
+  return values;
+}
+
+/**
+ * Reconcile a fresh connection's `settings` against what the operator tuned.
+ *
+ * `QuestTeleopConfig` lives PER CONNECTION and HumanTeleopClient reconnects
+ * after 50 ms, so a socket blip silently reverts every knob — and gains that
+ * quietly halve feel exactly like an arm that has started lagging. The page is
+ * therefore the source of truth for the knobs the operator moved, and only
+ * those: the server owns everything untouched.
+ *
+ * `reassert` is what to send straight back as a `config_update`. Knobs marked
+ * `local` in ALL_KNOBS never leave the client and never appear in it.
+ */
+export function reconcileConfig(
+  local: Readonly<Record<string, number>>,
+  dirty: readonly string[],
+  server: TuningValues | null,
+  knobs: readonly TuningKnob[] = ALL_KNOBS,
+): { values: Record<string, number>; reassert: Record<string, number> } {
+  const values: Record<string, number> = { ...local };
+  const reassert: Record<string, number> = {};
+  if (!server) return { values, reassert };
+  const moved = new Set(dirty);
+  const clientOnly = new Set(knobs.filter((k) => k.local).map((k) => k.key));
+  for (const [key, v] of Object.entries(server)) {
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
+    if (!moved.has(key)) {
+      values[key] = v;
+      continue;
+    }
+    const mine = values[key];
+    // Belt and braces: a `local` knob is never sent, so the server cannot be
+    // reporting one — and must not be handed one back if it somehow is.
+    if (!clientOnly.has(key) && typeof mine === "number" && Number.isFinite(mine)) {
+      reassert[key] = mine;
+    }
+  }
+  // A dirty key the server does not report is left alone and NOT re-asserted:
+  // a knob the server has never heard of is not a knob it will accept.
+  return { values, reassert };
 }
 
 // ---- dataset tally ----------------------------------------------------------

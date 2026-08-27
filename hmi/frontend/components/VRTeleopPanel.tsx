@@ -29,12 +29,12 @@
  * resolve poses, and the window loop is throttled to near-nothing while an
  * immersive session holds the display.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
 import {
-  api, cameraStreamUrl, type CameraInfo, type HumanTeleopStatus,
+  api, ApiError, cameraStreamUrl, type CameraInfo, type HumanTeleopStatus,
   type RecordStatus,
 } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
@@ -42,20 +42,23 @@ import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
 import { useSoloHand, useStance, type Pairing } from "@/lib/stance";
 import {
-  ALL_KNOBS, attachRenderScene, axPressed, CAM_TILE_SIZES,
+  ALL_KNOBS, applyServerConfig, attachRenderScene, axPressed, CAM_TILE_SIZES,
   clampKnob, clusterLayout, controllerRays, cycleIndex, DEFAULT_HUD_ANCHOR,
   DEFAULT_WRIST_PIVOT_M, disengagedFrame, episodesTotal, estopPressed,
   formatKnob, hapticCues, holdToggle, holdToggleInit, ikHapticCues,
   ORIENT_DEFICIT, paintHud,
   parseVrSocketMessage, precisionHeld, pulse, RECORD_HOLD_MS, rayQuadHit,
-  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame,
+  reconcileConfig, recorderHapticCue,
+  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame, stepTake,
   stepTuning, stickAxes, thumbstickPressed, WRIST_PIVOT_KEY,
   xrAvailableAtAll, xrSupported, yawTowardHead,
-  type DatasetTally, type HoldToggleState, type HudAnchor, type IkSides,
-  type SideAuthorityLike, type TeleopXRSession, type TuningNav, type VRFrame,
+  type ArmSetLike, type DatasetTally, type HoldToggleState, type HudAnchor,
+  type IkSides,
+  type SideAuthorityLike, type TakeEvent, type TakeState,
+  type TeleopXRSession, type TuningNav, type VRFrame,
   type VrMenuLike, type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
-import { presetsFor } from "./cockpit/teleopPresets";
+import { isSimArm, presetsFor, type ConfigArm } from "./cockpit/teleopPresets";
 import { repoIdFor } from "./cockpit/CommandBar";
 import { DeadManIndicator } from "./DeadManIndicator";
 
@@ -70,6 +73,11 @@ const PUBLISH_MS = 33;
  *  or closes. Same short/hold split the left stick already uses, so a short
  *  click still means what it always did (next tile size). */
 const TUNE_HOLD_MS = 500;
+
+/** How long the HUD keeps saying that home was refused. Long enough to read
+ *  with a headset on, short enough that it is gone before the next decision.
+ *  A timestamp, not a timer: nothing in the XR loop may own a setTimeout. */
+const HOME_REFUSED_MS = 1500;
 
 const SOLO_LS_KEY = "haller.vrTeleop.soloArm.v1";
 const WRIST_PIVOT_LS_KEY = "haller.vrTeleop.wristPivot.v1";
@@ -94,7 +102,69 @@ export function viewLabel(c: CameraInfo): string {
   return c.arm_id ? `${base} (${c.arm_id})` : base;
 }
 
-export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
+/** A backend that predates the start gate, told apart from a refusal by its
+ *  status alone. 404/405 is "this recorder has no gate"; a 409 is the gate
+ *  working — a colliding camera key, a measured rate under the floor — and
+ *  its detail is a sentence the operator has nowhere else to read. */
+function isMissingRoute(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 404 || e.status === 405);
+}
+
+/** What to show the operator for a failed act. `ApiError.detail` is the
+ *  backend's own reason without the `HTTP nnn:` prefix. */
+function refusalText(e: unknown): string {
+  return e instanceof ApiError ? e.detail : (e as Error).message;
+}
+
+/** The recorder's word for where a take is, in the take machine's vocabulary.
+ *  `/record/status` says "recording"; the machine says "rolling", because
+ *  "prompt" is a fourth state the recorder has no concept of and must never
+ *  be handed. A backend that predates the gate reports only `recording`. */
+function takeStateOf(rs: { state?: string; recording?: boolean } | null): TakeState {
+  if (!rs) return "idle";
+  if (rs.state === "armed") return "armed";
+  return rs.state === "recording" || rs.recording ? "rolling" : "idle";
+}
+
+/** Where the recorder actually is, asked rather than assumed. A failed act
+ *  must never leave the HUD claiming a state the recorder is not in. */
+async function recorderTakeState(): Promise<TakeState> {
+  try {
+    return takeStateOf(await api.recordStatus());
+  } catch {
+    return "idle";
+  }
+}
+
+/** The single worst drop source, reduced to one name — an operator needs a
+ *  cable to go check, not a table. Reads both shapes the status has carried:
+ *  a flat `{key: n}` and the `{cameras, arms}` split. Null when nothing has
+ *  dropped, which is the common case and must not paint a line. */
+function worstDropSource(drops: unknown): string | null {
+  if (!drops || typeof drops !== "object") return null;
+  const split = drops as { cameras?: unknown; arms?: unknown };
+  const maps: unknown[] = split.cameras || split.arms
+    ? [split.cameras, split.arms] : [drops];
+  let worst: string | null = null;
+  let most = 0;
+  for (const m of maps) {
+    if (!m || typeof m !== "object") continue;
+    for (const [key, n] of Object.entries(m as Record<string, unknown>)) {
+      if (typeof n === "number" && n > most) {
+        most = n;
+        worst = key;
+      }
+    }
+  }
+  return worst;
+}
+
+export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
+  // The whole arm record, not just the ids: a session about to bank 46
+  // episodes has to say on its own button whether this rig is the real one.
+  // Memoised because half the callbacks below take it as a dependency, and a
+  // fresh array every render would rebuild every one of them.
+  const armIds = useMemo(() => arms.map((a) => a.id), [arms]);
   const [supported, setSupported] = useState<boolean | null>(null);
   const [inSession, setInSession] = useState(false);
   const [xrMode, setXrMode] = useState<TeleopXRSession["mode"] | null>(null);
@@ -126,8 +196,18 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   // episode index, and "how many good ones so far" is what an operator
   // mid-run actually asks.
   const [takes, setTakes] = useState(0);
-  // The end-of-take decision, open until the operator saves or discards.
-  const [endPrompt, setEndPrompt] = useState(false);
+  // Where the take is: idle, ARMED (loaded, nothing written), rolling, or the
+  // decision. Mirrored into state for the desktop panel; the XR loop and the
+  // status poll both read the ref.
+  const [take, setTake] = useState<TakeState>("idle");
+  // The knobs the operator moved this page-load, mirrored out of the ref for
+  // the desktop panel's ◆ markers.
+  const [dirtyTune, setDirtyTune] = useState<string[]>([]);
+  // Which hand drives which arm, from the very pairing this session was
+  // STARTED with — the stance select stays live in-session and re-picking it
+  // there cannot re-pair arms the backend already owns, so a HUD that
+  // recomputed would describe a mapping nothing is running.
+  const [armSet, setArmSet] = useState<ArmSetLike>(null);
   // What the dataset on disk holds, so a rolling take can be named by the
   // index it will actually land at rather than by a page-local ordinal.
   const [tally, setTally] = useState<DatasetTally | null>(null);
@@ -174,7 +254,27 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   const tuneNavRef = useRef<TuningNav>({ index: 0, lastStepMs: 0 });
   const precisionRef = useRef(false);
   const takesRef = useRef(0);
-  const endPromptRef = useRef(false);
+  const takeRef = useRef<TakeState>("idle");
+  // Whether this backend has the start gate. Null until the first probe:
+  // false is a claim (hold ARMED here instead), and an unprobed backend has
+  // made no claim either way.
+  const gateServerRef = useRef<boolean | null>(null);
+  const gateNotedRef = useRef(false);
+  // True while a gate call is in flight. The recorder goes on reporting the
+  // state it is leaving until the call lands, and reconciling to that would
+  // walk the HUD backwards — and fire the ROLL cue, the firmest in the
+  // vocabulary, at an operator who is stopping a take.
+  const actInFlightRef = useRef(false);
+  // What ARM settled on, so ROLL writes to the same dataset the gate opened.
+  const gatePairRef = useRef<{ repoId: string; task: string } | null>(null);
+  // When the operator last asked for home during the prompt and was told no.
+  const homeRefusedAtRef = useRef(-Infinity);
+  const runTakeRef = useRef<((ev: TakeEvent) => void) | null>(null);
+  const dirtyTuneRef = useRef<Set<string>>(new Set());
+  // Set on every socket OPEN, cleared by the first config-bearing message:
+  // the re-assert is one `config_update` per connection, never one per 20 Hz
+  // push, which would flood the socket it is trying to correct.
+  const reassertPendingRef = useRef(false);
   const tallyRef = useRef<DatasetTally | null>(null);
   // The pairing the SELECTED button describes. Posted verbatim rather than
   // recomputed at click time: a preset that shows one mapping and starts
@@ -226,6 +326,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     activeViewId: baseCam?.id ?? null,
     tileSize: CAM_TILE_SIZES[tileIdx]?.name ?? "S",
     stance,
+    armSet,
   };
 
   useEffect(() => {
@@ -297,13 +398,28 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         .then((rs) => {
           if (!alive) return;
           setRecStatus(rs);
-          // A take that ended some other way — a recorder fault, the cockpit
-          // stopping it — takes the decision with it. Leaving the prompt up
-          // would offer a choice about an episode that is already closed.
-          if (!rs.recording && endPromptRef.current) {
-            endPromptRef.current = false;
-            setEndPrompt(false);
+          // A gate call in flight is a state the recorder has not moved to
+          // yet: it still reports the one it is leaving, and reconciling to
+          // that walks the HUD backwards.
+          if (actInFlightRef.current) return;
+          // Otherwise the recorder's own state outranks the client's guess: a
+          // take that ended some other way — a recorder fault, the cockpit
+          // stopping it — takes the decision with it, and a gate that was
+          // invalidated must not keep saying ARMED. `stepTake` is what keeps
+          // a recorder still legitimately rolling from slamming the prompt.
+          const gate = rs;
+          const backend = takeStateOf(gate);
+          // A locally held gate IS idle on the backend — that is exactly what
+          // "nothing is written before you roll" means without a gate to hold
+          // it — so its own idle report must not drop it out of ARMED.
+          if (gateServerRef.current === false && takeRef.current === "armed"
+              && backend === "idle") {
+            return;
           }
+          runTakeRef.current?.({
+            kind: "recorder", state: backend,
+            invalidated: Boolean(gate.invalidated_reason),
+          });
         })
         .catch(() => { /* recorder not ready; the badge just stays hidden */ });
       api.humanTeleopStatus()
@@ -389,8 +505,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     tuneOpenRef.current = false;
     precisionRef.current = false;
     setPrecision(false);
-    endPromptRef.current = false;
-    setEndPrompt(false);
+    // The take machine's `abort`, written out: teardown must not fire REST.
+    // Exiting VR stops teleop, which invalidates an armed gate on the
+    // backend's own rule, so leaving disarms without a command.
+    takeRef.current = "idle";
+    setTake("idle");
+    setArmSet(null);
     if (session) {
       try { await session.end(); } catch { /* already ended */ }
     }
@@ -477,77 +597,187 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     pulse(session, "right", intensity, durationMs);
   }, []);
 
-  /** Start a take. The task/HF-user draft comes from the cockpit's Dataset
-   *  tab (persisted), so a solo operator never has to leave the headset
-   *  between takes. */
-  const startTake = useCallback(async () => {
+  /** Put the panel back where the recorder actually is, with the cue that
+   *  move earns. A refused or failed act must never leave the HUD claiming a
+   *  state the recorder is not in — an armed gate that only exists on this
+   *  page is the silent un-arming the gate was built to prevent. */
+  const settleTake = useCallback((state: TakeState) => {
+    const from = takeRef.current;
+    const to = stepTake(from, { kind: "recorder", state }).state;
+    const cue = recorderHapticCue(from, to, null);
+    if (cue) buzzBoth(cue.intensity, cue.durationMs);
+    takeRef.current = to;
+    setTake(to);
+  }, [buzzBoth]);
+
+  /** ARM: open the dataset, freeze its schema, camera set, arm set and
+   *  measured fps, resolve the episode index — and write NOT ONE FRAME.
+   *
+   *  The task/HF-user draft comes from the cockpit's Dataset tab (persisted),
+   *  so a solo operator never has to leave the headset between takes. */
+  const armAct = useCallback(async () => {
     const rec = useRecorder.getState();
     const task = rec.task.trim();
     if (!task) {
       toast.error("no task drafted — set one in the cockpit's Dataset tab first");
       buzzBoth(0.2, 60);
+      settleTake("idle");
       return;
     }
+    const repoId = repoIdFor(rec.hfUser, task);
+    gatePairRef.current = { repoId, task };
     try {
-      const repoId = repoIdFor(rec.hfUser, task);
-      const st = await rec.start(repoId, task);
+      const st = await api.recordArm(repoId, task);
+      gateServerRef.current = true;
       recStatusRef.current = st;
       setRecStatus(st);
-      buzzBoth(0.7, 200);
-      toast.success(`recording → ${repoId}`);
-      // Now that the repo is settled, count what was already there: the take
-      // in flight lands at exactly that index.
+      toast.success(`armed → ${repoId} — nothing written until you roll`);
+      // The repo is settled here rather than at ROLL: the take in flight
+      // lands at exactly the index this counts.
       void refreshEpisodes(st.repo_id ?? repoId);
+    } catch (e) {
+      if (isMissingRoute(e)) {
+        // A backend that predates the gate. Hold ARMED here instead: nothing
+        // is written before ROLL either way — the operator-facing half — but
+        // the schema is not frozen, a colliding camera key 409s three seconds
+        // into the take instead of now, and the episode index is a guess. It
+        // upgrades silently the first time /record/arm answers 200.
+        gateServerRef.current = false;
+        if (!gateNotedRef.current) {
+          gateNotedRef.current = true;
+          toast.info("no start gate on this backend — armed locally: nothing is "
+            + "written before you roll, but the schema is not frozen");
+        }
+        return;
+      }
+      // Every refusal the gate exists to move earlier lands here: colliding
+      // camera keys, an unknown repo, a measured rate under the threshold.
+      toast.error(`arm refused: ${refusalText(e)}`);
+      settleTake("idle");
+    }
+  }, [buzzBoth, refreshEpisodes, settleTake]);
+
+  /** ROLL: frames start landing. Under a local gate there is nothing to roll
+   *  into, so this is the plain /record/start the page held back — which is
+   *  what "nothing is written before you roll" means without a real gate. */
+  const rollAct = useCallback(async () => {
+    const rec = useRecorder.getState();
+    const pair = gatePairRef.current;
+    try {
+      let st: RecordStatus | null = null;
+      if (gateServerRef.current) {
+        st = await api.recordRoll();
+      } else {
+        if (!pair) {
+          toast.error("nothing armed to roll — hold A/X again");
+          settleTake("idle");
+          return;
+        }
+        st = await rec.start(pair.repoId, pair.task);
+      }
+      if (st) {
+        recStatusRef.current = st;
+        setRecStatus(st);
+      }
+      toast.success(`rolling → ${st?.repo_id ?? pair?.repoId ?? "dataset"}`);
+      void refreshEpisodes(st?.repo_id ?? pair?.repoId);
       await rec.refresh();
     } catch (e) {
-      toast.error(`record start failed: ${(e as Error).message}`);
+      toast.error(`roll refused: ${refusalText(e)}`);
+      settleTake(await recorderTakeState());
     }
-  }, [buzzBoth, refreshEpisodes]);
+  }, [refreshEpisodes, settleTake]);
 
-  /** Commit the open take, or throw it away.
+  /** The decision, committed.
    *
    *  `POST /record/stop` takes the save decision AT stop time — there is no
    *  way to end the episode first and choose afterwards — so the choice runs
    *  while the recorder is still rolling and the tail of the episode is a
    *  second of the operator holding still. That is the honest trade, and the
-   *  HUD says so rather than pretending the take already ended. */
-  const endTake = useCallback(async (save: boolean) => {
-    endPromptRef.current = false;
-    setEndPrompt(false);
+   *  HUD says so rather than pretending the take already ended.
+   *
+   *  `rearm` is what keeps a session in ARMED, where it costs nothing and the
+   *  next take is always the expected next thing. */
+  const stopAct = useCallback(async (act: { save: boolean; rearm: boolean }) => {
     const rec = useRecorder.getState();
+    const before = recStatusRef.current?.episode_frames ?? 0;
     try {
-      const st = await rec.stop(save);
-      recStatusRef.current = st;
-      setRecStatus(st);
-      if (save) {
+      let st: RecordStatus | null = null;
+      if (gateServerRef.current) {
+        st = await api.recordStop(act.save, act.rearm);
+      } else {
+        // No `rearm` on a backend without the gate — the re-arm is done by
+        // hand below, and sending a field it has never heard of risks a 422
+        // on the one call that must not fail: the one that saves the take.
+        st = await rec.stop(act.save);
+      }
+      if (st) {
+        recStatusRef.current = st;
+        setRecStatus(st);
+      }
+      // The reply's count where it has one, else the last poll's: a recorder
+      // that zeroes the counter on stop must not report a 0-frame take.
+      const frames = st?.episode_frames || before;
+      if (act.save) {
         takesRef.current += 1;
         setTakes(takesRef.current);
-        buzzBoth(0.6, 180);
-        toast.success(`take ${takesRef.current} saved — ${st.episode_frames} frames`);
+        toast.success(`take ${takesRef.current} saved — ${frames} frames`
+          + (act.rearm ? " · armed for the next" : ""));
       } else {
-        buzzBoth(0.25, 80);
-        toast.info("take discarded");
+        // Never touches disk: an episode buffer that is never saved is
+        // dropped and the index does not advance.
+        toast.info("take discarded"
+          + (act.rearm ? " — armed again, same episode" : ""));
       }
-      void refreshEpisodes(st.repo_id);
+      void refreshEpisodes(st?.repo_id);
       await rec.refresh();
+      // A local gate has no server-side rearm — hold ARMED here again, which
+      // re-probes /record/arm and upgrades the moment it exists.
+      if (!gateServerRef.current && act.rearm) await armAct();
     } catch (e) {
-      toast.error(`record stop failed: ${(e as Error).message}`);
+      toast.error(`stop refused: ${refusalText(e)}`);
+      settleTake(await recorderTakeState());
     }
-  }, [buzzBoth, refreshEpisodes]);
+  }, [armAct, refreshEpisodes, settleTake]);
 
-  /** The A/X hold, from inside the XR loop. Not rolling: start a take.
-   *  Rolling: raise the save/discard decision — or withdraw it, so a hold
-   *  that was a mistake costs nothing. */
-  const onRecordHold = useCallback(() => {
-    if (!recStatusRef.current?.recording) {
-      void startTake();
-      return;
+  /** One step of the take machine: the pure transition, the cue it earns,
+   *  then the REST act it demands. The sticks, the A/X hold, the desktop
+   *  buttons and the status poll all come through here — where the take is
+   *  cannot be two different answers if only one place decides it. */
+  const runTake = useCallback(async (ev: TakeEvent) => {
+    const from = takeRef.current;
+    const tr = stepTake(from, ev);
+    const cue = recorderHapticCue(
+      from, tr.state, ev.kind === "choose" ? ev.choice : null);
+    if (cue) buzzBoth(cue.intensity, cue.durationMs);
+    takeRef.current = tr.state;
+    setTake(tr.state);
+    // The prompt is modal — both sticks are its own — so an open tuning list
+    // has to go, or the right stick walks a knob list and answers the prompt
+    // with the same click.
+    if (tr.state === "prompt") tuneOpenRef.current = false;
+    const act = tr.act;
+    if (!act) return;
+    actInFlightRef.current = true;
+    try {
+      if (act.do === "arm") await armAct();
+      else if (act.do === "roll") await rollAct();
+      else await stopAct({ save: act.save, rearm: act.rearm });
+    } finally {
+      actInFlightRef.current = false;
     }
-    const next = !endPromptRef.current;
-    endPromptRef.current = next;
-    setEndPrompt(next);
-    buzzBoth(next ? 0.45 : 0.2, next ? 120 : 60);
-  }, [startTake, buzzBoth]);
+  }, [armAct, buzzBoth, rollAct, stopAct]);
+  // The status poll fires take events at it, and that interval is declared
+  // above the machine — through a ref, so a new `runTake` never tears the
+  // 250 ms interval down and rebuilds it.
+  useEffect(() => { runTakeRef.current = (ev) => { void runTake(ev); }; }, [runTake]);
+
+  /** The A/X hold, from inside the XR loop. One gesture, the whole ladder:
+   *  ARM, ROLL, raise the decision — or withdraw it, so a hold that was a
+   *  mistake costs nothing. */
+  const onRecordHold = useCallback(() => {
+    void runTake({ kind: "ax_hold" });
+  }, [runTake]);
 
   /** Write one tuning knob.
    *
@@ -565,22 +795,49 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       catch { /* private mode: the pivot just won't persist */ }
       return;
     }
+    // Moved by the operator, so the page owns it from here: the teleoperator's
+    // config lives PER CONNECTION and HumanTeleopClient reconnects after
+    // 50 ms, and a gain that quietly halves mid-take feels exactly like an arm
+    // that has started lagging. The local pivot returns above and is never in
+    // this set — it never leaves the client to be reverted.
+    if (!dirtyTuneRef.current.has(key)) {
+      dirtyTuneRef.current.add(key);
+      setDirtyTune([...dirtyTuneRef.current]);
+    }
     clientRef.current?.send({ type: "config_update", config: { [key]: value } });
-  }, []);
+  }, [setDirtyTune]);
 
   /** One server → client message off the teleop socket. */
   const onSocketMessage = useCallback((data: string) => {
     const msg = parseVrSocketMessage(data);
     if (!msg) return;
+    if (msg.kind === "config_applied") {
+      // The clamped echo always wins: whatever the robot took IS the value,
+      // and re-asserting the unclamped ask would only fight it.
+      const applied = applyServerConfig(tuneValuesRef.current, msg.config);
+      tuneValuesRef.current = applied;
+      setTuneValues(applied);
+      return;
+    }
     if (msg.config) {
-      // The server's config wins for everything it owns; the local pivot is
-      // never in its dict, so a plain merge keeps it.
-      const merged = { ...tuneValuesRef.current };
-      for (const [k, v] of Object.entries(msg.config)) {
-        if (typeof v === "number" && Number.isFinite(v)) merged[k] = v;
+      // The server owns every knob the operator has not touched; the page owns
+      // the ones it has. The re-assert goes out ONCE per connection — this
+      // message also arrives at 20 Hz, and answering each one would flood the
+      // socket it is correcting.
+      const { values, reassert } = reconcileConfig(
+        tuneValuesRef.current, [...dirtyTuneRef.current], msg.config);
+      tuneValuesRef.current = values;
+      setTuneValues(values);
+      if (reassertPendingRef.current) {
+        reassertPendingRef.current = false;
+        const keys = Object.keys(reassert);
+        if (keys.length) {
+          clientRef.current?.send({ type: "config_update", config: reassert });
+          // Said out loud: a value that survives a blip while its neighbours
+          // revert to the server's defaults is otherwise witchcraft.
+          toast.info(`re-asserted your tuning: ${keys.join(", ")}`);
+        }
       }
-      tuneValuesRef.current = merged;
-      setTuneValues(merged);
     }
     if (msg.kind !== "ik_state") return;
     ikSidesRef.current = msg.sides;
@@ -666,6 +923,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     }
     try {
       await api.humanTeleopStart(pairing);
+      setArmSet({ left: pairing.left_arm, right: pairing.right_arm });
     } catch (e) {
       toast.error(`teleop start refused: ${(e as Error).message}`);
       await teardown({ stopBackend: false });
@@ -675,8 +933,13 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
     const client = new HumanTeleopClient<VRFrame>(WS_URL, {
       // Every open, reconnects included: the teleoperator's config lives per
       // connection, so a reconnected client whose list still shows the old
-      // numbers is describing something that no longer exists.
-      onOpen: () => { client.send({ type: "request_settings" }); },
+      // numbers is describing something that no longer exists. The reply is
+      // also where the operator's own knobs go back up — armed here so it
+      // happens once per connection rather than on every 20 Hz push.
+      onOpen: () => {
+        reassertPendingRef.current = true;
+        client.send({ type: "request_settings" });
+      },
       onMessage: onSocketMessage,
     });
     client.connect();
@@ -723,24 +986,34 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       // hold cannot first do the short thing on its way to the long one.
       // Left: click = next view, ~0.8 s hold = reset arms. Right: click =
       // next tile size, 0.5 s hold = the tuning list. While the end-of-take
-      // decision is open it takes both clicks instead — save left, discard
-      // right — because nothing else may be one click away from committing
-      // or binning an episode.
-      const prompt = endPromptRef.current;
+      // decision is open it takes both clicks instead — keep left, redo right
+      // — because nothing else may be one click away from banking or binning
+      // an episode.
+      const prompt = takeRef.current === "prompt";
       const lStick = thumbstickPressed(live, "left");
       if (lStick) {
         if (lStickDownAtRef.current === null) {
           lStickDownAtRef.current = t;
           lStickFiredRef.current = false;
-        } else if (!lStickFiredRef.current && !prompt
+        } else if (!lStickFiredRef.current
                    && t - lStickDownAtRef.current >= RESET_HOLD_MS) {
           lStickFiredRef.current = true;
-          void resetArms();
+          if (prompt) {
+            // Home is refused through the tail of a take the operator may be
+            // about to keep — homing would corrupt it. Answered rather than
+            // silently dropped: the weak tick `resetArms` already uses for a
+            // refusal, plus a line on the HUD. The fired flag is what stops
+            // the release falling through to KEEP.
+            homeRefusedAtRef.current = t;
+            pulse(live, "left", 0.2, 60);
+          } else {
+            void resetArms();
+          }
         }
       } else {
         if (lStickDownAtRef.current !== null && !lStickFiredRef.current
             && t - lStickDownAtRef.current < 350) {
-          if (prompt) void endTake(true);
+          if (prompt) void runTake({ kind: "choose", choice: "keep" });
           else cycleView();
         }
         lStickDownAtRef.current = null;
@@ -760,15 +1033,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       } else {
         if (rStickDownAtRef.current !== null && !rStickFiredRef.current
             && t - rStickDownAtRef.current < 350) {
-          if (prompt) void endTake(false);
+          if (prompt) void runTake({ kind: "choose", choice: "redo" });
           else cycleTile();
         }
         rStickDownAtRef.current = null;
       }
 
       // The tuning list walks and adjusts on the RIGHT stick's axes, and only
-      // while it is open: an accidental nudge mid-take must not move a gain.
-      if (tuneOpenRef.current) {
+      // while it is open and the prompt is not: an accidental nudge mid-take
+      // must not move a gain, and a stick that both walks a knob list and
+      // answers the decision answers it by accident.
+      if (tuneOpenRef.current && !prompt) {
         const step = stepTuning(tuneNavRef.current, stickAxes(live, "right"),
                                 t, tuneValuesRef.current);
         tuneNavRef.current = step.nav;
@@ -845,17 +1120,31 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         const rs = recStatusRef.current;
         paintHud(
           hudCtx, statusRef.current,
-          { recording: Boolean(rs?.recording),
+          { state: takeRef.current,
+            recording: Boolean(rs?.recording),
             episode_frames: rs?.episode_frames ?? 0,
+            skipped_frames: rs?.skipped_frames,
+            worstDrop: worstDropSource(rs?.drops),
+            fpsMeasured: rs?.fps_measured ?? null,
+            fpsDeclared: rs?.fps_declared ?? null,
+            invalidatedReason: rs?.invalidated_reason ?? null,
+            localGate: gateServerRef.current === false,
             takes: takesRef.current,
-            episodes: episodesTotal(tallyRef.current, takesRef.current) },
+            // The gate's own index where there is one. The floor under the
+            // fallback exists because lerobot buffers ten episodes' metadata
+            // in RAM, and it goes when the gate's index is everywhere.
+            episodes: typeof rs?.episode_index === "number"
+              ? rs.episode_index
+              : episodesTotal(tallyRef.current, takesRef.current) },
           menuRef.current && {
             ...menuRef.current,
             tuning: { open: tuneOpenRef.current,
                       index: tuneNavRef.current.index,
-                      values: tuneValuesRef.current },
+                      values: tuneValuesRef.current,
+                      dirty: [...dirtyTuneRef.current] },
             precision: precisionRef.current,
-            endPrompt: endPromptRef.current,
+            endPrompt: takeRef.current === "prompt",
+            homeRefused: t - homeRefusedAtRef.current < HOME_REFUSED_MS,
           },
           ikSidesRef.current);
         hudDirty = true;
@@ -897,7 +1186,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown, fireEstop, onRecordHold, endTake, setTuning,
+  }, [armIds, teardown, fireEstop, onRecordHold, runTake, setTuning,
       onSocketMessage, resetArms, cycleView, cycleTile]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
@@ -906,6 +1195,13 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
   useEffect(() => () => { void teardown({ stopBackend: true }); }, [teardown]);
 
   const datasetEpisodes = episodesTotal(tally, takes);
+  // How a take is named on both surfaces: the index the gate resolved where
+  // there is one, else the dataset count with this page's own take counter as
+  // its floor. "ep 34" is what an operator reconciles against the dataset
+  // browser afterwards; "take 3" is only ever true of this page-load.
+  const episodeIdx = recStatus?.episode_index
+    ?? datasetEpisodes;
+  const takeName = episodeIdx === null ? `take ${takes + 1}` : `ep ${episodeIdx}`;
   const clutch = status?.clutch;
   const running = Boolean(status?.running);
   const acquire = status?.acquire;
@@ -1006,11 +1302,15 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           ) : (
             <span className="text-amber-400">no collision guard</span>
           )}
+          {take === "armed" && (
+            // ARMED must never read like REC: it is loaded and writing
+            // nothing, and an operator who cannot tell them apart has been
+            // given the gate's cost without its benefit.
+            <span className="text-haller-warn font-bold">◆ ARMED {takeName}</span>
+          )}
           {recStatus?.recording && (
             <span className="text-red-400 font-bold animate-haller-rec">
-              ● REC {datasetEpisodes === null
-                ? `take ${takes + 1}`
-                : `ep ${datasetEpisodes}`} · {recStatus.episode_frames}
+              ● REC {takeName} · {recStatus.episode_frames}
             </span>
           )}
           {!recStatus?.recording && (takes > 0 || datasetEpisodes !== null) && (
@@ -1031,24 +1331,51 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
         )}
         <div className="text-neutral-400">
           grip = drive · trigger = gripper · <b>B / Y = E-STOP</b> ·{" "}
-          <b>A / X hold = record</b>
+          <b>A / X hold = arm · roll · end</b>
         </div>
-        {endPrompt && (
+        {take === "prompt" && (
           // Mirrors the in-scene prompt so the decision exists in both HUD
           // paths — dom-overlay headsets and the plain 2D page get the same
-          // two choices, and the stick clicks drive these same handlers.
+          // choices, and the stick clicks drive these same handlers. Four
+          // here against the controller's two: standing a session down is the
+          // desktop's, where a button costs nothing and collides with no
+          // gesture the operator has trained.
           <div className="rounded border border-red-400/70 p-2 space-y-1">
             <div className="text-red-400 font-bold">
               take ended · {recStatus?.episode_frames ?? 0} frames — still
               rolling until you pick
             </div>
-            <div className="flex gap-2 pointer-events-auto">
-              <Button size="sm" onClick={() => void endTake(true)}>
-                Save (L stick)
+            <div className="flex gap-2 flex-wrap pointer-events-auto">
+              <Button
+                size="sm"
+                onClick={() => void runTake({ kind: "choose", choice: "keep" })}
+              >
+                Keep (L click)
               </Button>
-              <Button size="sm" variant="destructive" onClick={() => void endTake(false)}>
-                Discard (R stick)
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => void runTake({ kind: "choose", choice: "redo" })}
+              >
+                Redo (R click)
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void runTake({ kind: "choose", choice: "keep_stop" })}
+              >
+                Keep &amp; stop
+              </Button>
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={() => void runTake({ kind: "choose", choice: "drop" })}
+              >
+                Discard &amp; stop
+              </Button>
+            </div>
+            <div className="text-neutral-400">
+              the first two arm the next take · the last two stand down to idle
             </div>
           </div>
         )}
@@ -1144,11 +1471,17 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           arms instantly.
         </div>
         <div>
-          <b>Hold A or X</b> (either controller, ~0.5 s) starts a take, and ends
-          an open one — the HUD then asks <b>save</b> (left stick click) or{" "}
-          <b>discard</b> (right stick click). Draft the task in the
-          cockpit&apos;s Dataset tab first; the recorder shows{" "}
-          <span className="font-bold">● REC</span> in the HUD while it rolls.
+          <b>Hold A or X</b> (either controller, ~0.5 s) <b>ARMS</b> a take: the
+          dataset opens and its schema freezes, and{" "}
+          <b>nothing is written until you roll</b>. A second hold <b>ROLLS</b>{" "}
+          it — that is when frames start landing — and a third opens the
+          decision: <b>keep</b> (left stick click) or <b>redo</b> (right stick
+          click), both of which leave you armed for the next take. The take is
+          still rolling while you pick, because{" "}
+          <code>/record/stop</code> takes the save decision at stop time. Draft
+          the task in the cockpit&apos;s Dataset tab first; the HUD shows{" "}
+          <span className="font-bold">◆ ARMED</span>, then{" "}
+          <span className="font-bold">● REC</span> while it rolls.
         </div>
         <div>
           Squeezing a grip <b>anchors your hand to the arm where it is</b> —
@@ -1169,6 +1502,12 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           <span className="text-muted-foreground">session</span>
           {presets.map((preset) => {
             const solo = preset.id === "dual" ? null : preset.id.slice("solo-".length);
+            // On the button itself: an operator about to bank 46 episodes has
+            // to know whether this is a sim take. `dual` earns the mark only
+            // when EVERY arm is sim — a mixed session still moves a real arm.
+            const sim = solo
+              ? arms.some((a) => a.id === solo && isSimArm(a))
+              : arms.length > 0 && arms.every(isSimArm);
             return (
               <Button
                 key={preset.id}
@@ -1184,7 +1523,7 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
                   } catch { /* non-fatal */ }
                 }}
               >
-                {preset.label}
+                {preset.label}{sim ? " (sim)" : ""}
               </Button>
             );
           })}
@@ -1284,13 +1623,39 @@ export function VRTeleopPanel({ armIds }: { armIds: string[] }) {
           while a session is running, and the values reset with it.
           {" "}The wrist pivot is the exception — it moves the read-out point on
           your controller, which only this client can do, and it persists here.
+          {" "}A knob you move is <b>yours</b> until the page reloads and is
+          marked <b>◆</b>: the teleoperator&apos;s config lives per connection
+          and the client reconnects after 50 ms, so without the page re-asserting
+          it a socket blip would silently revert it mid-take.
         </p>
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-2"
+          disabled={!dirtyTune.length}
+          title="hand every knob back to the robot's own defaults"
+          onClick={() => {
+            dirtyTuneRef.current = new Set();
+            setDirtyTune([]);
+            clientRef.current?.send({ type: "request_settings" });
+          }}
+        >
+          reset to robot defaults
+        </Button>
         <div className="mt-2 grid grid-cols-2 gap-2">
           {ALL_KNOBS.map((knob) => {
             const local = Boolean(knob.local);
+            const mine = dirtyTune.includes(knob.key);
             return (
               <label key={knob.key} className="flex items-center gap-2">
-                <span className="w-44 truncate" title={knob.key}>{knob.label}</span>
+                <span
+                  className="w-44 truncate"
+                  title={mine
+                    ? "yours — re-sent over the server's per-connection default on reconnect"
+                    : knob.key}
+                >
+                  {mine ? "◆ " : ""}{knob.label}
+                </span>
                 <input
                   type="number"
                   step={knob.step}

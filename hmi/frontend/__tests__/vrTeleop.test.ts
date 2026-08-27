@@ -466,15 +466,32 @@ describe("paintHud view menu", () => {
   });
 
   it("shows the record command, and the frame count while rolling", () => {
+    // Three states, three different commands: A/X arms, arms again to roll,
+    // and again to end. The one that must never be ambiguous is ARM vs ROLL —
+    // an operator who thinks a take is rolling when it is only armed records
+    // nothing, which is the failure the start gate exists to prevent.
     const idle = stubCtx();
     paintHud(idle.ctx, {}, { recording: false, episode_frames: 0 }, menu);
-    expect(idle.texts.join(" | ")).toContain("hold A/X to START");
+    expect(idle.texts.join(" | ")).toContain("hold A/X to ARM");
+
+    const armed = stubCtx();
+    paintHud(armed.ctx, {},
+             { state: "armed", recording: false, episode_frames: 0 }, menu);
+    const armedAll = armed.texts.join(" | ");
+    expect(armedAll).toContain("ARMED");
+    expect(armedAll).toContain("A/X to ROLL");
+    // Nothing is written yet, and the HUD says so rather than leaving the
+    // operator to infer it from an absent frame counter.
+    expect(armedAll).toContain("nothing written");
+    expect(armedAll).not.toContain("● REC");
 
     const live = stubCtx();
-    paintHud(live.ctx, {}, { recording: true, episode_frames: 42, takes: 2 }, menu);
+    paintHud(live.ctx, {},
+             { state: "rolling", recording: true, episode_frames: 42, takes: 2 },
+             menu);
     const all = live.texts.join(" | ");
     expect(all).toContain("REC take 3 · 42 fr");
-    expect(all).toContain("hold A/X to END");
+    expect(all).toContain("A/X to END");
   });
 
   it("counts the takes already banked while idle", () => {
@@ -498,18 +515,35 @@ describe("paintHud view menu", () => {
     expect(all).not.toContain("threequarter");
   });
 
-  it("takes the whole box for the save/discard decision", () => {
+  it("takes the whole box for the keep/redo decision", () => {
     const { ctx, texts } = stubCtx();
-    paintHud(ctx, {}, { recording: true, episode_frames: 612 },
+    paintHud(ctx, {}, { state: "prompt", recording: true, episode_frames: 612 },
              { ...menu, endPrompt: true });
     const all = texts.join(" | ");
     expect(all).toContain("TAKE ENDED · 612 frames");
-    expect(all).toContain("L stick click = SAVE");
-    expect(all).toContain("R stick click = DISCARD");
+    expect(all).toContain("L click = KEEP");
+    expect(all).toContain("R click = REDO");
     // The honest caveat: /record/stop decides at stop time, so the recorder
     // is still running while the operator picks.
     expect(all).toContain("still rolling until you pick");
     expect(all).not.toContain("SIZE");
+  });
+
+  it("answers the trained home gesture instead of dropping it", () => {
+    // Invariant 5 binds a left-stick hold to in-session home. The prompt owns
+    // both sticks, so that hold cannot fire — homing through the tail of an
+    // episode would corrupt a take the operator may be about to keep. The
+    // integrator approved that modal exception on one condition: the refusal
+    // is SEEN as well as felt. This is that condition, pinned.
+    const { ctx, texts } = stubCtx();
+    paintHud(ctx, {}, { state: "prompt", recording: true, episode_frames: 612 },
+             { ...menu, endPrompt: true, homeRefused: true });
+    const all = texts.join(" | ");
+    expect(all).toContain("home refused mid-take");
+    // It replaces the mnemonic in place — the box's row count is fixed, and a
+    // prompt that grew a row would clip its own last line.
+    expect(all).not.toContain("L = keep · R = redo");
+    expect(all).toContain("L click = KEEP");
   });
 
   it("shows the precision modifier wherever the operator is looking", () => {
@@ -518,7 +552,7 @@ describe("paintHud view menu", () => {
     const all = on.texts.join(" | ");
     expect(all).toContain("◆ PRECISION");
     // ...and in the status column, which is where the eye already is.
-    expect(all).toContain("gains scaled down while held");
+    expect(all).toContain("gains scaled down");
 
     const off = stubCtx();
     paintHud(off.ctx, {}, null, menu);

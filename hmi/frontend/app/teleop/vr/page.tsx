@@ -5,14 +5,15 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { DeepLinkChrome } from "@/components/DeepLinkChrome";
 import { VRTeleopPanel } from "@/components/VRTeleopPanel";
+import type { ConfigArm } from "@/components/cockpit/teleopPresets";
 
 export default function VRTeleopPage() {
-  const [armIds, setArmIds] = useState<string[]>([]);
+  const [arms, setArms] = useState<ConfigArm[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     api.config()
-      .then((cfg) => setArmIds(cfg.arms.map((a) => a.id)))
+      .then((cfg) => setArms(cfg.arms))
       .catch((e: Error) => setErr(e.message));
   }, []);
 
@@ -37,11 +38,11 @@ export default function VRTeleopPage() {
             Meta Quest · passthrough AR in the headset browser · per-hand grip to drive · B/Y = E-STOP
           </p>
         </header>
-        {armIds.length ? (
+        {arms.length ? (
           // One arm is a session, not a degenerate case: the absent side never
           // acquires and is never written to, and the panel pairs the arm it
           // does have to the hand the stance puts it under.
-          <VRTeleopPanel armIds={armIds} />
+          <VRTeleopPanel arms={arms} />
         ) : (
           <div className="text-[12px] font-mono text-muted-foreground">
             No arms are enabled in <code>hmi/backend/config.yaml</code>, so
