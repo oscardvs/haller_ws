@@ -17,13 +17,16 @@ import, for `MIN_RATE_FRACTION`, and it is stdlib-only for the same reason.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Self
+
+logger = logging.getLogger(__name__)
 
 #: Publish intervals kept for the rolling rate measurement. At 60 Hz this is a
 #: two-second window: long enough that one late tick does not move the number,
@@ -309,6 +312,7 @@ class TickBus:
         self._stamps: deque[float] = deque(maxlen=max(2, int(rate_window)))
         self._rate_min_samples = max(2, int(rate_min_samples))
         self._producer: ProducerToken | None = None
+        self._rate_producer: str | None = None
 
     # -- producers ---------------------------------------------------------
 
@@ -341,7 +345,47 @@ class TickBus:
                 )
             token = ProducerToken(self, name)
             self._producer = token
+            self._note_producer(name)
             return token
+
+    def _note_producer(self, name: str) -> None:
+        """Caller holds the lock. Drop the rate window when the cadence changes.
+
+        The idle sampler and the session run at different rates, so a window
+        spanning a handover describes neither of them — and `fps` is frozen
+        into `info.json` from that number. Automatic rather than a call the
+        handover has to remember, because the one that forgets is the one that
+        writes a wrong fps into a real episode.
+        """
+        if name != self._rate_producer:
+            self._stamps.clear()
+            self._rate_producer = name
+
+    def publish_once(self, name: str, **fields: Any) -> TickSample | None:
+        """Attach, publish one sample, and detach — all under one lock hold.
+
+        The idle sampler's whole API, and the reason the handover needs no
+        takeover protocol. Because the token is created and released inside a
+        single lock hold, a session claiming the bus for its lifetime either
+        wins it strictly before this call or strictly after it, never during.
+        Two producers therefore cannot overlap even for one tick, and neither
+        has to know the other exists.
+
+        Returns None when a long-lived producer already holds the bus. That is
+        the ordinary state while a session runs — not an error, and not
+        something to log every tick.
+        """
+        with self._lock:
+            if self._producer is not None and self._producer.live:
+                return None
+            token = ProducerToken(self, name)
+            self._producer = token
+            self._note_producer(name)
+            try:
+                return self._publish(token, **fields)
+            finally:
+                self._producer = None
+                token._live = False
 
     @property
     def producer_name(self) -> str | None:
@@ -446,3 +490,67 @@ class TickBus:
         """
         with self._lock:
             self._stamps.clear()
+
+
+class IdleSampler:
+    """Produces the tick while no teleop session owns the bus.
+
+    A cockpit with no session still needs live arms, and the recorder still
+    needs a measured rate to refuse against before a session ever starts. This
+    runs at telemetry's cadence and steps aside the instant a session attaches
+    — `publish_once` returns None and this simply skips, so there is no
+    stand-down handshake to get wrong.
+
+    Takes a `sample` callable rather than the arm manager so this module stays
+    stdlib-only: the wiring that knows about arms and ROS lives in the lifespan
+    that builds it, which keeps `server.py`'s delta to a few lines.
+
+    `sample()` returns the `TickSample` field dict for one moment, or None to
+    skip this tick (nothing to report, or a read that failed outright).
+    """
+
+    def __init__(self, bus: TickBus, *, sample: Callable[[], dict | None],
+                 hz: float = 20.0, name: str = "idle-sampler") -> None:
+        self._bus = bus
+        self._sample = sample
+        self._period = 1.0 / max(1e-6, float(hz))
+        self._name = name
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def tick_once(self) -> TickSample | None:
+        """One sample, published if the bus is free. Synchronous, for tests."""
+        fields = self._sample()
+        if fields is None:
+            return None
+        return self._bus.publish_once(self._name, **fields)
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name=self._name, daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            started = time.perf_counter()
+            try:
+                self.tick_once()
+            except Exception:
+                # A sampler that dies takes the cockpit's only view of the
+                # arms with it. Log and keep the cadence.
+                logger.exception("idle sampler tick failed")
+            self._stop.wait(
+                max(0.0, self._period - (time.perf_counter() - started)))

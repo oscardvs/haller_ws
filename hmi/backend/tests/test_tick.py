@@ -21,6 +21,7 @@ import pytest
 from haller_hmi.safety import MIN_RATE_FRACTION
 from haller_hmi.tick import (
     RATE_MIN_SAMPLES,
+    IdleSampler,
     ProducerConflict,
     TickBus,
     TickSample,
@@ -258,19 +259,32 @@ def test_tick_does_not_define_its_own_rate_fraction():
     assert not any("RATE_FRACTION" in n for n in vars(tick))
 
 
-def test_a_handover_resets_the_rate_window():
-    """A window spanning two cadences measures neither of them."""
+def test_reset_rate_drops_the_window_for_a_producer_that_did_not_change():
+    """The case the AUTOMATIC reset cannot see: one producer, a new cadence.
+
+    The auto-reset keys on the producer's NAME changing, so two consecutive
+    sessions — same name, different `hz` — would share one window and freeze
+    an fps that describes neither. The idle sampler running between them
+    happens to cover this today, but that is a coincidence of wiring rather
+    than a guarantee, so the session clears the window itself at start.
+
+    This test replaced one that called `reset_rate()` across a producer
+    CHANGE. That version went on passing with the method's body deleted,
+    because the auto-reset was doing the work — a live assertion that had
+    quietly stopped pinning the thing it named. The mutation pass found it;
+    reading it would not have.
+    """
     bus = TickBus()
-    idle = bus.attach_producer("idle-sampler")
+    token = bus.attach_producer("session")
     for i in range(60):
-        _publish(idle, t=i * (1.0 / 20.0))        # idle sampler at 20 Hz
-    idle.detach()
+        _publish(token, t=i * (1.0 / 20.0))
     assert bus.measured_hz() == pytest.approx(20.0, rel=1e-9)
 
     bus.reset_rate()
-    session = bus.attach_producer("session")
-    for i in range(60):
-        _publish(session, t=100.0 + i * (1.0 / 60.0))   # session at 60 Hz
+    assert bus.measured_hz() is None, "the previous cadence survived the reset"
+
+    for i in range(RATE_MIN_SAMPLES):
+        _publish(token, t=100.0 + i * (1.0 / 60.0))
     assert bus.measured_hz() == pytest.approx(60.0, rel=1e-9)
 
 
@@ -363,3 +377,101 @@ def test_a_sample_defaults_to_not_degraded():
     invariant 9 is where it is owed.
     """
     assert TickSample(seq=0, t_mono=0.0, t_unix=0.0).degraded is False
+
+
+# --- the producer handover ------------------------------------------------
+
+def test_publish_once_publishes_while_the_bus_is_free():
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    assert bus.publish_once("idle-sampler", t_mono=0.0) is not None
+    assert len(sub.drain()) == 1
+
+
+def test_the_idle_sampler_is_silent_while_a_session_holds_the_bus():
+    """The handover cannot overlap, so nothing has to stand the sampler down.
+
+    `publish_once` attaches, publishes and detaches inside ONE lock hold, so a
+    session claiming the bus wins it strictly before or strictly after — never
+    during. This is the property the contract wanted exclusivity for.
+    """
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    session = bus.attach_producer("session")
+    _publish(session, seq_hint=0, goal_deg={"left": {"j": 1.0}})
+
+    assert bus.publish_once("idle-sampler", t_mono=99.0) is None
+
+    session.detach()
+    assert bus.publish_once("idle-sampler", t_mono=1.0) is not None
+
+    seqs = [s.seq for s in sub.drain()]
+    assert seqs == [0, 1], "an idle sample slipped in beside the session's"
+
+
+def test_a_producer_change_drops_the_rate_window_without_being_asked():
+    """A window spanning two cadences describes neither, and fps comes from it."""
+    bus = TickBus()
+    idle = bus.attach_producer("idle-sampler")
+    for i in range(60):
+        _publish(idle, t=i * (1.0 / 20.0))
+    assert bus.measured_hz() == pytest.approx(20.0, rel=1e-9)
+    idle.detach()
+
+    session = bus.attach_producer("session")
+    assert bus.measured_hz() is None, "the 20 Hz window survived the handover"
+    for i in range(60):
+        _publish(session, t=100.0 + i * (1.0 / 60.0))
+    assert bus.measured_hz() == pytest.approx(60.0, rel=1e-9)
+
+
+def test_the_idle_sampler_accumulates_a_rate_across_its_own_publishes():
+    """The other side of the reset rule, and the one that breaks quietly.
+
+    `publish_once` attaches every tick. If attaching reset the window each
+    time, the window would never reach the sample floor and `measured_hz`
+    would be None forever — so the recorder could never refuse against a rate
+    while idle, and the reset built to protect fps would have removed it.
+    Reset is keyed on the producer's NAME changing, not on attaching.
+    """
+    bus = TickBus()
+    for i in range(60):
+        bus.publish_once("idle-sampler", t_mono=i * (1.0 / 20.0))
+    assert bus.measured_hz() == pytest.approx(20.0, rel=1e-9)
+
+
+def test_the_idle_sampler_skips_a_tick_its_source_cannot_answer():
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    sampler = IdleSampler(bus, sample=lambda: None, hz=1000.0)
+    assert sampler.tick_once() is None
+    assert sub.pending == 0
+
+
+def test_the_idle_sampler_publishes_what_its_source_returns():
+    bus = TickBus()
+    sub = bus.subscribe(name="a")
+    sampler = IdleSampler(
+        bus, sample=lambda: {"t_mono": 0.0, "arms": {"left": {"joints_deg": {"j": 3.0}}}},
+        hz=1000.0)
+    sampler.tick_once()
+    assert sub.drain()[0].arms["left"]["joints_deg"]["j"] == 3.0
+
+
+def test_the_idle_sampler_stands_aside_for_a_session_and_returns_after():
+    bus = TickBus()
+    calls = {"n": 0}
+
+    def sample():
+        calls["n"] += 1
+        return {"t_mono": float(calls["n"])}
+
+    sampler = IdleSampler(bus, sample=sample, hz=1000.0)
+    assert sampler.tick_once() is not None
+
+    session = bus.attach_producer("session")
+    assert sampler.tick_once() is None
+    session.detach()
+
+    assert sampler.tick_once() is not None
+    assert calls["n"] == 3, "the source is still asked, the bus just refuses"
