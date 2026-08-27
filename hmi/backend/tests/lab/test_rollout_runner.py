@@ -588,12 +588,23 @@ def test_the_probe_names_a_module_that_stays_stdlib_only():
     That constraint is why the constant lives in safety.py, and this asserts the
     probe keeps pointing at a light module rather than following the constant if
     it ever moves somewhere heavy.
+
+    In a SUBPROCESS, for the reason
+    `test_importing_the_runner_pulls_in_neither_lerobot_nor_torch` above already
+    gives: by the time the whole backend suite reaches this file, other modules
+    have imported lerobot into THIS interpreter, so `sys.modules` here says
+    nothing about what the probe pulled in. Asserting it in-process passes
+    alone and fails in the suite — which is what the first version of this test
+    did.
     """
     module_name, _attr = rr._PUBLISHED_FRACTION
-    importlib.import_module(module_name)
+    probe = (f"import sys; import {module_name}; "
+             "print('torch' in sys.modules, 'lerobot' in sys.modules)")
 
-    assert "lerobot" not in sys.modules
-    assert "torch" not in sys.modules
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                         text=True, check=True, timeout=120, cwd=str(BACKEND))
+
+    assert out.stdout.strip() == "False False", out.stderr
 
 
 def test_the_rate_gate_refuses_below_the_floor_and_records_both_numbers(tmp_path):
