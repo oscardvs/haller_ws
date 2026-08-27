@@ -72,13 +72,13 @@ its 5 tests once `episode_index` is real.
   by its author and it credits everyone's work to whoever ran it last; a sum is checkable
   by anyone holding a different tree, and when it fails to close the residual points at a
   specific commit. That is how `38ec8d6` was found — a commit no track had reported.
-- **frontend `vitest`: 412 passed, 18 files** at `5c221cd`. `tsc --noEmit` clean.
-  **A flake survives, and it is NOT the one Track D fixed:**
-  `__tests__/cockpitTabs.test.tsx > "names the newest episode on the confirm, not the last
-  row"` (~1018 ms, so a timeout shape). 2 red in 16 consecutive runs. **No rate is quoted
-  on purpose** — 2 in 16 cannot separate 5% from 25%. A single failure proves EXISTENCE,
-  which a small sample can support; a rate is not, which is the error that was published
-  and retracted once already today.
+- **frontend `vitest`: 418 passed, 18 files at `b644a60`**, `tsc --noEmit` clean.
+  **No known flake.** Both afternoon flakes were the SAME defect in different files — a
+  click on a control still rendered `disabled`, silently swallowed (`9c2d087`, `9e39e99`).
+  **0/16 red measured by the integrator, independently of the session that wrote the fix**,
+  plus 16/16 from that session — 32 clean runs by two parties. Still CORROBORATION: the
+  deterministic repro is the evidence, since 32 clean runs against a low rate happen often
+  enough by luck.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```

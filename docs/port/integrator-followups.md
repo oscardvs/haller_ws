@@ -524,6 +524,42 @@ applies to any probe that prunes, not only to a matrix.
   ported `max(pressure, 0.35)` sat below the 0.5 deg haptic dead zone and would have
   SILENCED the buzz at the exact pose it was added to raise.
 
+- **`innerText` is what the CSS RENDERS, not what the code wrote.** A tag chip written
+  as `"baseline"` reads back as `"BASELINE"` because the stylesheet applies
+  `text-transform: uppercase`. **Any assertion on rendered text is case-insensitive or it
+  is testing the stylesheet.** Caught twice in one day by the same session, the second time
+  one step away from filing a false regression against a landed fix — *"my first two probes
+  said the tags did not render"* — which is the failure this file already rates as worse
+  than silence. Use `textContent` where you want the DOM's text, or normalise case where
+  you want the operator's.
+
+- **Prove a published value is READ, not merely equal — by moving it.** Track C's
+  batching reads `compare_max_keys` from `/lab/system`, and the fallback is also 8, so at
+  the published value a live read and a hardcoded copy are indistinguishable. They patched
+  `compare.MAX_KEYS = 3` at RUNTIME in their own process (a two-line wrapper module on
+  `PYTHONPATH` — Track B's file never edited), restarted, and watched the requests follow:
+
+        cap 8 -> 2 requests, sizes [8, 2]
+        cap 3 -> 4 requests, sizes [3, 3, 3, 1]
+
+  Same method as publishing 0.5 and watching the rate resolver follow, and the same method
+  Track B used to pin the caps. **It is the only proof available when the values are
+  interned or simply happen to agree** — `is` cannot help, because CPython interns small
+  integers. Mutation confirmed the method rather than just the code: replacing the read
+  with the fallback fails ONLY that test while both fallback tests keep passing.
+  **Measurement-harness corollary:** they counted at the CDP NETWORK layer, not with a page
+  hook, because a hook installed before navigation is destroyed by it — the first attempt
+  reported zero requests and would have read as "batching never fired". A harness that
+  cannot observe the event reports the same thing as an event that never happened.
+
+- **A fallback is tolerable exactly when a stale value is SELF-CORRECTING.** Track C
+  recorded why one is acceptable for the compare cap and was not for the rate gate, and the
+  distinction is the right one: a stale cap that is too high gets refused by the backend in
+  words the pane now displays, and one too low merely splits the request more finely —
+  either way the system says so. A wrong rate-gate copy showed the operator a wrong
+  threshold **with nothing to contradict it.** Ask what happens when the fallback is wrong,
+  not whether a fallback is allowed.
+
 - **`findBy*` answers "does it EXIST", never "can it be USED".** Two independent
   instances in one afternoon, in two files, by two sessions — which makes it a rule rather
   than a coincidence. A control rendered DISABLED until something resolves is matched
