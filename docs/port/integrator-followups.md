@@ -385,6 +385,15 @@ applies to any probe that prunes, not only to a matrix.
   allocation is the one decision that cannot be made locally.** Corollary: a name that
   collides is not an address — use the ` [ref]`.
 
+- **Five runs cannot tell 40% from 20%.** "The fix halved the flake" was published by
+  the integrator from ten runs before and five after, and then propagated to three
+  sessions. At a ~27% underlying rate the interval on 1-of-5 spans most of the range, so
+  the number never separated the hypotheses it was quoted as separating. **A rate needs a
+  sample size before it needs a decimal point**, and a small-n rate is the same class of
+  error as a bare suite total: a claim that looks like a measurement. It was caught by the
+  next session measuring properly — 0/25 after a root-cause fix, 5/15 with one line
+  mutated back — which also demonstrates the fix: pick n from the effect you need to see.
+
 - **A fake backend that is LESS CONSISTENT than the real one measures the scheduler.**
   `vrTeleopXRLoop.test.tsx` failed roughly two runs in five, on a DIFFERENT test each time,
   which is exactly what made three sessions read it as tree noise — including the
@@ -394,7 +403,11 @@ applies to any probe that prunes, not only to a matrix.
   assertions. The mock did not simplify the backend, it invented one with different
   dynamics — a real `/record/status` never contradicts the state you just drove it into.
   Fixed by moving recorder state into `vi.hoisted` so the mocks READ it rather than each
-  returning a literal. **Fourth instance of the harness-decides-the-outcome class**, beside
+  returning a literal. **The rule stands on its own merits; its INSTANCE does not.** The
+  residual turned out to be a disabled-button race, and whether the hoisted change moved
+  the failure rate at all was never established — see the small-n entry above. A mock that
+  answers a fixed literal where the real thing returns evolving state is still a defect;
+  it simply is not proven to be THIS defect. **Fourth instance of the harness-decides-the-outcome class**, beside
   the in-process `sys.modules` check, the `/bin/true` launch stand-in, and the vacuous
   E-STOP teardown assertions. **Corollary, learned the embarrassing way: "re-run and see"
   is not triage.** A 40%-failing test and a scheduling flake are indistinguishable by

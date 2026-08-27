@@ -68,16 +68,23 @@ its 5 tests once `episode_index` is real.
   checkable by arithmetic instead of merely true, and it caught a commit the integrator
   had not been told about — the +7 was the gap between what two tracks reported and what
   the tree actually held.
-- **frontend `vitest`: 396 passed, FLAKING ~1 IN 5 FULL-SUITE RUNS** (was 186). Cause
-  known and named, fix at `8e7ff7a` HALVED it (~40% -> ~20%, ten runs before / five after)
-  and did not close it. **Do not report 396 as clean and do not "re-run and see"** — a 20%
-  failure hides under a re-run exactly as well as a 40% one. Residual is a real production
-  glitch, not only a test one: a `/record/status` read in flight when an A/X hold changes
-  state resolves afterwards and reconciles the take machine BACKWARDS, so the HUD reads
-  IDLE for one 250 ms poll while the recorder is already ARMED. Owned by Track D.
-- Measured from a DETACHED WORKTREE, which is the only reason the number means anything.
-  Within one hour three sessions honestly reported **1474, 1477 and 1487** — the tree had
-  moved under each of them. Always pin the commit; always re-measure.
+- **frontend `vitest`: 396 passed, 17 files — 0/25 runs red at `e8d6942`.** `tsc
+  --noEmit` clean. No known flake. Publish it for `hmi/frontend` at that commit only.
+  (eslint on `VRTeleopPanel.tsx` is 11 — 10 errors + 1 warning — all pre-existing.)
+- **The flake's cause was NOT the status-reconcile race, and "the fix halved it" was
+  never measured.** Both claims were the integrator's and both were wrong. The real cause:
+  `Enter Passthrough` renders DISABLED until `xrSupported()` resolves
+  (`VRTeleopPanel.tsx:1428`, `supported` starts `null` at `:168`, set from a promise at
+  `:338`), **`findByRole` matches a disabled button and clicking one is a no-op** — so a
+  click inside that window silently failed to enter the session, the XR loop never
+  registered a frame callback, and the first `step` after entry read null. Fixed `9c2d087`
+  by routing all five entry sites through one `clickEnterPassthrough`.
+  **On the retracted number:** "~40% -> ~20%, halved" rested on ten runs before and five
+  after. At a ~27% underlying rate five runs cannot separate 40% from 20% — the interval
+  on 1-of-5 spans most of the range — and the disabled-button race accounts for
+  essentially the whole residual on its own (5/15 red with that one line removed, on top
+  of the earlier change). **Whether `8e7ff7a` moved the rate at all is unknown.** It is a
+  correct change on its own merits, and that is a different claim from the one published.
 - `~/venvs/haller-hmi/bin/ruff` (0.16.0 — **NOT** the 0.15.1 on PATH, which misses things)
 
 ```
