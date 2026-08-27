@@ -78,6 +78,25 @@ matched the shape of the implementation rather than the shape of the promise.
    checked that a command produced *some* sane value. None checked the mapping was a
    bijection onto the jaw's actual travel, so half the trigger doing nothing was invisible.
 
+**Why each one fails, which is the same reason three times.** In a sequence claim tested
+per-step, the test walks the same control flow the code does, so any ordering assumption
+the code makes the test makes too. In an impossible fixture, the test's WORLD is built
+from the code's assumptions rather than from what the real loader can emit, so a mismatch
+between two real components has nowhere to appear. In a per-point assertion, the test
+checks the code's output at the points the code handles, never the property the claim is
+actually about. **In all three the test inherits the code's blind spot, because it was
+written from the code.**
+
+**The counter-discipline:** write the assertion from the CLAIM, in the claim's own terms,
+before reading the implementation — a sweep for a mapping, a real-loader-derived fixture
+for a world, an end-to-end for a sequence.
+
+**And a decision rule that came out of getting this wrong once:** when choosing between
+two tests, prefer the one that catches the OBSERVED failure over the more elegant one.
+Elegance is not a coverage argument. (The premise-vs-scanner call was nearly made the
+other way on exactly that mistake — the elegant test would have left the defect that
+motivated it free to recur.)
+
 ## Standing rules that came out of rulings
 
 - **Every window `_load_joint_limits` can produce is EXACTLY symmetric about zero** — it
