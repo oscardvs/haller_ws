@@ -67,7 +67,11 @@ export function PruneDialog({
   const wouldEmpty = episodes.length > 0 && drop.length === episodes.length;
   const blocked = nothingToDo || wouldEmpty;
   // Typing is required only when there is no copy to go back to.
-  const gateOpen = backup || typed === "DELETE";
+  // Trimmed, matching DeleteDatasetDialog — one rule for both typed gates,
+  // because it is the same operator at the same keyboard. Trimming is safe in
+  // both: no wrong value trims to a right one, and a pasted trailing space
+  // blocking someone who typed the right word is friction that teaches nothing.
+  const gateOpen = backup || typed.trim() === "DELETE";
 
   const confirm = useCallback(async () => {
     setBusy(true);

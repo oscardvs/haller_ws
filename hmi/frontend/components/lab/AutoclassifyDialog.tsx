@@ -25,9 +25,18 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
-  epLabel, isBusy, isForbidden, isMissing, lab, reason, REMOTE_REFUSED,
-  type AutoclassApplied, type AutoclassChange, type AutoclassMode,
-  type AutoclassParams, type AutoclassPreview,
+  epLabel,
+  isBusy,
+  isForbidden,
+  isMissing,
+  lab,
+  reason,
+  REMOTE_REFUSED,
+  type AutoclassApplied,
+  type AutoclassChange,
+  type AutoclassMode,
+  type AutoclassParams,
+  type AutoclassPreview,
 } from "@/lib/lab";
 import {
   Button, Dialog, Empty, Field, HeadRow, MARK_COLOR, Note, NumberInput,
@@ -175,6 +184,12 @@ export function AutoclassifyDialog({
       onApplied();
     } catch (e) {
       setWriteFailure(failureOf(e));
+      // A 409 means the server recomputed the token and the dataset had moved,
+      // so THIS token can only ever 409 again — leaving the button live would
+      // offer a retry that cannot succeed. Drop the read instead: the operator
+      // is back at "preview", which is the only thing that can help, and the
+      // diff they were about to approve is no longer on screen to be approved.
+      if (isBusy(e)) setRead(null);
     } finally {
       setBusy(false);
     }

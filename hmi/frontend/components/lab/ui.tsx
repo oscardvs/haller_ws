@@ -354,7 +354,10 @@ export function Chip({
     >
       {children}
       {count !== undefined && (
-        <span data-num className="tabular-nums opacity-70">{count}</span>
+        // The space is load-bearing, not spacing: without it the accessible
+        // name concatenates to "reject4" and a screen reader reads one token,
+        // so the chip cannot be asked for by its word either.
+        <span data-num className="tabular-nums opacity-70">{" "}{count}</span>
       )}
     </button>
   );
