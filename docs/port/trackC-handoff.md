@@ -6,9 +6,27 @@ Everything below is what a successor **cannot reconstruct from the code or the
 git log**. What the code already says is deliberately not repeated here.
 
 State at handoff: 11 commits, `tsc --noEmit` 0, eslint clean, production build
-clean, `/lab/compare` prerenders. Frontend suite 396 (Track C owns 150 of
-them). If a single test fails once and passes on re-run, check whether another
-track is mid-write before chasing it — that has happened three times.
+clean, `/lab/compare` prerenders.
+
+**Track C owns 150 tests and they are 150/150 measured IN ISOLATION** — run
+just the six suites below and that number is a fact about this track:
+
+```
+npx vitest run __tests__/labClient.test.ts __tests__/labCharts.test.ts   __tests__/labReview.test.tsx __tests__/cockpitTabs.test.tsx   __tests__/api.test.ts __tests__/cockpitLib.test.ts
+```
+
+The FULL-SUITE total is deliberately not pinned here, because on this tree it
+is not a property of the code. Four sessions share one working tree, so a count
+taken while another track is mid-write is a fact about the tree at that instant
+and nothing more. Measured across one afternoon at the same HEAD it read 396,
+then 395/1, then 396 three times, then 376/20 — that last one was Track D
+editing `__tests__/vrTeleopXRLoop.test.tsx`, which was the only file failing
+and was dirty in `git status` at the time.
+
+So before chasing any frontend failure: `git status --short -- hmi/frontend/`.
+If the failing file is dirty and is not yours, it is someone typing. Confirm
+your own scope with the isolated run above rather than re-running the whole
+suite and hoping.
 
 ---
 
