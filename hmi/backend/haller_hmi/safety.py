@@ -6,6 +6,32 @@ import enum
 import math
 from dataclasses import dataclass
 
+#: How far below its DECLARED rate a loop may run before we refuse to start it.
+#: Dimensionless: measured / declared.
+#:
+#: Two surfaces measure different quantities against this one threshold — the
+#: recorder's sample rate and the policy control loop's rate — so it lives
+#: here, in the module both can import, rather than inside either measuring
+#: surface. `safety.py` depends on enum/math/dataclasses and nothing else,
+#: which is what lets the detached rollout child read it without pulling
+#: lerobot in before it means to.
+#:
+#: It is published under two payload keys, `record_rate_gate` and
+#: `control_rate_gate`, because the QUANTITIES differ even though the bar does
+#: not. Read this constant; do not copy the number.
+#:
+#: 0.9 IS A JUDGEMENT, NOT A MEASUREMENT. Nobody has measured what fraction of
+#: declared rate actually degrades a trained policy; this is the reference
+#: stack's spirit and a round number, and U3 on real hardware may well argue
+#: with it. Treat a change to it as a decision, not a tuning tweak.
+#:
+#: And it is a ratio to the DECLARED rate, which makes it meaningful only while
+#: the declared number is exactly the `fps` that `info.json` synthesises every
+#: timestamp from. Let those two come apart and this stays 0.9 while quietly
+#: meaning something else — the declared-not-measured defect re-entering
+#: through the machinery built to stop it. See docs/port/phase2-tick-contract.md.
+MIN_RATE_FRACTION = 0.9
+
 
 class Mode(str, enum.Enum):
     AUTO = "auto"

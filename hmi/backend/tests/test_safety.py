@@ -177,3 +177,31 @@ def test_plan_ramp_rejects_nonpositive_rates():
         plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=60.0, hz=0.0)
     with pytest.raises(ValueError):
         plan_ramp({"a": 0.0}, {"a": 1.0}, max_speed_deg_s=60.0, hz=-1.0)
+
+
+def test_min_rate_fraction_is_importable_without_pulling_lerobot_in():
+    """The rollout child reads this constant BEFORE it means to import
+    lerobot, and its tests must not import lerobot at all. That only holds
+    while `safety` stays dependency-light, so this pins the property rather
+    than the intention: import it in a bare interpreter and assert nothing
+    heavy came along.
+
+    `tick.py` cannot host it for the same reason — it owns the measurement, so
+    it reaches `arm.py` and therefore lerobot. The threshold and the
+    measurement are two different facts and only one of them is cheap.
+    """
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c", (
+            "import sys; from haller_hmi.safety import MIN_RATE_FRACTION as f;"
+            " heavy = sorted(m for m in sys.modules"
+            "                if m.split('.')[0] in ('lerobot', 'torch', 'mujoco', 'cv2'));"
+            " print(f); print('HEAVY:' + ','.join(heavy))"
+        )],
+        capture_output=True, text=True, check=True,
+    )
+    value, heavy = out.stdout.strip().splitlines()
+    assert float(value) == 0.9
+    assert heavy == "HEAVY:", f"importing safety dragged in {heavy[6:]}"
