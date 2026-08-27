@@ -32,13 +32,21 @@
 #                                         #   up.sh --insertion --tailscale
 #   scripts/quest-teleop/down.sh          # stop the desktop half
 #
-# --tailscale exists because a local network can be actively hostile. The ZTE
-# router has AP/client isolation on: the Quest and this desktop each reach the
-# router and NEITHER can reach the other (ARP to the headset goes FAILED, and
-# tcpdump here sees literally zero packets from it). Nothing on this machine
-# can fix that — the frames never leave the AP. Tailscale sidesteps the LAN
-# entirely by carrying the traffic over WireGuard, so the two only have to
-# reach the internet, not each other. The second win is the certificate:
+# --tailscale exists because a local network can be actively hostile. This one
+# is NOT AP isolation, though it looks exactly like it: `ZTE_DEC155` is one
+# SSID on two BSSIDs — 10:3C:59:DE:C1:55 (ch 6, 2.4 GHz) and
+# 10:3C:59:E0:C1:55 (ch 44, 5 GHz) — and the router does not bridge clients
+# across them. Split across radios, the Quest and this desktop each hold a
+# 192.168.0.x lease and reach the internet while neither can see the other:
+# ARP to the headset goes FAILED and tcpdump here sees literally zero packets
+# from it. The band is re-chosen on every association, so it comes and goes
+# with no config change. The cheap fix is to pin this box to the headset's
+# radio (`nmcli con modify ZTE_DEC155 802-11-wireless.bssid <BSSID>`; both are
+# worth trying, it is a two-shot experiment) — see hmi/QUICKSTART-QUEST.md.
+# --tailscale is what works when that fails, or when the split is not the
+# problem: it sidesteps the LAN entirely by carrying the traffic over
+# WireGuard, so the two only have to reach the internet, not each other. The
+# second win is the certificate:
 # `tailscale cert` issues a publicly-trusted one for the MagicDNS name, so the
 # self-signed interstitial disappears — and that interstitial is not cosmetic
 # here, because it can never be accepted for a WebSocket.
@@ -402,9 +410,7 @@ if [ "$ok" = 1 ]; then
     fi
     say "In the Quest browser open:"
     say ""
-    say "    $ORIGIN/teleop/vr          (the Next.js cockpit page)"
-    say "    $ORIGIN/api/vr/            (the ported relay page — settings +"
-    say "                                single-arm start + guard toggle)"
+    say "    $ORIGIN/teleop/vr          (the in-headset page — the only VR client)"
     say ""
     if [ "$TAILSCALE" = 1 ]; then
         say "(over the tailnet, with a real cert — no interstitial). The headset"

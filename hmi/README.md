@@ -24,13 +24,13 @@ hmi/
 ├── backend/      Python service (uvicorn + FastAPI)
 │   ├── config.yaml             arms, ROS topics, telemetry rate, cameras
 │   ├── haller_hmi/             package
-│   └── tests/                  pytest (588 tests)
+│   └── tests/                  pytest (645 tests)
 └── frontend/     Next.js app (standalone-built)
     ├── app/                    pages: / (cockpit), /settings, /teleop/vr
     ├── components/cockpit/     the cockpit shell and its six tabs
     ├── components/             VRTeleopPanel (the in-headset HUD) + shared widgets
     ├── lib/                    api client, telemetry WS store, stance, config
-    └── __tests__/              vitest (178 tests)
+    └── __tests__/              vitest (186 tests)
 ```
 
 ## Prerequisites

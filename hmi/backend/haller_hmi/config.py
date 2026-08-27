@@ -243,12 +243,6 @@ def _cameras_from(raw: list[dict] | None) -> list[CameraConfig]:
 
 
 @dataclass
-class SimLeaderConfig:
-    source: str  # "mouse" | "replay"
-    dataset_path: str | None = None  # required when source == "replay"
-
-
-@dataclass
 class Config:
     arms: list[ArmConfig] = field(default_factory=list)
     ros: RosConfig = field(default_factory=RosConfig)
@@ -265,7 +259,6 @@ class Config:
     # a load error, not a warning: a typo here silently reverting to defaults
     # is exactly the "the change didn't take" trap this file exists to end.
     teleop: dict = field(default_factory=dict)
-    sim_leader: SimLeaderConfig | None = None
     # Cubes dealt onto the sim workbench at world build; ignored unless at
     # least one arm is source: sim.
     sim_cubes: int = 0
@@ -307,7 +300,6 @@ def _teleop_from(raw: dict | None) -> dict:
 def load_config(path: Path | None = None) -> Config:
     cfg_path = Path(path or os.environ.get("HALLER_HMI_CONFIG", DEFAULT_CONFIG_PATH))
     raw = yaml.safe_load(cfg_path.read_text())
-    sim_leader_raw = raw.get("sim_leader")
     return Config(
         arms=[ArmConfig(**a) for a in raw.get("arms", [])],
         ros=RosConfig(**raw.get("ros", {})),
@@ -316,7 +308,6 @@ def load_config(path: Path | None = None) -> Config:
         motion=MotionConfig(**raw.get("motion", {})),
         collision=_collision_from(raw.get("collision")),
         teleop=_teleop_from(raw.get("teleop")),
-        sim_leader=SimLeaderConfig(**sim_leader_raw) if sim_leader_raw else None,
         sim_cubes=int(raw.get("sim_cubes", 0)),
         sim_task=str(raw.get("sim_task", "cubes")),
         sim_seed=(None if raw.get("sim_seed") is None

@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
 from .arm import ArmManager
 from .calibration import (
@@ -107,13 +107,6 @@ _HOME_WAIT_S = 6.0
 class CmdVel(BaseModel):
     linear: float
     angular: float
-
-
-class ArmGoal(BaseModel):
-    model_config = ConfigDict(extra="allow")  # any subset of joint names
-
-    # No declared fields — the joint dict comes through as `model_extra`
-    # so we read it via `.__dict__`.
 
 
 class ArmModeBody(BaseModel):

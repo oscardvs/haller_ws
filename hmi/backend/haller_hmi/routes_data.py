@@ -20,10 +20,9 @@ That is deliberate: opening one pulls from the Hub, builds writers and costs
 seconds, all so a panel can print "12 episodes, 4.2 GB". A listing must be
 cheap enough to poll.
 
-Injected through `build_router` rather than importing the server's globals, for
-the reason `vr_teleop.relay` does the same: `server.py` imports this module, so
-this module must never import back, and the tests then get to mount the router
-on their own app with fakes.
+Injected through `build_router` rather than importing the server's globals:
+`server.py` imports this module, so this module must never import back, and the
+tests then get to mount the router on their own app with fakes.
 """
 from __future__ import annotations
 
@@ -93,9 +92,9 @@ def build_router(*, get_cameras, get_recorder, lerobot_home) -> APIRouter:
     load-bearing rather than stylistic: `server.py` mounts its routers at
     import time, but builds the `CameraManager` and `DatasetRecorder` inside
     `lifespan`. A router that closed over the values would capture `None` for
-    the entire life of the process and 503 forever. (Contrast `relay.py`,
-    which can inject bound methods because its `HumanTeleopSession` is built at
-    import time.)
+    the entire life of the process and 503 forever. (Contrast the teleop
+    socket, which closes over `human_teleop` directly — that session IS built
+    at import time.)
     """
     router = APIRouter()
 
