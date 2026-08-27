@@ -265,6 +265,27 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   predicate narrowing a partial body to `null`, a state both charts already draw. A bad
   trace now costs a chart.
 
+- **A check that cannot fire in EITHER direction is dead code shaped like a safety
+  check.** The preflight gripper gate was first diagnosed as a unit mismatch — percentage
+  compared against a degrees window. The sharper diagnosis is that gating it *in its own
+  unit* would have been UNFALSIFIABLE: `_normalize` clamps the reading into [0,100]
+  against the same range any window derives from, so the comparison could never fail in
+  either direction. That is the more dangerous class. A unit bug fires wrongly and gets
+  noticed; a check that cannot fire passes every test, reassures every reader, and
+  protects nothing — and it lives in the safety layer, which is exactly where "there is a
+  check for that" gets believed. The gripper is now outside the gate entirely, for that
+  reason rather than the units one.
+
+- **Fix a repeated hazard at the root, not at the call sites.** The bulk-torque defect
+  appeared at five call sites (`/arm/{id}/mode`, `/arm/{id}/torque`, the shutdown walk,
+  `calibration.py`, preflight). `ArmHandle.disable_torque()` now walks per motor and
+  returns the refusals, so one change fixes all five and invariant 5b has a single
+  enforcement point instead of five promises.
+
+- **A regression test should pin the boundary, not just the fixed value.** The 0.35 units
+  test asserts BOTH that 20.05 saturates the gate AND that 0.35 does not — pinning only
+  the corrected constant would let the same bug back in wearing a different number.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
