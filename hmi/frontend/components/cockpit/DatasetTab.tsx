@@ -445,10 +445,18 @@ function EpisodeBrowser({
       .catch((e: Error) => {
         if (cancelled) return;
         setData(null);
+        // 400 here is not a fault: it is the recorder saying it has never
+        // opened a repo, which is simply true of a backend that has just come
+        // up. `e.message` would render it as "HTTP 400: …", and an operator who
+        // reads a status code on a fresh cockpit goes looking for a broken
+        // build instead of picking a dataset. The backend's own sentence, plus
+        // the move that clears it.
         setError(
           e instanceof ApiError && e.status === 404
             ? "this backend has no episode listing"
-            : e.message,
+            : e instanceof ApiError && e.status === 400
+              ? `${e.detail} — pick one above, or start a take`
+              : e.message,
         );
       });
     return () => { cancelled = true; };

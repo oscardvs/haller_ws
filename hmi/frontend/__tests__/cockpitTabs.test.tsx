@@ -229,6 +229,20 @@ describe("DatasetTab — take composition", () => {
     expect(screen.getByText("16.7s")).toBeInTheDocument();
   });
 
+  it("reads a fresh recorder as a prompt, not as an HTTP 400", async () => {
+    // A backend that has just come up has never opened a repo, so the episode
+    // listing 400s and says so. That is true, not broken — and an operator who
+    // reads a status code on a fresh cockpit goes looking for a bad build
+    // instead of picking a dataset. The backend's own sentence survives; the
+    // "HTTP 400:" prefix does not.
+    routeFetch({ "/record/repos": { repos: [] }, "/record/episodes": 400 });
+    render(<DatasetTab cameras={CAMS} onCameraRecord={vi.fn()} />);
+
+    const shown = await screen.findByText(/pick one above, or start a take/i);
+    expect(shown).toHaveTextContent("nope");
+    expect(shown.textContent).not.toMatch(/HTTP\s*400/);
+  });
+
   it("names the newest episode on the confirm, not the last row", async () => {
     // "delete last" means the highest index. Naming the wrong one on a
     // confirm button is how an operator deletes a take they wanted.
