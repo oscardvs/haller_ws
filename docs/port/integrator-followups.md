@@ -1,0 +1,59 @@
+# Integrator follow-ups — the kit port
+
+Cross-track items the integrator (`haller-ws-13`) owes, or must chase once another
+track lands its half. Not a backlog: everything here is blocked on a specific event,
+and dies when that event happens. Add the trigger, not just the task.
+
+## Open
+
+- **Delete `episodesTotal()` and its 5 tests from `lib/vrTeleop.ts`.**
+  *Trigger:* Track A's `episode_index` lands in `GET /record/status`.
+  *Owner once triggered:* Track D (`haller-ws-1a`), who flagged it.
+  It exists only to paper over lerobot buffering ten episodes' metadata in RAM before
+  writing `meta/episodes.jsonl` — the HUD counter stalls at 7 while the operator banks
+  their tenth take. A real index from the recorder makes the guess unnecessary, and a
+  guess left next to a fact is how the two drift.
+
+- **Mount the record routes in `server.py`.**
+  *Trigger:* Track A reports the exact bodies for `POST /record/arm`, `/record/roll`,
+  `/record/stop {save, rearm}`.
+  `server.py` is the integrator's precisely because both backend tracks need routes
+  there.
+
+- **Mount Track B's Lab router in `server.py`, then delete `routes_data.py`.**
+  *Trigger:* Track B reports `build_router(...)`'s signature and its four
+  compatibility paths answer with the old shapes.
+  The factory must take ZERO-ARG CALLABLES (`get_cameras=lambda: cameras`, …), not
+  values: `server.py` mounts routers at import time but builds `cameras`/`recorder`
+  inside `lifespan`, so a router closing over the values captures `None` and 503s
+  forever. This bit the 08-22 unification; do not rediscover it.
+
+- **`/estop` must revoke the rollout lease, and the lease must be mounted.**
+  *Trigger:* Track B lands `lease.py` and the streaming-inference child.
+  Ruled 2026-08-27: the rollout child owns the POLICY, never the bus. It streams
+  actions to the server over loopback and they commit through the same chain as every
+  other input — LPF, rate cap, clamp, collision guard, workspace floors, E-STOP.
+  Handing the bus to a child was considered and CLOSED: it would mean `/estop` cannot
+  drop torque during a rollout, the exact trade the port's central decision refused.
+  The safety win is the other direction anyway — a freshly-trained policy is less
+  trustworthy than a practised hand, so it should get MORE of the commit chain, not
+  less. Fallback if streaming inference proves unworkable: rollout stays CLI-only with
+  the HMI stopped, which is what the kit does today. Only after measuring.
+
+- **Reconcile `RecordStatus` once every track's fields are in.**
+  *Trigger:* Tracks A and C both land.
+  The type was already missing `auto_scored`, `success`, `success_frames` — fields
+  `recorder.py::status()` returns TODAY — before this port added any. Worth one pass to
+  confirm the type finally matches the payload rather than merely growing.
+
+## Closed
+
+- ~~Plan doc's phase numbering disagreed with the track briefs~~ — pinned to the doc
+  (`633bbdb`), briefs are track-local.
+- ~~"No git write operations" contradicted the delegated-commit instruction~~ —
+  delegation made explicit (`633bbdb`).
+- ~~The end-of-take modal exception to invariant 5 was undocumented~~ — recorded with
+  its two lapse conditions (`34b732f`).
+- ~~`pos_reach_limit` brief said the kit used 0.25 m~~ — that was the `ClutchPoseMapper`
+  default and the DK1's; the SO-101's is 0.15 ("smaller arm, smaller wall"). Moved to
+  0.15, which is the only number here with 46 episodes behind it.
