@@ -21,7 +21,7 @@ import { toast } from "sonner";
 import { useTelemetry } from "@/lib/telemetry";
 import { useRecorder } from "@/lib/recorder";
 import {
-  api, ApiError, cameraStreamUrl, recordRateGate, recordRateOk,
+  api, ApiError, cameraStreamUrl, recordRateFaithful, recordRateTolerance,
   type CameraInfo, type EpisodesResponse, type RepoInfo,
 } from "@/lib/api";
 import { repoIdFor } from "./CommandBar";
@@ -75,8 +75,11 @@ export function DatasetTab({
   // measured sampler simply draws no rate row rather than an em-dash.
   const fpsMeasured = useRecorder((s) => s.status?.fps_measured ?? null);
   const fpsDeclared = useRecorder((s) => s.status?.fps_declared ?? null);
-  const rateOk = useRecorder((s) => recordRateOk(s.status));
-  const gate = useRecorder((s) => recordRateGate(s.status));
+  // Two-sided, and null when the band is unknowable — either the rate is
+  // not measured yet or the backend publishes no tolerance. Neither is a
+  // warning, and neither may be drawn as one.
+  const rateOk = useRecorder((s) => recordRateFaithful(s.status));
+  const tol = useRecorder((s) => recordRateTolerance(s.status));
   const liveRepo = useRecorder((s) => s.status?.repo_id ?? null);
   const busy = useRecorder((s) => s.busy);
   const teleopRunning = useTelemetry((s) => s.lastFrame?.human_teleop?.running ?? false);
@@ -227,10 +230,12 @@ export function DatasetTab({
                     className="tabular-nums"
                     style={rateOk === false ? { color: "var(--haller-warn)" } : undefined}
                     title={
-                      rateOk === false
-                        ? `below ${(gate * 100).toFixed(0)}% of the declared rate — ` +
+                      rateOk === false && tol !== null
+                        ? `outside ±${(tol * 100).toFixed(1)}% of the declared rate — ` +
                           "the recorder refuses to open an episode here"
-                        : "measured / declared"
+                        : tol === null
+                          ? "measured / declared — this backend publishes no rate tolerance"
+                          : "measured / declared"
                     }
                   >
                     <span data-num>{fpsMeasured.toFixed(1)}</span>

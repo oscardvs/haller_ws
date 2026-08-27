@@ -1,6 +1,9 @@
 // hmi/frontend/__tests__/api.test.ts
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { postJson, getJson, api } from "../lib/api";
+import {
+  postJson, getJson, api, recordRateGate, recordRateOk, recordRateTolerance,
+  recordRateFaithful, RECORD_RATE_GATE_FALLBACK, type RecordStatus,
+} from "../lib/api";
 
 describe("postJson", () => {
   beforeEach(() => vi.restoreAllMocks());
@@ -137,5 +140,78 @@ describe("api dataset wrappers", () => {
       status: 409,
       detail: "cannot pop the only episode",
     });
+  });
+});
+
+describe("the record rate band", () => {
+  // The recorder's gate became a FAITHFULNESS BOUND: `|measured − fps| / fps >
+  // 0.005` refuses. That is a symmetric tolerance, not a floor, and the key was
+  // renamed rather than revalued for one reason — publishing 0.005 under
+  // `record_rate_gate` would make every existing caller compute
+  // `declared * 0.005` and warn below half a percent of the declared rate. The
+  // warning would not become wrong; it would stop firing.
+  const st = (over: Partial<RecordStatus>): RecordStatus => ({
+    recording: false, repo_id: null, task: null, episode_frames: 0,
+    skipped_frames: 0, started_at: null, last_error: null, ...over,
+  }) as RecordStatus;
+
+  it("reads the tolerance the recorder publishes", () => {
+    expect(recordRateTolerance(st({ record_rate_tolerance: 0.005 }))).toBe(0.005);
+  });
+
+  it("returns null — never a number — when no tolerance is published", () => {
+    // THE decisive assertion. The tempting fallback is the one already in this
+    // file, and `0.9` read as a tolerance means ±90%: a band no real rate can
+    // fall outside, so the check could not fire in either direction. A
+    // reassuring check that protects nothing is worse than an absent one, so
+    // the absent case is named on screen instead.
+    expect(recordRateTolerance(st({}))).toBeNull();
+    expect(recordRateTolerance(null)).toBeNull();
+    expect(recordRateTolerance(st({ record_rate_tolerance: 0 }))).toBeNull();
+    // And specifically NOT the floor fallback wearing a tolerance's clothes.
+    expect(recordRateTolerance(st({}))).not.toBe(RECORD_RATE_GATE_FALLBACK);
+  });
+
+  it("refuses a rate that is too FAST, which a floor never could", () => {
+    // The half of the bound that `measured >= declared * g` cannot express at
+    // any value of g. Timestamps synthesised from a rate the rig overshot are
+    // as dishonest as ones it undershot.
+    const fast = st({ record_rate_tolerance: 0.005, fps_declared: 30, fps_measured: 30.6 });
+    expect(recordRateFaithful(fast)).toBe(false);
+    // The old one-sided reading calls the same take fine, which is exactly why
+    // the key had to be renamed rather than revalued.
+    expect(recordRateOk({ ...fast, record_rate_gate: 0.9 })).toBe(true);
+  });
+
+  it("pins the boundary on both sides, not just the fixed value", () => {
+    const at = (m: number) =>
+      recordRateFaithful(st({
+        record_rate_tolerance: 0.005, fps_declared: 30, fps_measured: m,
+      }));
+    expect(at(30)).toBe(true);
+    expect(at(30 * 1.005)).toBe(true);   // exactly on the bound
+    expect(at(30 * 0.995)).toBe(true);
+    expect(at(30 * 1.006)).toBe(false);
+    expect(at(30 * 0.994)).toBe(false);
+  });
+
+  it("says NOT ANSWERABLE rather than false for either unknown", () => {
+    // Not measured yet, and no published band, are different unknowns and
+    // neither is a warning. An operator shown a rate warning during the first
+    // second after boot learns to ignore rate warnings.
+    expect(recordRateFaithful(st({ record_rate_tolerance: 0.005, fps_declared: 30 }))).toBeNull();
+    expect(recordRateFaithful(st({ fps_declared: 30, fps_measured: 30 }))).toBeNull();
+  });
+
+  it("leaves the OLD accessor meaning exactly what it meant", () => {
+    // `recordRateGate` still has a caller in the headset client, which applies
+    // it as `declared * gate`. Keeping the symbol and changing what it returns
+    // would compile everywhere, warn nowhere, and move the silent window into
+    // the migration rather than closing it — so its floor semantics are pinned
+    // here until the key it reads is removed.
+    expect(recordRateGate(st({ record_rate_gate: 0.95 }))).toBe(0.95);
+    expect(recordRateGate(st({}))).toBe(RECORD_RATE_GATE_FALLBACK);
+    // A tolerance on the wire must NOT leak into the floor reader.
+    expect(recordRateGate(st({ record_rate_tolerance: 0.005 }))).toBe(RECORD_RATE_GATE_FALLBACK);
   });
 });

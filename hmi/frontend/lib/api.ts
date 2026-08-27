@@ -374,8 +374,18 @@ export type RecordStatus = {
    *  works and whether it is worth keeping is the operator's call. */
   alerts?: RecordAlert[];
   /** The gate the RECORDER is actually using, published so this UI reads it
-   *  rather than holding a copy. See `recordRateGate`. */
+   *  rather than holding a copy. See `recordRateGate`.
+   *
+   *  SUPERSEDED by `record_rate_tolerance` and kept only for the migration
+   *  window. It is a one-sided FLOOR FRACTION and keeps that meaning until it
+   *  is removed; the tolerance must never be published under this name. */
   record_rate_gate?: number;
+  /** The recorder's faithfulness bound: a take is refused when
+   *  `|measured − fps| / fps` exceeds this. A SYMMETRIC TOLERANCE — a
+   *  half-width, not a floor — so it is read by `recordRateTolerance` and
+   *  compared two-sided. Absent on a backend that predates it, and that
+   *  absence has NO fallback on purpose. */
+  record_rate_tolerance?: number;
 };
 
 export type RecordDrops = {
@@ -428,6 +438,60 @@ export function recordRateOk(status: RecordStatus | null | undefined): boolean |
     return null;
   }
   return measured >= declared * recordRateGate(status);
+}
+
+/**
+ * The recorder's faithfulness tolerance, or `null` if it does not publish one.
+ *
+ * **`null` is deliberate and there is no fallback number.** The obvious one —
+ * reuse `RECORD_RATE_GATE_FALLBACK` — is the worst available answer: `0.9`
+ * read as a TOLERANCE means ±90%, a band no real rate can fall outside, so the
+ * warning would not become wrong, it would stop existing. A check that cannot
+ * fire in either direction is dead code shaped like a safety check, and this
+ * one sits next to a readout an operator trusts.
+ *
+ * That is the same fallback question the compare cap answers the other way,
+ * and the difference is what happens when the fallback is WRONG. A stale
+ * `compare_max_keys` is self-correcting — too high and the backend refuses in
+ * words the pane displays, too low and the request is merely split more
+ * finely. A wrong rate band shows the operator a wrong number with nothing to
+ * contradict it. So: name the degraded state, never paper over it.
+ */
+export function recordRateTolerance(
+  status: RecordStatus | null | undefined,
+): number | null {
+  const t = status?.record_rate_tolerance;
+  return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : null;
+}
+
+/**
+ * Whether the measured rate is FAITHFUL to the declared one — the two-sided
+ * form of `recordRateOk`, and the shape the recorder now enforces.
+ *
+ * `null` means NOT ANSWERABLE, and it covers two different unknowns that must
+ * both stay off the screen as warnings: the rate is not measured yet (as in
+ * `recordRateOk`), or the backend publishes no tolerance, in which case this
+ * UI has no band and must say so rather than invent one.
+ *
+ * Two-sided because `|measured − fps| / fps > tol` refuses a rate that is too
+ * FAST as readily as one too slow, and `measured >= declared * g` cannot
+ * express that at any value of `g`. A dataset whose timestamps run quick is as
+ * dishonest as one that runs slow — the frames are stamped from a rate the rig
+ * did not achieve either way.
+ */
+export function recordRateFaithful(
+  status: RecordStatus | null | undefined,
+): boolean | null {
+  const measured = status?.fps_measured;
+  const declared = status?.fps_declared;
+  const tol = recordRateTolerance(status);
+  if (
+    tol === null ||
+    typeof measured !== "number" || typeof declared !== "number" || declared <= 0
+  ) {
+    return null;
+  }
+  return Math.abs(measured - declared) / declared <= tol;
 }
 
 /** One episode as the dataset meta records it. */
