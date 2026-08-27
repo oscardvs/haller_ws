@@ -524,6 +524,41 @@ applies to any probe that prunes, not only to a matrix.
   ported `max(pressure, 0.35)` sat below the 0.5 deg haptic dead zone and would have
   SILENCED the buzz at the exact pose it was added to raise.
 
+- **Rename a key whose MEANING changes; never revalue it.** The recorder's rate
+  threshold went from a one-sided FLOOR (`declared * 0.9`) to a symmetric TOLERANCE
+  (`|measured - fps| / fps > 0.005`). Publishing 0.005 under the existing
+  `record_rate_gate` would have made every reader compute `declared * 0.005` and warn below
+  0.5% of the declared rate — **the warning would not be wrong, it would be GONE, and
+  nothing would say so.** A different meaning gets a different name
+  (`record_rate_tolerance`), so a stale reader gets `undefined` and falls back visibly
+  instead of computing a plausible nothing. Same instinct as `episode_index` never being
+  spelled `index`.
+
+- **Migrate a cross-track key by EXPAND, MIGRATE, CONTRACT.** Publisher adds the new key
+  ALONGSIDE the old; each consumer migrates on its own clock; publisher removes the old key
+  last, on the integrator's word. A rename needing three sessions' commits to land in the
+  same instant will not land on this tree, and the failed intermediate is silent: every
+  reader falls to its own fallback and warns at a threshold nobody chose. **Costs the
+  publisher one extra line for an hour and removes the simultaneity requirement entirely.**
+
+- **Count the fallback's HOMES before you eliminate it.** `RECORD_RATE_GATE_FALLBACK` in
+  `api.ts:405` was the known copy; `lib/vrTeleop.ts:596-597` carried a **bare `0.9`
+  literal** doing the same job, in a different track's file, on nobody's list. A named
+  constant is greppable and a literal is not, so an audit that greps the NAME finds one of
+  two. Grep the VALUE as well.
+
+- **A formatter is calibrated for the threshold it was written against.** `toFixed(0)` on
+  a rate warning was CORRECT for a 10% floor and becomes a defect the moment a ±0.5%
+  tolerance lands: a take refused at 29.85 prints `RATE 30/30 fps` — red, two identical
+  numbers, no information — and still `30/30` at 29.7, a full 1% out. **The degraded-state
+  rule in its worse form: it substitutes a wrong conclusion rather than withholding one**,
+  since two matching numbers in red read as a broken HUD, which is an answer. Copied-fact
+  class in a different costume: right when written, invalidated by someone else's constant.
+  **The display change must land WITH the threshold change**, or there is a window where a
+  red warning cannot be acted on. And calibrate against the rate the warning will actually
+  live with: 29.9 was an IDLE figure with 0.05 Hz of headroom, and the loaded number is the
+  one the operator sees.
+
 - **`innerText` is what the CSS RENDERS, not what the code wrote.** A tag chip written
   as `"baseline"` reads back as `"BASELINE"` because the stylesheet applies
   `text-transform: uppercase`. **Any assertion on rendered text is case-insensitive or it
