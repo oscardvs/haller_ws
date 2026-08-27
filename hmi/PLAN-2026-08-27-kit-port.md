@@ -176,6 +176,26 @@ this port adds. These are not goals. They are the pass/fail.
 5. **Controller mapping unchanged**: per-side grip = dead-man, trigger = gripper
    (1−trigger), B/Y = E-STOP, left-stick hold ≈0.8 s = in-session home, left-stick short
    click on RELEASE = view cycle, A/X hold 500 ms = record toggle.
+
+   **The modal end-of-take exception** (ruled 2026-08-27; shipped behaviour since 08-22,
+   written down here because it had been living as a consequence nobody recorded). While
+   the end-of-take prompt is open it OWNS the sticks — left click = keep, right click =
+   redo — and the in-session home hold is refused. That is invariant 5 being honoured,
+   not bent, and it holds on two conditions:
+
+   - **the refusal is felt and seen** — the weak 0.2/60 tick `resetArms` already uses,
+     plus a HUD line saying home is refused mid-take. Homing through the tail of an
+     episode would corrupt a take the operator may be about to keep, so it stays refused;
+     what it must never do is fail *silently*.
+   - **the prompt is bounded and modal**, so the exception cannot leak into normal driving.
+
+   If either stops being true the exception lapses. The reasoning is asymmetric on
+   purpose: banking a take you did not mean to costs one reject mark in a file that
+   already carries 11 of 46, whereas asking for home and not getting it is the direction
+   that hurts. For the same reason there are no HOLD variants inside the prompt — two
+   gestures with the same dwell separated only by modal state is the class of thing that
+   passes testing and fails on someone's face in a headset. "Go again" is a MODE instead:
+   every decision returns to ARMED.
 6. **Single-arm sessions**: the absent side never acquires, is never written, reports
    `reason:"no_arm"`, cannot be homed. Now also: produces a dataset with no columns for
    that side, distinguishable by names alone.
