@@ -224,8 +224,18 @@ sentence is `message` and the duration is `held_s`. Both phantoms are
 optional, so it type-checks perfectly against a backend that has never sent
 either.
 
-**`RecordAlert` has no consumer** — `grep` finds only its own declaration —
-which is exactly why it has survived. It cannot render `undefined` until
+**`RecordAlert` survived TWO boundaries, and only one of them was about where
+anyone looked.** The coverage boundary is below: the `5a196a5` diff was scoped
+to the run routes. The second is depth, and it is a property of the instrument
+— `typediff.py` checks that an array IS an array and never opens one, so
+`compat('RecordAlert[]', 'array')` is `True` and this defect passes CLEAN even
+pointed straight at `/record/status`. Measured, not reasoned. So *a reconcile
+inherits the boundary of the surface it was run against* is necessary here and
+**not sufficient**: at the right surface, with the right tool, it would still
+have read as agreement.
+
+**And it has no consumer** — `grep` finds only its own declaration —
+which is the third reason it survived. It cannot render `undefined` until
 something reads it, and the first thing that does will reach for `detail`,
 the only text-shaped field the type offers, get `undefined` on every alert,
 and draw an empty warning row. A defect that is unobservable now and certain
@@ -289,9 +299,22 @@ type-check:
 **Use the tool, not a regex, and the reason is a real asymmetry — not
 preference.**
 
-`/home/odesha/haller-trackC-scratch/tools/typediff.py` parses a TS type out of
-`lib/api.ts` or `lib/lab.ts` and compares a LIVE payload key-by-key AND
-type-by-type. It found the `tags` defect. Beside it, `cdp.py` drives an
+**`hmi/frontend/tools/typediff.py` — in the repo as of `497be05`**, because it
+had been living in a stood-down session's scratch directory and would have gone
+when that was cleaned: this port's own *the guardrail was in the artifact, not
+in the habit* rule pointing at itself. It parses a TS type out of `lib/api.ts`
+or `lib/lab.ts` and compares a LIVE payload key-by-key and type-by-type. Its
+tests are beside it — `npm run test:tools` — and they pin the six modes it has
+actually produced confident nonsense in.
+
+**It FOUND one of the five defects (`tags`) and CONFIRMED the rest.** The other
+four were found by rendering the real thing in a browser, and every one of them
+had a type this tool would have called agreement. It is the only automated
+instrument for the class and it is not a substitute for the live pass; the
+docstring says so at the site, because the visible instrument silently becomes
+the whole procedure unless something says otherwise.
+
+`cdp.py` (still in `/home/odesha/haller-trackC-scratch/tools/`) drives an
 isolated headless chromium over CDP — needed because **the Playwright MCP
 browser profile is contended** and refuses outright with `Browser is already
 in use ... use --isolated`.

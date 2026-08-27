@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for `typediff.py` — the three modes it has actually lied in.
+"""Tests for `typediff.py` — the six modes it has actually lied in.
 
 Run: `npm run test:tools`, or `python3 tools/test_typediff.py`.
 
@@ -20,12 +20,12 @@ guardrail belongs in the artifact and not in the habit.
 No backend, no network, no fixtures on disk — pure functions over strings.
 """
 
-import sys
 import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from typediff import ts_fields, compat, _union_parts, jtype  # noqa: E402
+from typediff import _union_parts, compat, jtype, ts_fields
 
 FAILED = []
 
@@ -149,6 +149,82 @@ def test_generic_commas_do_not_invent_union_members():
           ["string", "null"])
     check("`Record<…>` vs object is True",
           compat("Record<string, a | b>", "object"), True)
+
+
+# ── Mode 6: execution at IMPORT time ──────────────────────────────────────
+#
+# The tool once ran its whole diff at module level with no `__main__` guard, so
+# `import typediff` fired every HTTP call and died on ConnectionRefusedError
+# against a port that had been stopped. It was a tool that could only ever be
+# run one way.
+#
+# It is pinned here rather than left to chance because of HOW it fails: the
+# traceback names the network and the backend, so it accuses the component
+# that is working. Every other mode in this file reports a wrong answer; this
+# one reports a wrong CULPRIT, and the reader goes and restarts a healthy
+# server.
+#
+# HOW THIS ONE ACTUALLY FAILS, measured rather than assumed: reintroducing a
+# module-level HTTP call makes this file die on its own top-level
+# `from typediff import ...`, BEFORE any test runs — an uncaught URLError and
+# exit 1, not a clean assertion with a diff. So the real guard is the import
+# at the top of this file, and the check below is the narrower one: it catches
+# import-time I/O that is CONDITIONAL and so survives a plain import. Both are
+# worth having; neither is what the other looks like. Do not "simplify" the
+# reload away as redundant with the import — they fail on different inputs.
+
+def test_importing_the_module_runs_nothing():
+    import importlib
+    import socket
+
+    real = socket.socket
+
+    def refuse(*a, **k):                       # any network use fails loudly
+        raise AssertionError("import performed network I/O")
+
+    socket.socket = refuse
+    try:
+        mod = importlib.reload(sys.modules["typediff"])
+        check("module imports with no network", hasattr(mod, "ts_fields"), True)
+    finally:
+        socket.socket = real
+
+
+# ── haller-ws-f3's verdict table, grafted whole ───────────────────────────
+#
+# Their artefact, not a restatement of it. Every row is `(declared, wire) ->
+# verdict` with `None` meaning CANNOT JUDGE. Kept as one table rather than
+# split across the tests above, because the table is the thing that was
+# verified 17/17 after the ruff pass and it should stay re-runnable as a unit.
+#
+# Row 16 is the one not to drop: `unknown`/`any` accept anything, and if that
+# branch is ever "tidied" it silently starts reporting a mismatch on every
+# `Record<string, unknown>` field in `lab.ts` — of which `Run.spec` is one.
+
+VERDICTS = [
+    ("RecordDrops",             "object", None),   # alias: must not pass OR fail
+    ("string | null",           "object", False),  # fullmatches the identifier pattern
+    ("string",                  "object", False),
+    ("number[]",                "object", False),
+    ("Record<string, number>",  "object", True),
+    ("{ a: string }",           "object", True),
+    ("Tags",                    "array",  None),   # alias that may BE an array
+    ("string[]",                "array",  True),
+    ("string",                  "array",  False),
+    ("number | null",           "null",   True),
+    ("AnnullableFoo",           "null",   False),  # substring must not count
+    ("number | null",           "string", False),
+    ("number | null",           "number", True),
+    ('"idle" | "armed"',        "string", True),   # string-literal union
+    ("RunKind",                 "string", None),
+    ("unknown",                 "object", True),
+    ("Record<string, a | b>",   "object", True),   # top-level split, not naive
+]
+
+
+def test_the_verdict_table():
+    for declared, wire, want in VERDICTS:
+        check(f"compat({declared!r}, {wire!r})", compat(declared, wire), want)
 
 
 def test_jtype_reads_json_shapes_including_bool_before_number():

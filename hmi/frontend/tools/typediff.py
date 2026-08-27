@@ -17,6 +17,45 @@ has never sent; this tool cannot, because it never reads the producer's source.
 That failure belongs to hand-rolled four-liners — haller-ws-95 hit it on
 2026-08-27 and it is why this note exists.
 
+WHAT THIS TOOL CANNOT DO, stated first because the cost of forgetting it is
+that someone imports it and retires the pass it cannot replace:
+
+    **A contract diff cannot see a correct type used wrongly.**
+
+Of the five Track C defects of 2026-08-27 it is credited with, it FOUND one
+(`tags`) and CONFIRMED the rest. The other four were found by rendering the
+real thing in a browser: a correctly-typed timestamp that rendered as an em
+dash, thirteen checkpoints with identical names, a `step: null` on the one row
+that most needed identifying, and a refusal that blanked a whole pane. Every
+one of those had a type a key-by-key diff would have called agreement.
+
+So this is the only AUTOMATED instrument for the class, and it is the half that
+can run unattended — not a substitute for the live-backend pass. Both halves,
+or the four that only rendering finds go back to being invisible.
+
+AND IT DOES NOT DESCEND INTO ARRAY ELEMENTS. Measured, not assumed:
+
+    RecordStatus declares alerts as    ('RecordAlert[]', optional)
+    the wire element carries           code, held_s, message, level, source, …
+    compat('RecordAlert[]', 'array')   True
+
+It checks that an array IS an array and never opens one. So the `RecordAlert`
+defect of 2026-08-27 — `detail` and `since` declared against `message` and
+`held_s` on the wire, one key of eight — passes this tool CLEAN even pointed
+straight at `/record/status`. It survived two boundaries, one of coverage and
+one of depth, and only the first was ever a matter of where someone looked.
+
+The general form, one level down from the line above: **a contract diff cannot
+see a correct type used wrongly, and it cannot see a wrong type it never
+descends into.**
+
+Element-descent is implementable with the machinery already here — for a
+declared `X[]` against a non-empty wire array of objects, resolve `X` with
+`ts_fields` and diff the first element — and is deliberately NOT done, so that
+this file could move into the repo without a feature landing mid-move. It is a
+separate change and it has a ready-made fixture: `RecordAlert` is a real defect
+that a passing run of this tool called agreement.
+
 Usage:
     python typediff.py                       # against the default backend
     python typediff.py --base http://127.0.0.1:8031 --run <run_id>
@@ -28,7 +67,7 @@ fetched yourself — that is how the 2026-08-27 `RecordStatus` reconcile and the
 arm/roll/stop walk were run.
 
 Its own tests are `test_typediff.py`, beside it: `npm run test:tools`, or
-`python3 tools/test_typediff.py`. They pin the three confident-nonsense modes
+`python3 tools/test_typediff.py`. They pin the six confident-nonsense modes
 this tool has actually produced. **They are NOT part of `npm test`**, which is
 a JS runner — see the note at the top of that file.
 """
@@ -57,7 +96,7 @@ def _take(fragment, out, nested):
     frag = fragment.strip()
     if not frag:
         return
-    m = re.match(r"(\w+)(\??)\s*:\s*(.+)", frag, re.S)
+    m = re.match(r"(\w+)(\??)\s*:\s*(.+)", frag, re.DOTALL)
     if not m:
         return
     declared = " ".join(m.group(3).split())
@@ -96,7 +135,7 @@ def ts_fields(src, name):
         raise LookupError(f"type `{name}` has no closing brace — refusing to guess")
 
     body = src[i + 1:end]
-    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
     body = re.sub(r"//.*", "", body)
 
     # Split on TOP-LEVEL `;` rather than by line. A line-anchored regex reads
@@ -161,11 +200,11 @@ def _kind_of(part):
     """What ONE union member is, as far as this file can tell."""
     p = part.strip()
     low = p.lower()
-    if p.endswith("[]") or low.startswith("array<") or low.startswith("readonly"):
+    if p.endswith("[]") or low.startswith(("array<", "readonly")):
         return "array"
-    if p.startswith("{") or low.startswith("record<") or low.startswith("partial<"):
+    if p.startswith("{") or low.startswith(("record<", "partial<")):
         return "object"
-    if low in PRIMITIVES or p.startswith('"') or p.startswith("'") or p.isdigit():
+    if low in PRIMITIVES or p.startswith(('"', "'")) or p.isdigit():
         return "prim"
     return "alias"          # a name this file cannot resolve
 
