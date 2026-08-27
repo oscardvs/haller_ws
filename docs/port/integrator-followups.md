@@ -63,6 +63,21 @@ and dies when that event happens. Add the trigger, not just the task.
   it is squeezed into 0..63.6 with a dead band over the lower half of the trigger. Not a
   baseline, not a fixture, not a smoke-test target for anything that reads the gripper.
 
+## Three ways a test can be shaped like the code instead of the claim
+
+All found in this port, all the same failure: the suite looked green because each test
+matched the shape of the implementation rather than the shape of the promise.
+
+1. **A claim about a SEQUENCE cannot be pinned by tests about single transitions.** Ten
+   takes without leaving ARMED passed trivially on a one-cycle test. Fixed by ten full
+   cycles with a status reconcile inside each.
+2. **An IMPOSSIBLE fixture invents a world where the bug cannot exist.** A limits window
+   the real loader can never emit converts an untested path into an apparently-tested
+   one — worse than no fixture at all.
+3. **A per-point assertion cannot see a dead zone; only a sweep can.** Every gripper test
+   checked that a command produced *some* sane value. None checked the mapping was a
+   bijection onto the jaw's actual travel, so half the trigger doing nothing was invisible.
+
 ## Standing rules that came out of rulings
 
 - **Every window `_load_joint_limits` can produce is EXACTLY symmetric about zero** — it
