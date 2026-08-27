@@ -53,9 +53,22 @@ a run can see the directory.
 
 ## The remaining order — do not reshuffle it
 
-1. **The sim walk of V3–V13**, once the routes are mounted. Every item in
-   `headset-checklist.md` carries a note saying which half vitest already holds and what the
-   run adds, so this is a short list of backend assertions, not a rediscovery.
+1. ~~The sim walk of V3–V13.~~ **DONE 2026-08-27** against a live
+   `config.bimanual-sim` after the mount. V3, V4, V6, V7, V9, V10 and V13's second half
+   are ◐ with their measured clauses named in `headset-checklist.md`; every device half
+   is still unrun. **Read the preamble's trap before re-running any of it** — a
+   `LeRobotDataset` read against a LIVE recorder counterfeits V10's corruption failure
+   exactly, because the parquet footer is only written on close and a `/record/stop`
+   does not close it.
+
+   **It left ONE open question, and it is not mine to answer.** `{save, rearm}` had its
+   re-arm refused 1 time in 8 with a settle gap and 2 of 2 without one: a re-arm is an
+   arm, and its rate check reads a rolling window still carrying the take that just
+   ended. Idle here is 29.93 Hz against a ±0.5% band — 0.23% slow before the recorder
+   costs anything. **So "ARMED is the resting state", the decision this whole track is
+   built on, is currently unproven against the rate gate.** V6 carries the numbers and
+   the `reset_rate()` precedent. Track A's call, and it wants making before the hardware
+   session rather than during it.
 2. ~~Retire the `episodesTotal()` fallbacks.~~ **DONE at `ccd79d6`**, once the routes
    landed at `9360e8b` and `episode_index` went real. What it actually took, and why it
    was not the two-line deletion the follow-up described, is under **The index and the

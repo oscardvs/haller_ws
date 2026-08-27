@@ -3,13 +3,51 @@
 Written 2026-08-27 on branch `feat/kit-port` by Track D (`haller-ws-1a`), the
 headset client.
 
-**Almost nothing below has been run.** V13 is ◐ — its device-free half was measured
-against a live backend on 2026-08-27 (see the item). Every other item: not once. The second arm's servos
-are on order and the wrist camera is not on hand; per PLAN-2026-08-27 decision 4
-the whole port is built without hardware and the verification is batched into ONE
-session when the servos land. One SO-101 arm is attached to the desktop today, so
-some solo items *could* be attempted early — they have not been, deliberately,
-because a half-run list read later as a run list is worse than an empty one.
+**The BACKEND halves of V3, V4, V6, V7, V9 and V10 were walked on 2026-08-27
+(`haller-ws-6e`), against a live `config.bimanual-sim` after the route mount at
+`9360e8b`.** Every one of those items is now ◐ and names which clauses were
+measured. Nothing on a headset: no item's device half has been run once. The
+second arm's servos are on order and the wrist camera is not on hand; per
+PLAN-2026-08-27 decision 4 the whole port is built without hardware and the
+device verification is batched into ONE session when the servos land. One SO-101
+arm is attached to the desktop today, so some solo items *could* be attempted
+early — they have not been, deliberately, because a half-run list read later as a
+run list is worse than an empty one.
+
+### The sim walk — how it was run, and the one trap in it
+
+Backend on `127.0.0.1:8061`, `HALLER_HMI_CONFIG=config.bimanual-sim.yaml`,
+`MUJOCO_GL=egl`, and a scratch `HF_LEROBOT_HOME` under the session scratchpad.
+
+**Isolation, proved BEFORE any mutating call:** `GET /record/repos` answered
+`{"root": "<scratch>", "repos": []}` — and that `root` is the value the SERVER
+MODULE resolved (`recorder.lerobot_home()` reads `environ` per call and
+`/record/repos` reports it), not the value the launcher exported. Checking after
+a write tells you what happened; this is the only cheap proof available before
+one. `~/.profile` and `~/.bashrc` both export the REAL unbacked-up root, so every
+shell inherits it and the override has to be explicit in the launcher.
+
+Real data fingerprinted before and after both server runs: **byte-identical**,
+39 files, 70 tree entries, no create, no modify, no delete. The scratch root took
+55 entries and 17 MB in the same window, **so the absence of writes to the real
+root is falsifiable rather than the silence of a harness that could not write**.
+
+> **THE TRAP, and it nearly went into this file as a FAILURE.** Reading the
+> dataset with `LeRobotDataset` while the recorder is still up raises
+> `pyarrow.lib.ArrowInvalid: Parquet magic bytes not found in footer` — which is
+> **exactly what V10's corruption clause is written to catch**, and it is not it.
+> The recorder holds `data/…/file-000.parquet` and `meta/episodes/…/file-000.parquet`
+> open for writing (visible as `l-wx` in `/proc/<pid>/fd`) and the footer is only
+> written on close. `meta/tasks.parquet`, which IS closed, carries `PAR1`
+> throughout. **A `/record/stop` stand-down does NOT close them — only process
+> shutdown does.** After a clean SIGTERM all three carried `PAR1` and all ten
+> episodes read back.
+>
+> So: **V10's read-back must be done with the recorder DOWN.** Run against a live
+> one it reports a false corruption, and the failure it counterfeits is the exact
+> one the item exists to find — which is the worst possible collision. Chase the
+> listener by port (`ss -ltnp`) and SIGTERM that PID; `kill $!` leaves a child
+> holding the socket, and `pkill -f` has taken down other sessions' servers here.
 
 This file is the headset half. `hardware-checklist.md` holds the arm-and-bus half
 (H1–H7, U3, U6, U8); U6 appears in both and is expanded here, since the test for
@@ -129,7 +167,7 @@ lerobot-record starts episode 0 the instant the process boots; Oscar recorded tw
 full 60 s episodes of himself getting ready. ARMED is full-rate teleop with the
 dataset open, the schema frozen, and **not one frame written**.
 
-### V3. ARM writes nothing ☐
+### V3. ARM writes nothing ◐
 
 > **Already pinned in vitest** — `stepTake` emits exactly `{do:"arm"}` and no
 > other act; the HUD paints `ARMED` and provably not `● REC`; the status column
@@ -142,11 +180,29 @@ One A/X hold (500 ms, either controller) from idle.
 - **PASS:** HUD chip reads `◆ ARMED ep N` in amber — not `● REC`, not red.
   `GET /record/status` reports `state:"armed"` and `episode_frames` 0, and stays
   at 0 while the operator moves around, gets set, and waits. `GET /record/episodes`
-  gains nothing. Nothing new appears under the repo on disk.
+  gains nothing. **No EPISODE data appears on disk** — see the correction below.
+
+> **MEASURED 2026-08-27 (`haller-ws-6e`), backend half PASS.** `state:"armed"`,
+> `episode_index: 0`, and `episode_frames` **0 across 12 reads over 6 s** with the
+> state never leaving `armed` and the index never moving. `GET /record/episodes`
+> reported `episodes: []`, `total_frames: 0`.
+>
+> **CORRECTION — "Nothing new appears under the repo on disk" was WRONG, and it
+> contradicted the design this item documents.** ARM created
+> `<repo>/meta/info.json` — 4 new entries, 12238 bytes. That is **the schema
+> freezing**, which is the entire purpose of the ARM step ("the dataset opens and
+> its schema freezes"). A literal reader would have recorded this item RED for
+> doing exactly what it is supposed to do, and a charitable one would have
+> softened the criterion silently, which is worse. The claim that is load-bearing
+> and true is: **no episode data, no frames, `episode_frames` 0.**
+>
+> **NOT MEASURED:** the HUD chip — its text, its amber, and that it is provably
+> not `● REC` — which is pinned in vitest and needs a headset to confirm through
+> the optics.
 - **RED if:** a single frame lands before ROLL. That is the defect the gate
   exists for, and everything else on this list is decoration if it is still true.
 
-### V4. ROLL writes ☐
+### V4. ROLL writes ◐
 
 > **Already pinned** — `armed → rolling` emits `{do:"roll"}`; the chip flips to
 > `● REC ep N · F`. **This run adds:** frames actually landing, starting AT the
@@ -158,8 +214,23 @@ Second A/X hold.
   reports `state:"recording"`. The frames start at the moment of the hold, not
   before it.
 - **Measure while there:** `fps_measured` against `fps_declared`. Invariant 10 —
-  `fps` in `info.json` is measured or the episode does not open — and the record
-  gate refuses below 90% of declared. Record the number either way.
+  `fps` in `info.json` is measured or the episode does not open. The gate is now a
+  SYMMETRIC tolerance (`record_rate_tolerance`, 0.005), not the one-sided 90%
+  floor this line used to name. Record the number either way.
+
+> **MEASURED 2026-08-27, backend half PASS.** `state:"recording"`, and the frame
+> count went `0` at the moment of the roll then `11, 26, 41, 56, 71, 86, 101` —
+> **frames start AT the call, not before it.** The reply is a BARE status with no
+> `ok` key, matching how the client types `recordRoll` (`lib/api.ts:163`).
+>
+> **The rate, recorded either way as this item asks:** `fps_declared` 30,
+> `fps_measured` **29.92 at ARM** (0.27% slow, inside the ±0.5% band) drifting to
+> **29.04 during the take** (3.2% slow, outside it). The gate is evaluated at ARM,
+> so the take was accepted and the drift appeared under it — which is the HUD's
+> RATE warning doing its job, not a refusal. See V6 for what that drift then does
+> to the re-arm.
+>
+> **NOT MEASURED:** the chip flipping to red `● REC ep N · F` on a device.
 
 ### V5. The prompt sits over a recorder that is still rolling ☐
 
@@ -181,7 +252,7 @@ Third A/X hold opens the four-way decision. The recorder does **not** stop.
   every quarter second. That path is unit-tested; this confirms the timing is
   what the test assumed.
 
-### V6. `keep` — left stick click ☐
+### V6. `keep` — left stick click ◐
 
 > **Already pinned** — `{save:true, rearm:true}`, lands in `armed` and never
 > `idle`, 0.6 / 180 ms cue. **This run adds:** that `GET /record/episodes` gains
@@ -193,7 +264,44 @@ Third A/X hold opens the four-way decision. The recorder does **not** stop.
 - **RED if:** it lands in idle. A decision that drops the operator back to idle
   makes banking 46 takes a ladder climbed 46 times.
 
-### V7. `redo` — right stick click ☐
+> **MEASURED 2026-08-27. The disk clause PASSES; the ARMED clause did NOT hold on
+> this box, and the reason is worth the whole item.**
+>
+> `GET /record/episodes` gained **exactly one** every time, and the index advanced.
+> That half is clean.
+>
+> But `{save:true, rearm:true}` came back **200 with `state:"idle"`** and an
+> `invalidated_reason` — **the take was banked and the re-arm was refused** — on
+> **2 of 2** back-to-back attempts and **1 of 8** with a ~1.5 s gap between takes.
+> The reason names it exactly: `re-arm refused: measured 29.754 Hz against fps 30
+> is 0.82% slow, outside 29.850..30.150 Hz`.
+>
+> **Why, and it is timing rather than the rig.** `measured_hz()` is a ROLLING
+> WINDOW (`tick.py:570-582`). A re-arm is an arm, so its rate check reads a window
+> still carrying the cadence of the take that just ended. Idle steady state here is
+> **29.93 Hz — already 0.23% slow against a ±0.5% band**, leaving 0.27% of budget
+> for the recorder's own cost, and recording costs more than that. A fresh ARM
+> seconds later, once the window recovers, is **accepted** — measured, the same
+> call that had just been refused.
+>
+> **Do not read this as a defect; it is a question for Track A.** Refusing is
+> arguably right — opening an episode while the sampler really is at 29.755 Hz
+> means every timestamp in it drifts 8 ms per second. But note that `reset_rate()`
+> exists (`tick.py:584-591`) for precisely this shape, with the rationale *"the two
+> producers run at different cadences, so a window spanning the handover measures
+> neither of them"* — and a stop-then-re-arm is a handover of the same kind.
+> **Whether ARMED-as-resting-state survives contact with the rate gate is a design
+> question, and this is the measurement it should be decided on.**
+>
+> **The client half is already correct**, and this walk is what confirmed it: the
+> stop toasts read `st.state` rather than the ask as of `ccd79d6`, so a refused
+> re-arm reads `take N saved — F frames · NOT re-armed — <reason>`. Before that
+> commit, roughly one keep in eight on this box would have announced
+> `· armed for the next` over a gate that was down.
+>
+> **NOT MEASURED:** the 0.6 / 180 ms cue in both hands.
+
+### V7. `redo` — right stick click ◐
 
 > **Already pinned** — `{save:false, rearm:true}`, lands in `armed`, and its cue
 > is provably distinguishable from `keep`'s though both end in the same state.
@@ -207,6 +315,20 @@ Third A/X hold opens the four-way decision. The recorder does **not** stop.
   is dropped and the index does not move. `redo` is a first-class outcome, not a
   failure — 11 of the kit's 46 episodes were rejected, a rate only visible
   because both outcomes exist.
+
+> **MEASURED 2026-08-27, backend half PASS — and this is the claim that was worth
+> the trip, because it is a statement about lerobot's buffer rather than about this
+> client.** Armed at index 10 with 10 episodes on disk, rolled 45 frames, then
+> `{save:false, rearm:true}`: episodes stayed at **10**, and the next ARM came back
+> at index **10** again. **Nothing on disk, index unmoved.**
+>
+> The re-arm was refused here too (same rate cause as V6), so the return was idle
+> rather than armed — which is why the index was read off the following ARM. That
+> makes the index claim stronger, not weaker: it survived a full stop-and-rearm
+> round trip rather than merely not being touched.
+>
+> **NOT MEASURED:** the 0.3 / 90 ms cue, and that it is distinguishable from
+> `keep`'s by hand.
 
 ### V8. Withdrawing the prompt ☐
 
@@ -222,7 +344,7 @@ A/X hold while the prompt is open.
   mistake costs nothing. (Not the weakest in the whole table: the dropped gate's
   0.15 / 50 ms is lighter still. Both extremes are pinned in vitest.)
 
-### V9. The desktop's two stand-down buttons ☐
+### V9. The desktop's two stand-down buttons ◐
 
 > **Already pinned** — `keep_stop` → `idle` `{true,false}` and `drop` → `idle`
 > `{false,false}`. **This run adds:** the two backend outcomes, one episode
@@ -235,7 +357,23 @@ for a gesture that does not collide with a trained one.
 - **PASS:** both land in `state:"idle"`. `Keep & stop` banked one episode;
   `Discard & stop` banked none.
 
-### V10. Ten takes without leaving ARMED ☐
+> **MEASURED 2026-08-27, PASS — both outcomes, and Track A's second contract
+> extension with them.**
+>
+> `{save:true, rearm:false}` (Keep & stop) -> `state:"idle"`, `episode_index: null`,
+> episodes **10 -> 11**. `{save:false, rearm:false}` from ARMED-never-rolled
+> (Discard & stop) -> `state:"idle"`, episodes unchanged at 10.
+>
+> **`invalidated_reason` was `null` on BOTH**, which is the extension: a deliberate
+> stand-down clears the reason, because an operator act is not a fault and a HUD
+> explaining a stand-down as one is worse than silence. Confirmed at
+> `recorder.py:983-988` and measured here.
+>
+> Nothing on this item needs a headset — the two buttons are desktop-only. **The
+> only unmeasured half is that the desktop buttons are wired to these bodies**,
+> which is vitest-pinned.
+
+### V10. Ten takes without leaving ARMED ◐
 
 > **Already pinned, as a sequence** — ten full cycles with a status reconcile
 > inside each, asserting the operator never passes through `idle` and that
@@ -252,6 +390,32 @@ The workflow claim, run as a workflow: arm once, then A/X hold → drive → A/X
   in RAM: takes 1–9 leave `meta/episodes/` empty, and from take 10 the parquet on
   disk has no footer if the writer was ever reopened. Nine takes would not show
   it. Reload the dataset afterwards and confirm all ten rows read back.
+> **MEASURED 2026-08-27. The lerobot half — the half worth the trip — PASSES. The
+> "without leaving ARMED" clause could NOT be met on this box.**
+>
+> Ten takes banked. `GET /record/episodes` reported **10**, `total_frames` 1512,
+> indices **contiguous 0..9**, and the index never stalled — it advanced exactly
+> with the banked count, take by take.
+>
+> **The read-back, which is the actual point of the number ten.** With the recorder
+> **shut down**, a fresh `LeRobotDataset` off disk reported `total_episodes` 10,
+> `total_frames` 1512, `fps` 30 in `info.json`, an episodes table with **10 rows**
+> indexed 0..9, and `ds[0]` decoding to 17 keys with all three camera streams
+> (`top`, `left_wrist`, `right_wrist`). **All ten rows read back; no footerless
+> parquet, no lost tenth episode.**
+>
+> Read it against a LIVE recorder and it reports the opposite — see **the trap** in
+> the preamble. That is not a caveat, it is the single most misleading result this
+> checklist can produce, because the false failure is a perfect counterfeit of the
+> real one.
+>
+> **NOT MEASURED, and it is the workflow clause:** the operator never passing
+> through idle. The re-arm was refused 1 time in 8 here (V6 has the mechanism and
+> the numbers), so the run was arm -> roll -> keep with a manual re-arm after each
+> refusal, not the unbroken ARMED loop this item describes. **The claim "ten takes
+> without leaving ARMED" is therefore still UNPROVEN**, and on current rate-gate
+> behaviour it is not reachable on this box.
+
 - **Also watch:** the HUD's episode counter — **and this item did not go away with
   the mount.** The two INDEX fallbacks were retired at `ccd79d6`, so the chip's
   `ep N` is now the gate's `episode_index` and nothing else. But the row that reads
@@ -378,8 +542,17 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 >
 > **NOT MEASURED — two clauses, and one of them is now FORFEITED.**
 >
-> - **The silent upgrade** against a backend that DOES mount the routes: runnable
->   from `9360e8b` onward, and it belongs to the sim walk.
+> - **The silent upgrade** against a backend that DOES mount the routes: the
+>   BACKEND half is **MEASURED 2026-08-27** — `POST /record/arm` answers **200**
+>   with a bare `RecordStatus` carrying `state:"armed"`, so `isMissingRoute` is not
+>   reached and `gateServerRef` goes true on the first probe. The **client** half
+>   (no toast, no `(local gate)`) is vitest-pinned; reading it on a device is not.
+>
+>   Also measured, and it is the clause the arm probe exists for: **`POST
+>   /record/arm` really does answer 409** — the rate gate refusing — and a 409 is
+>   the gate WORKING, never an absent route. `isMissingRoute` takes 404/405 only
+>   (`VRTeleopPanel.tsx:109-111`), so the refusal lands on the refusal branch. This
+>   was unreachable before the mount and is now the ordinary case.
 > - **The operator-facing strings** — one `toast.info` per session,
 >   `◆ ARMED take N (local gate)` — vitest-pinned, never read on a device, and
 >   **now unreachable on Haller's own backend.** The routes are mounted; the client
