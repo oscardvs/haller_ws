@@ -100,6 +100,44 @@ and dies when that event happens. Add the trigger, not just the task.
   Same instinct as renaming a key whose meaning changes so a stale reader gets `undefined`
   rather than a plausible number.
 
+- **`lib/api.ts::RecordAlert` matches the real `/record/status` payload on 1 key of 8.**
+  *Trigger:* Track A lands 2d. *Owner:* Track C, folded into the `RecordStatus` reconcile as
+  one more line on the same pass — their proposal, and the right one.
+  `recorder.py::_rate_alerts()` emits `level, code, source, measured_hz, fps, tolerance,
+  held_s, message`. `lib/api.ts:389` declares `code, detail?, since?`. Overlap: `code`. Both
+  phantom fields are OPTIONAL, so it type-checks perfectly against a producer that has never
+  sent either — **the `started_at` shape again: no commit made it wrong, so no bisect finds
+  it.**
+  **`RecordAlert` has no consumer** — two grep hits across `components/ lib/ app/ __tests__/`,
+  both its own declaration. So this is not a current defect, it is the NEXT one: the first
+  consumer written against this type reaches for `detail`, the only text-shaped field the
+  type offers, gets `undefined` on every alert and renders an empty warning row, while the
+  operator-facing sentence sits in `message`, which the type does not mention. `since`
+  invites `Date` math on a field that is not there; the duration is `held_s`.
+  **The correct shape already exists in the same frontend**: `lib/telemetry.ts:50` declares
+  the same producer as `{level, code, message, source}` and `AlertsPopover.tsx:37-58` renders
+  it and works. One producer, two frontend declarations, one right and one wrong — the drift
+  pattern, except these never converged in the first place.
+
+- **A NON-FINDING worth the space: `RecordStatus.started_at` typed `number | null` is
+  CORRECT.** Recorded because the obvious pattern-match off the `started_at` defect — *we
+  found this typed wrong once, go fix the others* — breaks it, and breaks it in the direction
+  that type-checks. `recorder.py:861` stamps `time.time()`, a float; `runs.py:179 _now()`
+  returns an ISO string. Two producers, two shapes, both types right. **A field with the same
+  name on a different producer is a different question.** Raised by Track C against their own
+  finding, in the same breath as the finding.
+
+- **While another track owns the producer, measure the contract against `git show HEAD:`, and
+  SAY that is what you did.** The constructive half of "triage before you measure". Track C
+  went to measure `/record/status`'s real payload, found `recorder.py` dirty with Track A
+  mid-2d, and took the numbers from committed HEAD instead — *"I nearly measured Track A's
+  half-written file and reported it as the contract."* A payload read off a working copy
+  someone else is typing in is a fact about their editor buffer, and it arrives wearing the
+  authority of a measurement. They also declined to stand a backend up for the same reason,
+  and labelled the result **static read, committed HEAD** rather than rounding it up to
+  live-verified — which the handoff's own §2 demands and which is the difference between this
+  and a false regression report.
+
 - **`docs/port/trackC-handoff.md` is stale in four places.**
   *Trigger:* fired. *Owner:* Track C (`haller-ws-95`), by the ownership ruling below.
   Flagged INDEPENDENTLY by the current Track C and by the previous one (`haller-ws-f3`,
