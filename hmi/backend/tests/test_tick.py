@@ -18,7 +18,6 @@ import asyncio
 
 import pytest
 
-from haller_hmi.safety import MIN_RATE_FRACTION
 from haller_hmi.tick import (
     RATE_MIN_SAMPLES,
     IdleSampler,
@@ -229,30 +228,31 @@ def test_a_producer_running_slow_reports_slow_rather_than_its_intention():
         _publish(token, t=i * (1.0 / 4.8))        # a 4.8 Hz reality
     measured = bus.measured_hz()
     assert measured == pytest.approx(4.8, rel=1e-9)
-    assert bus.rate_ok(declared_hz=30.0, fraction=MIN_RATE_FRACTION) is False
 
 
-def test_an_unknown_rate_is_not_a_pass():
-    """A gate that reads 'do not know' as 'fine' is a check that cannot fire."""
-    bus = TickBus()
-    token = bus.attach_producer("test")
-    _publish(token, t=0.0)
-    assert bus.measured_hz() is None
-    assert bus.rate_ok(declared_hz=30.0, fraction=MIN_RATE_FRACTION) is None
+def test_a_stalled_window_reports_None_rather_than_dividing_by_its_own_span():
+    """The bus says "I do not know" instead of producing a number, and that
+    is what makes `recorder._freeze_fps` fail CLOSED: it RAISES on a None
+    `rate_detail()`, so an unmounted or stalled sampler cannot open an
+    episode. Invariant 10 from the reporting side.
 
+    Pointed at the state only the SPAN guard can rescue. `rate_detail` has two
+    ways to answer None — below `RATE_MIN_SAMPLES`, and a non-positive window
+    — and the test above already pins the sample floor at its boundary. A
+    handful of publishes trips BOTH, so it would pass with either guard
+    deleted and has therefore tested neither. A FULL window stamped at one
+    instant clears the floor and leaves the span guard as the only thing
+    between the caller and `(n - 1) / 0`.
 
-def test_the_gate_reads_the_published_threshold_rather_than_a_copy():
-    """`MIN_RATE_FRACTION` has ONE home, in `safety.py`. `tick` must not grow a second.
-
-    Pinned by moving the threshold and watching the verdict follow: when two
-    numbers agree, agreement is not evidence of connection.
+    Not a contrived input: `t_mono` comes from the producer, and a producer
+    whose clock has stopped advancing is exactly the stall this reports.
     """
     bus = TickBus()
     token = bus.attach_producer("test")
-    for i in range(60):
-        _publish(token, t=i * (1.0 / 28.0))       # 93.3% of 30 Hz
-    assert bus.rate_ok(declared_hz=30.0, fraction=0.9) is True
-    assert bus.rate_ok(declared_hz=30.0, fraction=0.95) is False
+    for _ in range(RATE_MIN_SAMPLES + 10):
+        _publish(token, t=0.0)                    # a window with no span at all
+    assert bus.rate_detail() is None
+    assert bus.measured_hz() is None
 
 
 def test_tick_does_not_define_its_own_rate_fraction():

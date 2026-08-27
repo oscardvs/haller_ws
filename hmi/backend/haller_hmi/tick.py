@@ -12,9 +12,18 @@ This module is the fix's foundation: a producer publishes one `TickSample`, and
 every consumer that reads that sample reads the SAME moment. Invariant 8.
 
 STDLIB ONLY, and it must stay that way: the detached rollout child imports
-this without wanting lerobot, which `arm.py` would drag in. That is also why
-`rate_ok` takes its threshold as an ARGUMENT rather than importing one — this
-module never becomes a second home for a number that belongs elsewhere.
+this without wanting lerobot, which `arm.py` would drag in. This module also
+never becomes a second home for a number that belongs elsewhere — it MEASURES
+the rate and reports it, and every threshold a rate is judged against lives
+with the surface doing the judging. Pinned by
+`test_tick_does_not_define_its_own_rate_fraction`.
+
+That discipline extends to VERDICTS, which is why there is no `rate_ok` here
+any more (deleted 2026-08-27, no production caller). The record gate is a
+symmetric tolerance — `timestamp` is `frame_index / fps`, so fast is as wrong
+as slow — and the rollout gate is a one-sided floor. One helper on the object
+they both read can only ever express one of those, under a name general enough
+for the other to reach for.
 """
 from __future__ import annotations
 
@@ -558,37 +567,6 @@ class TickBus:
         """
         detail = self.rate_detail()
         return None if detail is None else detail["hz"]
-
-    def rate_ok(self, declared_hz: float, fraction: float) -> bool | None:
-        """Is the measured rate at least `fraction` of `declared_hz`? A FLOOR.
-
-        None while the rate is not yet known — which is NOT a pass. Callers
-        refuse on None; a gate that treats "do not know" as "fine" is a check
-        that cannot fire.
-
-        `fraction` is passed in rather than read here so this module never
-        becomes a second home for a threshold that belongs elsewhere.
-
-        ONE-SIDED, AND THE RECORDER MUST NOT USE IT. This asks only whether
-        the rate is fast ENOUGH. The recorder's question is symmetric —
-        `|measured - fps| / fps` against `recorder.FPS_FAITHFUL_FRACTION` —
-        because lerobot's `timestamp` is `frame_index / fps`, so running fast
-        is exactly as wrong as running slow. A floor cannot express that in
-        either direction: it passes every fast rate, and for a slow one it
-        passes everything down to 90%, twenty times looser than the recorder
-        refuses at.
-
-        The docstring here used to end "one threshold, one home, read by both
-        measuring surfaces". That was true when the recorder shared
-        `safety.MIN_RATE_FRACTION`, and stopped being true when the two gates
-        were split on 2026-08-27 — a comment that rotted on a later commit of
-        my own, found by grepping for what CITED the thing that changed rather
-        than for the thing itself.
-        """
-        measured = self.measured_hz()
-        if measured is None or declared_hz <= 0:
-            return None
-        return measured >= declared_hz * fraction
 
     def reset_rate(self) -> None:
         """Forget the rate window — used at a producer handover.
