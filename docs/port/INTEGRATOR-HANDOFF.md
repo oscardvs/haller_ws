@@ -69,6 +69,16 @@ its 5 tests once `episode_index` is real.
         +  0  2202e7c  — `trackB-handoff.md` only (Track B)
         ----
         1632  f92cc41  (haller-ws-84, detached worktree; Track B measured 1632 @ b908cf6)
+        +  0  69f5f4e, 1c34f16, 8aebdb6, afca93e, 7540d92, 52c8fad  — docs
+        + 31  965fa32  Phase 2d: arm/roll/stop + test_record_gate.py (Track A)
+        + 16  6f0ac90  rollout rate-provenance stamp (Track B)
+        +  1  728a80c  mid-take auto-save off the loop (Track A) — UNREPORTED; the
+                       arithmetic found it, which is the second time that rule has
+                       named a commit no track mentioned
+        +  0  3e68420, ae51fb4  — frontend + docs (Track C)
+        +  1  9360e8b  the per-call bus-wiring test (integrator)
+        ----
+        1681  9360e8b  (haller-ws-84, detached worktree)
 
   Two rungs are asserted from commit SCOPE rather than re-run, and say so: `2202e7c` is
   one docs file, and `abdc52e`'s only code touch is a test docstring (`test_server_mount.py`
@@ -77,7 +87,9 @@ its 5 tests once `episode_index` is real.
   Track A's older **1577 = 1487 + 90** at `8ce2ede` is also right — it is a TRACK delta
   against their own `42d5fa4`+Phase-2 tree, which excludes other tracks' commits. **Say
   which base.**
-- **frontend `vitest`: 426 passed, 18 files at `80984b6`**, `tsc` clean (exit 0, no output),
+- **frontend `vitest`: 429 passed, 18 files at `9360e8b`** (`base 80984b6 + 3 = 429`, Track
+  C's `RecordAlert` retype; measured by the integrator and by Track C). Previously **426 at
+  `80984b6`**, `tsc` clean (exit 0, no output),
   **0 red in 12 consecutive runs from the integrator's worktree**, independently of the
   sessions that wrote the fixes. 426 not 427 is the migration's pinning test dying with what
   it pinned. **Still 426 at `3ae8320`**: `git diff --name-only 80984b6..3ae8320 -- hmi/frontend`
@@ -257,15 +269,45 @@ says "nothing further is worth doing", believe them.
 
 ---
 
-## Live state — 2026-08-27 evening, at `abdc52e`
+## Live state — 2026-08-27 evening, at `9360e8b` — **THE ROUTES ARE MOUNTED**
 
 **All four "why it failed here" mechanisms are CLOSED.** 1 (three uncoordinated samplers)
 died at `54bf6fd`; 2 (`isAvailable()`) in Phase 1; 3 (declared-not-measured `fps`) at
 `95d2507`; 4 was retracted as a mis-attributed sensor. **The port's central thesis is now
 testable rather than argued.**
 
-**Phase 2 is at 2c-complete and 2d is IN FLIGHT** — `/record/arm|roll|stop`, Track A's, the
-last blocker in the port. `recorder.py` is theirs and open; expect the tree dirty there.
+**PHASE 2 IS COMPLETE. 2d landed at `965fa32` and the routes are MOUNTED at `9360e8b`** —
+`/record/arm`, `/record/roll`, and `/record/stop` grown a `rearm`. The last blocker in the
+port is closed; next is the rollout ingest (solo), then P3, then P7.
+
+### The mount uncovered a LIVE DEFECT in `server.py`, and the integrator's own test hid it
+
+**`DatasetRecorder` was constructed without `tick_bus=` from 2c until the mount.** So
+`recorder.tick_bus` was None on every real backend, `_freeze_fps` raised *"no tick bus: fps
+cannot be measured"*, and **every `/record/start` 409'd — recording was dead the whole
+time.** `fps_measured` was permanently null with it, so `_check_rate` returned early and the
+rate alert could never fire either. Found by Track A while reporting 2d, in the integrator's
+file, and fixed in the mount commit rather than after it: mounting `arm`/`roll` on top would
+have given three routes that all 409 with "no tick bus", reading as Track A's state machine
+failing.
+
+**Why the wiring test could not have caught it.**
+`test_telemetry_is_wired_to_the_same_bus_the_session_owns` asserted the SUBSTRING
+`"tick_bus=human_teleop.tick_bus"` anywhere in `_lifespan` — and TELEMETRY satisfies it at
+the first of three call sites. **A presence check over a whole function is satisfied by its
+easiest instance**, which is the vacuous-absence-assertion shape one level up: the harness,
+not the code, decided the outcome. Replaced by
+`test_every_bus_consumer_is_wired_to_the_session_bus`, which walks the AST and checks the
+argument **per CALL** — parsed rather than grepped, so a mention in a comment cannot satisfy
+it, and pinning that both constructors were FOUND before judging them, because *a loop over
+zero matches passes every assertion inside it* and a rename would otherwise empty the test
+rather than fail it. **Mutation-checked, and the mutation shows the blind spot directly:**
+
+        remove tick_bus from the recorder alone ->  new AST test: RED
+                                                    old substring test: GREEN (blind)
+
+`extra="forbid"` landed on all four record bodies **in the same commit as `rearm`**, per the
+amendment above — never before it.
 
 ### The one promise the integrator owed — DISCHARGED, and it cost nothing
 
