@@ -21,7 +21,7 @@ import { toast } from "sonner";
 import { useTelemetry } from "@/lib/telemetry";
 import { useRecorder } from "@/lib/recorder";
 import {
-  api, ApiError, cameraStreamUrl, recordRateFaithful, recordRateTolerance,
+  api, ApiError, cameraStreamUrl, formatHz, recordRateFaithful, recordRateTolerance,
   type CameraInfo, type EpisodesResponse, type RepoInfo,
 } from "@/lib/api";
 import { repoIdFor } from "./CommandBar";
@@ -238,7 +238,7 @@ export function DatasetTab({
                           : "measured / declared"
                     }
                   >
-                    <span data-num>{fpsMeasured.toFixed(1)}</span>
+                    <span data-num>{formatHz(fpsMeasured)}</span>
                     <span className="text-muted-foreground"> / </span>
                     <span data-num>{fpsDeclared}</span> Hz
                   </span>

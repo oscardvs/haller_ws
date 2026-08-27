@@ -2,7 +2,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   postJson, getJson, api, recordRateGate, recordRateOk, recordRateTolerance,
-  recordRateFaithful, RECORD_RATE_GATE_FALLBACK, type RecordStatus,
+  recordRateFaithful, RECORD_RATE_GATE_FALLBACK, RATE_DECIMALS, formatHz,
+  type RecordStatus,
 } from "../lib/api";
 
 describe("postJson", () => {
@@ -213,5 +214,47 @@ describe("the record rate band", () => {
     expect(recordRateGate(st({}))).toBe(RECORD_RATE_GATE_FALLBACK);
     // A tolerance on the wire must NOT leak into the floor reader.
     expect(recordRateGate(st({ record_rate_tolerance: 0.005 }))).toBe(RECORD_RATE_GATE_FALLBACK);
+  });
+});
+
+describe("a rate readout shows the band it is judged against", () => {
+  // A readout coloured as a warning while showing two numbers that look equal
+  // teaches the operator that the warning is spurious. The decimal count is a
+  // CADENCE-COUPLED CONSTANT: with `d` decimals a rate outside the tolerance
+  // still renders as the declared one whenever `fps < 10^(2-d)`, so one
+  // decimal is safe at 30 and silently broken at 5.
+  const TOL = 0.005;
+  const st = (declared: number, measured: number): RecordStatus => ({
+    recording: false, repo_id: null, task: null, episode_frames: 0,
+    skipped_frames: 0, started_at: null, last_error: null,
+    record_rate_tolerance: TOL, fps_declared: declared, fps_measured: measured,
+  }) as RecordStatus;
+
+  // Every cadence reachable through `POST /teleop/human/start {hz}`, plus the
+  // 4.8 Hz the kit's real rollout actually ran at.
+  const CADENCES = [60, 30, 20, 10, 5, 4.8, 2];
+
+  it("never renders a REFUSED rate as the declared one", () => {
+    // Written against the real band function rather than a remembered
+    // threshold: if the tolerance tightens, this fails rather than rotting.
+    for (const fps of CADENCES) {
+      const outside = fps + fps * TOL * 1.2;
+      expect(recordRateFaithful(st(fps, outside))).toBe(false);
+      expect(formatHz(outside)).not.toBe(formatHz(fps));
+    }
+  });
+
+  it("would fail at one decimal, which is why it is not one", () => {
+    // The instrument, not the assertion: this states WHERE the old resolution
+    // broke, so the constant cannot be quietly lowered back. 5 Hz is inside
+    // `fps < 10^(2-1)`; 30 Hz is not, which is why nobody saw it.
+    const at = (fps: number, d: number) => {
+      const outside = fps + fps * TOL * 1.2;
+      return outside.toFixed(d) === fps.toFixed(d);
+    };
+    expect(at(5, 1)).toBe(true);    // collides at one decimal
+    expect(at(5, RATE_DECIMALS)).toBe(false);
+    expect(at(30, 1)).toBe(false);  // safe at 30 — how it survived
+    expect(at(30, 0)).toBe(true);   // and the `RATE 30/30` defect at zero
   });
 });

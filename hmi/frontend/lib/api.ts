@@ -479,6 +479,33 @@ export function recordRateTolerance(
  * dishonest as one that runs slow — the frames are stamped from a rate the rig
  * did not achieve either way.
  */
+/**
+ * Decimals a rate readout needs for the BAND it is judged against to be
+ * visible in it.
+ *
+ * A readout coloured as a warning while showing two numbers that look equal
+ * teaches the operator that the warning is spurious. With `d` decimals there
+ * is a rate OUTSIDE the tolerance that still renders as the declared one
+ * whenever `fps < 10^(2-d)`:
+ *
+ *     d=0   collides at every rate below 100 — 30.15 Hz renders "30/30"
+ *     d=1   collides below 10 — 5.025 Hz renders "5.0" against a declared 5
+ *     d=2   collides below 1, which no session runs at
+ *
+ * `d=0` predicts the `RATE 30/30 fps` defect the headset track had already
+ * observed, which is what makes this an instrument rather than an argument.
+ * One decimal is safe at 30 and silently broken at 5 — and 10 Hz and below are
+ * reachable today through `POST /teleop/human/start {hz}`. So the decimal count
+ * is a CADENCE-COUPLED CONSTANT, and two is the first value that is not
+ * calibrated for one cadence. Ported from Track D's derivation.
+ */
+export const RATE_DECIMALS = 2;
+
+/** A measured rate, at a resolution that can show the tolerance band. */
+export function formatHz(v: number): string {
+  return v.toFixed(RATE_DECIMALS);
+}
+
 export function recordRateFaithful(
   status: RecordStatus | null | undefined,
 ): boolean | null {
