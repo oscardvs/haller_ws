@@ -544,6 +544,41 @@ applies to any probe that prunes, not only to a matrix.
   one clause. It also makes the class **greppable** — "assumed" is searchable, "the
   backend writes" is not.
 
+- **One sentence justifying two omissions may describe only ONE of them.** The
+  integrator tasked adding both `tags` and `spec_summary` to the run detail. Track B moved
+  `tags` and refused `spec_summary`, with evidence, and was right. A defending test said
+  *"`tags` and `spec_summary` are a LISTING shape — the detail is reading the spec itself,
+  so a second, stale one-line rendering of it beside the real thing is a second answer to
+  the same question."* **That rationale is sound and it only ever described
+  `spec_summary`.** Tags are not a rendering of the spec — `launch()` puts them on the
+  record and they appear nowhere in `spec` — so there was nothing to duplicate and nothing
+  to go stale against. **Half the asymmetry was justified; the other half was a
+  branch-structure accident wearing the same sentence.** A shared justification is the
+  cheapest place for a defect to hide, because the sentence is true and reviewers stop
+  there. Check the rationale against each item it covers, separately. (Decided by what the
+  frontend actually CONSUMES, not by the type: `RunDetail.tsx:329` reads `run.tags` and
+  could not fire; `spec_summary` appears only in `RunList.tsx:183,213`; and both are
+  optional on `RunSummary`, so the detail omitting one is not a lie.)
+
+- **Report an EQUIVALENT MUTANT; do not chase it.** A surviving mutation is not
+  automatically a coverage gap. "A missing `tags` key becomes `None` rather than `[]`"
+  survived — because `runs.load()` already defaults `tags` to `[]` before the wire sees
+  the record, so `load()`'s default and `_run_wire`'s `or []` are two guards independently
+  preventing a `null` and no single-point mutation can isolate either. Both defaults were
+  KEPT: removing the wire's would make it silently depend on a behaviour of `load()` that
+  nothing states. The test's docstring now says it pins the PROPERTY and cannot isolate
+  the mechanism. **Deleting a real guard to turn a matrix green is optimising for the
+  matrix over the code** — and a 4/4 that was bought that way is worth less than a 3/4
+  with the fourth explained.
+
+- **Keep a defending test and INVERT it.** The test that defended this defect was
+  narrowed rather than deleted: it now asserts the detail HAS `tags` and does NOT have
+  `spec_summary`, and records that its old form defended a defect because it was written
+  from the branch STRUCTURE while `Run = RunSummary & {...}` had said otherwise all along.
+  Second instance of this move, after the `index`/`episode_index` spelling test — a test
+  pointed the wrong way is usually the right test with its sign flipped, and it carries
+  the history a fresh test would lose.
+
 - **A test that greps prose is measuring the documentation.** Found in the integrator's
   own mount test, which asserted `idle_sampler.stop()` precedes `arms.disconnect_all()`
   by indexing `inspect.getsource`, and FAILED against correct code — because the comment
