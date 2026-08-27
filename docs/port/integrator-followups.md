@@ -33,6 +33,17 @@ and dies when that event happens. Add the trigger, not just the task.
   less. Fallback if streaming inference proves unworkable: rollout stays CLI-only with
   the HMI stopped, which is what the kit does today. Only after measuring.
 
+- **Exercise the rollout END TO END.**
+  *Trigger:* Track A's server-side ingest lands. *Owner:* Track B (`haller-ws-8f`), who
+  has asked to be pinged on that event and will pick it up cold from
+  `docs/port/trackb-lab-contract.md`.
+  **The first thing it must establish is the one thing Track B could not: that the two
+  halves fit.** Verified today — the child's preflight, refusals, message shape,
+  handshake, the rate gate in both directions, check (a) at launch, and a source-level
+  tripwire proving no code can touch the bus. NOT verified, and not to be rounded up: that
+  a policy action ever reaches the commit chain. A rollout can currently be REFUSED for a
+  reason that is true; nothing has ever been ACCEPTED.
+
 - **Rewrite the A/X take protocol in the operator docs.**
   *Trigger:* Track A's `/record/arm|roll|stop` land and are committed.
   `hmi/QUICKSTART-QUEST.md` (~121-147, 298) and `docs/setup/dataset-collection.md`
@@ -112,7 +123,17 @@ components rather than either against a fixture.
 
 **Also from that pass:** where two guards each independently prevent an outcome, no
 single-mutation test can isolate either — the test pins the PROPERTY, not a mechanism, and
-its comment must say so. A comment that reads as though it pinned one of them is the
+its comment must say so.
+
+**Its other half, and they belong together:** where two guards can each REFUSE an input,
+a test that only asserts refusal has not tested EITHER. The first is about what a mutation
+cannot isolate; this is about what an assertion cannot distinguish. Found live: a `NaN`
+guard test passed with the `isfinite` check deleted, because `NaN` was still refused — by
+the RATE GATE, since `nan != 30`. `assert "control_hz" in detail` could not tell the
+validator from the gate. The fix is to disable the other guard so the one under test is
+the only thing standing: assert `NaN` **with `allow_rate_mismatch` set**, where the gate is
+bypassed and nothing but the validator is between `nan` and a child computing `1.0/nan`.
+**Point the test at a state only its own subject can rescue.** A comment that reads as though it pinned one of them is the
 checklist-asserting-a-contradicted-number failure again.
 
 **Decision rule, from getting the fixture call wrong:** prefer the test that catches the
@@ -322,6 +343,20 @@ applies to any probe that prunes, not only to a matrix.
   minute. Sharpened by Track C into the form to keep: **pin whatever you measure yourself,
   beside its commit AND its `git status`** — pinning the commit alone still misses a dirty
   tree at that commit.
+
+- **Report a suite delta as `base + N = total`, never as a bare total.** A total is a
+  claim only its author can check; `base + N` is checkable by anyone holding a DIFFERENT
+  tree, which on this branch is the normal condition rather than the exception. It also
+  fails in the useful direction: when the sum does not close, the residual is a pointer to
+  a specific commit rather than a reason to distrust the number. Earned immediately —
+  1487 + 24 + 45 came to 1556 against a measured 1563, and the missing **7** was
+  `38ec8d6`, a second tick commit no track had reported to the integrator. Two honest
+  per-track numbers and the tree's real total disagreed, and only the arithmetic said why.
+
+        42d5fa4  baseline                        1487
+        a6965dd  tick 2a        (Track A)        + 24  -> 1511
+        38ec8d6  tick handover  (Track A)        +  7  -> 1518
+        d32cb3b  rollout + gate (Track B)        + 45  -> 1563
 
 - **A baseline without a commit beside it is not a baseline.** Within one hour, three
   sessions honestly reported **1474, 1477 and 1487** backend passes. Nobody was wrong and
