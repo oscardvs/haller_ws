@@ -31,7 +31,7 @@ from .safety import Mode, ModeError
 from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
 from .recorder import DatasetRecorder, lerobot_home
-from .routes_data import build_router as build_data_router
+from .lab.routes import build_lab_router
 from .sim.scene import SceneController
 from .sim.task import InsertionMonitor, TaskMonitor
 from .sim.teleop import SimLeaderTeleop
@@ -238,13 +238,20 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="haller-hmi", version=VERSION, lifespan=_lifespan)
 
-# The data router takes zero-arg callables, not values: routers mount at import
+# The Lab router takes zero-arg callables, not values: routers mount at import
 # time but cameras/recorder are module globals assigned in _lifespan — a router
 # closing over the values would capture None and 503 forever.
-app.include_router(build_data_router(
+#
+# One router, not three: /lab/runs/** and /lab/system join this same builder as
+# they land, so this line never changes again.
+app.include_router(build_lab_router(
     get_cameras=lambda: cameras,
     get_recorder=lambda: recorder,
     lerobot_home=lerobot_home,
+    # () -> bool. None reads HALLER_ALLOW_REMOTE_CONTROL. Mutating Lab routes
+    # are loopback-only by default: --host 0.0.0.0 is how the Quest reaches the
+    # page, and reaching the page must not also mean deleting a dataset.
+    allow_remote_control=None,
 ))
 
 # Permissive CORS — the HMI is intended for trusted local networks (Wi-Fi or AP).
