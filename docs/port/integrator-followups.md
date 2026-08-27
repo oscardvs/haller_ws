@@ -332,6 +332,21 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   fallback there would have the same shape as a check that cannot fire: it looks like
   resilience and is a bypass.
 
+- **A one-sided observation cannot support a two-sided claim.** A regression was
+  reported from a single observation of the NEW behaviour, with no observation of the old
+  one — and the old file was available the whole time. The two resolvers turned out to be
+  the same function; the 400 was pre-existing and correct, seen for the first time on a
+  fresh backend where the recorder had never opened a repo. **A false regression report is
+  worse than silence:** it sends someone after a bug that does not exist, and it casts
+  doubt on a differential proof that has no gap. Before claiming something CHANGED,
+  observe both sides.
+
+- **Distinguish a fact about the BUILD from a fact about the MOMENT.** The same surface
+  renders a 404 as an error (this backend cannot do it — a property of the build) and a
+  400 as a prompt with the move that clears it (no dataset open yet — a property of right
+  now). An operator reading a status code on a fresh cockpit goes hunting for a bad build
+  instead of picking a dataset from the selector directly above it.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
