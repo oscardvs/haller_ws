@@ -137,6 +137,27 @@ whose contract is to honour whatever limits it is handed, and asymmetry is the p
 two of them. So the lesson had **zero** real instances and is removed rather than
 softened. The defect it was attached to is real and unchanged; only the diagnosis moved.
 
+## U4 / U5 — ANSWERED on real data, 2026-08-27
+
+The export runner's prune path was written against lerobot 0.6.1's `delete_episodes`
+but had never been run on a real recorded dataset, and the only real dataset has no
+backup. Track B stopped deliberately rather than point it at `so101_pick_cube`. Closed by
+the integrator on a throwaway 709 MB copy:
+
+- **U4 — `delete_episodes` handles our v3.0 layout on real recorded data: YES.** Pruning
+  the 11 REAL rejects from Oscar's own review took the dataset 46 -> 35 episodes and
+  29,500 -> 21,416 frames, re-encoding the video (SVT-AV1) and rebuilding the episode
+  metadata.
+- **U5 — cross-version round trip: YES.** A dataset WRITTEN by 0.6.1 reads identically
+  under 0.6.1 and under the serving venv's 0.5.1 — same 35 episodes, same 21,416 frames,
+  same `codebase_version` v3.0, video key intact, samples load.
+- **Survivors RENUMBER: `episode_index` runs 0..34 afterwards.** This confirms the
+  existing design decision that review marks must be cleared after an in-place prune — a
+  mark is an index, and every index past the first deletion now means a different episode.
+
+Do not skip the throwaway copy when running this for real. The prune is destructive and
+re-encodes; a mistake is not recoverable on this machine.
+
 ## Standing rules that came out of rulings
 
 - **THE GIT INDEX IS SHARED ACROSS ALL FOUR SESSIONS.** Four processes, one working
