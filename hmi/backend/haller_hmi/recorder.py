@@ -474,16 +474,32 @@ class DatasetRecorder:
     telemetry: object                      # TelemetryBroadcaster
     human_teleop: object                   # HumanTeleopSession
     cameras: object                        # CameraManager
+    # THE tick. Every recorded row's state, action, effort and wall clock come
+    # off ONE sample from here, which is what makes them one moment
+    # (invariant 8).
+    #
+    # REQUIRED, and it was not always. Until 2026-08-27 this read
+    # `tick_bus: object | None = None`, carried over from Phase 2a when the
+    # recorder still had a telemetry path and `None` was a genuine working
+    # mode. Phase 2c deleted that mode — `_run` and `_freeze_fps` both
+    # hard-require the bus — and left the default standing, so the optionality
+    # outlived its justification and the failure moved from build time to first
+    # use. `server.py` then built a recorder without one and `/record/start`
+    # 409'd "no tick bus" on the live backend for two phases, with the suite
+    # green throughout.
+    #
+    # THE RULE, worth more than the fix: an optional parameter is a standing
+    # promise that `None` is a working mode. When you delete the mode, delete
+    # the default. A signature does not read like a claim, so nothing prompts
+    # anyone to re-check it — which is what makes this rot quieter than the
+    # same rot in a comment.
+    tick_bus: object
     # sim.task.TaskMonitor, or None. None is not a degraded mode — it is the
     # real rig, which has no auto-scorer at all — so it does not merely disable
     # a nicety: it removes `next.reward`/`next.done` from the schema entirely
     # and makes `info.json` say the episodes are unlabelled. See the module
     # docstring for why a constant-zero reward column would be worse than none.
     task_monitor: object | None = None
-    # THE tick. Every recorded row's state, action, effort and wall clock come
-    # off ONE sample from here, which is what makes them one moment
-    # (invariant 8). None keeps the pre-Phase-2 telemetry path.
-    tick_bus: object | None = None
     left_arm_id: str = "left"
     right_arm_id: str = "right"
     # The dataset's own directory. None -> $HF_LEROBOT_HOME/<repo_id>, which
@@ -521,6 +537,27 @@ class DatasetRecorder:
     # still flushing, and a re-arm must not read `meta.total_episodes` while a
     # save is halfway through advancing it.
     _gate_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+
+    def __post_init__(self) -> None:
+        """Refuse to exist without a bus, at BUILD time.
+
+        Making the parameter required already stops it being OMITTED. This also
+        stops it being passed explicitly as `None`, which is the same dead mode
+        arriving by the one road a signature cannot close.
+
+        Build time is the whole point. The bus is not read until the first
+        `arm`, so without this the wiring fault surfaces as a refused take
+        minutes or days after the process started, attributed to whatever the
+        operator was doing at the time. Raising here means `_lifespan` dies at
+        startup instead: loud, immediate, and pointing at the line that is
+        actually wrong.
+        """
+        if self.tick_bus is None:
+            raise ValueError(
+                "DatasetRecorder requires a tick_bus: every recorded row's "
+                "state and action come off ONE sample from it (invariant 8), "
+                "and fps is measured from it or no episode opens "
+                "(invariant 10). Pass human_teleop.tick_bus.")
     # Episodes THIS PROCESS has saved, in order: {repo_id, index, frames, task}.
     #
     # It exists because `meta/episodes/` lags reality badly while a dataset is
@@ -585,8 +622,7 @@ class DatasetRecorder:
             "drops": {"cameras": dict(s.drops_cameras),
                       "arms": dict(s.drops_arms)},
             "fps_declared": s.fps_declared,
-            "fps_measured": (self.tick_bus.measured_hz()
-                             if self.tick_bus is not None else None),
+            "fps_measured": self.tick_bus.measured_hz(),
             # Emitted rather than mirrored in the UI, so a dashboard cannot
             # come to disagree with the system it is monitoring.
             #
@@ -617,8 +653,7 @@ class DatasetRecorder:
         held_s = time.time() - since
         if held_s < RATE_ALERT_AFTER_S:
             return []
-        measured = (self.tick_bus.measured_hz()
-                    if self.tick_bus is not None else None)
+        measured = self.tick_bus.measured_hz()
         fps = self._state.fps_declared
         return [{
             "level": "warn",
@@ -645,7 +680,7 @@ class DatasetRecorder:
         a rate wobble would cost more than the drift does. The alert is the
         response, and `haller_rate` records what the rate actually was.
         """
-        if self.tick_bus is None or self._state.fps_declared is None:
+        if self._state.fps_declared is None:
             return
         measured = self.tick_bus.measured_hz()
         if measured is None:
@@ -1680,10 +1715,6 @@ class DatasetRecorder:
         a 0.9 branch in this method could never fire and would sit in the
         safety layer looking like a check. Ruled 2026-08-27.
         """
-        if self.tick_bus is None:
-            raise RuntimeError(
-                "no tick bus: fps cannot be measured, so no episode may open "
-                "(invariant 10)")
         rate = self.tick_bus.rate_detail()
         if rate is None:
             raise RateNotMeasuredYet(

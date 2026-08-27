@@ -1849,11 +1849,41 @@ async def test_an_episode_does_not_open_without_a_measured_rate(tmp_path):
         await r.start_episode("smoke/norate", "t")
 
 
-async def test_an_episode_does_not_open_without_a_bus_at_all(tmp_path):
-    r = _real_recorder(tmp_path / "ds")
-    r.tick_bus = None
-    with pytest.raises(RuntimeError, match="no tick bus"):
-        await r.start_episode("smoke/nobus", "t")
+def test_a_recorder_cannot_EXIST_without_a_bus():
+    """Invariant 10, moved from first-use to BUILD time — same guarantee, and
+    the earliest point it can be made.
+
+    This test used to build a valid recorder, assign `r.tick_bus = None`, and
+    assert that `start_episode` refused. The claim was right; the mechanism it
+    named is gone, because `tick_bus` is now a required field and that
+    post-hoc assignment is something production cannot do. Testing it would be
+    testing an impossible input.
+
+    The reason the guarantee moved is the defect it caused. `tick_bus` was
+    optional with a `None` default, left over from Phase 2a when a telemetry
+    path existed and `None` genuinely worked. 2c deleted that mode and left the
+    default, `server.py` then built a recorder without a bus, and
+    `/record/start` 409'd on the live backend for two phases with the suite
+    green — because a refusal at first use is indistinguishable from a rig that
+    is merely not ready yet. Refusing at construction makes `_lifespan` die at
+    startup instead.
+
+    Both roads are closed, and they are different roads: the required field
+    closes OMISSION, `__post_init__` closes an explicit `None`, which no
+    signature can express.
+    """
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    kw = {"telemetry": _FakeTelemetry(arms),
+          "human_teleop": _FakeHumanTeleop({"running": False}),
+          "cameras": _FakeCameras([])}
+
+    with pytest.raises(TypeError, match="tick_bus"):
+        DatasetRecorder(**kw)                        # omitted
+
+    with pytest.raises(ValueError, match="requires a tick_bus"):
+        DatasetRecorder(tick_bus=None, **kw)         # passed as None
+
+    DatasetRecorder(tick_bus=_measured_bus(), **kw)  # and one that works
 
 
 async def test_fps_is_the_rounded_MEASUREMENT_and_never_the_target(tmp_path):
