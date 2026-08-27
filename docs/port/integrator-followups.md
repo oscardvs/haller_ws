@@ -40,6 +40,15 @@ and dies when that event happens. Add the trigger, not just the task.
   less. Fallback if streaming inference proves unworkable: rollout stays CLI-only with
   the HMI stopped, which is what the kit does today. Only after measuring.
 
+- **Rewrite the A/X take protocol in the operator docs.**
+  *Trigger:* Track A's `/record/arm|roll|stop` land and are committed.
+  `hmi/QUICKSTART-QUEST.md` (~121-147, 298) and `docs/setup/dataset-collection.md`
+  (~53-54) still document "hold A/X to start a take, hold again to stop-and-save" plus a
+  two-way save/discard prompt. Wrong in three ways now: ARM vs ROLL, keep/redo rather
+  than save/discard, and every decision returning to ARMED. Deliberately NOT done yet —
+  a doc should describe the protocol that is committed, and documenting one whose server
+  half is still in Verify is how it becomes wrong in a fourth way.
+
 - **Reconcile `RecordStatus` once every track's fields are in.**
   *Trigger:* Tracks A and C both land.
   The type was already missing `auto_scored`, `success`, `success_frames` — fields
