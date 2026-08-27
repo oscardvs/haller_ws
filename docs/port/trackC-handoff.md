@@ -146,14 +146,47 @@ All three of Track A's 2d fields — `state`, `episode_index`,
 `invalidated_reason` — are on the wire and correctly typed.
 
 **THE ROUTES THIS PASS COVERED, because a reconcile inherits the boundary of
-the surface it was run against:** `GET /record/status` only — its top-level
-keys and its `alerts[]` member. NOT `/record/arm`, `/record/roll` or
-`/record/stop` (unmounted at the time), and no `/lab` route. And `alerts` came
-back `[]` from an idle recorder, so the member below is a **static read of the
-producer at HEAD**, not a live judgement: populating it needs a rate breach
-during a take, which is a mutating call. Name this boundary in the next pass
-too, or the next reader inherits an unstated one — which is exactly how this
-section came to read as a clean bill for `RecordStatus` entire.
+the surface it was run against:**
+
+```
+GET  /record/status                      top-level keys + the alerts[] member
+POST /record/arm    {repo_id, task}      -> 200, state "armed",  episode_index 0
+POST /record/roll   {}                   -> 200, state "recording"
+POST /record/stop   {save}               -> 200, {ok:true}, state "idle"
+POST /record/stop   {save, rearm}        -> 200, state "armed", index advanced
+POST /record/roll   before arm           -> 409 {detail: "not armed (state is
+                                              'idle'); POST /record/arm first"}
+```
+
+Bodies are the literal ones `lib/api.ts` sends, not hand-written equivalents.
+All four 200s diff CLEAN against `RecordStatus` — no mismatch, no missing
+field, only the two alias `?` lines resolved above. **NOT covered: any `/lab`
+route**, and `/record/episodes`, `/record/repos` and the delete route beyond
+the isolation check below.
+
+**`{save}` alone is confirmed on the wire**, which is the decision of record
+two shipped desktop surfaces depend on — the cockpit's stop button and the
+Record popover both predate `rearm` and call it that way. And
+`recording === (state === "recording")` held at every step of the walk
+(`armed`/false, `recording`/true, `idle`/false), which is the invariant that
+kept `state` from being spelled `"rolling"`.
+
+**`alerts` came back `[]` from an idle recorder**, so the member below is a
+**static read of the producer at HEAD**, not a live judgement: populating it
+needs a sustained rate breach mid-take. Left static and labelled.
+
+**This was run against a SCRATCH `HF_LEROBOT_HOME`, and the isolation was
+proven BEFORE the first mutating call, not after.** `HF_LEROBOT_HOME` is set
+in Oscar's environment to `~/robot-data/lerobot` — the real, unbacked-up data —
+and `/record/arm` creates a dataset. `GET /record/repos` was called first and
+returned `{"root": "<scratch>", "repos": []}`: an empty list from a scratch
+root is what proves the backend cannot reach the 46-episode datasets, and it
+is the only cheap proof available before the write. Verified again afterwards —
+`trackc_probe` exists only under scratch, both real datasets intact.
+
+Name this boundary in the next pass too, or the next reader inherits an
+unstated one — which is exactly how this section came to read as a clean bill
+for `RecordStatus` entire.
 
 ```
 GET /record/status returns, today:
