@@ -779,6 +779,28 @@ re-encodes. Run it on a throwaway copy first, every time.
     control_hz_trained_reason        which link BROKE, when it did
     control_hz_declared_by           "request" | "trained_fps"
     control_hz_mismatch_override     explicit, for someone who means it
+    control_hz_trained_measured      is that fps ATTESTED as measured?
+    control_hz_trained_measured_hz   the unrounded figure, when it is
+
+**`control_hz_trained_measured` never refuses** (added `6f0ac90`, approved by
+`haller-ws-84`). `control_hz_trained` is the number; this says whether it means
+anything. Nothing in `info.json`'s `fps` records where it came from, so a PASS
+against a pre-invariant-10 dataset is a declaration agreeing with a declaration
+— and on 2026-08-27 that was EVERY dataset on this box, `local/so101_pick_cube`
+included, which is the one the only real trained checkpoint here used and the
+one this gate's link chain was verified against.
+
+Three values: `true` with the unrounded `measured_hz` when the recorder's
+`haller_rate` block is present; `false` when the dataset reads and carries no
+attestation; `null` when there was no dataset to ask. **`false` claims only that
+nothing attests the rate — never that it was declared**, since a third tool that
+measured honestly and wrote no block lands there too.
+
+Refusing on `false` was considered and RULED OUT. This package refuses a rollout
+below the rate floor on purpose, so "refuse when unsure" has a live precedent
+here that does not apply: it would block the only real checkpoint on this box
+over a number that is probably fine, converting a caveat into a blockade.
+Recording that we cannot tell is the right response to not being able to tell.
 
 **NOT `control_hz_source`**, deliberately: the child already uses that spelling for
 gate (b)'s measurement window, and two meanings on one key is exactly the collision the
