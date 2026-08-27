@@ -707,6 +707,14 @@ export const STATUS_MAX_CHARS = 39;
 export const MENU_MAX_CHARS = 36;
 export const MENU_TITLE_MAX_CHARS = 32;
 
+/** Trim a row that carries caller data — a camera label, an arm id — to the
+ *  menu's budget. The box is clipped as a backstop, but a clip lands
+ *  mid-glyph and reads as a rendering fault; an ellipsis reads as what it is. */
+function fitMenu(text: string): string {
+  return text.length <= MENU_MAX_CHARS
+    ? text : `${text.slice(0, MENU_MAX_CHARS - 1)}…`;
+}
+
 /** Repaint the status/menu PANEL — text only. The workspace camera is not
  *  composited here any more: it renders as its own quad, textured at native
  *  resolution every display frame (see `attachRenderScene`), while this
@@ -807,14 +815,22 @@ export function paintHud(
     if (acq.authority === "acquiring" && acq.remaining_ms !== null) {
       line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
     }
-    if (acq.reason === "no_tracking") line += "  (no tracking)";
-    if (acq.reason === "no_arm") line += "  (no arm this side)";
+    // "(no arm)" rather than "(no arm this side)": the L/R glyph at x=24 has
+    // already said which side, and the long form pushed the row past the clip.
+    if (acq.reason === "no_tracking") line += " (no tracking)";
+    if (acq.reason === "no_arm") line += " (no arm)";
     // σ_min is in m/rad: how far the tool moves, in its worst direction, per
     // radian of joint travel. Falling toward zero IS the singular set.
     if (acq.authority === "driving" && typeof d?.sigma_min === "number") {
       line += `  σ ${d.sigma_min.toFixed(3)}`;
     }
+    // 24px, not the column's 28px: the widest this row gets is
+    // "acquiring 1.2s (no tracking)", which needs 487 px at 28 px against the
+    // 419 px the indent leaves. At 28 px the operator was being told a hand
+    // had stopped tracking in a sentence that ran off the panel.
+    ctx.font = "24px monospace";
     ctx.fillText(line, 120, y);
+    ctx.font = "28px monospace";
     // The 5-DoF wrist has one axis fewer than an arbitrary orientation asks
     // for. Say what to do about it — twisting harder at a deficit is exactly
     // the wrong response, and the controller is buzzing at the same moment.
@@ -1007,7 +1023,7 @@ function paintViewMenu(
   for (const v of menu.views) {
     const on = v.id === menu.activeViewId;
     ctx.fillStyle = on ? "#8ab4f8" : "#9aa0a6";
-    ctx.fillText(`${on ? "▸" : " "} ${v.label}`, x, y);
+    ctx.fillText(fitMenu(`${on ? "▸" : " "} ${v.label}`), x, y);
     y += lineH;
   }
   if (!menu.views.length) {
@@ -1027,7 +1043,7 @@ function paintViewMenu(
   }
 
   if (menu.armSet) {
-    ctx.fillText(`ARMS  ${describeArmSet(menu.armSet)}`, x, y);
+    ctx.fillText(fitMenu(`ARMS  ${describeArmSet(menu.armSet)}`), x, y);
     y += lineH;
   }
 

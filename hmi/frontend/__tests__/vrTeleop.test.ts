@@ -311,7 +311,14 @@ describe("paintHud", () => {
     paintHud(ctx, {
       acquire: { right: { authority: "held", remaining_ms: null, reason: "no_arm" } },
     });
-    expect(texts.join(" | ")).toContain("no arm this side");
+    // "(no arm)", not "(no arm this side)" — the R glyph at the head of the row
+    // has already said which side, and the long form pushed the row past the
+    // column's clip. It must never read as the tracking-loss reason: an
+    // operator sent hunting for a hand that is not missing is the failure this
+    // distinction exists to prevent.
+    const all = texts.join(" | ");
+    expect(all).toContain("(no arm)");
+    expect(all).not.toContain("no tracking");
   });
 
   it("never throws on an empty status", () => {

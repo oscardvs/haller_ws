@@ -608,6 +608,81 @@ describe("every painted row fits the box it is painted in", () => {
       paintHud(s.ctx, driving, null, menu, { left: { driving: true, orient_residual: 0.9 } });
       return s;
     }],
+    ["a collision hold", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, { ...driving, collision: { enabled: true, slack_m: -0.004, limited: true } },
+               rollingRec, menu);
+      return s;
+    }],
+    ["a sagging rate", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, driving,
+               { ...rollingRec, fpsMeasured: 21.7, fpsDeclared: 30 }, menu);
+      return s;
+    }],
+    ["a drop source", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, driving,
+               { ...rollingRec, worstDrop: "left_wrist", skipped_frames: 128 }, menu);
+      return s;
+    }],
+    ["skipped frames", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, driving, { ...rollingRec, skipped_frames: 1284 }, menu);
+      return s;
+    }],
+    ["a hand that stopped tracking mid-countdown", () => {
+      // The widest this row ever gets. At the column's 28px it needed 487px
+      // against 419px of room, so the operator was being told a hand had
+      // stopped tracking in a sentence that ran off the panel.
+      const s = stubCtx();
+      paintHud(s.ctx, {
+        state: "acquiring",
+        acquire: {
+          left: { authority: "acquiring", remaining_ms: 1200, reason: "no_tracking" },
+          right: { authority: "acquiring", remaining_ms: 1200, reason: "no_tracking" },
+        },
+      }, null, menu);
+      return s;
+    }],
+    ["a solo session's absent side", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, {
+        state: "driving",
+        acquire: {
+          left: { authority: "held", remaining_ms: null, reason: "no_arm" },
+          right: { authority: "driving", remaining_ms: null, reason: "" },
+        },
+      }, null, { ...menu, armSet: { left: null, right: "so101_right" } },
+      { right: { driving: true, sigma_min: 0.0312 } });
+      return s;
+    }],
+    ["a long error the backend handed up", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, {
+        state: "fault",
+        last_error: "shoulder_pan overloaded and dropped torque mid-sweep; "
+          + "four joints left energised, see /estop",
+      }, null, menu);
+      return s;
+    }],
+    ["no cameras at all", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, driving, null, { ...menu, views: [], activeViewId: null });
+      return s;
+    }],
+    ["camera labels and arm ids longer than the box", () => {
+      const s = stubCtx();
+      paintHud(s.ctx, driving, null, {
+        ...menu,
+        views: [{ id: "a", label: "over the shoulder threequarter (right_arm)" },
+                { id: "b", label: "left wrist gripper close-up (left_arm)" }],
+        activeViewId: "a",
+        armSet: { left: "so101_left_arm_lower_bench",
+                  right: "so101_right_arm_upper_bench" },
+      });
+      return s;
+    }],
     ["a gate that dropped", () => {
       const s = stubCtx();
       paintHud(s.ctx, driving, {
