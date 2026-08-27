@@ -723,6 +723,42 @@ applies to any probe that prunes, not only to a matrix.
   form failed 6 of 15, which is what distinguishes a test that covers a line from one that
   would notice it changing.
 
+- **THE IMPOSSIBLE-FIXTURE RULE HAS EARNED ITS FIRST REAL INSTANCE — and it did the exact
+  damage the rule predicts.** This rule was kept in 2026-08-27's retraction *without* a
+  verified instance (the gripper `(0.0, 100.0)` window turned out CORRECT; that retraction
+  stands). It has one now, and the damage was not hypothetical:
+
+  The two-sided rate test demonstrated FAST with `31.0` against `fps=30`. That is an input
+  **production cannot make** — the commit loop sleeps `period - elapsed`, so a tick can
+  never exceed its own target and a rig targeting 30 cannot measure 31. The predicate was
+  symmetric and the demonstration was impossible.
+
+  **A branch shown only by an impossible input invites the conclusion that the branch never
+  fires** — and that is exactly the conclusion its author drew, and then **told another
+  track in as many words** while recommending they leave a direction word off the HUD. The
+  test would have taught the next reader the same mistake. This is the impossible fixture
+  not merely hiding a defect but *manufacturing and propagating a false belief across a
+  track boundary*.
+
+  The reachable case needs nothing exotic, and it is the `round()`-goes-both-ways finding:
+
+        target 30, arm at 29.10 -> fps = round = 29, err 0.345%  PASSES (already fast)
+        mid-take rises to 29.25 -> fps frozen 29,    err 0.862%  FIRES, and FAST
+
+  **Test the reachable case even when an unreachable one proves the same predicate.** A
+  symmetric predicate demonstrated by an impossible input proves the ARITHMETIC and lies
+  about the WORLD.
+
+- **`cmd && echo "clean"` fires on EXIT STATUS, not on empty output.** `git status
+  --short` exits 0 whether or not it printed anything, so that idiom reports "clean"
+  unconditionally — a check that cannot fail, telling the reporter what they wanted. It had
+  been true by luck on every previous use and was false the moment it mattered. The honest
+  forms: `[ -z "$(git status --porcelain)" ]`, or count with `| wc -l`, or print the file
+  list and let its emptiness be the evidence rather than a claim layered on top. Caught by
+  its own author in their own REPORTING rather than in code, which is the fifth instance of
+  the harness-not-the-code shape in one day — and the first where the faulty instrument was
+  a shell one-liner in a status message rather than a test.
+
 - **A fixture that is not merely simplified but IMPOSSIBLE is worse than no fixture.**
   The gripper defect survived because a test hardcoded `gripper: (0.0, 100.0)` — a
   window `_load_joint_limits` can never produce. It converted an untested path into an
