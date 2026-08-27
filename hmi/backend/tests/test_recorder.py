@@ -1959,15 +1959,66 @@ def test_a_rate_breach_alerts_only_once_it_has_LASTED():
 
 def test_the_alert_is_two_sided_because_the_timestamp_column_is_synthetic():
     """Running fast is as wrong as running slow — `frame_index / fps` does not
-    care which way the real rate went, only that it is not fps."""
-    r = _recorder({"running": False})
-    r._state.fps_declared = 30
+    care which way the real rate went, only that it is not fps.
 
-    for hz in (29.0, 31.0):
-        r._state.rate_breach_since = None
-        r.tick_bus = _bus_at(hz)
-        r._check_rate()
-        assert r._state.rate_breach_since is not None, f"{hz} Hz did not breach"
+    The FAST case here is deliberately one production can actually reach, and
+    the first version of this test was not. `31.0` against `fps=30` proves the
+    predicate is two-sided but is UNREACHABLE: the commit loop sleeps
+    `period - elapsed`, so the tick can never exceed its own target, and a rig
+    targeting 30 cannot measure 31. A fast branch demonstrated only by an
+    impossible input invites the conclusion that it never happens.
+
+    It does happen. `fps` is `round(measured)` and the target is a DIFFERENT
+    quantity, so in the round-DOWN regime `measured > fps` while still sitting
+    under the target:
+
+        target 30, arm at 29.10 -> fps = round = 29, err 0.345%  passes
+        mid-take rises to 29.25 -> fps frozen 29,   err 0.862%  FIRES, fast
+
+    Nothing exotic — no fractional `hz`, no misconfiguration, just an achieved
+    rate whose fractional part is below 0.5. This rig sits at 29.94, which
+    rounds UP, so every deviation it can show today is slow; a real rig slowed
+    by Feetech round trips (U3) may well land in the other regime. Found by
+    Track D refusing a premise rather than the conclusion it supported.
+    """
+    r = _recorder({"running": False})
+
+    # SLOW, in the round-up regime this rig is actually in.
+    r._state.fps_declared = 30
+    r._state.rate_breach_since = None
+    r.tick_bus = _bus_at(29.0)
+    r._check_rate()
+    assert r._state.rate_breach_since is not None, "29.0 vs 30 did not breach"
+
+    # FAST, in the round-down regime, and reachable under a 30 Hz target.
+    r._state.fps_declared = 29
+    r._state.rate_breach_since = None
+    r.tick_bus = _bus_at(29.25)
+    r._check_rate()
+    assert r._state.rate_breach_since is not None, "29.25 vs 29 did not breach"
+    alert_hz = 29.25
+    assert alert_hz > r._state.fps_declared, "this case must be FAST to count"
+
+
+def test_a_rate_that_rounds_down_passes_the_arm_gate_and_can_still_breach():
+    """The two comparisons are different, and that is what makes fast reachable.
+
+    The sleep floor bounds `measured <= target`. The gate compares `measured`
+    against `fps`, which is `round(measured)` — a different quantity. So a rate
+    can clear the arm gate and later breach it going FAST, without ever
+    approaching its target.
+    """
+    r = _recorder({"running": False})
+    r.tick_bus = _bus_at(29.10)                    # target 30, rounds DOWN to 29
+
+    fps, _rate = r._freeze_fps("smoke/rounddown")
+    assert fps == 29
+    assert 29.10 > fps                             # already fast, and it PASSED
+
+    r._state.fps_declared = fps
+    r.tick_bus = _bus_at(29.25)                    # still far below the target
+    r._check_rate()
+    assert r._state.rate_breach_since is not None
 
 
 def test_a_rate_back_inside_the_band_clears_the_breach():
@@ -2037,5 +2088,11 @@ async def test_the_refusal_names_the_right_remedy_for_a_FRESH_dataset(tmp_path):
     r.tick_bus = _bus_at(29.4)                    # rounds DOWN -> 29, so FAST
     with pytest.raises(RuntimeError, match="whole number") as exc:
         await r.start_episode("smoke/fresh", "t")
-    assert "fast" in str(exc.value)
-    assert "record into a new one" not in str(exc.value)
+    msg = str(exc.value)
+    assert "fast" in msg
+    assert "record into a new one" not in msg
+    # The nearest whole number to 29.4 is 29, NOT the 30 the sampler was
+    # aiming at. Naming the target here would put a number in front of the
+    # operator that appears nowhere in their dataset.
+    assert "29 is the nearest" in msg
+    assert "fps 29" in msg
