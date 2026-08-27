@@ -39,6 +39,7 @@ from dataclasses import dataclass
 
 from .arm import ArmManager
 from .safety import Mode
+from .tick import ProducerConflict, TickBus
 
 logger = logging.getLogger(__name__)
 
@@ -228,8 +229,35 @@ class HumanTeleopSession:
         acquire_ramp_ms: float = ACQUIRE_RAMP_MS,
         lpf_tau_s: float = 0.100,
         collision_guard=None,
+        tick_bus: TickBus | None = None,
+        sample_hz: float | None = None,
     ):
         self._arms = arms
+        # THE tick bus. Constructed here rather than handed in from the
+        # lifespan because this object is built at module scope in server.py
+        # while telemetry and the recorder are lifespan locals — so the bus
+        # cannot be a lifespan local without reordering construction. Owning
+        # it here keeps that line unchanged; consumers read
+        # `human_teleop.tick_bus`.
+        self.tick_bus = tick_bus if tick_bus is not None else TickBus()
+        self._tick_token = None
+        # Where `base` in a published sample comes from. Injected after
+        # construction (`set_base_source`) because ROS is a lifespan object
+        # and this session is not.
+        self._base_source = None
+        # Sampling rate for the published tick, in HERTZ — not a divisor.
+        #
+        # A count of ticks is calibrated for exactly one cadence and lies at
+        # every other: `read_divisor = 2` means 30 Hz at hz=60 and 5 Hz at
+        # hz=10, so the recorder's fps would silently follow the control rate.
+        # That is the constant class `_rate_cap_deg_per_tick` was just fixed
+        # for, and the house rule this codebase adopted from that fix. The
+        # divisor is DERIVED from this rate and the loop's real period, so the
+        # sampler targets the same real rate at any control cadence.
+        #
+        # None samples every tick, which is what the three-sampler world
+        # effectively did for the commit loop and changes nothing on its own.
+        self._sample_hz = sample_hz
         # Bimanual collision/workspace guard (collision.CollisionGuard), or
         # None to run unguarded. Duck-typed so tests can inject a stub; the
         # session only calls filter_step()/clearance() and reads .cfg.margin_m.
@@ -307,6 +335,90 @@ class HumanTeleopSession:
         peer reports running=True, this session refuses to start (HTTP 409 in
         the route)."""
         self._peers.append(peer)
+
+    @staticmethod
+    def _sample_divisor(hz: float, sample_hz: float | None) -> int:
+        """Ticks per published sample, from two RATES.
+
+        The house rule this codebase adopted after `_rate_cap_deg_per_tick`:
+        a constant counted in ticks is calibrated for exactly one cadence and
+        lies at every other. A configured divisor of 2 would mean 30 Hz of
+        samples at hz=60 and 5 Hz at hz=10 — and `fps` is frozen from the
+        measured sample rate, so the recorder's declared frame rate would
+        quietly follow the control rate. Expressed as a rate, the sampler
+        targets the same real cadence at any `hz`.
+
+        Never below 1: a sample rate above the control rate cannot be served
+        by decimating it, and rounding to 0 would divide by zero every tick.
+        """
+        if not sample_hz or sample_hz <= 0:
+            return 1
+        return max(1, round(hz / sample_hz))
+
+    def set_base_source(self, ros) -> None:
+        """Where `base` in a published sample comes from.
+
+        Injected rather than constructed because ROS is a lifespan object and
+        this session is built at module scope. Anything with a `snapshot()`
+        answering linear/angular/odom/scan_min_range will do, which is what
+        telemetry already reads.
+        """
+        self._base_source = ros
+
+    def _base_block(self) -> dict:
+        src = self._base_source
+        if src is None:
+            return {}
+        try:
+            snap = src.snapshot()
+        except Exception:
+            logger.warning("base snapshot failed for this tick", exc_info=True)
+            return {}
+        return {
+            "linear": snap.linear,
+            "angular": snap.angular,
+            "odom": dict(snap.odom),
+            "scan_min_range": snap.scan_min_range,
+        }
+
+    def _sample_arms(self) -> tuple[dict, dict]:
+        """One state read per arm, for the moment this tick owns.
+
+        EVERY arm the manager has, not only the session's. The cockpit shows
+        arms this session is not driving, and once telemetry consumes the bus
+        instead of reading for itself, an arm nobody sampled is an arm nobody
+        can see. One sampler means one sampler for all of them.
+
+        A read that fails puts the arm in `errors` and leaves it OUT of
+        `arms`, so a consumer meets a hole rather than a plausible number
+        standing in for a measurement that did not happen. That is invariant 9
+        at the point where the read is taken: mechanism 2's tick 0 decodes to
+        -180.0 deg, not to zero, so a substituted value is not a small error.
+        """
+        arms: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        # `.keys()`, and it must stay `.keys()`. ArmManager is NOT a dict: it
+        # has __getitem__/keys/values and no __iter__, so `for x in manager`
+        # falls back to the legacy integer protocol and raises
+        # `KeyError: unknown arm id 0` on the first tick — every tick, until
+        # MAX_CONSECUTIVE_TICK_ERRORS stops the session about 2.5 s after it
+        # starts. Ruff's SIM118 asks for the dict form here and is wrong about
+        # this receiver; the rule is sound one type over.
+        for arm_id in self._arms.keys():  # noqa: SIM118  (ArmManager, not a dict)
+            try:
+                snap = self._arms[arm_id].state_snapshot()
+            except Exception as e:  # noqa: BLE001  (any bus fault is a hole)
+                errors[arm_id] = str(e)
+                continue
+            joints = snap.get("joints", {})
+            arms[arm_id] = {
+                "joints_deg": {j: float(v["pos"]) for j, v in joints.items()},
+                "effort_norm": {j: float(v.get("effort", 0.0))
+                                for j, v in joints.items()},
+                "torque": bool(snap.get("torque", False)),
+                "mode": snap.get("mode"),
+            }
+        return arms, errors
 
     def _reset_clutch_state(self) -> None:
         """Clear every clutch transient. Caller holds the lock.
@@ -527,6 +639,24 @@ class HumanTeleopSession:
             self._steps_left = self._held_steps(self._committed_left)
             self._steps_right = self._held_steps(self._committed_right)
         self._stop_flag.clear()
+        # Claim the bus BEFORE the loop exists, so there is no window in which
+        # the loop is running and the idle sampler still owns the tick. The
+        # rate window is dropped explicitly: two consecutive sessions share a
+        # producer NAME, so the automatic reset cannot see a cadence change
+        # between them, and fps is frozen from this number.
+        self.tick_bus.reset_rate()
+        try:
+            self._tick_token = self.tick_bus.attach_producer("human-teleop")
+        except ProducerConflict:
+            # The state was already set to RUNNING under the lock above. A
+            # session marked running with no thread and no producer is worse
+            # than a failed start: `stop()` would clean up a session that
+            # never began, and every surface would report teleop live.
+            with self._lock:
+                self._state = HumanState.IDLE
+                self._cfg = None
+                self._started_at = None
+            raise
         self._thread = threading.Thread(
             target=self._loop,
             name=f"haller-hmi-human-teleop-{left_arm or '-'}-{right_arm or '-'}",
@@ -579,6 +709,11 @@ class HumanTeleopSession:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         self._thread = None
+        # After the join, never before: releasing while the loop can still
+        # publish would let the idle sampler back on the bus beside it.
+        if self._tick_token is not None:
+            self._tick_token.detach()
+            self._tick_token = None
         # Restore arms to MANUAL with torque on.
         if cfg is not None:
             for side in cfg.sides:
@@ -928,8 +1063,19 @@ class HumanTeleopSession:
         tau_s = self._lpf_tau_s
         alpha = 1.0 - math.exp(-period / tau_s) if period > 0 else 1.0
         consecutive_errors = 0
+        # Ticks per PUBLISHED sample. Derived from a rate rather than
+        # configured as a count, so the sampler targets the same real cadence
+        # whatever `hz` this session runs at — a divisor of 2 would mean 30 Hz
+        # at hz=60 and 5 Hz at hz=10, and the recorder's fps would silently
+        # follow the control rate.
+        sample_every = self._sample_divisor(cfg.hz, self._sample_hz)
+        token = self._tick_token
+        tick_index = -1
+        unix_at_read = 0.0
         while not self._stop_flag.is_set():
             tick_start = time.perf_counter()
+            tick_index += 1
+            sampling = token is not None and (tick_index % sample_every) == 0
             try:
                 # Re-read any side that is not being driven, BEFORE authority
                 # is judged against its position. Outside the lock: this is bus
@@ -967,6 +1113,18 @@ class HumanTeleopSession:
                 # loss. Both budgets should still be measured against the
                 # moment they are being applied, not against the moment the
                 # tick happened to begin.
+                #
+                # THE read also happens here, in the same breath as the clock:
+                # one round trip per arm, once per published tick, so the
+                # state in a sample and the action committed below describe
+                # one moment rather than two (invariant 8). This is the read
+                # telemetry and the recorder each used to take for themselves
+                # at their own instants.
+                arms_snap: dict = {}
+                arm_errors: dict = {}
+                if sampling:
+                    arms_snap, arm_errors = self._sample_arms()
+                    unix_at_read = time.time()
                 now = time.perf_counter()
                 with self._lock:
                     self._update_authority(now)
@@ -1109,6 +1267,38 @@ class HumanTeleopSession:
                         self._committed_left = {**self._committed_left, **sent_left}
                     if write_right:
                         self._committed_right = {**self._committed_right, **sent_right}
+                # Publish LAST, once this tick's commit is final — including
+                # the fold-back of what send_goal actually sent. Publishing
+                # the intended goal instead of the committed one would put an
+                # action in the dataset that the arm was never asked for.
+                if sampling:
+                    with self._lock:
+                        goal_deg = {"left": dict(self._committed_left),
+                                    "right": dict(self._committed_right)}
+                        reasons = {
+                            "left": {j: st.reason
+                                     for j, st in self._steps_left.items()},
+                            "right": {j: st.reason
+                                      for j, st in self._steps_right.items()},
+                        }
+                        clutch = {"engaged": self._dead_man,
+                                  "sides": dict(self._dead_man_sides),
+                                  "reason": self._clutch_reason}
+                        collision_block = self._collision_last
+                    try:
+                        token.publish(
+                            t_mono=now, t_unix=unix_at_read,
+                            arms=arms_snap, arm_errors=arm_errors,
+                            goal_deg=goal_deg, reasons=reasons,
+                            base=self._base_block(), clutch=clutch,
+                            collision=collision_block,
+                            degraded=bool(arm_errors),
+                        )
+                    except ProducerConflict:
+                        # stop() detached between the sample and here. The
+                        # session is going away; dropping this sample is the
+                        # correct outcome, and it must not be an error.
+                        pass
                 # WS disconnect grace window: if too much time has passed, auto-stop.
                 with self._lock:
                     disc_at = self._ws_disconnected_at_perf

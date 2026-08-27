@@ -104,6 +104,10 @@ class TickSample:
     goal_deg: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     #: {side: {joint: reason}} — why a joint was held back, e.g. "collision".
     reasons: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    #: {arm_id: message} for arms whose state read FAILED this tick. An arm
+    #: here is absent from `arms` above, so a consumer sees the hole rather
+    #: than a plausible number standing in for it.
+    arm_errors: Mapping[str, str] = field(default_factory=dict)
     base: Mapping[str, Any] = field(default_factory=dict)
     clutch: Mapping[str, Any] = field(default_factory=dict)
     collision: Mapping[str, Any] | None = None
@@ -114,8 +118,8 @@ class TickSample:
     degraded: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("arms", "goal_deg", "reasons", "base", "clutch",
-                     "collision"):
+        for name in ("arms", "goal_deg", "reasons", "arm_errors", "base",
+                     "clutch", "collision"):
             object.__setattr__(self, name, _freeze(getattr(self, name)))
 
 
