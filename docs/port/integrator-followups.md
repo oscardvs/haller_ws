@@ -541,6 +541,22 @@ applies to any probe that prunes, not only to a matrix.
   reader falls to its own fallback and warns at a threshold nobody chose. **Costs the
   publisher one extra line for an hour and removes the simultaneity requirement entirely.**
 
+  **AND IT MUST COVER THE ACCESSOR, NOT ONLY THE WIRE — an expand-migrate-contract that
+  protects one boundary and not the other has MOVED the silent window, not closed it.**
+  The first version of this ruling expanded the wire and told the middle track to "rename
+  the function", which relocates the identical failure one layer down: a stale reader gets
+  `undefined` from a renamed KEY and falls back visibly, but a **plausible number** from a
+  revalued FUNCTION. Track D found it before anyone wrote a line.
+  The asymmetry is the part to remember, because it inverts the usual advice: renaming the
+  symbol BREAKS the downstream build — loud, safe, merely inconvenient — while keeping the
+  symbol and changing what it returns compiles, returns a number, and silently stops the
+  warning firing. **The version that reviews better is the one that fails in silence.**
+  So the accessor expands too: `recordRateTolerance()` lands BESIDE `recordRateGate()`,
+  both live at once, and the old function dies WITH the old key at the contract step.
+  Second instance in one day of "the guard is correct at the boundary you were looking at,
+  and the value crosses another one" — after `is` working for a float and failing for an
+  interned int.
+
 - **Count the fallback's HOMES before you eliminate it.** `RECORD_RATE_GATE_FALLBACK` in
   `api.ts:405` was the known copy; `lib/vrTeleop.ts:596-597` carried a **bare `0.9`
   literal** doing the same job, in a different track's file, on nobody's list. A named
