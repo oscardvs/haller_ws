@@ -232,6 +232,69 @@ MIN_SAVEABLE_FRAMES = 2
 REWARD_FEATURE = "next.reward"
 DONE_FEATURE = "next.done"
 
+# The recorder's three states. `recording` is the shipped payload's boolean
+# spelled as a state, NOT a new word: Track D's machine says "rolling"
+# internally and translates, so that the shipped `recording` boolean stays
+# exactly `state == "recording"` for the two desktop surfaces that read it.
+IDLE = "idle"
+ARMED = "armed"
+RECORDING = "recording"
+
+#: The DURABLE per-episode identity. int64, microseconds since the Unix epoch
+#: UTC, stamped at ARM time, one value repeated on every frame of the episode.
+#:
+#: BARE. NEVER `observation.episode_uid`, NEVER `action.episode_uid`, and the
+#: instinct to namespace it is strong. `dataset_to_policy_features` classifies
+#: by key PREFIX — `observation.*` becomes a STATE input, `action*` becomes an
+#: ACTION target, and everything else hits a bare `continue`. That `continue`
+#: is the entire reason this column is free: it never reaches the policy. Under
+#: `observation.` it would be handed to the policy as an input feature, and we
+#: would be training on our own episode ids.
+#:
+#: The function lives at `lerobot/datasets/feature_utils.py:169` in the 0.5.1
+#: the HMI actually serves from, and at `lerobot/utils/feature_utils.py:139` in
+#: the 0.6.1 the export runner uses. Both spellings are recorded because a
+#: citation that does not resolve in the venv the reader is standing in reads
+#: as a stale comment. `test_the_uid_is_inert_to_training` asserts the
+#: behaviour against the installed classifier rather than against either path.
+#:
+#: WHY IT EXISTS: pruning renumbers. `delete_episodes` leaves the survivors as
+#: `episode_index` 0..n, measured twice (46 -> 35 on real data, 4 -> 2
+#: synthetic). So `episode_index` is exact AT RECORD TIME and not durable, and
+#: anything storing it as a lasting key — review marks, a `--dataset.episodes`
+#: keep set — silently re-points after a prune and trains on the wrong
+#: episodes. Measured before it was ruled on: a per-frame column SURVIVES a
+#: prune; a key in `info.json` does not (the loader warns "Unknown fields in
+#: DatasetInfo ... will be ignored").
+#:
+#: ARM TIME, not save time: at save time a redo and its keeper are
+#: indistinguishable in the ordering. MICROSECONDS because the value is then
+#: sortable, so recording ORDER survives the prune too.
+EPISODE_UID_FEATURE = "episode_uid"
+
+
+class RateNotMeasuredYet(RuntimeError):
+    """The tick window is not full yet, so `fps` cannot be measured.
+
+    TRANSIENT: waiting fixes it. The window needs `RATE_MIN_SAMPLES` publishes,
+    so this is what a scripted arm-on-boot hits every time, about a second
+    before it would have succeeded.
+
+    Subclasses `RuntimeError` so every existing handler — which is to say the
+    409 in `server.py` — keeps behaving exactly as it did. The type exists so a
+    caller CAN tell the two rate refusals apart; separating them by matching
+    message text is the thing that rots.
+    """
+
+
+class RateUnfaithful(RuntimeError):
+    """The rig cannot hold a rate close enough to the integer `fps`.
+
+    PERSISTENT: waiting does nothing, because the rig is running at a rate that
+    would write a materially wrong time base (see `FPS_FAITHFUL_FRACTION`). The
+    remedy is a target the rig can actually hold, or a different dataset.
+    """
+
 # Canonical SO-101 motor order. State/action vectors are built in this order,
 # left arm first then right arm, so the dataset layout is deterministic and
 # independent of dict iteration order.
@@ -327,7 +390,11 @@ def _episode_stats(row: dict) -> dict[str, dict]:
 
 @dataclass
 class RecorderState:
-    recording: bool = False
+    # idle -> armed -> recording, and back. ARMED is where a recording session
+    # SITS between takes: the dataset is open, the schema, camera set, arm set
+    # and `fps` are frozen, the episode index is resolved, and nothing has been
+    # written. See `DatasetRecorder.arm`.
+    state: str = IDLE
     repo_id: str | None = None
     task: str | None = None
     episode_frames: int = 0
@@ -367,6 +434,32 @@ class RecorderState:
     # is inside. A timestamp rather than a counter so the alert threshold can
     # be expressed in seconds.
     rate_breach_since: float | None = None
+    # The index the NEXT save lands on, resolved at ARM time and treated as
+    # exact by every consumer. Track D deleted its own `episodesTotal()` floor
+    # on the strength of this number, so a guess here is worse than the guess
+    # it replaced — see `arm`.
+    episode_index: int | None = None
+    # The DURABLE episode identity, stamped at ARM time. Microseconds since the
+    # Unix epoch UTC as an int64. `episode_index` renumbers across a prune;
+    # this does not. See `EPISODE_UID_FEATURE`.
+    episode_uid: int | None = None
+    # Why an ARMED gate fell back to idle: teleop stopped, the arm set changed
+    # under it, or a re-arm was refused after a save. NEVER set mid-take — a
+    # mid-take teleop stop saves up to the stop and closes the episode, which
+    # predates this port and stays. Track C deleted a red-banner state on the
+    # strength of that promise.
+    invalidated_reason: str | None = None
+
+    @property
+    def recording(self) -> bool:
+        """`state == "recording"`, and DERIVED rather than stored.
+
+        The shipped payload's `recording` boolean and the new three-valued
+        `state` are two spellings of one fact. Two fields would be two things
+        to keep in step, and the first stop path that updated one and not the
+        other would leave the HUD reading "recording" over a closed episode.
+        """
+        return self.state == RECORDING
 
 
 @dataclass
@@ -413,6 +506,21 @@ class DatasetRecorder:
     # no matter who reaches it first: the operator's /record/stop, or the
     # record loop itself when the teleop session dies mid-take.
     _episode_open: bool = field(default=False, init=False)
+    # ---- the ARMED freeze. All of it describes the world at arm time, and
+    # `_reconcile_armed` drops the gate when that world moves.
+    _armed_features: dict | None = field(default=None, init=False)
+    _armed_sides: tuple = field(default=(), init=False)
+    _armed_teleop_running: bool = field(default=False, init=False)
+    _armed_teleop_arms: tuple = field(default=(None, None), init=False)
+    # Highest episode uid this process has issued, so the next one can be
+    # forced past it. See `_next_episode_uid`.
+    _last_episode_uid: int | None = field(default=None, init=False)
+    # Serialises arm/roll/stop against each other. `save_episode` folds stats
+    # and may encode video, and `{save: true, rearm: true}` is the MOST-PRESSED
+    # control on the rig — so a second stop must not interleave with the first
+    # still flushing, and a re-arm must not read `meta.total_episodes` while a
+    # save is halfway through advancing it.
+    _gate_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     # Episodes THIS PROCESS has saved, in order: {repo_id, index, frames, task}.
     #
     # It exists because `meta/episodes/` lags reality badly while a dataset is
@@ -443,9 +551,22 @@ class DatasetRecorder:
         bucket[key] = bucket.get(key, 0) + 1
 
     def status(self) -> dict:
+        # Reconcile-on-read. An ARMED gate can go stale without anyone calling
+        # a route — teleop stops, the arm set changes — and there is no armed
+        # loop to notice, deliberately (see C2 in `arm`: a long-lived armed
+        # subscriber would manufacture drop counts). The two places the staleness
+        # can matter are the moment somebody LOOKS and the moment somebody
+        # ROLLS, so the check lives at both, and this is the one that puts the
+        # reason on the HUD.
+        self._reconcile_armed()
         s = self._state
         return {
+            "state": s.state,
             "recording": s.recording,
+            # Known at ARM time, and consumers treat it as exact rather than as
+            # a floor. Null while idle.
+            "episode_index": s.episode_index,
+            "invalidated_reason": s.invalidated_reason,
             "repo_id": s.repo_id,
             "task": s.task,
             "episode_frames": s.episode_frames,
@@ -536,9 +657,120 @@ class DatasetRecorder:
         elif not outside:
             self._state.rate_breach_since = None
 
-    async def start_episode(self, repo_id: str, task: str) -> None:
-        """Create/append the dataset and begin recording one episode."""
-        if self._state.recording:
+    def _teleop_arm_set(self) -> tuple[bool, tuple[str | None, str | None]]:
+        """What the teleop session is driving right now: (running, (left, right)).
+
+        Read through `status()` rather than off the session's attributes,
+        because that is the surface the session actually maintains and the one
+        `_run`'s mid-take stop detection already trusts.
+        """
+        st = self.human_teleop.status()
+        return (bool(st.get("running")),
+                (st.get("left_arm"), st.get("right_arm")))
+
+    def _reconcile_armed(self) -> None:
+        """Drop an ARMED gate to idle when the freeze it holds has gone stale.
+
+        Arming freezes the camera set, the feature schema AND the arm set.
+        Three ways that freeze stops describing reality, all of which mean the
+        NEXT take would be written against a world that has moved:
+
+          - teleop was running at arm time and has since stopped;
+          - teleop is driving a different pair of arms than it was;
+          - the rig's own arm set changed under us.
+
+        Only ever armed -> idle. Never mid-take: a mid-take teleop stop already
+        saves up to the stop and closes the episode (`_run`), behaviour that
+        predates this port and stays, and Track C deleted a whole red-banner
+        state on the strength of `invalidated_reason` never firing mid-take.
+
+        A take armed while teleop was NOT running has nothing to go stale —
+        that is the bring-up path, which records with the arms idle — so it is
+        exempt, the same asymmetry `_run` already makes with
+        `teleop_was_running`.
+
+        Exiting VR stops teleop, so leaving the headset disarms by this rule.
+        That is why there is no stand-down gesture: there is nothing to press.
+        """
+        if self._state.state != ARMED:
+            return
+        running, arm_set = self._teleop_arm_set()
+        reason: str | None = None
+        if self._armed_teleop_running and not running:
+            reason = ("teleop stopped while the take was armed; the frozen arm "
+                      "set no longer describes a live session")
+        elif self._armed_teleop_running and arm_set != self._armed_teleop_arms:
+            reason = (f"teleop switched arms while the take was armed "
+                      f"{self._armed_teleop_arms} -> {arm_set}; the frozen "
+                      f"schema names the old pair")
+        elif tuple(self._sides()) != self._armed_sides:
+            reason = (f"the rig's arm set changed while the take was armed "
+                      f"{self._armed_sides} -> {tuple(self._sides())}; the "
+                      f"frozen schema names the old set")
+        if reason is not None:
+            self._invalidate(reason)
+
+    def _invalidate(self, reason: str) -> None:
+        """armed -> idle, with the why. The episode index goes back to null."""
+        logger.info("recorder: armed gate invalidated — %s", reason)
+        self._state.state = IDLE
+        self._state.invalidated_reason = reason
+        self._state.episode_index = None
+        self._state.episode_uid = None
+        self._armed_features = None
+        self._armed_teleop_running = False
+
+    def _next_episode_uid(self) -> int:
+        """A durable episode id: microseconds since the Unix epoch UTC, int64.
+
+        MONOTONIC WITHIN A PROCESS, by +1 on collision. Two arms inside one
+        microsecond collide, and `time.time()` is not monotonic — an NTP step
+        backwards would otherwise hand a later episode a smaller id.
+
+        When the two disagree, ORDER WINS over absolute accuracy. The column
+        exists so that recording order survives a prune that renumbers
+        `episode_index`; an id that sorts wrongly has lost the only property it
+        was added for, while one sitting a few microseconds off real time has
+        lost nothing anybody reads it for.
+        """
+        uid = int(time.time() * 1_000_000)
+        if self._last_episode_uid is not None and uid <= self._last_episode_uid:
+            uid = self._last_episode_uid + 1
+        self._last_episode_uid = uid
+        return uid
+
+    async def arm(self, repo_id: str, task: str) -> dict:
+        """Open the dataset and hold the start gate. Writes NO frames.
+
+        Everything that can refuse a take lives here rather than at roll,
+        because a refusal at the moment the operator commits to a take is a
+        lost take: colliding camera keys, an unknown repo, a measured rate too
+        far from the integer `fps` (invariant 10, via `_freeze_fps`), and an
+        already-rolling episode.
+
+        What is frozen: the camera set, the feature schema, the arm set, the
+        integer `fps`, the episode index and the episode uid. All of it
+        describes the world at this instant, and `_reconcile_armed` drops the
+        gate if that world moves before the take rolls.
+
+        C2 — NO SUBSCRIPTION IS TAKEN HERE, and that is the whole design.
+        ARMED is where a session SITS between takes, so an attached-but-not-
+        committing subscriber would overflow its bounded queue continuously and
+        count drops that mean nothing: nothing was lost, nothing was going to
+        be written. `skipped_frames` climbing while parked is the number Track D
+        puts on the HUD, and an operator who learns to ignore it while parked
+        will ignore it mid-take. The record loop subscribes at ROLL and only at
+        ROLL, so an armed recorder is not a consumer at all.
+        """
+        async with self._gate_lock:
+            return await self._arm_locked(repo_id, task)
+
+    async def _arm_locked(self, repo_id: str, task: str) -> dict:
+        # The re-arm half of `/record/stop {rearm: true}` calls THIS rather than
+        # `arm`, because it already holds `_gate_lock` and an `asyncio.Lock` is
+        # not reentrant: taking it twice from one task deadlocks silently, and
+        # the symptom is a route that simply never answers.
+        if self._state.state == RECORDING:
             raise RuntimeError("already recording; stop the current episode first")
 
         # Determine the active camera set + shapes NOW so the schema is fixed
@@ -587,9 +819,14 @@ class DatasetRecorder:
         if callable(monitor_reset):
             monitor_reset()
 
+        running, arm_set = self._teleop_arm_set()
         self._state = RecorderState(
-            recording=True, repo_id=repo_id, task=task,
-            episode_frames=0, skipped_frames=0, started_at=time.time(),
+            state=ARMED, repo_id=repo_id, task=task,
+            episode_frames=0, skipped_frames=0,
+            # `started_at` is when FRAMES begin, so it is stamped at ROLL, not
+            # here. An armed gate can sit for minutes while the operator poses
+            # the arm, and `observation.wall_clock` is measured from it.
+            started_at=None,
             # False (not None) the moment something is actually watching: "no
             # success yet", as opposed to "nobody is looking".
             success=None if self.task_monitor is None else False,
@@ -598,29 +835,82 @@ class DatasetRecorder:
             # and quietly starts meaning something else.
             fps_declared=fps,
             fps_measured_at_open=float(rate["hz"]),
+            # The index the next save lands on. `save_episode` validates the
+            # buffer against `meta.total_episodes` and THEN increments it, so
+            # the pre-save value IS this episode's index — the same read
+            # `_finish_episode` makes, taken earlier and promised out loud.
+            episode_index=int(self._dataset.meta.total_episodes),
+            episode_uid=self._next_episode_uid(),
         )
-        # After `self._state`, not with the other two metadata writes above:
-        # this block carries the take's start time, which does not exist yet
-        # when those run. Non-fatal for the same reason they are.
-        try:
-            self._write_wall_clock_metadata()
-        except Exception as e:
-            logger.warning("recorder: wall-clock metadata not written: %s", e)
-        # Separate again, and non-fatal for the same reason: losing a
-        # demonstration because a metadata file could not be rewritten would
-        # be the worse trade. The refusal above is what protects the data;
-        # this block only makes the accepted number auditable.
+        # Separate try, non-fatal: losing a demonstration because a metadata
+        # file could not be rewritten would be the worse trade. The refusal
+        # above is what protects the data; this block only makes the accepted
+        # number auditable.
         try:
             self._write_rate_metadata(rate, fps)
         except Exception as e:
             logger.warning("recorder: rate metadata not written: %s", e)
         self._cam_specs = cam_specs
-        self._episode_open = True
-        self._task_handle = asyncio.get_event_loop().create_task(self._run())
-        logger.info("recorder: episode started repo=%s task=%r fps=%d cams=%s scored=%s",
-                    repo_id, task, fps,
+        self._armed_features = features
+        self._armed_sides = tuple(self._sides())
+        self._armed_teleop_running = running
+        self._armed_teleop_arms = arm_set
+        logger.info("recorder: ARMED repo=%s task=%r fps=%d index=%d uid=%d "
+                    "cams=%s scored=%s",
+                    repo_id, task, fps, self._state.episode_index,
+                    self._state.episode_uid,
                     [f"{c['id']}->{c['key']}" for c in cam_specs],
                     self.task_monitor is not None)
+        return self.status()
+
+    async def roll(self) -> dict:
+        """Begin writing frames. 409 unless the gate is armed and still valid.
+
+        Deliberately does almost nothing: every refusal already happened at
+        arm time, so this is the cheap, fast half of the protocol — it is what
+        the operator's thumb is waiting on.
+
+        `_reconcile_armed` runs first so a gate that went stale while the
+        operator was posing fails CLOSED here rather than opening a take
+        against a frozen schema that no longer matches the rig.
+        """
+        async with self._gate_lock:
+            return await self._roll_locked()
+
+    async def _roll_locked(self) -> dict:
+        self._reconcile_armed()
+        if self._state.state != ARMED:
+            raise RuntimeError(
+                f"not armed (state is {self._state.state!r}); POST /record/arm "
+                f"first"
+                + (f" — {self._state.invalidated_reason}"
+                   if self._state.invalidated_reason else ""))
+
+        self._state.state = RECORDING
+        self._state.started_at = time.time()
+        # After `started_at`: this block carries the take's absolute start,
+        # which does not exist until the take actually rolls. Non-fatal for the
+        # same reason the other metadata writes are.
+        try:
+            self._write_wall_clock_metadata()
+        except Exception as e:
+            logger.warning("recorder: wall-clock metadata not written: %s", e)
+        self._episode_open = True
+        self._task_handle = asyncio.get_event_loop().create_task(self._run())
+        logger.info("recorder: ROLLING repo=%s index=%s",
+                    self._state.repo_id, self._state.episode_index)
+        return self.status()
+
+    async def start_episode(self, repo_id: str, task: str) -> None:
+        """Arm and roll in one call — the shipped `POST /record/start`.
+
+        Kept because two desktop surfaces and the headset's fallback path call
+        it, and because a take with no separate posing step is still the right
+        shape for a scripted or sim run. It is exactly `arm` then `roll`, so
+        there is no second implementation of the open sequence to drift.
+        """
+        await self.arm(repo_id, task)
+        await self.roll()
 
     def _end_tick_stream(self) -> None:
         """Wake the record loop now rather than at its next timeout.
@@ -633,14 +923,50 @@ class DatasetRecorder:
         if sub is not None:
             sub.close()
 
-    async def stop_episode(self, save: bool = True) -> dict:
-        """Stop the loop and either save or discard the episode buffer.
+    async def stop_episode(self, save: bool = True, rearm: bool = False) -> dict:
+        """End the take. All four save/rearm combinations are legal.
 
-        Idempotent by design: if the record loop already closed the episode
-        on its own (teleop died mid-take — see `_run`), this is a no-op that
-        just reports status.
+        | save  | rearm | outcome         | lands in | index     |
+        |-------|-------|-----------------|----------|-----------|
+        | true  | false | SAVE            | idle     | advances  |
+        | false | true  | RE-RECORD       | armed    | SAME      |
+        | false | false | DISCARD         | idle     | unchanged |
+        | true  | true  | SAVE + GO AGAIN | armed    | next      |
+
+        `rearm` is OPTIONAL and defaults FALSE, so `{save}` alone keeps meaning
+        exactly what it means today — two shipped desktop surfaces call it that
+        way and predate the headset's state machine.
+
+        RE-RECORD never touches the dataset on disk. An episode buffer that was
+        never `save_episode`'d is dropped and the index does not advance: no
+        delete, no stats recompute, none of the hand-rolled pop's five refusals.
+
+        Idempotent by design: if the record loop already closed the episode on
+        its own (teleop died mid-take — see `_run`), the save half is a no-op
+        that just reports status. The re-arm half still runs, because "go
+        again" is a decision about the NEXT take and the last one being already
+        closed does not change it.
+
+        C1 — `{save: true, rearm: true}` IS THE HOT PATH, not an edge case. It
+        is L-stick click, KEEP, the most-pressed control on a rig banking 46
+        takes. Three things it must get right, all of them here:
+          - the re-arm reports the index AFTER the save has committed, never
+            before. Track D deleted its own `episodesTotal()` floor because we
+            promised this index is the truth, so a guess here is worse than the
+            guess it replaced;
+          - a second save cannot interleave with the first still flushing
+            (`_gate_lock`);
+          - the tick keeps running at full rate through the flush, because the
+            operator is posing the arm during it.
         """
-        self._state.recording = False
+        async with self._gate_lock:
+            return await self._stop_locked(save, rearm)
+
+    async def _stop_locked(self, save: bool, rearm: bool) -> dict:
+        was_armed_only = self._state.state == ARMED
+        repo_id, task = self._state.repo_id, self._state.task
+        if self._state.state == RECORDING:
+            self._state.state = IDLE
         self._end_tick_stream()
         if self._task_handle is not None:
             try:
@@ -651,9 +977,65 @@ class DatasetRecorder:
                 self._task_handle.cancel()
         self._task_handle = None
 
+        if self._dataset is not None:
+            await self._finish_episode_async(save)
+        self._state.state = IDLE
+        if was_armed_only:
+            # Standing down from ARMED without ever rolling. Nothing was
+            # written, so there is nothing to save or discard — but it is a
+            # deliberate act rather than a staleness fallback, so it must NOT
+            # leave an `invalidated_reason` behind for the HUD to explain.
+            self._state.invalidated_reason = None
+        if not rearm:
+            self._state.episode_index = None
+            self._state.episode_uid = None
+            self._armed_teleop_running = False
+            return self.status()
+
+        if repo_id is None:
+            # `{rearm: true}` against a recorder that never opened anything.
+            # Nothing to re-arm ONTO, and inventing a repo here would open a
+            # dataset the operator never named.
+            self._state.invalidated_reason = (
+                "cannot re-arm: no dataset has been opened this session")
+            return self.status()
+        try:
+            # AFTER the save above, so `meta.total_episodes` has already been
+            # advanced by it and the index this reports is a fact rather than a
+            # prediction. This is the whole of the C1 index promise.
+            return await self._arm_locked(repo_id, task or "")
+        except Exception as e:
+            # The save SUCCEEDED and the re-arm did not. Reporting this as a
+            # failure would be a lie about the take that was just banked, so it
+            # is a 200 that lands in idle and says why — the same signal
+            # `_reconcile_armed` uses, for the same "wanted armed, got idle"
+            # meaning. The operator re-arms by hand once the rig is healthy.
+            logger.warning("recorder: re-arm refused after stop: %s", e)
+            self._state.state = IDLE
+            self._state.invalidated_reason = f"re-arm refused: {e}"
+            self._state.episode_index = None
+            self._state.episode_uid = None
+            return self.status()
+
+    async def _finish_episode_async(self, save: bool) -> None:
+        """`_finish_episode` off the event loop, so the tick keeps flowing.
+
+        `save_episode` folds statistics and may encode video — hundreds of
+        milliseconds to seconds — and C1 says the tick must keep running at
+        full rate through it, because the operator is posing the arm during the
+        flush and has been told they may drive.
+
+        THE LOAD-BEARING MECHANISM IS NOT THIS THREAD HOP, and it is worth
+        being exact about which one it is: the tick's producer is the teleop
+        session's own `threading.Thread` (`human_teleop.py:703`), so a blocked
+        event loop never stalls teleop or the commit chain. What the hop
+        actually buys is the CONSUMERS — telemetry's websocket keeps
+        broadcasting and its bounded queue stops overflowing, so the HUD does
+        not freeze at the exact moment it is telling the operator to go again.
+        """
         if self._dataset is None:
-            return self.status()  # never started — nothing to finish
-        return self._finish_episode(save)
+            return
+        await asyncio.to_thread(self._finish_episode, save)
 
     def _finish_episode(self, save: bool) -> dict:
         """Save or discard the buffered episode, exactly once.
@@ -665,7 +1047,7 @@ class DatasetRecorder:
         if not self._episode_open:
             return self.status()
         self._episode_open = False
-        self._state.recording = False
+        self._state.state = IDLE
         assert self._dataset is not None
         frames = self._state.episode_frames
         if save and 0 < frames < MIN_SAVEABLE_FRAMES:
@@ -1195,6 +1577,13 @@ class DatasetRecorder:
             # start time is in `haller_wall_clock` in info.json for anyone who
             # needs to line a take up against an external log.
             "observation.wall_clock": {"dtype": "float32", "shape": (1,), "names": ["t"]},
+            # BARE, and never under `observation.` or `action.` — see
+            # EPISODE_UID_FEATURE for why that one choice is what keeps this
+            # column inert to training instead of feeding the policy our own
+            # episode ids. int64 because microseconds since 1970 overflow
+            # float32's exact-integer range by nine orders of magnitude, and a
+            # uid that cannot be compared for equality is not an identity.
+            EPISODE_UID_FEATURE: {"dtype": "int64", "shape": (1,), "names": None},
         }
         if self.task_monitor is not None:
             # LeRobot's own names and dtypes for the two task-outcome columns,
@@ -1297,7 +1686,7 @@ class DatasetRecorder:
                 "(invariant 10)")
         rate = self.tick_bus.rate_detail()
         if rate is None:
-            raise RuntimeError(
+            raise RateNotMeasuredYet(
                 "tick rate not measured yet: fps is measured or the episode "
                 "does not open (invariant 10). Wait for the sampler to fill "
                 "its window and try again")
@@ -1337,7 +1726,7 @@ class DatasetRecorder:
                        f"whole number ({fps} is the nearest). Adjust the "
                        f"sampler's target so the rate it actually holds lands "
                        f"near an integer")
-            raise RuntimeError(
+            raise RateUnfaithful(
                 f"measured {measured:.3f} Hz against fps {fps} is "
                 f"{error * 100:.2f}% {direction}, outside "
                 f"{lo:.3f}..{hi:.3f} Hz — a drift of "
@@ -1690,6 +2079,13 @@ class DatasetRecorder:
             "observation.wall_clock": np.asarray(
                 [float(sample.t_unix) - (self._state.started_at or 0.0)],
                 dtype=np.float32),
+            # The SAME value on every frame of the episode — stamped once at
+            # ARM time and read here, never recomputed per frame. Recomputing
+            # would make it a timestamp instead of an identity, and the column
+            # would no longer answer "which take is this row from" after a
+            # prune renumbered `episode_index`.
+            EPISODE_UID_FEATURE: np.asarray(
+                [int(self._state.episode_uid or 0)], dtype=np.int64),
             "task": self._state.task,
         }
         for c in self._cam_specs:

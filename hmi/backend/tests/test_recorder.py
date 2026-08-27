@@ -17,9 +17,12 @@ from haller_hmi.recorder import (
     CALIBRATION_INFO_KEY,
     DONE_FEATURE,
     EFFORT_INFO_KEY,
+    EPISODE_UID_FEATURE,
     FPS_FAITHFUL_FRACTION,
+    IDLE,
     RATE_ALERT_AFTER_S,
     RATE_INFO_KEY,
+    RECORDING,
     REWARD_FEATURE,
     SCORING_INFO_KEY,
     SO101_JOINT_ORDER,
@@ -374,7 +377,8 @@ def test_dataset_key_names_the_feature_and_the_frame():
     assert set(frame) - {"observation.images.left_wrist",
                          "observation.images.right_wrist"} == {
         "observation.state", "action", "observation.effort",
-        "observation.base", "observation.wall_clock", "task"}
+        "observation.base", "observation.wall_clock", EPISODE_UID_FEATURE,
+        "task"}
 
 
 def test_committed_action_comes_off_the_same_sample_as_the_state():
@@ -697,18 +701,27 @@ def test_scoring_block_carries_the_predicate_and_the_exact_thresholds():
 class _FakeDatasetMeta:
     """`meta.total_episodes` is the index the NEXT episode will take, and
     `save_episode` advances it — modelled because `_finish_episode` reads it to
-    stamp the session log, exactly as it does against a real dataset."""
+    stamp the session log, exactly as it does against a real dataset.
 
-    def __init__(self):
+    `info` is here for the same reason `repo_id` is on the dataset: the real
+    `LeRobotDataset` carries both, and `_existing_fps` reads them on every arm.
+    A fake MISSING something production has fails loudly, which is fine; a fake
+    that is MORE permissive than production is the dangerous direction, so
+    neither is invented — both mirror a real attribute.
+    """
+
+    def __init__(self, fps: int = 30):
         self.total_episodes = 0
+        self.info = {"fps": fps}
 
 
 class _FakeDataset:
-    def __init__(self):
+    def __init__(self, repo_id: str = "smoke/gate", fps: int = 30):
         self.saved = 0
         self.cleared = 0
         self.frames: list[dict] = []
-        self.meta = _FakeDatasetMeta()
+        self.repo_id = repo_id
+        self.meta = _FakeDatasetMeta(fps)
 
     def add_frame(self, frame):
         self.frames.append(frame)
@@ -791,7 +804,7 @@ def _runnable_recorder(teleop_seq):
     r._cam_specs = []
     r._state.task = "t"
     r._episode_open = True
-    r._state.recording = True
+    r._state.state = RECORDING
     return r, _TickPump(bus)
 
 
@@ -823,7 +836,7 @@ async def test_teleop_never_running_does_not_auto_stop():
         assert r._state.episode_frames > 0
         assert r._episode_open is True     # no transition -> no auto-close
         assert r._dataset.saved == 0
-        r._state.recording = False         # normal operator stop
+        r._state.state = IDLE              # normal operator stop
         await asyncio.wait_for(task, timeout=5.0)
     finally:
         await pump.stop()
@@ -876,13 +889,23 @@ def _real_recorder(root, monitor=None):
     )
 
 
-def _real_frame(task: str) -> dict:
+def _real_frame(task: str, uid: int = 1) -> dict:
+    """A frame built BY HAND, bypassing `_build_frame`.
+
+    These tests exercise the dataset round trip — create, save, resume,
+    reload — so the values are deliberately trivial; what matters is that the
+    key set matches the frozen schema. That makes the literal `uid` here a
+    fixture constant rather than a claim about production, so what
+    `_build_frame` actually stamps is pinned separately and against the real
+    path (see the `episode_uid` tests), never inferred from this.
+    """
     return {
         "observation.state": np.zeros(12, dtype=np.float32),
         "action": np.zeros(12, dtype=np.float32),
         "observation.effort": np.zeros(12, dtype=np.float32),
         "observation.base": np.zeros(2, dtype=np.float32),
         "observation.wall_clock": np.zeros(1, dtype=np.float32),
+        EPISODE_UID_FEATURE: np.asarray([uid], dtype=np.int64),
         "task": task,
     }
 
@@ -890,7 +913,10 @@ def _real_frame(task: str) -> dict:
 async def _drive(rec, task: str, n_frames: int) -> None:
     await rec.start_episode("smoke/roundtrip", task)
     for _ in range(n_frames):
-        rec._dataset.add_frame(_real_frame(task))
+        # The recorder's OWN uid for this take, not a literal: these frames go
+        # to disk and get read back, so carrying the real value is what lets a
+        # round-trip test say anything about the column at all.
+        rec._dataset.add_frame(_real_frame(task, rec._state.episode_uid))
         rec._state.episode_frames += 1
     await rec.stop_episode(save=True)
 
