@@ -1,8 +1,9 @@
 # Integrator handoff — the kit port
 
 Written 2026-08-27 by `haller-ws-13`, handing the integrator role on. Integrator is now
-`haller-ws-b7`'s successor (see **Live state** below). **Sessions saturate and are replaced — that is normal here; the docs are
-the continuity, not the sessions.** Four fresh track sessions were opened 2026-08-27 pm. **Read this first, then
+`haller-ws-84` (from `haller-ws-b7`, see **Live state** below). **Sessions saturate and are
+replaced — that is normal here; the docs are the continuity, not the sessions.** Four fresh
+track sessions were opened 2026-08-27 pm and a second cohort that evening. **Read this first, then
 `hmi/PLAN-2026-08-27-kit-port.md`, then `docs/port/integrator-followups.md`.**
 
 ---
@@ -36,10 +37,10 @@ honoured exactly.
 
 | track | session | territory | state |
 |---|---|---|---|
-| **A** realtime core | *(in handover)* | `arm/human_teleop/telemetry/recorder/cameras/collision/config/realsense.py`, `vr_teleop/**`, `sim/**`, `tick.py`, config yamls | **ACTIVE — the critical path** |
-| **B** Lab backend | *(in handover)* | `lab/**`, `api/**`, `runners/**` | ✅ COMPLETE |
-| **C** Lab frontend | *(in handover)* | all `hmi/frontend/**` except D's files | ✅ COMPLETE, holding |
-| **D** headset client | *(in handover)* | `VRTeleopPanel.tsx`, `lib/vrTeleop.ts`, `lib/humanTeleopClient.ts`, `app/teleop/vr/**` + their tests | ✅ COMPLETE, holding |
+| **A** realtime core | `haller-ws-54` | `arm/human_teleop/telemetry/recorder/cameras/collision/config/realsense.py`, `vr_teleop/**`, `sim/**`, `tick.py`, config yamls | **ACTIVE — the critical path** |
+| **B** Lab backend | `haller-ws-2d` | `lab/**`, `api/**`, `runners/**` | ✅ COMPLETE |
+| **C** Lab frontend | `haller-ws-95` | all `hmi/frontend/**` except D's files | ✅ COMPLETE, holding |
+| **D** headset client | `haller-ws-6e` | `VRTeleopPanel.tsx`, `lib/vrTeleop.ts`, `lib/humanTeleopClient.ts`, `app/teleop/vr/**` + their tests | ✅ COMPLETE, holding |
 
 ### What remains — all of it Track A
 
@@ -55,12 +56,26 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1633 at `c0cab73`**; Track A reports **1577 = 1487 + 90** at
-  `8ce2ede` against their own `42d5fa4`+Phase-2 tree. **Both are right — say which base.**
-  A track delta excludes other tracks' commits; the tree total does not.
-- **frontend `vitest`: 426 passed, 18 files at `80984b6`**, `tsc` clean, **0 red in 12
-  consecutive runs from the integrator's worktree**, independently of the sessions that
-  wrote the fixes. 426 not 427 is the migration's pinning test dying with what it pinned.
+- **backend `pytest`: 1632 passed + 1 xfailed at `3ae8320`.** The ladder, every rung
+  measured from a detached worktree run from inside `<worktree>/hmi/backend`:
+
+        1633  c0cab73  settled baseline (haller-ws-b7)
+        +  0  8ce2ede, 5238478, fc3b6c5  — bodies, docstrings and docs; no test added or removed
+        1633  fc3b6c5  (haller-ws-84; independently re-measured by Track B, same figure)
+        -  1  3ae8320  `rate_ok` deleted — one pure-`rate_ok` test dies with it (Track A)
+        ----
+        1632  3ae8320  (haller-ws-84, and Track A independently)
+
+  Track A's older **1577 = 1487 + 90** at `8ce2ede` is also right — it is a TRACK delta
+  against their own `42d5fa4`+Phase-2 tree, which excludes other tracks' commits. **Say
+  which base.**
+- **frontend `vitest`: 426 passed, 18 files at `80984b6`**, `tsc` clean (exit 0, no output),
+  **0 red in 12 consecutive runs from the integrator's worktree**, independently of the
+  sessions that wrote the fixes. 426 not 427 is the migration's pinning test dying with what
+  it pinned. **Still 426 at `3ae8320`**: `git diff --name-only 80984b6..3ae8320 -- hmi/frontend`
+  is EMPTY, so the figure carries forward by construction rather than by re-running — a
+  path-scoped diff is the stronger measurement for "did the frontend move". Re-run anyway;
+  `haller-ws-84` and Track C both did, and both read 426 / 18 / tsc-clean.
 - **Re-measure after any landing.** `base + N = total`, never a bare total, and name the
   base COMMIT — "+N on top" silently assumes nothing landed in between, and something
   always has.
@@ -261,14 +276,45 @@ TOLERANCE, 0.005) via **expand -> migrate -> contract**, across three tracks:
 `safety.py`**, which is the strongest guarantee the rollout's floor cannot creep back into
 a surface needing a tolerance.
 
-### OPEN — one ruling, one dead function
+### CLOSED — `tick.py::rate_ok` is deleted (`3ae8320`)
 
-**`tick.py::rate_ok` has NO production caller** and should be deleted with its four
-assertions in `test_tick.py`. It is a one-sided FLOOR sitting on the bus with a plausible
-name, where the only backend surface measuring a record rate needs a symmetric tolerance —
-so a future author reaching for the obvious helper gets a check twenty times looser than
-the recorder refuses at. **Dead code shaped like a safety check**, which this port rates as
-worse than a bug. Track A neutralised the misuse risk in its docstring rather than deleting
-it, deliberately, because it touched the integrator's file and possibly Track B's plans.
-Both are now clear: the integrator's citation was fixed at `5238478`, and Track B's rollout
-gates on `MIN_RATE_FRACTION` imported directly, with no bus. **Ruling: delete it.**
+A one-sided FLOOR sitting on the bus with a plausible name, where the only backend surface
+measuring a record rate needs a symmetric tolerance — so a future author reaching for the
+obvious helper got a check twenty times looser than the recorder refuses at. **Dead code
+shaped like a safety check.** Ruled and actioned; premise re-verified by the integrator
+before tasking rather than relayed.
+
+**The ruling as issued said "delete it and its four assertions", and that was
+underspecified** in exactly the way this port has a rule for — *a test that pins an
+implementation dies with it; one that pins a property survives it, in whatever form still
+expresses it.* The split actually made, which is the one to copy:
+
+| site | verdict |
+|---|---|
+| `test_the_gate_reads_the_published_threshold_rather_than_a_copy` | DIES — pure `rate_ok`. Safe only because `test_tick_does_not_define_its_own_rate_fraction` pins the no-second-home property independently and survives untouched. |
+| `test_a_producer_running_slow_reports_slow_rather_than_its_intention` | KEPT — its claim is `measured == approx(4.8)`, i.e. mechanism 3. The `rate_ok` line was a rider. |
+| `test_an_unknown_rate_is_not_a_pass` | KEPT and RE-POINTED, see below. |
+
+**Track A corrected the integrator on the test the integrator asked them to keep, and was
+right.** The reason for keeping it was sound — `recorder._freeze_fps` RAISES on a None
+`rate_detail()`, which is what makes an unmounted sampler fail CLOSED — but as written it
+published ONE sample, which trips BOTH of `rate_detail`'s None branches at once (the sample
+floor and `span <= 0`). It passed with either guard deleted, so it had tested NEITHER:
+*where two guards can each refuse an input, a test that only asserts refusal has not tested
+either.* It now stamps a FULL window at a single instant, clearing the floor so the span
+guard is the only thing between the caller and `(n-1)/0`, and is renamed
+`test_a_stalled_window_reports_None_rather_than_dividing_by_its_own_span`. **Keeping a test
+for a correct reason is not the same as the test pinning that reason.**
+
+Track A also wrote a tombstone test asserting `not hasattr(TickBus, "rate_ok")` and
+**deleted it before committing, unprompted**: it only catches re-addition under the
+identical name, and an author asking the same wrong question would call it `rate_meets` and
+stay green. A check that cannot fire in the direction that matters, inside the commit that
+deletes a check that cannot fire. The reasoning lives in the module docstring instead, which
+is where that author actually looks.
+
+**Grep AFTER the deletion found three citations, all prose, none breaking a build:**
+`tick.py:21` keeps the DISCIPLINE and retires the INSTANCE by name ("which is why there is
+no `rate_ok` here any more") — correct, leave it. `test_server_mount.py:53-54` and this
+document both described a live ruling and were fixed afterwards. **The second-order form is
+new: a citation written to record an earlier grep-after-deletion outlived its own subject.**

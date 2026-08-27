@@ -7,13 +7,29 @@ and dies when that event happens. Add the trigger, not just the task.
 
 ## Open
 
-- **Delete `episodesTotal()` and its 5 tests from `lib/vrTeleop.ts`.**
+- **Retire the two `episodesTotal()` INDEX FALLBACKS. Keep the function.**
   *Trigger:* Track A's `episode_index` lands in `GET /record/status`.
-  *Owner once triggered:* Track D (`haller-ws-1a`), who flagged it.
-  It exists only to paper over lerobot buffering ten episodes' metadata in RAM before
-  writing `meta/episodes.jsonl` — the HUD counter stalls at 7 while the operator banks
-  their tenth take. A real index from the recorder makes the guess unnecessary, and a
-  guess left next to a fact is how the two drift.
+  *Owner once triggered:* Track D.
+  **CORRECTED 2026-08-27 by Track D (`51e642d`); this entry said "delete `episodesTotal()`
+  and its 5 tests" and was not executable as written.** Three things were wrong, and the
+  integrator relayed all three to a fresh session before Track D caught it:
+    - the tests are not in `lib/vrTeleop.ts` — the function is (`:1865`), the five tests are
+      `__tests__/vrTeleopProtocol.test.ts:385-415`;
+    - the deletion is **PARTIAL**. Two of three consumers are index fallbacks and do go
+      (`VRTeleopPanel.tsx:1160-1162`, the HUD `episodes` chip, and `:1226-1227`,
+      `episodeIdx`). The third is not: `:1221`'s `datasetEpisodes` feeds `:1348-1349`'s
+      `` `${datasetEpisodes} in dataset` ``, which is a **COUNT**;
+    - **all five tests pin the COUNT, not the fallback**, so every one survives
+      `episode_index` landing, and deleting them strips the only coverage from a function
+      that still has a live caller.
+  **`episode_index` is the index of the take in hand; `episodesTotal()` is the size of the
+  dataset. Two numbers that coincide on the happy path are not the same fact** — and they
+  diverge for real, since `episode_index` renumbers across a `delete_episodes` prune. The
+  lerobot RAM-buffering defect this papers over is a fact about `meta/episodes.jsonl`
+  (`lib/vrTeleop.ts:1852-1863`) and no gate index touches it: **`N in dataset` still stalls
+  at 7 after the mount.**
+  Executable version: delete the two fallback arms and whatever pins them; KEEP
+  `episodesTotal()`, its five tests, `DatasetTally` and `refreshEpisodes`.
 
 - **Mount the record routes in `server.py`.**
   *Trigger:* Track A reports the exact bodies for `POST /record/arm`, `/record/roll`,
@@ -22,7 +38,14 @@ and dies when that event happens. Add the trigger, not just the task.
   there.
 
 - **`/estop` must revoke the rollout lease, and the lease must be mounted.**
-  *Trigger:* Track B lands `lease.py` and the streaming-inference child.
+  *Trigger:* ~~Track B lands `lease.py` and the streaming-inference child~~ — **that trigger
+  had ALREADY FIRED when it was written**: `lease.py` landed at `2a92b03` (+265, with
+  `test_lease.py` +412) and `rollout_runner.py` at `8585e71` (+970). Caught by Track B
+  2026-08-27 when the integrator relayed it as live. **The real trigger is Track A's
+  server-side ingest — the same one as the item above, so the two travel together.**
+  *A stale trigger is worse than a missing one: the item reads as blocked on the one session
+  that could act on it.* This list's whole discipline is "add the trigger, not just the
+  task", and a trigger is a claim that needs checking exactly like any other.
   Ruled 2026-08-27: the rollout child owns the POLICY, never the bus. It streams
   actions to the server over loopback and they commit through the same chain as every
   other input — LPF, rate cap, clamp, collision guard, workspace floors, E-STOP.
@@ -58,6 +81,64 @@ and dies when that event happens. Add the trigger, not just the task.
   The type was already missing `auto_scored`, `success`, `success_frames` — fields
   `recorder.py::status()` returns TODAY — before this port added any. Worth one pass to
   confirm the type finally matches the payload rather than merely growing.
+
+- **`RecordStopBody` must gain `rearm`, and take `extra="forbid"`.**
+  *Trigger:* Track A's 2d, IN FLIGHT — sent to them 2026-08-27. *Owner:* Track A.
+  Found by Track D against the LIVE pydantic model, not by reading: `RecordStopBody`
+  (`server.py:155-156`) has exactly one field, `save`, and pydantic's default
+  `extra="ignore"` means `model_validate({"save": False, "rearm": True})` returns
+  `{'save': False}`. So the headset's REDO — "re-record, SAME index" — is executed as
+  DISCARD -> IDLE and answers **200**.
+  **`/record/arm` and `/record/roll` are pure adds, so absent is LOUD** — 404 lands on the
+  client's local-gate branch by design. **`/record/stop` is the opposite shape**: a live
+  route with a second caller (`lib/recorder.ts:132`, one-arg, unaffected), where a partial
+  implementation is indistinguishable from a correct one at the wire. *A route that 404s is
+  loud; a route that 200s and drops a field is the failure this port keeps refusing.*
+  Cheaper before the mount, because that is when the body is being written.
+  Integrator ruling: `extra="forbid"`. `{save}` alone stays valid — it rejects only UNKNOWN
+  fields — and every future mismatch on this route becomes a 422 instead of a silent 200.
+  Same instinct as renaming a key whose meaning changes so a stale reader gets `undefined`
+  rather than a plausible number.
+
+- **`docs/port/trackC-handoff.md` is stale in four places.**
+  *Trigger:* fired. *Owner:* Track C (`haller-ws-95`), by the ownership ruling below.
+  Flagged INDEPENDENTLY by the current Track C and by the previous one (`haller-ws-f3`,
+  formerly `haller-ws-fd`), which is what makes it a fact rather than a reading. §3 line 131
+  says *"Train and Compare are verified only against a mock I wrote"* and line 137 tells a
+  successor to do the live-backend pass — but that pass happened at `5a196a5` and found four
+  defects, with the fifth (compare `MAX_KEYS`) closed by `f7b862c` + `b644a60`. The doc was
+  edited AFTER `5a196a5`, at `a39b85b`, and §3 was not touched. It also claims
+  `RECORD_RATE_GATE_FALLBACK = 0.9` needs no change (deleted at `80984b6`; `0.9` read as a
+  TOLERANCE means ±90% and cannot fire), says the `RecordStatus` reconcile is half done, and
+  under-reports its own suite as *"150 tests"* on a six-suite command that OMITS
+  `__tests__/labRuns.test.tsx` — the 20-test suite guarding all five of those defects.
+  Correct figure: **7 suites, 177 tests**. **The continuity doc doing the opposite of
+  continuity: a successor either redoes verified work or distrusts code that is now right.**
+
+- **A rollout run has no render path in `RunDetail`. REASONED, NOT MEASURED.**
+  *Trigger:* Track B exercises the rollout end to end. *Owner:* Track C, who found it.
+  Flagged by Track C as a PREDICTION and labelled as one — nothing has been rendered,
+  because no rollout has ever been ACCEPTED, so there is no run in any catalog to render.
+  `RunDetail.tsx:168` narrows the wire type (`Partial<TrainSpec> & Record<string, unknown>`,
+  `lib/lab.ts:440`) to the `TrainSpec` half, and the Stat grid at `:277-291` renders six
+  fixed TRAIN fields. A `kind:"rollout"` run's own spec keys have no render path, so they
+  would come back as six em dashes — **and an em dash there reads "not set", not "does not
+  apply to this kind"**. The `started_at` defect's exact shape: type-checks, renders,
+  answers plausibly and wrongly. Track C argued its own finding DOWN in the same breath,
+  which is why it is worth this much space: `argv` IS rendered (`:169`, `:318-322`) so the
+  real command line reaches the screen, and there is no kind-specific branching anywhere in
+  `components/lab/` — `kind` is displayed as a value and used only as a server-side filter —
+  so the rest of the surface is kind-agnostic by construction. Narrow, one site.
+
+- **V13's operator-facing device clause is KNOWINGLY FORFEITED at the mount.**
+  *Trigger:* fired at the mount. *Owner:* nobody — recorded so it is not hunted later.
+  The `toast.info` (once per session) and `◆ ARMED take N (local gate)` read through the
+  optics die when the routes mount, because the client then upgrades silently and those
+  strings are unreachable on Haller's own backend. It is device-gated, the servos are not
+  here, and per PLAN decision 4 the hardware session is batched. Holding the mount for it
+  would cost Track A the critical path for weeks and STILL not get it. **A sequencing item
+  that expires is worth a line saying it was forfeited, or the next reader thinks it is
+  gettable.** Raised by Track D, who flagged rather than assumed.
 
 ## Known-bad data
 
@@ -431,6 +512,56 @@ applies to any probe that prunes, not only to a matrix.
   after the D455 tables, where §Consequences was right while the delivery table someone
   actually picks work up from was wrong — which makes it a class, not a coincidence.
 
+- **A RESUMED SESSION'S ASSIGNMENT IS STALE BY DEFAULT, AND IT CANNOT TELL. Three for
+  three.** The mirror of the rule below, and the more dangerous half. The recorded mode is a
+  fresh session reading the handoffs, concluding "all that remains is Track A" and
+  self-selecting — that takes a decision, and it can be argued out of. This one takes none.
+  On the 2026-08-27 evening rotation the integrator sent a preventative "you are not
+  assigned, please hold" to the three sessions its allocation did not name. **All three
+  turned out to be the PREVIOUS cohort's track owners, resumed under new names**, each
+  holding a full, coherent, correct-as-of-when-it-was-written context saying *I am Track X,
+  mid-flight*:
+
+        haller-ws-03  was haller-ws-80  — previous Track A; WROTE fc3b6c5, the handoff its successor was reading
+        haller-ws-da  was haller-ws-8f  — previous Track B; d32cb3b, f7b862c, ff537da
+        haller-ws-f3  was haller-ws-fd  — previous Track C; eight commits, 5a196a5 .. 80984b6
+
+  The previous Track A's own account is the mechanism: *"I never read my way into the
+  territory, I was GIVEN it, and the grant silently expired. Had you not messaged me, I
+  would have opened `human_teleop.py` for 2d believing I held it — landing exactly on
+  `haller-ws-54`, from an honest premise rather than a careless one."* **A name-keyed
+  allocation cannot survive a resume**, and nothing anywhere records that the session which
+  wrote a handoff is no longer its owner. The handoff records the state of the WORK.
+
+  Three guards, all cheap, in the order they are worth having:
+    1. **A handoff commit is the moment the writing session's own assignment ends** — say so
+       IN the handoff. That line would have stopped all three a minute before the integrator
+       did, and it is the only one that works without anybody being awake.
+    2. **Ask a claimant what they last COMMITTED.** Offered by the previous Track C and it is
+       decisive: checkable against `git log` in one command, and **a self-selector has
+       nothing to show** while a genuine former owner answers instantly. It separates the two
+       modes, which no amount of "are you sure?" does.
+    3. Send the preventative note anyway. It cost four sentences and caught three.
+
+  What NOT to conclude: none of the three was careless, and two of them volunteered
+  corrections in the same breath as standing down (a stale trigger, a stale handoff doc, a
+  live `/record/stop` defect). **A de-allocated owner is the best-informed reader you have.
+  Take their knowledge by message and let the CURRENT owner make the edit** — that keeps
+  writer = owner without throwing the knowledge away.
+
+- **A per-track handoff belongs to its TRACK; the integrator's docs belong to the
+  integrator.** Ruled 2026-08-27 after Track C escalated two stale facts in
+  `docs/port/trackC-handoff.md` rather than editing it, correctly noting the precedent cut
+  the other way (`ad6cd93` Track C's own, `9616e07` Track D's own) and that Track D's
+  ownership list already names `trackD-handoff.md` as Track D's. Both readings were
+  defensible, which is exactly when it is arbitration and not a preference. **Ruling:**
+  `docs/port/track{A,B,C,D}-handoff.md` and `headset-checklist.md` belong to their tracks;
+  `INTEGRATOR-HANDOFF.md`, `integrator-followups.md`, the plan of record,
+  `hardware-checklist.md` and the phase docs are the integrator's. The reason is not
+  precedent but competence: **the session that can tell whether a handoff line is stale is
+  the one that did the work**, and a handoff edited by anyone else drifts toward describing
+  the plan instead of the tree.
+
 - **Do not infer an assignment from a name.** Four fresh sessions opened in one minute
   during a track rotation; one of them, `haller-ws-fd [bfacdc]`, shared a name with the
   live Track C session `[c29a0a]` and explicitly refused to treat that as Oscar assigning
@@ -786,6 +917,18 @@ applies to any probe that prunes, not only to a matrix.
   **Test the reachable case even when an unreachable one proves the same predicate.** A
   symmetric predicate demonstrated by an impossible input proves the ARITHMETIC and lies
   about the WORLD.
+
+- **`cmd | tail; echo $?` reads the PIPE's last stage, not the command.** Second costume of
+  the entry below, and hit INDEPENDENTLY by two sessions inside one hour on the same check —
+  the integrator and Track C both ran `npx tsc --noEmit 2>&1 | tail -N` and then read `$?`,
+  which is `tail`'s status and is 0 through any number of type errors. Both caught it in
+  their own reporting rather than in code; Track C self-reported it unprompted. **Two
+  independent instances of one shape in one hour is this port's own bar for a rule.** The
+  honest forms: capture and test separately (`out=$(cmd 2>&1); rc=$?`), use `PIPESTATUS`, or
+  count the output lines and let the emptiness be the evidence rather than a claim layered
+  on top. The general lesson is the one below it: **an instrument that cannot report failure
+  will report success**, and a verifier's own shell one-liner gets none of the scrutiny a
+  test assertion gets.
 
 - **`cmd && echo "clean"` fires on EXIT STATUS, not on empty output.** `git status
   --short` exits 0 whether or not it printed anything, so that idiom reports "clean"

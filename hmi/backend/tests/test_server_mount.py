@@ -51,8 +51,9 @@ def test_the_lifespan_mounts_the_idle_sampler():
     Safe, and completely broken.
 
     (This cited `rate_ok` until 2026-08-27. The conclusion was right and the
-    mechanism named was not: `rate_ok` has no production caller at all. Caught by
-    Track A grepping AFTER their deletion — the compiler sees neither citation.)
+    mechanism named was not: `rate_ok` had no production caller at all, and is
+    now deleted outright at `3ae8320`. Caught by grepping AFTER a deletion, twice
+    over — the compiler sees neither citation, and this one outlived its subject.)
     """
     src = _lifespan_source()
     assert "IdleSampler(" in src
