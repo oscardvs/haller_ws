@@ -639,6 +639,26 @@ export function gripperGuides(ep: LabEpisode | null): GripperGuide[] {
     }));
 }
 
+/**
+ * Whether a trace is complete enough to draw.
+ *
+ * The contract says every trace carries names, t, state and action, and a
+ * conforming backend always sends them. This exists for the one that does not:
+ * a partial body arriving with a 200 makes `trace.names.map` throw INSIDE a
+ * render, and a render-phase throw takes the whole review pane down — the
+ * operator loses the episode list and the marking controls too, over a chart.
+ * Treated as "no trace" instead, which is a state every chart already draws.
+ */
+export function isDrawableTrace(t: Trace | null | undefined): t is Trace {
+  return (
+    !!t &&
+    Array.isArray(t.names) &&
+    Array.isArray(t.t) &&
+    Array.isArray(t.state) &&
+    Array.isArray(t.action)
+  );
+}
+
 /** Channel indices grouped by arm side, from `trace.names`.
  *
  *  The names are the only rig signal a chart gets: a solo dataset's columns

@@ -24,7 +24,7 @@
  */
 import { useMemo } from "react";
 
-import { isGripperChannel, type GripperGuide, type Trace } from "@/lib/lab";
+import { isDrawableTrace, isGripperChannel, type GripperGuide, type Trace } from "@/lib/lab";
 import { Panel, PanelHead } from "@/components/lab/ui";
 import { ChartLegend, LineChart, type Guide, type Series } from "./LineChart";
 import { extent, padDomain, secondsTickFormat, seriesColor } from "./svg";
@@ -55,7 +55,7 @@ function guideFor(guides: GripperGuide[], name: string): GripperGuide | null {
 }
 
 export function GripperChart({
-  trace,
+  trace: rawTrace,
   playheadT,
   guides: given = [],
 }: {
@@ -66,6 +66,10 @@ export function GripperChart({
    *  per arm. Empty on a backend that sends none, and then no guide is drawn. */
   guides?: GripperGuide[];
 }): React.ReactElement {
+  // A partial body arriving with a 200 is "no trace", not a render-phase throw
+  // that takes the review pane down with it. See `isDrawableTrace`.
+  const trace = isDrawableTrace(rawTrace) ? rawTrace : null;
+
   // `trace.gripper` is the backend's own isolation of these columns. The scan
   // is the fallback for a backend that does not send it.
   const channels = useMemo(() => {

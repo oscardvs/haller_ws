@@ -23,6 +23,7 @@ import {
 } from "@/components/lab/EpisodeFilters";
 import { EpisodeRow } from "@/components/lab/EpisodeRow";
 import { PruneDialog } from "@/components/lab/PruneDialog";
+import { ReviewPane } from "@/components/lab/ReviewPane";
 import type { AutoclassPreview, LabEpisode, Mark } from "@/lib/lab";
 
 const REPO = "local/so101_pick_cube";
@@ -80,6 +81,10 @@ function ep(over: Partial<LabEpisode> = {}): LabEpisode {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // jsdom does not implement it, and ReviewPane calls it to keep the selected
+  // row in view. Stubbed here rather than guarded in the component: the guard
+  // would be dead code in every browser that matters.
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
 });
 afterEach(() => {
   cleanup();
@@ -729,5 +734,128 @@ describe("BulkBar", () => {
     for (const n of names) {
       expect(screen.getByRole("button", { name: n })).toBeEnabled();
     }
+  });
+});
+
+/* ─── shift-range selection ───────────────────────────────────────────── */
+
+describe("ReviewPane — shift-range selection", () => {
+  // The list is sorted SERVER-side, so the visible order and the numeric order
+  // are different things. Every fixture here is deliberately out of numeric
+  // order, because a range implementation that walks indices instead of rows
+  // passes on a sorted list and only fails on a sorted-by-duration one — which
+  // is the list an operator triaging by length is actually looking at.
+  const ORDER = [5, 2, 9, 1, 7];
+
+  const EPISODES = ORDER.map((i, n) =>
+    ep({ index: i, label: i + 1, duration_s: 30 - n, mark: "unset" }),
+  );
+
+  function mount() {
+    const r = routeFetch({
+      "/lab/datasets/detail": {
+        repo_id: REPO, root: "/d", fps: 30, robot_type: "so_follower",
+        video_keys: ["top"], features: {}, rig: "solo", episodes: EPISODES,
+      },
+      "/lab/datasets/episodes": { total: EPISODES.length, episodes: EPISODES },
+      "/lab/datasets/split": { order: [], train_episodes: [], eval_episodes: [] },
+      "/lab/datasets/bulk": { updated: 0 },
+      "/lab/datasets/trace": {
+        names: ["shoulder_pan.pos", "gripper.pos"],
+        t: [0, 0.03], state: [[1, 2], [90, 40]], action: [[1, 2], [90, 40]],
+        gripper: { "gripper.pos": [90, 40] },
+      },
+    });
+    render(<ReviewPane repoId={REPO} onPickDataset={() => {}} />);
+    return r;
+  }
+
+  /** The row checkboxes, in the order the list renders them. */
+  async function boxes() {
+    await waitFor(() =>
+      expect(document.querySelectorAll("[data-episode-index]").length)
+        .toBe(EPISODES.length),
+    );
+    return [...document.querySelectorAll<HTMLElement>("[data-episode-index]")].map(
+      (row) => ({
+        index: Number(row.getAttribute("data-episode-index")),
+        box: within(row).getByRole("checkbox"),
+      }),
+    );
+  }
+
+  const selectedCount = () => {
+    const strip = [...document.querySelectorAll("span")].find(
+      (n) => /^\s*\d+\s+selected\s*$/.test(n.textContent ?? ""),
+    );
+    return strip ? Number(/(\d+)/.exec(strip.textContent ?? "")?.[1] ?? 0) : 0;
+  };
+
+  it("takes the range from the VISIBLE order, not the numeric indices", async () => {
+    // Anchor on the first row (idx 5), shift-click the third (idx 9). What the
+    // operator dragged across is three rows. Walking numeric indices instead
+    // would sweep 5..9 — five episodes, two of which are not even on screen in
+    // that span — and bulk-marking those is a silent, unrecoverable edit.
+    mount();
+    const rows = await boxes();
+    expect(rows.map((r) => r.index)).toEqual(ORDER);
+
+    fireEvent.click(rows[0].box);
+    fireEvent.click(rows[2].box, { shiftKey: true });
+
+    await waitFor(() => expect(selectedCount()).toBe(3));
+  });
+
+  it("ranges backwards from the anchor as readily as forwards", async () => {
+    // The anchor is a position, not a lower bound. An implementation that
+    // assumes the shift-click is always below it selects nothing here.
+    mount();
+    const rows = await boxes();
+
+    fireEvent.click(rows[3].box);
+    fireEvent.click(rows[1].box, { shiftKey: true });
+
+    await waitFor(() => expect(selectedCount()).toBe(3));
+  });
+
+  it("keeps ranging from a live anchor across repeated shift-clicks", async () => {
+    // What this actually guards: the anchor survives a shift-click at all. Two
+    // shift-clicks in a row must both range, rather than the second degrading
+    // to a single toggle because the anchor was lost.
+    //
+    // What it CANNOT guard, and why there is no test for it: whether the
+    // anchor STAYS at row 0 or moves to the last shift-clicked row is
+    // unobservable while the range is add-only, because both produce the same
+    // selection set — the anchor is always already inside the selection, so
+    // every subsequent range unions into the same span. `if (!shiftKey)` is
+    // still the right code (it matches what the operator thinks the anchor is)
+    // and it becomes observable the day the range replaces the selection
+    // instead of adding to it. Whoever makes that change owes this a real test.
+    mount();
+    const rows = await boxes();
+
+    fireEvent.click(rows[0].box);
+    fireEvent.click(rows[2].box, { shiftKey: true });
+    await waitFor(() => expect(selectedCount()).toBe(3));
+
+    fireEvent.click(rows[4].box, { shiftKey: true });
+    await waitFor(() => expect(selectedCount()).toBe(5));
+  });
+
+  it("plain-clicks toggle one row and re-anchor", async () => {
+    // The un-shifted click is both the toggle and the anchor set. A row that
+    // toggles without anchoring makes the next shift-click range from
+    // wherever the operator last happened to be.
+    mount();
+    const rows = await boxes();
+
+    fireEvent.click(rows[0].box);
+    await waitFor(() => expect(selectedCount()).toBe(1));
+    fireEvent.click(rows[0].box);
+    await waitFor(() => expect(selectedCount()).toBe(0));
+
+    fireEvent.click(rows[3].box);
+    fireEvent.click(rows[4].box, { shiftKey: true });
+    await waitFor(() => expect(selectedCount()).toBe(2));
   });
 });

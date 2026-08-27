@@ -17,9 +17,7 @@
  */
 import { useMemo } from "react";
 
-import {
-  armGroups, isGripperChannel, shortChannel, type Trace,
-} from "@/lib/lab";
+import { armGroups, isDrawableTrace, isGripperChannel, shortChannel, type Trace } from "@/lib/lab";
 import { Chip, Panel, PanelHead } from "@/components/lab/ui";
 import { ChartLegend, LineChart, type Series } from "./LineChart";
 import { extent, padDomain, secondsTickFormat, seriesColor } from "./svg";
@@ -33,7 +31,7 @@ const HEIGHT_MANY = 92;
 const sideLabel = (side: string) => (side === "arm" ? "arm" : `${side} arm`);
 
 export function TraceChart({
-  trace,
+  trace: given,
   playheadT,
   overlay,
   onOverlay,
@@ -44,6 +42,10 @@ export function TraceChart({
   overlay: boolean;
   onOverlay?: (v: boolean) => void;
 }): React.ReactElement {
+  // A partial body arriving with a 200 is "no trace", not a render-phase throw
+  // that takes the review pane down with it. See `isDrawableTrace`.
+  const trace = isDrawableTrace(given) ? given : null;
+
   const groups = useMemo(() => {
     if (!trace) return [];
     return armGroups(trace.names)
