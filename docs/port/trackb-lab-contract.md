@@ -173,6 +173,7 @@ POST /lab/datasets/prune  {repo_id,backup,expect_episodes:[int]} -> {run_id}
 GET  /lab/runs?kind&status            -> {runs:[{id,kind,name,status,started_at,finished_at,
                                                  tags,spec_summary}]}
 POST /lab/runs/train {spec}           -> {id}
+POST /lab/runs/rollout {spec}         -> {id}   # served via build_runs_router; NO server.py mount
 GET  /lab/runs/{id}                   -> {id,kind,name,status,spec,argv,started_at,finished_at,
                                           exit_code,error}
 GET  /lab/runs/{id}/metrics?offset    -> {offset,rows:[...]}   # byte offset, WHOLE LINES only
@@ -226,8 +227,12 @@ mean deleting a dataset or launching a job. Gated (403 from a non-loopback
 client unless `allow_remote_control`):
 
     autoclass/apply, autoclass/revert, prune,
-    runs/train, runs/{id}/stop, DELETE runs/{id},
+    runs/train, runs/rollout, runs/{id}/stop, DELETE runs/{id},
     DELETE /lab/datasets
+
+`runs/rollout` is the worst of these to leave LAN-open and it is worth saying why
+rather than leaving it as one entry in a list: `train` burns a GPU, **`rollout` moves
+the arm.** It has a 403 assertion in the compose gate matrix.
 
 Ungated, deliberately, so Oscar can triage from the headset: every GET,
 `datasets/mark`, `datasets/bulk`, and `autoclass/preview` (which writes nothing).
@@ -764,3 +769,29 @@ What it settles for the code in this package:
 
 The prune remains destructive and remains a background job because it
 re-encodes. Run it on a throwaway copy first, every time.
+
+## `POST /lab/runs/rollout` spec keys (landed `d32cb3b`)
+
+    control_hz                       what the run will be stepped at
+    control_hz_trained               fps the policy was trained at, or null
+    control_hz_trained_repo_id       the dataset it came from
+    control_hz_trained_source        how the link was resolved
+    control_hz_trained_reason        which link BROKE, when it did
+    control_hz_declared_by           "request" | "trained_fps"
+    control_hz_mismatch_override     explicit, for someone who means it
+
+**NOT `control_hz_source`**, deliberately: the child already uses that spelling for
+gate (b)'s measurement window, and two meanings on one key is exactly the collision the
+`episode_index` ruling was about. `control_hz_declared_by` exists because otherwise every
+run record reads as a deliberate agreement between two numbers, and a later reader cannot
+tell whether the operator chose the rate or got it for free.
+
+**Check (a) is EXACT MATCH, two-sided, and does NOT read `MIN_RATE_FRACTION`.** That
+constant absorbs measurement jitter — a physical gap between an intended period and an
+achieved one. There is no such gap between an `int` in `info.json` and a declared value,
+so a tolerance band there would admit only typos and deliberate choices, and deliberate
+choices belong in the override where they get stamped.
+
+**Still true and not to be rounded up:** the rollout path has never run end to end and
+cannot until Track A's ingest exists. What is new is that a rollout can now be REFUSED
+before it starts, for a reason that is true.

@@ -33,19 +33,6 @@ and dies when that event happens. Add the trigger, not just the task.
   less. Fallback if streaming inference proves unworkable: rollout stays CLI-only with
   the HMI stopped, which is what the kit does today. Only after measuring.
 
-- **The launcher must check declared `control_hz` against the dataset's `fps`.**
-  *Trigger:* Track B (`haller-ws-ea`) confirms a checkpoint carries the `repo_id` it
-  was trained on. *Owner:* Track B, at `POST /lab/runs/*`, ruled 2026-08-27.
-  Two different checks, and only the second existed: (a) declared vs the rate the policy
-  was TRAINED at — launch time; (b) measured vs declared — run time, already built. The
-  rollout child cannot do (a): it is handed `control_hz` in its spec and never opens
-  `info.json`, so recording both numbers makes a divergence RECONSTRUCTIBLE, not
-  DETECTED. A check belongs where both quantities are in scope.
-  **If a checkpoint does not record its training `repo_id`, report that rather than
-  inventing the link.** Inferring it from the run directory or the currently-selected
-  dataset would compare the declared rate against the wrong dataset's fps and report
-  agreement — worse than no check.
-
 - **Rewrite the A/X take protocol in the operator docs.**
   *Trigger:* Track A's `/record/arm|roll|stop` land and are committed.
   `hmi/QUICKSTART-QUEST.md` (~121-147, 298) and `docs/setup/dataset-collection.md`
@@ -664,6 +651,15 @@ applies to any probe that prunes, not only to a matrix.
   guarded-`pyrealsense2` source gated on both probes. **The delivery table is where someone
   picks up a phase; nobody reads a §Consequences section to find out what P2 builds.** Rows
   marked SUPERSEDED rather than deleted — the measurements behind them are real record.
+
+- ~~The launcher must check declared `control_hz` against the dataset's `fps`~~ — landed
+  `d32cb3b` as `POST /lab/runs/rollout` + check (a). The precondition held: a real ACT
+  checkpoint carries `train_config.json` with `dataset.repo_id`, and **nothing in a
+  checkpoint records an fps or a control rate anywhere**, so that chain is the ONLY route
+  and any fallback would be pure invention — which is why `trained_dataset` REPORTS a
+  broken link rather than guessing. No `server.py` mount was needed and I verified that
+  rather than accepting it: the route rides `build_runs_router`, which the existing mount
+  already composes, and the compose test walks the REAL served paths.
 
 - ~~Plan doc's phase numbering disagreed with the track briefs~~ — pinned to the doc
   (`633bbdb`), briefs are track-local.
