@@ -73,7 +73,7 @@ const sent = (c: { init?: RequestInit }): unknown =>
 
 function ep(over: Partial<LabEpisode> = {}): LabEpisode {
   return {
-    index: 0, label: 1, frames: 372, duration_s: 12.4, share: 0.03,
+    episode_index: 0, label: 1, frames: 372, duration_s: 12.4, share: 0.03,
     task: "Pick up the cube", verdict: "PASS", reasons: [],
     mark: "unset", note: null, tags: [], ...over,
   };
@@ -98,14 +98,14 @@ describe("PruneDialog — the one that destroys episodes", () => {
   // Indices are NOT array positions: this is a filtered page of a dataset, so
   // idx 4 is simply not here. `expect_episodes` has to carry 2 and 5.
   const EPISODES: LabEpisode[] = [
-    ep({ index: 0, label: 1, mark: "keep" }),
-    ep({ index: 1, label: 2, mark: "unset" }),
+    ep({ episode_index: 0, label: 1, mark: "keep" }),
+    ep({ episode_index: 1, label: 2, mark: "unset" }),
     ep({
-      index: 2, label: 3, mark: "reject", duration_s: 4.2,
+      episode_index: 2, label: 3, mark: "reject", duration_s: 4.2,
       reasons: ["left: gripper never closed"],
     }),
-    ep({ index: 3, label: 4, mark: "keep" }),
-    ep({ index: 5, label: 6, mark: "reject", duration_s: 9.8, note: "arm stalled" }),
+    ep({ episode_index: 3, label: 4, mark: "keep" }),
+    ep({ episode_index: 5, label: 6, mark: "reject", duration_s: 9.8, note: "arm stalled" }),
   ];
 
   function open(episodes: LabEpisode[] = EPISODES) {
@@ -266,7 +266,7 @@ describe("PruneDialog — the one that destroys episodes", () => {
     // A live remove button over an empty set is a button that can only ever
     // do something nobody asked for.
     routeFetch({});
-    open([ep({ index: 0, label: 1, mark: "keep" })]);
+    open([ep({ episode_index: 0, label: 1, mark: "keep" })]);
 
     expect(screen.getByText(/no episodes are marked reject/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^remove/ })).not.toBeInTheDocument();
@@ -278,8 +278,8 @@ describe("PruneDialog — the one that destroys episodes", () => {
     // wanted the dataset gone, so send them to the delete that says so.
     routeFetch({});
     open([
-      ep({ index: 0, label: 1, mark: "reject" }),
-      ep({ index: 1, label: 2, mark: "reject" }),
+      ep({ episode_index: 0, label: 1, mark: "reject" }),
+      ep({ episode_index: 1, label: 2, mark: "reject" }),
     ]);
 
     expect(screen.getByText(/delete the whole dataset instead/i)).toBeInTheDocument();
@@ -552,7 +552,7 @@ describe("EpisodeRow — the off-by-one that deletes the wrong take", () => {
   // index and label deliberately differ, so nothing here can pass by reading
   // the wrong field and landing on the right number.
   const EP = ep({
-    index: 2, label: 3, duration_s: 12.4, share: 0.03, mark: "keep",
+    episode_index: 2, label: 3, duration_s: 12.4, share: 0.03, mark: "keep",
     task: "Pick up the cube",
   });
 
@@ -748,7 +748,7 @@ describe("ReviewPane — shift-range selection", () => {
   const ORDER = [5, 2, 9, 1, 7];
 
   const EPISODES = ORDER.map((i, n) =>
-    ep({ index: i, label: i + 1, duration_s: 30 - n, mark: "unset" }),
+    ep({ episode_index: i, label: i + 1, duration_s: 30 - n, mark: "unset" }),
   );
 
   function mount() {
@@ -778,7 +778,7 @@ describe("ReviewPane — shift-range selection", () => {
     );
     return [...document.querySelectorAll<HTMLElement>("[data-episode-index]")].map(
       (row) => ({
-        index: Number(row.getAttribute("data-episode-index")),
+        episode_index: Number(row.getAttribute("data-episode-index")),
         box: within(row).getByRole("checkbox"),
       }),
     );
@@ -798,7 +798,7 @@ describe("ReviewPane — shift-range selection", () => {
     // that span — and bulk-marking those is a silent, unrecoverable edit.
     mount();
     const rows = await boxes();
-    expect(rows.map((r) => r.index)).toEqual(ORDER);
+    expect(rows.map((r) => r.episode_index)).toEqual(ORDER);
 
     fireEvent.click(rows[0].box);
     fireEvent.click(rows[2].box, { shiftKey: true });

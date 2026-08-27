@@ -170,9 +170,17 @@ export type EpisodeArm = {
 };
 
 export type LabEpisode = {
-  /** The stored index — 0-based, and what every endpoint takes. */
-  index: number;
-  /** What the operator calls it — `index + 1`. The server owns the mapping so
+  /**
+   * The stored episode index — 0-based, and what every endpoint takes.
+   *
+   * Spelled `episode_index` and never `index`, because LeRobot's own v3.0
+   * parquet carries BOTH as different columns and `index` is the GLOBAL FRAME
+   * index: on the real dataset, episode 1's first three frames have
+   * episode_index [1,1,1], frame_index [0,1,2] and index [855,856,857].
+   * A field called `index` here would read correctly and mean something else.
+   */
+  episode_index: number;
+  /** What the operator calls it — `episode_index + 1`. The server owns the mapping so
    *  the UI never derives it, and both spellings are always shown together:
    *  Oscar numbers episodes 1-based in conversation and they are stored
    *  0-based, and that off-by-one is how the wrong demonstration gets
@@ -614,7 +622,7 @@ export function videoSrcKey(repoId: string, ep: LabEpisode, key: string | null):
   if (s.chunk_index !== undefined && s.file_index !== undefined) {
     return `${repoId}|${key}|${s.chunk_index}|${s.file_index}`;
   }
-  return `${repoId}|${key}|${ep.index}`;
+  return `${repoId}|${key}|${ep.episode_index}`;
 }
 
 /**

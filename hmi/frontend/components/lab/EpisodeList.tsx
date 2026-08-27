@@ -108,16 +108,16 @@ export function EpisodeList({
           <Empty>{loading ? "reading…" : "no episodes match these filters"}</Empty>
         ) : (
           episodes.map((ep) => (
-            <div key={ep.index} data-episode-index={ep.index} className="shrink-0">
+            <div key={ep.episode_index} data-episode-index={ep.episode_index} className="shrink-0">
               <EpisodeRow
                 episode={ep}
-                selected={selectedIndex === ep.index}
-                checked={selection.has(ep.index)}
-                inEval={evalSet.has(ep.index)}
-                onSelect={() => onSelect(ep.index)}
-                onToggleSelect={(shiftKey) => onToggleSelect(ep.index, shiftKey)}
-                onMark={(m) => onMark(ep.index, m)}
-                onNote={(n) => onNote(ep.index, n)}
+                selected={selectedIndex === ep.episode_index}
+                checked={selection.has(ep.episode_index)}
+                inEval={evalSet.has(ep.episode_index)}
+                onSelect={() => onSelect(ep.episode_index)}
+                onToggleSelect={(shiftKey) => onToggleSelect(ep.episode_index, shiftKey)}
+                onMark={(m) => onMark(ep.episode_index, m)}
+                onNote={(n) => onNote(ep.episode_index, n)}
               />
             </div>
           ))

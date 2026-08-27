@@ -43,7 +43,7 @@ const body = (c: { init?: RequestInit }) =>
 
 function ep(over: Partial<LabEpisode> = {}): LabEpisode {
   return {
-    index: 0, label: 1, frames: 855, duration_s: 28.5, share: 0.029,
+    episode_index: 0, label: 1, frames: 855, duration_s: 28.5, share: 0.029,
     task: "Pick up the battery", verdict: "PASS", reasons: [],
     mark: "unset", note: null, tags: [], ...over,
   };
@@ -107,7 +107,7 @@ describe("episode numbering", () => {
 
 describe("video slices", () => {
   const packed = ep({
-    index: 2, label: 3, duration_s: 15.533,
+    episode_index: 2, label: 3, duration_s: 15.533,
     videos: {
       top: { chunk_index: 0, file_index: 1, from_timestamp: 0, to_timestamp: 15.533 },
     },
@@ -123,18 +123,18 @@ describe("video slices", () => {
     // The guess would be {0, duration_s}. On the real 46-episode dataset,
     // episode 1 lives at 28.5..45.93 of a file that starts with episode 0 —
     // so the guess opens the wrong take and plays it under the right label.
-    expect(sliceFor(ep({ index: 1 }), "top")).toBeNull();
+    expect(sliceFor(ep({ episode_index: 1 }), "top")).toBeNull();
     expect(sliceFor(packed, "left_wrist")).toBeNull();
     expect(sliceFor(packed, null)).toBeNull();
   });
 
   it("keys the loaded FILE, so a second episode in it is a seek", () => {
     const a = ep({
-      index: 0,
+      episode_index: 0,
       videos: { top: { chunk_index: 0, file_index: 0, from_timestamp: 0, to_timestamp: 28.5 } },
     });
     const b = ep({
-      index: 1,
+      episode_index: 1,
       videos: { top: { chunk_index: 0, file_index: 0, from_timestamp: 28.5, to_timestamp: 45.93 } },
     });
     // Same file: the src must not change, or every J/L keypress re-buffers.

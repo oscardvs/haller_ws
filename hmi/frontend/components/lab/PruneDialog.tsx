@@ -81,7 +81,7 @@ export function PruneDialog({
       // if the set moved between this dialog opening and this click, which is
       // exactly the window in which a renumbering would make these indices
       // name different takes.
-      const r = await lab.prune(repoId, backup, drop.map((e) => e.index));
+      const r = await lab.prune(repoId, backup, drop.map((e) => e.episode_index));
       toast.success(
         `prune started · ${drop.length} episode${drop.length === 1 ? "" : "s"} ` +
         `queued for removal · run ${r.run_id}`,
@@ -140,9 +140,9 @@ export function PruneDialog({
             {/* Named one per line. This is the part that has to be read. */}
             <div className="mt-2 max-h-[38vh] min-h-0 overflow-y-auto font-mono text-[10px] leading-[1.7]">
               {drop.map((ep) => (
-                <div key={ep.index} className="text-pretty">
+                <div key={ep.episode_index} className="text-pretty">
                   <span data-num className="tabular-nums">Ep {ep.label}</span>{" "}
-                  <span className="opacity-70">(idx {ep.index})</span>
+                  <span className="opacity-70">(idx {ep.episode_index})</span>
                   {" — "}
                   <span data-num className="tabular-nums">{secs(ep.duration_s)}</span>
                   {" — "}

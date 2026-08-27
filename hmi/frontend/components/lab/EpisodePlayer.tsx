@@ -144,7 +144,7 @@ export const EpisodePlayer = forwardRef<
     }
   }, [ready]);
 
-  const epIndex = episode?.index ?? null;
+  const epIndex = episode?.episode_index ?? null;
 
   useEffect(() => {
     const v = videoRef.current;
@@ -242,7 +242,7 @@ export const EpisodePlayer = forwardRef<
           episode ? (
             <>
               Ep {episode.label}{" "}
-              <span className="opacity-60">idx {episode.index}</span>
+              <span className="opacity-60">idx {episode.episode_index}</span>
             </>
           ) : (
             "—"

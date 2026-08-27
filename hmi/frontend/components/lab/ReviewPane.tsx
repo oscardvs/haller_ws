@@ -365,7 +365,7 @@ export function ReviewPane({
   }, [episodes]);
 
   const rowByIndex = useMemo(
-    () => new Map(rows.map((r) => [r.index, r] as const)),
+    () => new Map(rows.map((r) => [r.episode_index, r] as const)),
     [rows],
   );
 
@@ -379,7 +379,7 @@ export function ReviewPane({
       selectedIndex === null
         ? null
         : rowByIndex.get(selectedIndex)
-          ?? episodes.find((e) => e.index === selectedIndex)
+          ?? episodes.find((e) => e.episode_index === selectedIndex)
           ?? null,
     [selectedIndex, rowByIndex, episodes],
   );
@@ -404,17 +404,17 @@ export function ReviewPane({
   // render, not from an effect: an effect commits one frame of empty player
   // under a list that already has rows, and the fix for that is not a timer.
   if (selectedIndex === null && rows.length > 0) {
-    setSelectedIndex(rows[0].index);
+    setSelectedIndex(rows[0].episode_index);
     setPlayheadT(null);
   }
 
   const onToggleSelect = useCallback(
     (index: number, shiftKey: boolean) => {
-      const at = rows.findIndex((r) => r.index === index);
+      const at = rows.findIndex((r) => r.episode_index === index);
       const from =
         anchor.current === null
           ? -1
-          : rows.findIndex((r) => r.index === anchor.current);
+          : rows.findIndex((r) => r.episode_index === anchor.current);
       setSelection((prev) => {
         const next = new Set(prev);
         // The range is taken from the CURRENT LIST ORDER, not from the numeric
@@ -422,7 +422,7 @@ export function ReviewPane({
         // across is what they see.
         if (shiftKey && at >= 0 && from >= 0) {
           const [lo, hi] = from <= at ? [from, at] : [at, from];
-          for (let i = lo; i <= hi; i += 1) next.add(rows[i].index);
+          for (let i = lo; i <= hi; i += 1) next.add(rows[i].episode_index);
           return next;
         }
         if (next.has(index)) next.delete(index);
@@ -442,7 +442,7 @@ export function ReviewPane({
   /** Everything the list has actually READ, which is not the same as everything
    *  the filter matched — the pages beyond are takes nobody has looked at. */
   const selectAll = useCallback(() => {
-    setSelection(new Set(rows.map((r) => r.index)));
+    setSelection(new Set(rows.map((r) => r.episode_index)));
   }, [rows]);
 
   /* ── writes ────────────────────────────────────────────────────────────── */
@@ -454,11 +454,11 @@ export function ReviewPane({
   /** Patch one episode in BOTH the list window and the full episode list, so a
    *  mark and the counts it changes move together. */
   const patch = useCallback((index: number, p: Partial<LabEpisode>) => {
-    setRows((rs) => rs.map((r) => (r.index === index ? { ...r, ...p } : r)));
+    setRows((rs) => rs.map((r) => (r.episode_index === index ? { ...r, ...p } : r)));
     setDetail((d) =>
       d === null
         ? d
-        : { ...d, episodes: d.episodes.map((e) => (e.index === index ? { ...e, ...p } : e)) },
+        : { ...d, episodes: d.episodes.map((e) => (e.episode_index === index ? { ...e, ...p } : e)) },
     );
   }, []);
 
@@ -474,7 +474,7 @@ export function ReviewPane({
   const markOne = useCallback(
     async (index: number, mark: Mark, note?: string) => {
       if (!repoId) return;
-      const before = rowByIndex.get(index) ?? episodes.find((e) => e.index === index);
+      const before = rowByIndex.get(index) ?? episodes.find((e) => e.episode_index === index);
       patch(index, note === undefined ? { mark } : { mark, note });
       try {
         await lab.mark(repoId, index, mark, note);
@@ -496,7 +496,7 @@ export function ReviewPane({
    *  takes both, and sending a note without one would clear the decision. */
   const onNote = useCallback(
     (index: number, note: string) => {
-      const cur = rowByIndex.get(index) ?? episodes.find((e) => e.index === index);
+      const cur = rowByIndex.get(index) ?? episodes.find((e) => e.episode_index === index);
       void markOne(index, cur?.mark ?? "unset", note);
     },
     [rowByIndex, episodes, markOne],
@@ -550,12 +550,12 @@ export function ReviewPane({
   const step = useCallback(
     (delta: number) => {
       if (rows.length === 0) return;
-      const at = selectedIndex === null ? -1 : rows.findIndex((r) => r.index === selectedIndex);
+      const at = selectedIndex === null ? -1 : rows.findIndex((r) => r.episode_index === selectedIndex);
       const next =
         at < 0
           ? (delta > 0 ? 0 : rows.length - 1)
           : Math.min(rows.length - 1, Math.max(0, at + delta));
-      select(rows[next].index);
+      select(rows[next].episode_index);
     },
     [rows, selectedIndex, select],
   );
@@ -565,7 +565,7 @@ export function ReviewPane({
       if (selected === null) return;
       // Pressing the mark that is already on returns the take to `unset` —
       // "I have not judged this" is a state worth being able to get back to.
-      void markOne(selected.index, selected.mark === mark ? "unset" : mark);
+      void markOne(selected.episode_index, selected.mark === mark ? "unset" : mark);
     },
     [selected, markOne],
   );

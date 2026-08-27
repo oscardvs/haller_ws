@@ -47,9 +47,9 @@ export function EpisodeRow({
   // box. Compared during render rather than synced from an effect: an effect
   // paints the superseded text for one frame first, and this box is being
   // typed into.
-  const [shown, setShown] = useState({ index: episode.index, note: stored });
-  if (shown.index !== episode.index || shown.note !== stored) {
-    setShown({ index: episode.index, note: stored });
+  const [shown, setShown] = useState({ index: episode.episode_index, note: stored });
+  if (shown.index !== episode.episode_index || shown.note !== stored) {
+    setShown({ index: episode.episode_index, note: stored });
     setNote(stored);
   }
 
@@ -104,14 +104,14 @@ export function EpisodeRow({
               onSelect();
             }}
             aria-current={selected ? "true" : undefined}
-            title={`episode ${episode.label} · stored index ${episode.index}`}
+            title={`episode ${episode.label} · stored index ${episode.episode_index}`}
             className="flex min-w-0 items-baseline gap-1 text-left"
           >
             <span className={"font-mono text-[11px] font-semibold " + struck}>
               Ep {episode.label}
             </span>
             <span className="font-mono text-[9px] text-muted-foreground">
-              idx {episode.index}
+              idx {episode.episode_index}
             </span>
           </button>
 

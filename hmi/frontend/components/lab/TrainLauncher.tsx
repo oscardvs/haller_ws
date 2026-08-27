@@ -213,7 +213,7 @@ export function TrainLauncher({
   const keptIdx = useMemo(
     () =>
       detail && detail.repo_id === repoId
-        ? detail.episodes.filter((e) => e.mark !== "reject").map((e) => e.index)
+        ? detail.episodes.filter((e) => e.mark !== "reject").map((e) => e.episode_index)
         : null,
     [detail, repoId],
   );
@@ -226,7 +226,7 @@ export function TrainLauncher({
   const labels = useMemo(() => {
     const m = new Map<number, string>();
     if (detail && detail.repo_id === repoId) {
-      for (const e of detail.episodes) m.set(e.index, `Ep ${e.label}`);
+      for (const e of detail.episodes) m.set(e.episode_index, `Ep ${e.label}`);
     }
     return m;
   }, [detail, repoId]);
