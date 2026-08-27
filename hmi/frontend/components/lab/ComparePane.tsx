@@ -72,6 +72,13 @@ type Loaded = {
   series: CompareMetrics["runs"];
   /** The backend has runs but no cross-run metrics endpoint. */
   seriesMissing: boolean;
+  /** The metrics request was REFUSED (not absent) — the backend's own sentence.
+   *  Kept inside the loaded state on purpose: a refusal here costs the CURVES,
+   *  never the page. A real ACT run logs 12 numeric keys against a cap of 8, so
+   *  this is the ordinary path for the only kind of run worth comparing, and
+   *  throwing it to the outer catch blanked the run list, the legend and the
+   *  hparam diff over a chart nobody could draw. */
+  seriesRefusal: string | null;
 };
 
 export function ComparePane({ runIds }: { runIds: string[] }) {
@@ -154,17 +161,22 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
 
         let series: CompareMetrics["runs"] = {};
         let seriesMissing = false;
+        let seriesRefusal: string | null = null;
         if (shared.length > 0 && speaking.length > 0) {
           try {
             const res = await lab.compareMetrics(speaking, shared, MAX_POINTS);
             series = res.runs ?? {};
           } catch (e) {
-            if (!isMissing(e)) throw e;
-            seriesMissing = true;
+            if (isMissing(e)) seriesMissing = true;
+            else seriesRefusal = reason(e);
           }
         }
         if (cancelled) return;
-        settle({ loaded: { runs, gone, silent, shared, dropped, series, seriesMissing } });
+        settle({
+          loaded: {
+            runs, gone, silent, shared, dropped, series, seriesMissing, seriesRefusal,
+          },
+        });
       } catch (e) {
         if (cancelled) return;
         if (isBusy(e)) settle({ refusal: reason(e) });
@@ -183,7 +195,7 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
   const shared = useMemo(() => state?.shared ?? [], [state]);
   // An empty bordered strip reads as a panel that failed to load something.
   const hasNotes = Boolean(
-    refusal || error || state?.seriesMissing ||
+    refusal || error || state?.seriesMissing || state?.seriesRefusal ||
     (state?.gone.length ?? 0) > 0 || (state?.silent.length ?? 0) > 0 ||
     (state?.dropped.length ?? 0) > 0 || runs.length === 1,
   );
@@ -276,6 +288,9 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
             )}
             {state?.seriesMissing && (
               <Note>this backend cannot serve cross-run metrics — the curves are unavailable.</Note>
+            )}
+            {state?.seriesRefusal && (
+              <Refusal>curves refused: {state.seriesRefusal}</Refusal>
             )}
           </div>
         )}

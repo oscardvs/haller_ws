@@ -29,7 +29,7 @@ import {
 } from "@/lib/lab";
 import { Button, Empty, Panel, PanelHead, Refusal, Stat } from "@/components/lab/ui";
 import { fmtDuration } from "@/components/lab/charts/svg";
-import { StatusPill, fullWhen, runLabel, shortWhen } from "@/components/lab/RunList";
+import { StatusPill, epochSeconds, fullWhen, runLabel, shortWhen } from "@/components/lab/RunList";
 import { MetricGrid } from "@/components/lab/MetricGrid";
 import { CheckpointList } from "@/components/lab/CheckpointList";
 import { RunLogTail } from "@/components/lab/RunLogTail";
@@ -171,11 +171,10 @@ export function RunDetail({
    *  0 until the first tick of a RUNNING run — a run that has neither has no
    *  elapsed to report, and a made-up one would read as a run that started in
    *  1970. */
-  const until = run?.finished_at ?? (now > 0 ? now : null);
+  const until = epochSeconds(run?.finished_at) ?? (now > 0 ? now : null);
+  const startedSecs = epochSeconds(run?.started_at);
   const elapsed =
-    run && typeof run.started_at === "number" && until !== null
-      ? until - run.started_at
-      : null;
+    startedSecs !== null && until !== null ? until - startedSecs : null;
 
   const refuse = (e: unknown, cannot: string) => {
     if (isForbidden(e)) setRefusal(REMOTE_REFUSED);

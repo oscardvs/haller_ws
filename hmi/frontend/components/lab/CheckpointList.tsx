@@ -18,11 +18,19 @@ import { Chip, Empty, HeadRow, Panel, PanelHead, Refusal } from "@/components/la
 
 const COLS = "minmax(0,1fr) 56px 84px";
 
-/** The directory name. The full path is a title attribute — it is what you
- *  paste into a rollout, and it is far too long to be a column. */
-function baseName(path: string): string {
-  const parts = path.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || path;
+/** The CHECKPOINT directory's name — `060000`, or `last` for the symlink.
+ *
+ *  The backend sends the path of the model directory INSIDE it
+ *  (`.../checkpoints/060000/pretrained_model`), because that is what a rollout
+ *  is pointed at. So the last segment is `pretrained_model` on every row and
+ *  taking it named all thirteen identically; the step directory is its parent.
+ *  Falls back to the last segment for any path not in that shape rather than
+ *  rendering empty. */
+export function checkpointName(path: string): string {
+  const parts = path.replace(/\/+$/, "").split("/").filter(Boolean);
+  const last = parts[parts.length - 1] ?? path;
+  if (last !== "pretrained_model") return last;
+  return parts[parts.length - 2] ?? last;
 }
 
 export function CheckpointList({
@@ -72,8 +80,13 @@ export function CheckpointList({
   // highest step rather than from a symlink the backend no longer reports.
   // Highest step IS the newest checkpoint; nothing else about the set is
   // being guessed.
+  // `last` carries a null step, so it is skipped rather than compared: it is
+  // a POINTER at the newest numbered checkpoint, and letting it win would put
+  // the badge on the alias instead of the thing it aliases — and with every
+  // step null, `c.step === latest` would be `null === null` on every row.
   const latest = rows.reduce<number | null>(
-    (best, c) => (best === null || c.step > best ? c.step : best),
+    (best, c) =>
+      c.step !== null && (best === null || c.step > best) ? c.step : best,
     null,
   );
 
@@ -115,9 +128,9 @@ export function CheckpointList({
               className="grid items-center gap-2 border-b border-border px-2.5 py-1"
               style={{ gridTemplateColumns: COLS }}
             >
-              <span className="truncate font-mono text-[10px]">{baseName(c.path)}</span>
+              <span className="truncate font-mono text-[10px]">{checkpointName(c.path)}</span>
               <span data-num className="text-right font-mono text-[10px] tabular-nums">
-                {c.step}
+                {c.step ?? "—"}
               </span>
               <span className="flex items-center justify-end gap-1">
                 {/* A directory the runner created but never finished writing
@@ -128,7 +141,7 @@ export function CheckpointList({
                     partial
                   </Chip>
                 )}
-                {c.step === latest && c.has_model && (
+                {c.step !== null && c.step === latest && c.has_model && (
                   <Chip on tabIndex={-1} title="the newest checkpoint this run wrote">
                     latest
                   </Chip>

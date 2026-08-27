@@ -75,16 +75,29 @@ export function StatusPill({ status }: { status: RunStatus }) {
 }
 
 /**
+ * Epoch SECONDS from the backend's stamp, or null if there is nothing to read.
+ *
+ * The stamp is an ISO 8601 UTC string — `runs.py::_now()` returns
+ * `datetime.now(UTC).isoformat(timespec="seconds")`, e.g.
+ * `"2026-08-26T19:33:50+00:00"`. It is NOT `time.time()`, and it never was:
+ * the kit this was ported from writes the same string. Seconds rather than
+ * milliseconds because `RunDetail` measures elapsed against a `Date.now()/1000`
+ * poll clock, and a mixed pair there reads as a run that ran for 50 years.
+ */
+export function epochSeconds(ts: string | null | undefined): number | null {
+  if (typeof ts !== "string" || ts === "") return null;
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? ms / 1000 : null;
+}
+
+/**
  * A started-at short enough for a 42px column: clock time for a run started
  * today, month-day for anything older.
- *
- * The stamp is unix SECONDS — the backend writes `time.time()` — so it is
- * multiplied here. Reading it as milliseconds would put every run in 1970,
- * which looks like a formatting bug and is actually a units bug.
  */
-export function shortWhen(ts: number | null | undefined): string {
-  if (typeof ts !== "number" || !Number.isFinite(ts)) return "—";
-  const d = new Date(ts * 1000);
+export function shortWhen(ts: string | null | undefined): string {
+  const secs = epochSeconds(ts);
+  if (secs === null) return "—";
+  const d = new Date(secs * 1000);
   const now = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   const sameDay =
@@ -97,9 +110,10 @@ export function shortWhen(ts: number | null | undefined): string {
 }
 
 /** The full stamp, for a title attribute. */
-export function fullWhen(ts: number | null | undefined): string | undefined {
-  if (typeof ts !== "number" || !Number.isFinite(ts)) return undefined;
-  return new Date(ts * 1000).toLocaleString();
+export function fullWhen(ts: string | null | undefined): string | undefined {
+  const secs = epochSeconds(ts);
+  if (secs === null) return undefined;
+  return new Date(secs * 1000).toLocaleString();
 }
 
 /** A run's display name. The id is the fallback rather than the primary: a

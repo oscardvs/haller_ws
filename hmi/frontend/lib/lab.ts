@@ -420,8 +420,13 @@ export type RunSummary = {
   kind: RunKind;
   name: string | null;
   status: RunStatus;
-  started_at: number | null;
-  finished_at: number | null;
+  /** ISO 8601 UTC, as `runs.py::_now()` writes it — `"2026-08-26T19:33:50+00:00"`,
+   *  never a unix number. The catalog sorts these as STRINGS
+   *  (`r.get("started_at") or ""`), which only works because they are. Typed
+   *  `number` here until 2026-08-27, which type-checked against a backend that
+   *  has never sent one: every `AT` cell and every elapsed read `—`. */
+  started_at: string | null;
+  finished_at: string | null;
   tags?: string[];
   /** A one-line rendering of the spec, made by the backend. Shown verbatim:
    *  the list must not re-derive a summary the detail view would word
@@ -454,7 +459,11 @@ export type MetricsPage = {
 export type LogPage = { offset: number; text: string };
 
 export type Checkpoint = {
-  step: number;
+  /** `null` for LeRobot's `last` symlink — the backend sends it that way ON
+   *  PURPOSE, as the only thing distinguishing `last` from the numbered
+   *  checkpoint it points at (`_checkpoint_wire`). Typed `number` here until
+   *  2026-08-27. */
+  step: number | null;
   path: string;
   /** False for a checkpoint directory the runner created but never finished
    *  writing — offering it as a rollout source would fail at load. */
