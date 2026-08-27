@@ -43,7 +43,8 @@ being fixed, with two conversions where the honest path has zero.
 
 **THE SERVER SIDE DOES NOT EXIST YET.** Track A owns the ingest. Every inbound
 spelling below (`ACK_TYPE`, `REFUSED_TYPE`, `OBSERVATION_TYPE`) is a named
-placeholder pending their publication, and so is `MIN_CONTROL_HZ_FRACTION`.
+placeholder pending their publication. The rate floor is NOT a placeholder
+any more: `safety.MIN_RATE_FRACTION` landed 2026-08-27 and is imported directly.
 When nothing is listening this child REFUSES, loudly, naming the endpoint. It
 does not fall back to driving the arm, and it does not stand up a server of its
 own.
@@ -59,7 +60,6 @@ stack and must never be asked to.
 """
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import socket
@@ -71,6 +71,7 @@ from urllib.parse import urlparse
 
 from ..lab.lease import port_holders
 from ..lab.schema import RigSpec
+from ..safety import MIN_RATE_FRACTION
 from ._common import load_spec, run_guarded
 
 __all__ = [
@@ -83,7 +84,7 @@ __all__ = [
     "HELLO_TYPE",
     "INGEST_URL_ENV",
     "MAX_DURATION_S",
-    "MIN_CONTROL_HZ_FRACTION",
+    "MIN_RATE_FRACTION",
     "OBSERVATION_TYPE",
     "RATE_ALERT_UNDER_S",
     "RATE_SIDECAR",
@@ -147,42 +148,6 @@ HANDSHAKE_TIMEOUT_S = 10.0
 
 # ---- the rate gate -------------------------------------------------------
 
-#: The fraction of the DECLARED control rate below which a rollout refuses to
-#: start.
-#:
-#: **This constant is Track A's to own and this is a placeholder pending their
-#: publication.** `rate_floor_fraction()` probes for the published one first
-#: and only falls back here, so the day it appears this module reads it with no
-#: edit. Recorded rather than inlined because the number is a policy decision
-#: about the arms, not a detail of this file.
-#:
-#: A policy trained on 30 Hz data and executed at 4.8 Hz is not a slow rollout,
-#: it is a DIFFERENT DYNAMICAL SYSTEM: action deltas sized for 33 ms steps
-#: applied over 208 ms. The kit's own rollout ran at 4.8 Hz against a 30 Hz
-#: target and was reported as a SUCCESSFUL RUN with that number attached
-#: nowhere. That is the failure this gate exists for.
-MIN_CONTROL_HZ_FRACTION = 0.90
-
-#: Module and attribute Track A publishes it as, agreed 2026-08-27. Probed BY
-#: NAME, and the name is the whole content of the agreement: this probe CANNOT
-#: distinguish "not published yet" from "published under a name I am not looking
-#: for" — both raise, both fall back, and because the fallback above is 0.90 and
-#: Track A's value is 0.9, a mis-aimed probe would agree with them by coincidence
-#: and read as working. Checking the VALUE is the check that passes here; only
-#: the module and attribute decide whether this reads Track A or merely happens
-#: to match them.
-#:
-#: The module must stay a LIGHT one. `haller_hmi.safety` imports enum, math and
-#: dataclasses and nothing else (verified); `haller_hmi.tick` will own the
-#: measurement and therefore reach `arm.py` and therefore lerobot, which this
-#: child must not import before `_rollout` and the tests must not import at all.
-#: That constraint is why the constant lives in safety.py rather than tick.py.
-#:
-#: The name is Track A's, not this module's: a `POLICY_` prefix would be wrong
-#: the moment the recorder gate reads the same constant, which it will. The
-#: threshold is a property of the rig's timing, not of what is driving it.
-_PUBLISHED_FRACTION = ("haller_hmi.safety", "MIN_RATE_FRACTION")
-
 #: How long the measured rate may sit under the floor mid-run before it is
 #: called out. Two seconds at a legitimate 30 Hz is 60 ticks — long enough that
 #: one slow inference step is not an alert, short enough that the operator hears
@@ -210,33 +175,23 @@ RATE_SIDECAR = "rollout.json"
 # ---- the plan ------------------------------------------------------------
 
 def rate_floor_fraction() -> float:
-    """Track A's published fraction, else `MIN_CONTROL_HZ_FRACTION`.
+    """Track A's published floor, read directly.
 
-    Probed rather than imported so that this module keeps working before the
-    constant exists — and probed only against a module that imports nothing
-    heavy, because a lazy `import lerobot` riding in on this lookup would break
-    `--dry-run` and the two-interpreter rule with it.
+    This was a name-probe with a local fallback until `MIN_RATE_FRACTION`
+    landed (2026-08-27, safety.py:33). The fallback is gone deliberately rather
+    than left as belt-and-braces: before publication a missing constant was
+    normal, but AFTER it a lookup that cannot find it is a rename, a move or a
+    typo — never "normal" — and swallowing that would hide the exact drift the
+    probe existed to prevent. A warning was the softer option and is not enough:
+    it still resolves to a number and still runs the arm. Absence is now an
+    ImportError at module load, which is the loudest and earliest it can be.
 
-    **This fallback has an expiry.** Absence is genuinely normal only until
-    Track A ships `haller_hmi.safety.MIN_RATE_FRACTION`. After that it stops
-    being resilience and becomes a bypass — the same shape as an ingest fallback
-    that drove the arm directly, and the same standing rule applies: fail loudly
-    at an absent dependency rather than substituting a local guess for it. On
-    the day it lands, DELETE this function and `MIN_CONTROL_HZ_FRACTION` with it
-    and import the constant at module scope. `safety.py` is stdlib-only, so a
-    direct import costs the two-interpreter rule nothing.
+    Imported at module scope safely because `safety.py` is stdlib-only — enum,
+    math, dataclasses. `haller_hmi.tick` owns the rate MEASUREMENT and therefore
+    reaches `arm.py` and therefore lerobot, which is why the constant lives in
+    safety.py and why this must never follow it somewhere heavier.
     """
-    module_name, attr = _PUBLISHED_FRACTION
-    try:
-        published = getattr(importlib.import_module(module_name), attr)
-        value = float(published)
-    except Exception:  # noqa: BLE001 - not published yet is the NORMAL case
-        return MIN_CONTROL_HZ_FRACTION
-    # A published 0 or a negative would disable the gate entirely, which is a
-    # typo rather than a decision. Anything above 1 would refuse every rollout.
-    if not (0.0 < value <= 1.0):
-        return MIN_CONTROL_HZ_FRACTION
-    return value
+    return MIN_RATE_FRACTION
 
 
 def rate_floor_hz(declared_hz: float) -> float:

@@ -32,7 +32,6 @@ it.
 """
 from __future__ import annotations
 
-import importlib
 import json
 import socket
 import subprocess
@@ -43,6 +42,7 @@ from pathlib import Path
 
 import pytest
 
+from haller_hmi import safety
 from haller_hmi.runners import rollout_runner as rr
 
 BACKEND = Path(__file__).resolve().parents[2]
@@ -535,48 +535,55 @@ def test_the_bus_check_asks_nothing_without_a_device(monkeypatch):
 # ---- the rate gate --------------------------------------------------------
 
 def test_the_rate_floor_is_a_fraction_of_the_declared_rate():
-    assert rr.rate_floor_hz(30.0) == pytest.approx(30.0 * rr.MIN_CONTROL_HZ_FRACTION)
+    assert rr.rate_floor_hz(30.0) == pytest.approx(30.0 * safety.MIN_RATE_FRACTION)
 
 
-def _publish(monkeypatch, value) -> None:
-    """Set the constant at the exact name the probe reads.
+def test_the_rate_fraction_IS_track_as_constant_and_not_a_local_copy():
+    """The floor must come FROM `safety`, not merely be a number that agrees
+    with it.
 
-    Derived from `rr._PUBLISHED_FRACTION` rather than spelled out, and that is
-    the point of the helper: a hard-coded name goes on passing after the probe
-    is retargeted, because it sets an attribute nobody looks at and the test
-    then asserts about a name that no longer exists anywhere. This helper cannot
-    drift from the probe — if the probe moves, these tests move with it.
+    This was a name-probe with a local 0.90 fallback until Track A published
+    `MIN_RATE_FRACTION = 0.9`. Both said 0.9, so every reading agreed whether
+    the probe was aimed correctly or not — "a test that passes on the fallback
+    path cannot tell the two apart". The identity check below is the one that
+    can: it moves the published value and requires this module to move with it,
+    which no local copy can do.
     """
-    module_name, attr = rr._PUBLISHED_FRACTION
-    monkeypatch.setattr(importlib.import_module(module_name), attr, value,
-                        raising=False)
+    assert rr.rate_floor_fraction() is safety.MIN_RATE_FRACTION
 
 
-def test_the_rate_fraction_is_read_from_track_a_when_it_is_published(monkeypatch):
-    """The fraction is Track A's to own and this side's to READ. The
-    module-level constant is a placeholder; the day the published one appears,
-    this module starts using it with no edit.
+def test_moving_the_published_value_moves_the_floor(monkeypatch):
+    """0.5, deliberately not 0.9: a value the old fallback could have produced
+    would pass whether or not this module reads Track A at all.
 
-    0.5, deliberately NOT the local fallback: this probe cannot tell "not
-    published yet" from "published under a name I am not looking for" — both
-    raise and both fall back — so a test using a value equal to the fallback
-    would pass whether the probe was aimed correctly or not. The published value
-    has to be one the fallback cannot produce for the assertion to mean
-    anything. (Track A's real value is 0.9 and so is the fallback, which is
-    exactly how a mis-aimed probe would have gone unnoticed.)
+    Patched on `rr`, not on `safety`, because `from ..safety import
+    MIN_RATE_FRACTION` binds the value at IMPORT time — which is right for a
+    constant and is exactly what makes the identity assertion above meaningful.
+    The two tests do different halves: that one proves the floor IS Track A's
+    object, this one proves `rate_floor_hz` derives from it rather than from a
+    second literal.
     """
-    _publish(monkeypatch, 0.5)
+    monkeypatch.setattr(rr, "MIN_RATE_FRACTION", 0.5)
 
     assert rr.rate_floor_fraction() == 0.5
     assert rr.rate_floor_hz(30.0) == 15.0
 
 
-def test_a_nonsense_published_fraction_falls_back_rather_than_disabling_the_gate(monkeypatch):
-    """A published 0 would disable the gate entirely and a published 2 would
-    refuse every rollout. Both are typos, not decisions."""
-    for bad in (0.0, -1.0, 2.0, "fast"):
-        _publish(monkeypatch, bad)
-        assert rr.rate_floor_fraction() == rr.MIN_CONTROL_HZ_FRACTION
+def test_the_floor_is_imported_rather_than_probed_with_a_fallback():
+    """The fallback is GONE, and its absence is the point.
+
+    Before publication a missing constant was normal. After it, a lookup that
+    cannot find it is a rename, a move or a typo — never normal — and swallowing
+    that would hide the exact drift the probe existed to prevent. A warning was
+    the softer option and is not enough: it still resolves to a number and still
+    runs the arm. Absence is now an ImportError at module load, the loudest and
+    earliest it can be.
+    """
+    source = Path(rr.__file__).read_text()
+
+    assert "MIN_CONTROL_HZ_FRACTION" not in source, "the local fallback is back"
+    assert "_PUBLISHED_FRACTION" not in source, "the name probe is back"
+    assert "from ..safety import MIN_RATE_FRACTION" in source
 
 
 def test_the_probe_names_a_module_that_stays_stdlib_only():
@@ -597,8 +604,7 @@ def test_the_probe_names_a_module_that_stays_stdlib_only():
     alone and fails in the suite — which is what the first version of this test
     did.
     """
-    module_name, _attr = rr._PUBLISHED_FRACTION
-    probe = (f"import sys; import {module_name}; "
+    probe = ("import sys; import haller_hmi.safety; "
              "print('torch' in sys.modules, 'lerobot' in sys.modules)")
 
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
