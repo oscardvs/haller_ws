@@ -43,6 +43,26 @@ root is falsifiable rather than the silence of a harness that could not write**.
 > shutdown does.** After a clean SIGTERM all three carried `PAR1` and all ten
 > episodes read back.
 >
+> **THE SECOND TRAP — arming too early, and it is not a race to paper over.**
+> `/record/arm` refuses on a cold backend until the idle sampler has filled its
+> rate window (`RATE_MIN_SAMPLES`, 30 publishes, ~1 s): `fps` is measured or the
+> episode does not open. Track A's advice is to poll until `fps_measured` is
+> non-null — **and that is not enough.** Non-null means the window is FULL, not
+> that the rate has SETTLED.
+>
+> Measured 2026-08-27 across 17 cold starts of Track A's in-process probe: **14
+> read 29.936–29.952 and armed cleanly; 3 read 27.138, 30.328 and 30.532 and
+> raised `RateUnfaithful` out of `_freeze_fps`** — about **18%**. `_freeze_fps`
+> rounds the measured rate to the nearest integer and applies ±0.5%, and none of
+> those three outliers satisfies any integer. One died as
+> `terminate called without an active exception`, SIGABRT, taking the process
+> with it.
+>
+> **So poll for a SETTLED rate, not a present one** — successive reads agreeing
+> inside the tolerance, or a reading already within the band of its own nearest
+> integer. A scripted arm-on-boot that waits only for non-null fails roughly one
+> run in five, and the failure looks like a gate defect rather than a warm-up.
+>
 > So: **V10's read-back must be done with the recorder DOWN.** Run against a live
 > one it reports a false corruption, and the failure it counterfeits is the exact
 > one the item exists to find — which is the worst possible collision. Chase the
