@@ -366,6 +366,16 @@ takes `fps` from exactly two places and never a third:
         CREATE:  fps = round(measured),  measured = float(tick_bus.rate_detail()["hz"])
         APPEND:  fps = self._existing_fps(repo_id)   # fixed by the dataset; must not be re-derived
 
+**The APPEND branch STRENGTHENS check (a)'s premise; it does not weaken it** — correcting the
+integrator, who read it as "a historical measurement" and stopped one line early. `:1312`
+gates the freshly measured rate against `existing` at the same 0.5%, and refuses above it
+(`_freeze_fps`: *"28.6 against a dataset written at 29 is 1.38% and refuses"*). So every
+episode ever appended was **re-attested** within 0.5% of that stored integer or it did not
+open. That is better than a per-session re-measure would be: a re-measure lets the number
+follow the rig as it drifts, while the append gate refuses the drift, so `info.json`'s `fps`
+stays true of the WHOLE dataset by construction rather than of whichever session wrote it
+last.
+
 **AND THE FIELD NAME CAMOUFLAGES THE REGRESSION.** The frozen integer is stored as
 `fps_declared` (`:364`, set at `:599` from `_freeze_fps`'s return). In this file "declared"
 means *the integer written to `info.json`* — NOT the operator's requested rate. So a 2d that

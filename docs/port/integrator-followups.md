@@ -153,6 +153,38 @@ and dies when that event happens. Add the trigger, not just the task.
   Correct figure: **7 suites, 177 tests**. **The continuity doc doing the opposite of
   continuity: a successor either redoes verified work or distrusts code that is now right.**
 
+- **Stamp `control_hz_trained_measured` in the rollout run record. APPROVED, Track B's, not
+  urgent.** *Trigger:* the first `haller_rate` dataset exists, i.e. after the mount. Filing it
+  now because that is the moment it becomes INVISIBLE — today the answer is uniformly
+  "declared", which is at least consistent.
+  **Check (a) is comparing a declaration against a declaration TODAY, at 100%.** Verified on
+  disk, read-only: both datasets carry `fps=30` with `haller_rate` **ABSENT** —
+
+        local/so101_pick_cube                                   fps=30   haller_rate=ABSENT
+        local/haller_pick_the_red_cube_and_place_it_in_the_box   fps=30   haller_rate=ABSENT
+
+  Both predate invariant 10, so both carry a mechanism-3 declared 30 — and `so101_pick_cube`
+  is what the only real ACT checkpoint on this box was trained on, the one check (a)'s link
+  chain was verified against. So the gate passes and stamps agreement, and **a PASS means two
+  different things depending on when the dataset was recorded, with nothing on the wire
+  saying which.** Track B reached the family the integrator and they were both watching for
+  in 2d from the opposite end: not a future regression, the legacy already on disk.
+  **The discriminator already exists and has zero positive instances**: `RATE_INFO_KEY =
+  "haller_rate"` (`recorder.py:149`), written at `:1374`. Present = measured by this recorder;
+  absent = provenance unknown. The moment 2d lands, the box holds both kinds and check (a)
+  treats them identically.
+  Ruled: stamp it beside the two numbers, as `control_hz_trained_measured: true|false|null`
+  off `haller_rate` presence. It fits the existing family exactly — `control_hz_trained_source`
+  and `control_hz_trained_reason` are already at `routes_runs.py:862-863`. This is
+  *record the value that must NOT be used beside the one that is*, one turn further: the
+  contract already makes both numbers reconstructible after the arm has moved, and this makes
+  **whether their agreement meant anything** reconstructible too.
+  **Explicitly ruled: do NOT refuse on a legacy dataset.** That would block the only real
+  checkpoint on this box over a number that is probably fine, and convert a caveat into a
+  blockade. **Refusing is the wrong response to "we cannot tell"; recording that we cannot
+  tell is the right one** — and the distinction matters because this port refuses a rollout
+  below rate on purpose, so "refuse when unsure" is a live and wrong instinct here.
+
 - **No RUNNING run has ever been rendered. `RunDetail`'s whole `status === "running"` branch
   has never executed.** *Trigger:* a long-lived run exists to watch — Track B exercising the
   rollout, or any train launch. *Owner:* Track C.
