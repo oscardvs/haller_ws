@@ -32,6 +32,7 @@ it.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import socket
 import subprocess
@@ -537,12 +538,34 @@ def test_the_rate_floor_is_a_fraction_of_the_declared_rate():
     assert rr.rate_floor_hz(30.0) == pytest.approx(30.0 * rr.MIN_CONTROL_HZ_FRACTION)
 
 
+def _publish(monkeypatch, value) -> None:
+    """Set the constant at the exact name the probe reads.
+
+    Derived from `rr._PUBLISHED_FRACTION` rather than spelled out, and that is
+    the point of the helper: a hard-coded name goes on passing after the probe
+    is retargeted, because it sets an attribute nobody looks at and the test
+    then asserts about a name that no longer exists anywhere. This helper cannot
+    drift from the probe — if the probe moves, these tests move with it.
+    """
+    module_name, attr = rr._PUBLISHED_FRACTION
+    monkeypatch.setattr(importlib.import_module(module_name), attr, value,
+                        raising=False)
+
+
 def test_the_rate_fraction_is_read_from_track_a_when_it_is_published(monkeypatch):
-    """The 90 % is Track A's to own and this side's to READ. The module-level
-    constant is a placeholder; the day the published one appears, this module
-    starts using it with no edit."""
-    from haller_hmi import safety
-    monkeypatch.setattr(safety, "POLICY_MIN_CONTROL_HZ_FRACTION", 0.5, raising=False)
+    """The fraction is Track A's to own and this side's to READ. The
+    module-level constant is a placeholder; the day the published one appears,
+    this module starts using it with no edit.
+
+    0.5, deliberately NOT the local fallback: this probe cannot tell "not
+    published yet" from "published under a name I am not looking for" — both
+    raise and both fall back — so a test using a value equal to the fallback
+    would pass whether the probe was aimed correctly or not. The published value
+    has to be one the fallback cannot produce for the assertion to mean
+    anything. (Track A's real value is 0.9 and so is the fallback, which is
+    exactly how a mis-aimed probe would have gone unnoticed.)
+    """
+    _publish(monkeypatch, 0.5)
 
     assert rr.rate_floor_fraction() == 0.5
     assert rr.rate_floor_hz(30.0) == 15.0
@@ -551,11 +574,26 @@ def test_the_rate_fraction_is_read_from_track_a_when_it_is_published(monkeypatch
 def test_a_nonsense_published_fraction_falls_back_rather_than_disabling_the_gate(monkeypatch):
     """A published 0 would disable the gate entirely and a published 2 would
     refuse every rollout. Both are typos, not decisions."""
-    from haller_hmi import safety
-
     for bad in (0.0, -1.0, 2.0, "fast"):
-        monkeypatch.setattr(safety, "POLICY_MIN_CONTROL_HZ_FRACTION", bad, raising=False)
+        _publish(monkeypatch, bad)
         assert rr.rate_floor_fraction() == rr.MIN_CONTROL_HZ_FRACTION
+
+
+def test_the_probe_names_a_module_that_stays_stdlib_only():
+    """The probe's module is imported by this child and by these tests, so it
+    must not reach lerobot.
+
+    `haller_hmi.tick` will own the rate MEASUREMENT and therefore `arm.py` and
+    therefore lerobot; `haller_hmi.safety` imports enum, math and dataclasses.
+    That constraint is why the constant lives in safety.py, and this asserts the
+    probe keeps pointing at a light module rather than following the constant if
+    it ever moves somewhere heavy.
+    """
+    module_name, _attr = rr._PUBLISHED_FRACTION
+    importlib.import_module(module_name)
+
+    assert "lerobot" not in sys.modules
+    assert "torch" not in sys.modules
 
 
 def test_the_rate_gate_refuses_below_the_floor_and_records_both_numbers(tmp_path):

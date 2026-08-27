@@ -163,11 +163,25 @@ HANDSHAKE_TIMEOUT_S = 10.0
 #: nowhere. That is the failure this gate exists for.
 MIN_CONTROL_HZ_FRACTION = 0.90
 
-#: Module and attribute Track A would publish it as. Probed BY NAME, and the
-#: module must stay a LIGHT one: `haller_hmi.safety` is stdlib-only, while
-#: `haller_hmi.human_teleop` reaches `arm.py` and therefore lerobot, which this
+#: Module and attribute Track A publishes it as, agreed 2026-08-27. Probed BY
+#: NAME, and the name is the whole content of the agreement: this probe CANNOT
+#: distinguish "not published yet" from "published under a name I am not looking
+#: for" — both raise, both fall back, and because the fallback above is 0.90 and
+#: Track A's value is 0.9, a mis-aimed probe would agree with them by coincidence
+#: and read as working. Checking the VALUE is the check that passes here; only
+#: the module and attribute decide whether this reads Track A or merely happens
+#: to match them.
+#:
+#: The module must stay a LIGHT one. `haller_hmi.safety` imports enum, math and
+#: dataclasses and nothing else (verified); `haller_hmi.tick` will own the
+#: measurement and therefore reach `arm.py` and therefore lerobot, which this
 #: child must not import before `_rollout` and the tests must not import at all.
-_PUBLISHED_FRACTION = ("haller_hmi.safety", "POLICY_MIN_CONTROL_HZ_FRACTION")
+#: That constraint is why the constant lives in safety.py rather than tick.py.
+#:
+#: The name is Track A's, not this module's: a `POLICY_` prefix would be wrong
+#: the moment the recorder gate reads the same constant, which it will. The
+#: threshold is a property of the rig's timing, not of what is driving it.
+_PUBLISHED_FRACTION = ("haller_hmi.safety", "MIN_RATE_FRACTION")
 
 #: How long the measured rate may sit under the floor mid-run before it is
 #: called out. Two seconds at a legitimate 30 Hz is 60 ticks — long enough that
@@ -202,6 +216,15 @@ def rate_floor_fraction() -> float:
     constant exists — and probed only against a module that imports nothing
     heavy, because a lazy `import lerobot` riding in on this lookup would break
     `--dry-run` and the two-interpreter rule with it.
+
+    **This fallback has an expiry.** Absence is genuinely normal only until
+    Track A ships `haller_hmi.safety.MIN_RATE_FRACTION`. After that it stops
+    being resilience and becomes a bypass — the same shape as an ingest fallback
+    that drove the arm directly, and the same standing rule applies: fail loudly
+    at an absent dependency rather than substituting a local guess for it. On
+    the day it lands, DELETE this function and `MIN_CONTROL_HZ_FRACTION` with it
+    and import the constant at module scope. `safety.py` is stdlib-only, so a
+    direct import costs the two-interpreter rule nothing.
     """
     module_name, attr = _PUBLISHED_FRACTION
     try:
