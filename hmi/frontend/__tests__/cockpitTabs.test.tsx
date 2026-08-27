@@ -243,6 +243,27 @@ describe("DatasetTab — take composition", () => {
     expect(shown.textContent).not.toMatch(/HTTP\s*400/);
   });
 
+  /** Click delete-last once it can actually BE clicked.
+   *
+   *  `findByRole` resolves as soon as the button EXISTS, and `DatasetTab`
+   *  renders it `disabled={recording || last === null}` — so it is present and
+   *  dead until `/record/episodes` lands. `fireEvent.click` on a disabled
+   *  button is swallowed silently, `armed` never flips, and the confirm
+   *  assertion below times out at the default 1000 ms. That reads as a slow
+   *  box, which is what it was mistaken for: measured at ~1 run in 25 on this
+   *  file alone, and it moved between the three tests sharing this shape,
+   *  which is exactly what made it look like scheduling noise.
+   *
+   *  This is a PRECONDITION fix. Every behavioural assertion downstream stays
+   *  exactly as strict — loosening one to cure a flake removes the reason the
+   *  test exists. Same class as Track D's residual at `9c2d087`: a click on a
+   *  disabled button, not a read resolving late. */
+  async function clickDeleteLast() {
+    const btn = await screen.findByRole("button", { name: /delete last episode/i });
+    await waitFor(() => expect(btn).toBeEnabled());
+    fireEvent.click(btn);
+  }
+
   it("names the newest episode on the confirm, not the last row", async () => {
     // "delete last" means the highest index. Naming the wrong one on a
     // confirm button is how an operator deletes a take they wanted.
@@ -258,7 +279,7 @@ describe("DatasetTab — take composition", () => {
     });
     render(<DatasetTab cameras={CAMS} onCameraRecord={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /delete last episode/i }));
+    await clickDeleteLast();
     expect(
       await screen.findByRole("button", { name: /confirm · delete ep 2/i }),
     ).toBeInTheDocument();
@@ -278,7 +299,7 @@ describe("DatasetTab — take composition", () => {
     });
     render(<DatasetTab cameras={CAMS} onCameraRecord={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /delete last episode/i }));
+    await clickDeleteLast();
     fireEvent.click(
       await screen.findByRole("button", { name: /confirm · delete ep 0/i }),
     );
@@ -302,7 +323,7 @@ describe("DatasetTab — take composition", () => {
     });
     render(<DatasetTab cameras={CAMS} onCameraRecord={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /delete last episode/i }));
+    await clickDeleteLast();
     fireEvent.click(
       await screen.findByRole("button", { name: /confirm · delete ep 0/i }),
     );
