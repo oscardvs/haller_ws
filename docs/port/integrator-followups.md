@@ -278,13 +278,24 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   (The code stayed: it still matches what the operator believes the anchor is. It is
   simply not load-bearing today, and saying so is the point.)
 
-- **A subordinate widget must not be able to unmount the workspace.** A malformed 200 on
+- **A subordinate widget must not be able to unmount the workspace.** *(Vindicated
+  within the hour it was added — see below.)* A malformed 200 on
   `/lab/datasets/trace` — no `names` field — threw inside render and took down the WHOLE
   review pane, so the operator lost the episode list and the marking controls over a
   chart. A conforming backend always sends the field, which is exactly why it went
   unnoticed. The failure mode was wildly out of proportion to the cause; the fix is one
   predicate narrowing a partial body to `null`, a state both charts already draw. A bad
   trace now costs a chart.
+
+  **It earned itself on first contact with the real backend.** The boundary was added
+  because a MOCK returning `{}` exposed a disproportionate blast radius. An hour later the
+  real router handed back a genuinely different shape — `Trace.gripper` is a LIST of
+  channel objects, not a `Record<string, number[]>` — and it threw against every real
+  trace. The boundary caught it, named it in place, and cost the gripper chart; the
+  episode list, player, traces and mark buttons all kept working. One commit earlier the
+  same throw would have unmounted the workspace, and the report would have been "the Data
+  tab is blank" rather than "the gripper chart cannot read this trace". Defensive
+  boundaries as evidence, not principle.
 
 - **A check that cannot fire in EITHER direction is dead code shaped like a safety
   check.** The preflight gripper gate was first diagnosed as a unit mismatch — percentage
