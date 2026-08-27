@@ -314,10 +314,27 @@ instrument for the class and it is not a substitute for the live pass; the
 docstring says so at the site, because the visible instrument silently becomes
 the whole procedure unless something says otherwise.
 
-`cdp.py` (still in `/home/odesha/haller-trackC-scratch/tools/`) drives an
-isolated headless chromium over CDP — needed because **the Playwright MCP
-browser profile is contended** and refuses outright with `Browser is already
-in use ... use --isolated`.
+`cdp.py` (still in `/home/odesha/haller-trackC-scratch/tools/`, NOT in the
+repo) drives an isolated headless chromium over CDP — needed because **the
+Playwright MCP browser profile is contended** and refuses outright with
+`Browser is already in use ... use --isolated`.
+
+**Read this before you debug it:** `cdp.py:10` pins
+`~/.cache/ms-playwright/chromium-1208/...`, a build number that is correct
+today and is owned by a system this repo does not control. On the next
+Playwright upgrade it dies with `FileNotFoundError` on a cache path, **which
+reads as "Playwright is broken" and sends the reader into the wrong repository
+entirely.** `chromium-1117` already sits beside `1208` on this box, so the
+churn is real and not hypothetical. The fix when it bites is discovery — glob
+`chromium-*/chrome-linux64/chrome`, take the highest build, and fail with a
+sentence naming what was searched — not a new pin.
+
+It is deliberately NOT in the repo yet, and the open question is not the pin.
+**`cdp.py` exists because a shared browser profile was contended, not because
+Playwright was insufficient** — it is a workaround, and a workaround promoted
+to repo residency outlives the problem it worked around. Whether the honest fix
+is `--isolated` on the MCP server instead is the integrator's ruling, and it is
+escalated, not dropped.
 
 **The four-liner in this section's history hoists nested keys; the tool
 cannot.** A hand-rolled `^\s*"(\w+)":` regex over `recorder.py` reads
