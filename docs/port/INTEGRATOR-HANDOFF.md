@@ -55,7 +55,7 @@ its 5 tests once `episode_index` is real.
 
 ## Baseline to protect
 
-- **backend `pytest`: 1601 passed, 1 xfailed — measured at commit `5c221cd`**, detached
+- **backend `pytest`: 1611 passed, 1 xfailed — measured at commit `f67ddbf`**, detached
   worktree, clean tree. **A baseline without a commit beside it is not a baseline**, and
   it must RECONCILE — every delta attributable:
 
@@ -64,6 +64,9 @@ its 5 tests once `episode_index` is real.
         5a0c525 + a60e274  Phase 2b  (Track A)     + 34  -> 1552
         d32cb3b  rollout route + gate (Track B)    + 45  -> 1597
         f7b862c  compare caps        (Track B)     +  4  -> 1601
+        b0f876e  server mount tests   (integrator)  +  5  -> 1606
+        154ca9c  arm effort, real+sim (Track A)     +  3  -> 1609
+        ff537da  tags on run detail   (Track B)     +  2  -> 1611
 
   **Report a delta as `base + N = total`, never a bare total.** A total is checkable only
   by its author and it credits everyone's work to whoever ran it last; a sum is checkable

@@ -375,6 +375,31 @@ applies to any probe that prunes, not only to a matrix.
   beside its commit AND its `git status`** — pinning the commit alone still misses a dirty
   tree at that commit.
 
+- **`+N on top` is not `base + N` — name the BASE COMMIT, not "the last number I saw".**
+  The integrator wrote *"your `ff537da` adds 2 on top"* of a 1601 baseline, which reads as
+  1603. **The tree was never at 1603.** Four commits had landed in between, so that work
+  was built on 1609; the delta was exactly +2, but the phrasing silently assumed nothing
+  arrived in the interval — and on this tree something always has. A ladder is only
+  checkable if every rung names the commit it stands on. Attribute the residual rather
+  than leaving it as a gap:
+
+        1601  5c221cd  settled baseline
+        +  0  802007d  ComparePane.tsx — frontend only
+        +  5  b0f876e  test_server_mount.py
+        +  3  154ca9c  arm effort, real + sim (Track A)
+        +  2  ff537da  tags on the run detail (Track B)
+        +  0  7ad8755, 058fb79, f67ddbf — docs
+        ----
+        1611  f67ddbf  (independently measured twice, two worktrees)
+
+- **A commit SCOPE word can span two owners' trees.** `docs(lab)` on `802007d` reads as
+  the Lab BACKEND track's territory; it is `hmi/frontend/components/lab/ComparePane.tsx`,
+  the Lab FRONTEND track's file, with zero backend effect. Track B checked before
+  measuring rather than assuming, and flagged it. Anyone later diffing "who touched lab"
+  hits the same moment of doubt. Not worth renaming retroactively — worth knowing that on
+  this branch `lab` is a feature area with two owners, and a scope word is not an
+  ownership claim.
+
 - **Report a suite delta as `base + N = total`, never as a bare total.** A total is a
   claim only its author can check; `base + N` is checkable by anyone holding a DIFFERENT
   tree, which on this branch is the normal condition rather than the exception. It also
