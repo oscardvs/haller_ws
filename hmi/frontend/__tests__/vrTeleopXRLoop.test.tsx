@@ -90,7 +90,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   };
 });
 
-import { ApiError } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { VRTeleopPanel } from "../components/VRTeleopPanel";
 
 // ---- the fake headset -------------------------------------------------------
@@ -241,6 +241,11 @@ beforeEach(async () => {
   humanTeleopStop.mockResolvedValue({ ok: true });
   // The local-gate ROLL path: /record/start, not /record/roll.
   recordStart.mockImplementation(async () => settle("recording"));
+  // `clearAllMocks` clears CALLS, not implementations, and `recordStatus`'s
+  // lives in the vi.mock factory rather than here — so a test that overrides it
+  // would leak that override into every test after it. Re-established per test.
+  vi.mocked(api.recordStatus).mockImplementation(
+    async () => ({ ...gate.status }) as Awaited<ReturnType<typeof api.recordStatus>>);
   hs = fakeHeadset();
   (globalThis as unknown as { WebSocket: unknown }).WebSocket = class {
     readyState = 0;
@@ -585,5 +590,64 @@ describe("the local gate, on a backend without /record/arm", () => {
     // And it did not silently roll on anyway.
     expect(recordRoll).not.toHaveBeenCalled();
     expect(recordStart).not.toHaveBeenCalled();
+  });
+});
+
+// ---- the reconcile race: a status read that predates the transition --------
+
+describe("a /record/status read that resolves across a transition", () => {
+  it("does not walk the take machine back to where the read was taken", async () => {
+    // Written from the CLAIM rather than from the guard it is aimed at, because
+    // the guard is what is in question: `armAct` settles the machine to ARMED
+    // from /record/arm's own answer, and the 250 ms poll then reconciles
+    // against whatever /record/status says. A read ISSUED BEFORE the hold still
+    // describes IDLE. If it lands AFTER the hold it is stale by exactly one
+    // transition, and reconciling to it walks the machine backwards.
+    //
+    // Asserted in the operator's terms, not the machine's: from ARMED the next
+    // A/X hold must ROLL. A machine that walked back to IDLE arms a second time
+    // instead, and no frames ever land — the operator holds A/X twice and is
+    // still not recording.
+    await enterSession();
+
+    // Freeze the poll. Every read from here is captured and left pending, so
+    // the one released below is provably a read taken BEFORE the arm.
+    const inFlight: Array<(v: unknown) => void> = [];
+    const asOfNow = { ...gate.status };            // idle, right now
+    vi.mocked(api.recordStatus).mockImplementation(
+      () => new Promise((res) => { inFlight.push(res as (v: unknown) => void); }));
+    await waitFor(() => expect(inFlight.length).toBeGreaterThan(0));
+
+    const t = await holdAX(hs, 1000);              // idle -> armed
+    expect(recordArm).toHaveBeenCalledTimes(1);
+
+    // ...and only now does the pre-arm read come back, still saying idle.
+    await act(async () => { inFlight[0](asOfNow); });
+
+    await holdAX(hs, t);                           // armed -> rolling
+    expect(recordRoll).toHaveBeenCalledTimes(1);
+    expect(recordArm).toHaveBeenCalledTimes(1);    // and NOT armed a second time
+  });
+
+  it("CONTROL: rolls when that same read resolves BEFORE the transition", async () => {
+    // The control for the test above, and the reason its red means anything.
+    // Identical harness — frozen poll, one released read — except the read is
+    // released BEFORE the arm, so it is not stale. If this did not roll either,
+    // the failure above would be a fact about the frozen poll and not about the
+    // race, and no amount of staring at the guard would have said so.
+    await enterSession();
+
+    const inFlight: Array<(v: unknown) => void> = [];
+    const asOfNow = { ...gate.status };
+    vi.mocked(api.recordStatus).mockImplementation(
+      () => new Promise((res) => { inFlight.push(res as (v: unknown) => void); }));
+    await waitFor(() => expect(inFlight.length).toBeGreaterThan(0));
+
+    await act(async () => { inFlight[0](asOfNow); });   // BEFORE the arm
+    const t = await holdAX(hs, 1000);                  // idle -> armed
+    expect(recordArm).toHaveBeenCalledTimes(1);
+
+    await holdAX(hs, t);                               // armed -> rolling
+    expect(recordRoll).toHaveBeenCalledTimes(1);
   });
 });

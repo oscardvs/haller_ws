@@ -270,6 +270,11 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // walk the HUD backwards — and fire the ROLL cue, the firmest in the
   // vocabulary, at an operator who is stopping a take.
   const actInFlightRef = useRef(false);
+  // Bumped on every LOCAL take transition. A status read carries the epoch it
+  // was ISSUED under; if the epoch has moved by the time it resolves, the read
+  // describes a state the machine has already left. `actInFlightRef` cannot
+  // catch that one — it is back to false by the time such a read lands.
+  const takeEpochRef = useRef(0);
   // What ARM settled on, so ROLL writes to the same dataset the gate opened.
   const gatePairRef = useRef<{ repoId: string; task: string } | null>(null);
   // When the operator last asked for home during the prompt and was told no.
@@ -399,6 +404,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     const t = setInterval(() => {
       // Recorder status rides the same poll: the HUD's REC line is the only
       // way an operator inside the headset can see a take rolling.
+      const issuedAt = takeEpochRef.current;
       api.recordStatus()
         .then((rs) => {
           if (!alive) return;
@@ -407,6 +413,11 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
           // yet: it still reports the one it is leaving, and reconciling to
           // that walks the HUD backwards.
           if (actInFlightRef.current) return;
+          // Issued before a transition and resolved after it: stale by exactly
+          // one move. Reconciling to it walks the machine backwards, and the
+          // operator's next A/X hold re-arms instead of rolling — they hold
+          // twice and are still not recording.
+          if (takeEpochRef.current !== issuedAt) return;
           // Otherwise the recorder's own state outranks the client's guess: a
           // take that ended some other way — a recorder fault, the cockpit
           // stopping it — takes the decision with it, and a gate that was
@@ -514,6 +525,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     // Exiting VR stops teleop, which invalidates an armed gate on the
     // backend's own rule, so leaving disarms without a command.
     takeRef.current = "idle";
+    takeEpochRef.current += 1;
     setTake("idle");
     setArmSet(null);
     if (session) {
@@ -612,6 +624,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     const cue = recorderHapticCue(from, to, null);
     if (cue) buzzBoth(cue.intensity, cue.durationMs);
     takeRef.current = to;
+    takeEpochRef.current += 1;
     setTake(to);
   }, [buzzBoth]);
 
@@ -758,6 +771,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       from, tr.state, ev.kind === "choose" ? ev.choice : null);
     if (cue) buzzBoth(cue.intensity, cue.durationMs);
     takeRef.current = tr.state;
+    takeEpochRef.current += 1;
     setTake(tr.state);
     // The prompt is modal — both sticks are its own — so an open tuning list
     // has to go, or the right stick walks a knob list and answers the prompt
