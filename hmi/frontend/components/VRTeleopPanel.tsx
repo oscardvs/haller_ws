@@ -738,16 +738,38 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       // The reply's count where it has one, else the last poll's: a recorder
       // that zeroes the counter on stop must not report a 0-frame take.
       const frames = st?.episode_frames || before;
+      // What the recorder DID, never what we asked it for.
+      //
+      // `{rearm: true}` whose save lands and whose re-arm is refused is a
+      // 200 carrying `state:"idle"` and a reason — deliberately not a 409,
+      // because a 409 would report a banked take as a failure. So the ask is
+      // no longer evidence of the outcome, and a toast built from `act.rearm`
+      // would announce a gate that is DOWN at the one moment the operator is
+      // deciding whether to keep driving. The poll reconciles the state a
+      // quarter-second later and the HUD paints `GATE DROPPED — <reason>`,
+      // but the toast is what gets read at the decision, and it would have
+      // substituted a wrong conclusion rather than withholding one.
+      //
+      // Under a LOCAL gate there is no backend verdict to read: `rearm` was
+      // never sent, and the re-arm below is this page's own. Reading `state`
+      // there would invent a refusal that did not happen.
+      const rearmed = gateServerRef.current ? st?.state === "armed" : act.rearm;
+      const refused = act.rearm && !rearmed;
+      const why = st?.invalidated_reason ? ` — ${st.invalidated_reason}` : "";
       if (act.save) {
         takesRef.current += 1;
         setTakes(takesRef.current);
-        toast.success(`take ${takesRef.current} saved — ${frames} frames`
-          + (act.rearm ? " · armed for the next" : ""));
+        // The take is SAFE either way, and the copy says so first: a refused
+        // re-arm must not read as a lost take.
+        const saved = `take ${takesRef.current} saved — ${frames} frames`;
+        if (refused) toast.error(`${saved} · NOT re-armed${why}`);
+        else toast.success(saved + (rearmed ? " · armed for the next" : ""));
       } else {
         // Never touches disk: an episode buffer that is never saved is
         // dropped and the index does not advance.
-        toast.info("take discarded"
-          + (act.rearm ? " — armed again, same episode" : ""));
+        if (refused) toast.error(`take discarded · NOT re-armed${why}`);
+        else toast.info("take discarded"
+          + (rearmed ? " — armed again, same episode" : ""));
       }
       void refreshEpisodes(st?.repo_id);
       await rec.refresh();
@@ -1154,12 +1176,14 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
             invalidatedReason: rs?.invalidated_reason ?? null,
             localGate: gateServerRef.current === false,
             takes: takesRef.current,
-            // The gate's own index where there is one. The floor under the
-            // fallback exists because lerobot buffers ten episodes' metadata
-            // in RAM, and it goes when the gate's index is everywhere.
-            episodes: typeof rs?.episode_index === "number"
-              ? rs.episode_index
-              : episodesTotal(tallyRef.current, takesRef.current) },
+            // Two fields because they are two facts. The gate's index names
+            // the take in hand and is null unless one is armed; the count is
+            // the idle menu's, and is still a guess past lerobot's RAM buffer.
+            // The fallback that used to sit between them is GONE: a backend
+            // with no gate now reads `take N`, which is true, instead of
+            // `ep N` off a count that was right only by coincidence.
+            episodeIndex: rs?.episode_index ?? null,
+            datasetCount: episodesTotal(tallyRef.current, takesRef.current) },
           menuRef.current && {
             ...menuRef.current,
             tuning: { open: tuneOpenRef.current,
@@ -1218,13 +1242,16 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // so there is no "operator looked at another tab" case to preserve.
   useEffect(() => () => { void teardown({ stopBackend: true }); }, [teardown]);
 
+  // The COUNT, and it stays: `N in dataset` below is the size of the dataset,
+  // which no gate index reports. It is still guessed past lerobot's RAM
+  // buffer, so it still stalls at 7 while the operator banks their tenth.
   const datasetEpisodes = episodesTotal(tally, takes);
-  // How a take is named on both surfaces: the index the gate resolved where
-  // there is one, else the dataset count with this page's own take counter as
-  // its floor. "ep 34" is what an operator reconciles against the dataset
-  // browser afterwards; "take 3" is only ever true of this page-load.
-  const episodeIdx = recStatus?.episode_index
-    ?? datasetEpisodes;
+  // How a take is named on both surfaces: the index the gate resolved, and
+  // nothing else. "ep 34" is what an operator reconciles against the dataset
+  // browser afterwards; "take 3" is only ever true of this page-load, and is
+  // what an ungated backend honestly gets. The count is NOT a stand-in — it
+  // renumbers differently and is null at different moments.
+  const episodeIdx = recStatus?.episode_index ?? null;
   const takeName = episodeIdx === null ? `take ${takes + 1}` : `ep ${episodeIdx}`;
   const clutch = status?.clutch;
   const running = Boolean(status?.running);

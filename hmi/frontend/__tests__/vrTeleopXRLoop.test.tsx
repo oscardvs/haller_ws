@@ -345,6 +345,61 @@ describe("the right stick while the prompt is open", () => {
 
 // ---- the ladder itself, through the real loop -------------------------------
 
+// ---- the re-arm that was asked for and refused -------------------------------
+
+describe("a re-arm the recorder refused", () => {
+  /** The contract that makes this reachable: a `{save, rearm}` whose save
+   *  lands and whose re-arm does not is a 200 carrying `state:"idle"` and a
+   *  reason — NOT a 409, because a 409 would report a banked take as a
+   *  failure. So a 200 is no longer evidence that the ask was honoured. */
+  const refuseRearm = () =>
+    recordStop.mockImplementation(async () => ({
+      ok: true, state: "idle", recording: false, episode_frames: 412,
+      episode_index: null, repo_id: "u/haller_pick", task: "pick",
+      invalidated_reason: "re-arm refused: bus timeout on right_arm",
+    }));
+
+  it("says NOT re-armed, rather than announcing a gate that is down", async () => {
+    refuseRearm();
+    const t = await intoThePrompt();
+    await holdStick(hs, "left", t, 120);              // keep: {save, rearm}
+
+    const said = (toast.error as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]));
+    expect(said.some((m) => m.includes("NOT re-armed"))).toBe(true);
+    expect(said.some((m) => m.includes("bus timeout on right_arm"))).toBe(true);
+    // The claim that would have been made from the ask instead of the outcome.
+    const claimed = (toast.success as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]));
+    expect(claimed.some((m) => m.includes("armed for the next"))).toBe(false);
+  });
+
+  it("still reports the take as SAVED, because it was", async () => {
+    // A refused re-arm must not read as a lost take. The frames are on disk;
+    // only the next gate is not open. Leading with the failure would send an
+    // operator hunting for a take that is sitting safely in the dataset.
+    refuseRearm();
+    const t = await intoThePrompt();
+    await holdStick(hs, "left", t, 120);
+
+    const said = (toast.error as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]));
+    expect(said.some((m) => m.includes("saved") && m.includes("412"))).toBe(true);
+  });
+
+  it("still says armed for the next when the re-arm actually landed", async () => {
+    // The other side of the same read: the default harness re-arms, and the
+    // happy path must keep the words it has always had. Without this, dropping
+    // the announcement entirely would pass the two tests above.
+    const t = await intoThePrompt();
+    await holdStick(hs, "left", t, 120);
+
+    const claimed = (toast.success as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]));
+    expect(claimed.some((m) => m.includes("armed for the next"))).toBe(true);
+  });
+});
+
 describe("the A/X ladder, driven through the XR loop", () => {
   it("arms before it rolls, and writes nothing in between", async () => {
     render(<VRTeleopPanel arms={ARMS} />);

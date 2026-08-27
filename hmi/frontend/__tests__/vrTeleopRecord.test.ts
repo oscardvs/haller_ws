@@ -70,13 +70,13 @@ const driving = {
 
 /** Loaded and writing nothing — the resting state of a recording session. */
 const armedRec: NonNullable<RecorderHudLike> = {
-  state: "armed", recording: false, episode_frames: 0, episodes: 12,
+  state: "armed", recording: false, episode_frames: 0, episodeIndex: 12,
 };
 
 /** Mid-take, and the same object the prompt paints from: the recorder is
  *  still rolling while the operator decides. */
 const rollingRec: NonNullable<RecorderHudLike> = {
-  state: "rolling", recording: true, episode_frames: 412, episodes: 12,
+  state: "rolling", recording: true, episode_frames: 412, episodeIndex: 12,
 };
 
 /** Every cue the §1b table names, as the transition that produces it. Kept as
@@ -446,6 +446,45 @@ describe("paintHud and the start gate", () => {
     expect(text()).toContain("A/X to END");
   });
 
+  it("names the take off the gate's index, and never off the dataset count", () => {
+    // The two fields exist because they are two facts. `episodeIndex` names
+    // the take in hand; `datasetCount` is how big the dataset is. They agree
+    // on the happy path — 0-based sequential indices into a dataset nothing
+    // has pruned — and that agreement is exactly what made one field look
+    // like enough. Pin them DISAGREEING, which is the state a prune produces
+    // and the state no single field can represent.
+    const { ctx, text } = stubCtx();
+    paintHud(ctx, {}, { ...armedRec, episodeIndex: 12, datasetCount: 99 }, menu);
+    expect(text()).toContain("◆ ARMED ep 12");
+    expect(text()).not.toContain("ep 99");
+  });
+
+  it("names the take off this page when the backend has no gate index", () => {
+    // The retirement, and the whole of it. `episode_index` is absent on a
+    // backend with no start gate, and null on a gated one whenever nothing is
+    // armed — the recorder sets it at ARM and clears it at STOP. What used to
+    // fill that hole was the dataset count, which is right only by
+    // coincidence. `take 3` is true of this page-load; `ep 34` off a count
+    // would be a claim about a dataset this page cannot make.
+    const { ctx, text } = stubCtx();
+    paintHud(ctx, {}, { state: "armed", recording: false, episode_frames: 0,
+                        takes: 2, datasetCount: 34 }, menu);
+    expect(text()).toContain("◆ ARMED take 3");
+    expect(text()).not.toContain("ep 34");
+    expect(text()).not.toContain("ep ");
+  });
+
+  it("counts the dataset on the idle row, where the gate has no index to give", () => {
+    // The one reader that wants the COUNT, and the row that paints in exactly
+    // the state where `episodeIndex` is null by construction. It was painted
+    // and unpinned: the width tests measured the row, so a wrong number would
+    // have fitted the box perfectly and said nothing.
+    const { ctx, text } = stubCtx();
+    paintHud(ctx, {}, { recording: false, episode_frames: 0, datasetCount: 34 },
+             menu);
+    expect(text()).toContain("hold A/X to ARM  (34 in dataset)");
+  });
+
   it("takes the whole box for the decision, and names both gestures", () => {
     const { ctx, text } = stubCtx();
     paintHud(ctx, {}, rollingRec, { ...menu, endPrompt: true });
@@ -550,7 +589,8 @@ describe("paintHud and the start gate", () => {
     expect(() => paintHud(ctx, {}, { recording: false, episode_frames: 0 }, menu))
       .not.toThrow();
     expect(() => paintHud(ctx, {}, {
-      ...rollingRec, episodes: null, worstDrop: null, fpsMeasured: null,
+      ...rollingRec, episodeIndex: null, datasetCount: null,
+      worstDrop: null, fpsMeasured: null,
       fpsDeclared: null, invalidatedReason: null,
     }, { ...menu, armSet: null, tuning: null })).not.toThrow();
   });
@@ -589,7 +629,8 @@ describe("every painted row fits the box it is painted in", () => {
   const paints: [string, () => ReturnType<typeof stubCtx>][] = [
     ["idle", () => {
       const s = stubCtx();
-      paintHud(s.ctx, driving, { recording: false, episode_frames: 0, episodes: 12 },
+      paintHud(s.ctx, driving,
+               { recording: false, episode_frames: 0, datasetCount: 12 },
                { ...menu, stance: "behind", armSet: { left: "left_arm", right: "right_arm" } });
       return s;
     }],

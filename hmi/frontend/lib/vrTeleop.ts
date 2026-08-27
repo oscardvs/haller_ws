@@ -567,18 +567,34 @@ export type RecorderHudLike = {
   /** Takes this page has saved — the fallback count, and the floor under the
    *  dataset-wide one. */
   takes?: number;
-  /** Episodes already in the dataset, so a rolling take can be named by the
-   *  index it will actually land at (they are 0-based and sequential, so with
-   *  N on disk the one in flight is N). Null when no dataset has been read —
-   *  a fresh repo, or the endpoint refused. */
-  episodes?: number | null;
+  /** The gate's index for the take in hand — `episode_index` off
+   *  `GET /record/status`, and nothing else. **Null whenever no take is
+   *  armed:** the recorder sets it at ARM and clears it at STOP, so idle is
+   *  null by construction, and a backend with no start gate never sends it at
+   *  all. The take is then named `take N` off this page's own counter, which
+   *  is true of the page-load, rather than `ep N` off a count that would be
+   *  right only by coincidence.
+   *
+   *  This REPLACED a field called `episodes` that every reader below took as
+   *  an index except the idle menu, which took it as a count. The two agreed
+   *  for as long as `episode_index` did not exist. A different meaning got a
+   *  different name so a stale reader breaks at the type rather than painting
+   *  the wrong number — same reasoning as `record_rate_tolerance`. */
+  episodeIndex?: number | null;
+  /** How many episodes the DATASET holds. A count, and the idle menu is its
+   *  only reader. **Not interchangeable with `episodeIndex`:** that one names
+   *  the take in hand and renumbers across a prune, this one counts what is on
+   *  disk and is still guessed past lerobot's RAM buffer (`episodesTotal`).
+   *  They coincide on the happy path and are not the same fact. Null when no
+   *  dataset has been read — a fresh repo, or the endpoint refused. */
+  datasetCount?: number | null;
 } | null;
 
 /** How a take is named. The dataset-wide index when there is one — "ep 34" is
  *  what an operator reconciles against the dataset browser afterwards, where
  *  "take 3" is only ever true of this page-load. */
 function takeNaming(rec: RecorderHudLike): string {
-  const ep = rec?.episodes;
+  const ep = rec?.episodeIndex;
   return typeof ep === "number" ? `ep ${ep}` : `take ${(rec?.takes ?? 0) + 1}`;
 }
 
@@ -786,7 +802,7 @@ export function paintHud(
         leftW, y);
     } else {
       ctx.fillStyle = "#f28b82";
-      const ep = rec.episodes;
+      const ep = rec.episodeIndex;
       ctx.fillText(
         typeof ep === "number"
           ? `● REC ep ${ep} · ${rec.episode_frames}`
@@ -1069,15 +1085,18 @@ function paintViewMenu(
   }
 
   const takes = rec?.takes ?? 0;
-  const ep = rec?.episodes;
+  // The COUNT, not the index — this row is the one reader that wants the size
+  // of the dataset, and it is the row that paints while idle, which is exactly
+  // when the gate's index is null.
+  const count = rec?.datasetCount;
   const naming = takeNaming(rec);
   // Three-way, because ARM and ROLL are two different commands on the same
   // button and the operator has to know which one the next hold fires. A
   // backend that predates the gate reports only `recording`.
   const takeState: TakeState = rec?.state ?? (rec?.recording ? "rolling" : "idle");
   const rolling = takeState === "rolling" || takeState === "prompt";
-  const idle = typeof ep === "number"
-    ? `hold A/X to ARM  (${ep} in dataset)`
+  const idle = typeof count === "number"
+    ? `hold A/X to ARM  (${count} in dataset)`
     : takes
       ? `hold A/X to ARM a take  (${takes} saved)`
       : "hold A/X to ARM a take";
