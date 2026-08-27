@@ -29,7 +29,6 @@ import {
 import { toast } from "sonner";
 
 import {
-  gripperGuides,
   isBusy,
   isForbidden,
   isMissing,
@@ -744,11 +743,9 @@ export function ReviewPane({
           <div className="flex min-h-0 shrink-0 flex-col gap-2">
             {traceError && <Refusal>{traceError}</Refusal>}
             <PaneBoundary what="the gripper chart">
-              <GripperChart
-                trace={trace}
-                playheadT={playheadT}
-                guides={gripperGuides(selected)}
-              />
+              {/* The thresholds ride on the trace's own gripper channels, so
+                  the line and the guides under it come from one response. */}
+              <GripperChart trace={trace} playheadT={playheadT} />
             </PaneBoundary>
           </div>
 

@@ -216,12 +216,27 @@ export type FeatureSpec = {
   names?: string[] | Record<string, unknown> | null;
 };
 
-/** What a gripper chart draws its guides from: one pair per arm, taken from
- *  the grader's own numbers. See `gripperGuides`. */
-export type GripperGuide = {
+/**
+ * One gripper channel, as the trace endpoint isolates it.
+ *
+ * Carries its own thresholds, which is why nothing else has to look them up:
+ * `closed_below` / `open_above` here are the exact floats `grade.py` graded
+ * this episode with, index-aligned to the channel they describe. The episode's
+ * `arms[]` carries the same pair, and taking it from there instead would be a
+ * second source for one number — the shape this whole surface has been
+ * avoiding. Measured on disk: 40.0 / 70.0 on the kit's dataset, 34.13 / 67.20
+ * on Haller's degree-calibrated one.
+ */
+export type GripperChannel = {
+  /** "left" / "right", or "" on a solo rig. */
   side: string;
+  /** The column name, e.g. `gripper.pos` or `left_gripper`. */
+  name: string;
+  /** Its index into `state` / `action`. */
+  index: number;
   closed_below: number;
   open_above: number;
+  values: number[];
 };
 
 export type DatasetDetail = {
@@ -271,9 +286,10 @@ export type Trace = {
   action: number[][];
   /** Measured, `[channel][sample]`. What the arm did. */
   state: number[][];
-  /** Gripper channels by name, already isolated so a chart does not have to
-   *  guess which of twelve columns closes on the object. */
-  gripper?: Record<string, number[]>;
+  /** The gripper channels, already isolated so a chart does not have to guess
+   *  which of twelve columns closes on the object — and carrying the
+   *  thresholds each was graded against. */
+  gripper?: GripperChannel[];
 };
 
 /** The held-out plan, straight from the server.
@@ -623,28 +639,6 @@ export function videoSrcKey(repoId: string, ep: LabEpisode, key: string | null):
     return `${repoId}|${key}|${s.chunk_index}|${s.file_index}`;
   }
   return `${repoId}|${key}|${ep.episode_index}`;
-}
-
-/**
- * The gripper guides for one episode: the thresholds it was actually GRADED
- * with, per arm.
- *
- * Empty when the backend did not send them, and the chart then draws no
- * guides at all rather than the kit's 40/70. The kit could hardcode those
- * because it had one rig with a 0..100 gripper; on Haller's dataset the
- * gripper is calibrated in degrees over [-9.97, 100.27] and the same
- * fractions land at 34.13 / 67.20, so a hardcoded pair would call every
- * grasp a failure.
- */
-export function gripperGuides(ep: LabEpisode | null): GripperGuide[] {
-  if (!ep?.arms) return [];
-  return ep.arms
-    .filter((a) => typeof a.closed_below === "number" && typeof a.open_above === "number")
-    .map((a) => ({
-      side: a.side,
-      closed_below: a.closed_below as number,
-      open_above: a.open_above as number,
-    }));
 }
 
 /**

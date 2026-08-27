@@ -11,10 +11,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { ApiError } from "@/lib/api";
 import {
-  armGroups, epLabel, gripperGuides, isBusy, isForbidden, isMissing,
+  armGroups, epLabel, isBusy, isDrawableTrace, isForbidden, isMissing,
   isGripperChannel, lab, labVideoUrl, metricKeys, metricX, qs, reason,
   rigLabel, shortChannel, sliceFor, videoSrcKey,
-  type LabEpisode, type MetricRow,
+  type LabEpisode, type MetricRow, type Trace,
 } from "@/lib/lab";
 
 /** Routes fetch by path so a call's boot requests need not be ordered.
@@ -205,43 +205,38 @@ describe("rig-shaped trace readings", () => {
   });
 });
 
-describe("gripper guides", () => {
-  it("takes the thresholds the episode was GRADED with", () => {
-    // Measured on disk: the kit's dataset grades at 40.0/70.0, and the
-    // bimanual one — whose gripper is calibrated in DEGREES over
-    // [-9.97, 100.27] — at 34.1254/67.1965. A hardcoded 40/70 would call
-    // every bimanual grasp a failure.
-    const bimanual = ep({
-      arms: [
-        {
-          side: "left", verdict: "PASS", why: "", closes: 1, reopened: true,
-          grip_min: 0, grip_max: 100, tracking: 1.4, sweep_total: 900,
-          closed_below: 34.1254, open_above: 67.1965,
-        },
-        {
-          side: "right", verdict: "PASS", why: "", closes: 1, reopened: true,
-          grip_min: 0, grip_max: 100, tracking: 1.1, sweep_total: 880,
-          closed_below: 34.1254, open_above: 67.1965,
-        },
+describe("gripper channels", () => {
+  it("takes the thresholds from the trace's own channels", () => {
+    // Measured on disk through the real backend: the kit's dataset grades at
+    // 40.0 / 70.0, and the bimanual one — gripper calibrated in DEGREES over
+    // [-9.97, 100.27] — at 34.13 / 67.20. The channel carries its own pair, so
+    // the line and the guide under it come from one response and cannot
+    // disagree. A hardcoded 40/70 would call every bimanual grasp a failure.
+    const trace: Trace = {
+      names: ["left_shoulder_pan", "left_gripper", "right_gripper"],
+      t: [0, 0.033],
+      state: [[1, 2], [90, 30], [88, 31]],
+      action: [[1, 2], [90, 30], [88, 31]],
+      gripper: [
+        { side: "left", name: "left_gripper", index: 1,
+          closed_below: 34.1254, open_above: 67.1965, values: [90, 30] },
+        { side: "right", name: "right_gripper", index: 2,
+          closed_below: 34.1254, open_above: 67.1965, values: [88, 31] },
       ],
-    });
-    expect(gripperGuides(bimanual)).toEqual([
-      { side: "left", closed_below: 34.1254, open_above: 67.1965 },
-      { side: "right", closed_below: 34.1254, open_above: 67.1965 },
-    ]);
+    };
+    expect(trace.gripper?.map((g) => g.name))
+      .toEqual(["left_gripper", "right_gripper"]);
+    expect(trace.gripper?.every((g) => g.closed_below === 34.1254)).toBe(true);
   });
 
-  it("draws nothing at all when the backend sent no thresholds", () => {
-    // An invented guide is worse than a missing one: it looks like a
-    // measurement, and the verdict beside it would disagree with it.
-    expect(gripperGuides(ep())).toEqual([]);
-    expect(gripperGuides(null)).toEqual([]);
-    expect(gripperGuides(ep({
-      arms: [{
-        side: "", verdict: "PASS", why: "", closes: 1, reopened: true,
-        grip_min: 0, grip_max: 100, tracking: 1, sweep_total: 100,
-      }],
-    }))).toEqual([]);
+  it("is drawable only with every array the charts read", () => {
+    // A partial body arriving with a 200 makes `names.map` throw INSIDE a
+    // render, which unmounts the pane rather than the chart.
+    const full: Trace = { names: ["a"], t: [0], state: [[1]], action: [[1]] };
+    expect(isDrawableTrace(full)).toBe(true);
+    expect(isDrawableTrace(null)).toBe(false);
+    expect(isDrawableTrace({} as Trace)).toBe(false);
+    expect(isDrawableTrace({ names: ["a"], t: [0], state: [[1]] } as Trace)).toBe(false);
   });
 });
 

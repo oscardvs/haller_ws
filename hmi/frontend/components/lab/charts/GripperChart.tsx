@@ -24,7 +24,7 @@
  */
 import { useMemo } from "react";
 
-import { isDrawableTrace, isGripperChannel, type GripperGuide, type Trace } from "@/lib/lab";
+import { isDrawableTrace, isGripperChannel, type Trace } from "@/lib/lab";
 import { Panel, PanelHead } from "@/components/lab/ui";
 import { ChartLegend, LineChart, type Guide, type Series } from "./LineChart";
 import { extent, padDomain, secondsTickFormat, seriesColor } from "./svg";
@@ -36,50 +36,42 @@ const HEIGHT = 104;
 const gripperLabel = (name: string) =>
   name.replace(/\.pos$/, "").replace(/_/g, " ");
 
-/**
- * The guide pair for one gripper channel, or null.
- *
- * `arms[]` is keyed by SIDE (`"left"`, `"right"`, or `""` on a solo rig) and
- * the trace's gripper channels are named (`left_gripper`, `gripper.pos`). The
- * match is by side prefix, and a solo rig's single unprefixed arm matches its
- * single channel. Nothing is invented when neither hits.
- */
-function guideFor(guides: GripperGuide[], name: string): GripperGuide | null {
-  if (guides.length === 0) return null;
-  const m = /^(left|right)[_.]/.exec(name);
-  const side = m ? m[1] : "";
-  const bySide = guides.find((g) => g.side === side);
-  if (bySide) return bySide;
-  // A solo rig reports `side: ""` whatever the channel is called.
-  return guides.length === 1 ? guides[0] : null;
-}
-
 export function GripperChart({
   trace: rawTrace,
   playheadT,
-  guides: given = [],
 }: {
   trace: Trace | null;
   /** Episode-relative seconds from the player, or null when nothing plays. */
   playheadT: number | null;
-  /** `gripperGuides(episode)` — the thresholds this episode was graded with,
-   *  per arm. Empty on a backend that sends none, and then no guide is drawn. */
-  guides?: GripperGuide[];
 }): React.ReactElement {
   // A partial body arriving with a 200 is "no trace", not a render-phase throw
   // that takes the review pane down with it. See `isDrawableTrace`.
   const trace = isDrawableTrace(rawTrace) ? rawTrace : null;
 
-  // `trace.gripper` is the backend's own isolation of these columns. The scan
-  // is the fallback for a backend that does not send it.
+  // `trace.gripper` is the backend's own isolation of these columns, and it
+  // carries the thresholds each channel was GRADED against — so the line and
+  // the guides under it come from one place and cannot disagree. The scan is
+  // the fallback for a backend that does not send it, and it can only produce
+  // lines: there is nothing to draw a guide from, and an invented one looks
+  // like a measurement.
   const channels = useMemo(() => {
     if (!trace) return [];
     const packed = trace.gripper;
-    if (packed && Object.keys(packed).length > 0) {
-      return Object.entries(packed).map(([name, ys]) => ({ name, ys }));
+    if (Array.isArray(packed) && packed.length > 0) {
+      return packed.map((g) => ({
+        name: g.name,
+        ys: g.values ?? trace.state[g.index] ?? [],
+        closed_below: g.closed_below,
+        open_above: g.open_above,
+      }));
     }
     return trace.names
-      .map((name, i) => ({ name, ys: trace.state[i] ?? [] }))
+      .map((name, i) => ({
+        name,
+        ys: trace.state[i] ?? [],
+        closed_below: undefined as number | undefined,
+        open_above: undefined as number | undefined,
+      }))
       .filter((c) => isGripperChannel(c.name));
   }, [trace]);
 
@@ -88,14 +80,12 @@ export function GripperChart({
     const seen = new Set<string>();
     const missing: string[] = [];
     for (const c of channels) {
-      const g = guideFor(given, c.name);
-      if (!g) {
+      if (!Number.isFinite(c.closed_below) || !Number.isFinite(c.open_above)) {
         missing.push(c.name);
         continue;
       }
       for (const [at, label] of
-           [[g.closed_below, "closed"], [g.open_above, "open"]] as const) {
-        if (!Number.isFinite(at)) continue;
+           [[c.closed_below as number, "closed"], [c.open_above as number, "open"]] as const) {
         // Both arms usually share one calibration; drawing the same rule twice
         // makes a 1px line look like a 2px one.
         const key = `${label}:${at.toFixed(4)}`;
@@ -105,7 +95,7 @@ export function GripperChart({
       }
     }
     return { guides: out, uncalibrated: missing };
-  }, [channels, given]);
+  }, [channels]);
 
   const series: Series[] = channels.map((c, i) => ({
     id: c.name,
