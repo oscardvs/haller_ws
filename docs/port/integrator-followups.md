@@ -62,12 +62,31 @@ and dies when that event happens. Add the trigger, not just the task.
   branches that only render in a degraded state — which is exactly why neither was ever
   seen, since the happy path fits. `B/Y = E-STOP` had been invisible since before this
   port; `acquiring 1.2s (no tracking)` cut off mid-word, so a hand that stopped tracking
-  during the countdown reported it in a sentence the panel truncated, and the operator's
-  natural read was "broken" rather than "move your hand". Canvas text does not wrap, so
+  during the countdown reported it in a sentence the panel truncated. That second one is
+  the worse kind and the distinction is worth keeping: it did not merely hide
+  information, it SUBSTITUTED A WRONG CONCLUSION — a stalled countdown with no legible
+  reason reads as "this is broken", which is an answer, and the wrong one. Hunt the
+  degraded-state strings that are the ONLY route to a diagnosis first. Canvas text does not wrap, so
   every `fillText` site is pinned against its column width in tests (monospace advances
   at 0.6 em, so it is arithmetic). The PAINTER trims, not the caller: an ellipsis reads
   as truncation, a mid-glyph clip reads as a rendering fault. Does NOT apply to the
   desktop cockpit — DOM text wraps, so the failure mode does not exist there.
+
+- **A copied fact is only wrong once someone changes it elsewhere — and until then,
+  the happy path fits.** Third instance of the legibility class, one level up. Track D's
+  HUD carried `declared * 0.9` with a comment asserting it matched the recorder's gate.
+  That comment was TRUE when written, which is what makes the class nasty: it passes
+  review, it passes tests, and it rots on somebody else's commit. The failure mode is
+  the sharp one — the rate warning and the 409 refusal telling the operator two
+  different stories about one take, with no way to tell which is lying. Reading the
+  published value is not sufficient on its own: the ABSENT case must not silently revert
+  to a hardcoded copy, so both paths get pinned.
+
+- **Preserving a distinction through the type and discarding it before the operator sees
+  it is worse than never typing it.** It buys the reviewer's confidence and spends none
+  of it on the operator. Found when the `drops` reducer, correctly typed nested, returned
+  a bare key at the last step — so a camera named for a side and an arm named for a side
+  collapse to one confident wrong answer.
 
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
