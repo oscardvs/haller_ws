@@ -196,6 +196,12 @@ this port adds. These are not goals. They are the pass/fail.
    gestures with the same dwell separated only by modal state is the class of thing that
    passes testing and fails on someone's face in a headset. "Go again" is a MODE instead:
    every decision returns to ARMED.
+5b. **Anything that drops torque goes through `_release_torque_per_motor`.** lerobot's
+   bulk `disable_torque()` raises on the first refusal and strands the rest energised;
+   that is the 2026-08-21 incident, and it has now arrived twice by two different roads.
+   No exceptions, including inside a safety check whose whole purpose is to make the arm
+   safe.
+
 6. **Single-arm sessions**: the absent side never acquires, is never written, reports
    `reason:"no_arm"`, cannot be homed. Now also: produces a dataset with no columns for
    that side, distinguishable by names alone.

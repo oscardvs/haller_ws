@@ -55,7 +55,21 @@ and dies when that event happens. Add the trigger, not just the task.
   `recorder.py::status()` returns TODAY — before this port added any. Worth one pass to
   confirm the type finally matches the payload rather than merely growing.
 
+## Known-bad data
+
+- **`local/haller_pick_the_red_cube_and_place_it_in_the_box` must never be trained on.**
+  2 sim episodes / 997 frames. Already suspect (one arm never moved, per the grader), and
+  now definite: its gripper column was recorded through the compressed mapping below, so
+  it is squeezed into 0..63.6 with a dead band over the lower half of the trigger. Not a
+  baseline, not a fixture, not a smoke-test target for anything that reads the gripper.
+
 ## Standing rules that came out of rulings
+
+- **Every window `_load_joint_limits` can produce is EXACTLY symmetric about zero** — it
+  centres on `(range_min + range_max)/2` and offsets both ends. So any asymmetric limits
+  fixture is impossible by construction, which turns "is this fixture realistic?" from a
+  judgement call into a one-line assertion runnable over every fixture in the suite. It
+  found `gripper: (0.0, 100.0)` in two files and `elbow_flex: (0.0, 40.0)` in a third.
 
 - **The message that only matters when something has gone wrong is the one that was
   not legible.** Two HUD strings were found clipped off the in-headset panel, both in
