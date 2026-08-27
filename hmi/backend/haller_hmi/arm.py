@@ -60,6 +60,30 @@ class SyncReaderRace(ConnectionError):
     """
 
 
+#: What an arm's effort channel did on ONE read, published in `state_snapshot`.
+#:
+#: The recorder branches on this and the two failures are NOT the same event
+#: (ruled 2026-08-27). `observation.effort` is policy-visible —
+#: `dataset_to_policy_features` classifies `observation.*` as FeatureType.STATE
+#: — so a false 0.0 is a sensor reading in the training set saying "no load" at
+#: a moment when there was load. And `recorder.py`'s effort docstring already
+#: defines a FLAT-ZERO column as the sentinel for "no effort channel on that
+#: take", so scattered zeros would be a third thing that docstring denies
+#: exists.
+#:
+#:   EFFORT_OK        this tick's effort is measured. Includes a genuine 0.0.
+#:   EFFORT_TRANSIENT the channel is live, THIS read did not land (a lost
+#:                    `sync_reader` race, a comm failure). One tick, ~1 in 1800
+#:                    at 60 Hz. The recorder DROPS the frame and counts it.
+#:   EFFORT_ABSENT    there is no effort channel on this arm at all. Every
+#:                    frame degrades, so dropping would trade a whole
+#:                    demonstration for one optional column. The recorder
+#:                    writes 0.0 and declares the column flat.
+EFFORT_OK = "ok"
+EFFORT_TRANSIENT = "transient"
+EFFORT_ABSENT = "absent"
+
+
 def _median_present_position(robot: SO101Follower,
                              n: int = ANCHOR_READS) -> dict[str, int]:
     """`Present_Position` in RAW TICKS, per-joint median of `n` reads.
@@ -709,9 +733,26 @@ class ArmHandle:
         self._effort_fail_streak = 0
         return effort
 
-    def _read_state_and_effort(self) -> tuple[dict[str, float], dict[str, float]]:
-        """Positions (deg) + effort for one telemetry tick, in as few round
-        trips as the arm allows: one on the block path, two otherwise."""
+    def _read_state_and_effort(
+        self,
+    ) -> tuple[dict[str, float], dict[str, float], str]:
+        """Positions (deg) + effort + what the effort channel DID, for one tick.
+
+        The third value is one of EFFORT_OK / EFFORT_TRANSIENT / EFFORT_ABSENT
+        and exists because the recorder must tell those two failures apart: a
+        live channel that missed one read is a dropped frame, a channel that
+        does not exist is a declared flat-zero column. Before this, both
+        arrived as an empty effort dict and the recorder could only guess —
+        and guessing wrong in the permissive direction writes false zeros into
+        a policy-visible feature.
+
+        As few round trips as the arm allows: one on the block path, two
+        otherwise.
+        """
+        if self._effort_mode == "none":
+            # Structurally absent: nothing to attempt, so this is not a failed
+            # read and must not be reported as one.
+            return self.read_joints_deg(), {}, EFFORT_ABSENT
         if self._effort_mode == "block":
             try:
                 pos, effort = self._read_block()
@@ -723,17 +764,25 @@ class ArmHandle:
                 # still to be read. The demotion counter handles a bus that
                 # cannot serve the block read; a lost race is not that and is
                 # counted separately (see _demote_effort_path).
-                return self.read_joints_deg(), {}
+                return self.read_joints_deg(), {}, EFFORT_TRANSIENT
             self._effort_fail_streak = 0
-            return pos, effort
+            return pos, effort, EFFORT_OK
         # Fallback path: lerobot's own position read, plus effort on its own
         # round trip if this arm can serve one at all. read_joints_deg raising
         # here is the pre-existing "arm telemetry failed" behaviour and stays.
-        return self.read_joints_deg(), self.read_effort_norm()
+        pos = self.read_joints_deg()
+        effort = self.read_effort_norm()
+        if effort:
+            return pos, effort, EFFORT_OK
+        # `read_effort_norm` swallows its own failure and may have demoted us
+        # to "none" on the way through. If it did, the channel is gone from
+        # here on; if it did not, this was one missed read on a live channel.
+        return pos, {}, (EFFORT_ABSENT if self._effort_mode == "none"
+                         else EFFORT_TRANSIENT)
 
     def state_snapshot(self) -> dict:
         assert self.robot is not None
-        pos, effort = self._read_state_and_effort()
+        pos, effort, effort_status = self._read_state_and_effort()
         joints = {}
         for joint, (lo, hi) in self.joint_limits_deg.items():
             joints[joint] = {
@@ -750,6 +799,10 @@ class ArmHandle:
         return {
             "mode": self.guard.mode.value,
             "torque": self.torque_enabled,
+            # What the effort channel did on THIS read — see EFFORT_OK above.
+            # Per-arm, not per-joint: the block read is one round trip for the
+            # whole arm, so its outcome cannot differ between joints.
+            "effort_status": effort_status,
             "joints": joints,
         }
 

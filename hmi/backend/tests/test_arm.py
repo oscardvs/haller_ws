@@ -7,7 +7,7 @@ import pytest
 from lerobot.motors.encoding_utils import encode_sign_magnitude
 
 import haller_hmi.arm as arm_mod
-from haller_hmi.arm import ArmManager, ArmHandle
+from haller_hmi.arm import EFFORT_OK, EFFORT_TRANSIENT, ArmManager, ArmHandle
 from haller_hmi.config import ArmConfig, MotionConfig
 from haller_hmi.safety import Mode, ModeError
 
@@ -737,9 +737,13 @@ def test_a_lost_race_costs_one_tick_of_effort_but_not_the_fast_path():
     handle._effort_fail_streak = ArmHandle._EFFORT_DEMOTE_AFTER - 1
 
     for _ in range(ArmHandle._EFFORT_DEMOTE_AFTER * 3):
-        pos, effort = handle._read_state_and_effort()
+        pos, effort, status = handle._read_state_and_effort()
         assert effort == {}                    # no effort this tick, deliberately
         assert pos["shoulder_pan"] == 1.0      # position still read
+        # TRANSIENT, not ABSENT: the channel is live and this one read missed.
+        # The recorder drops this frame; reporting ABSENT would make it write a
+        # false 0.0 into a policy-visible column instead.
+        assert status == EFFORT_TRANSIENT
 
     assert handle._effort_mode == "block"
     assert handle._effort_fail_streak == ArmHandle._EFFORT_DEMOTE_AFTER - 1
@@ -834,13 +838,15 @@ def test_block_read_failures_demote_after_three_ticks_and_keep_position():
                                                  "gripper.pos": 2.0}
 
     for _ in range(ArmHandle._EFFORT_DEMOTE_AFTER):
-        pos, effort = handle._read_state_and_effort()
+        pos, effort, status = handle._read_state_and_effort()
         assert effort == {}                    # no effort this tick, deliberately
         assert pos["shoulder_pan"] == 1.0      # position still read
+        assert status == EFFORT_TRANSIENT      # a live channel that missed
 
     assert handle._effort_mode == "sync_read"
     assert handle._effort_race_count == 0       # a comm failure is not a race
-    pos, effort = handle._read_state_and_effort()
+    pos, effort, status = handle._read_state_and_effort()
+    assert status == EFFORT_OK
     assert effort == {"shoulder_pan": 0.1, "gripper": 0.0}
     assert pos["shoulder_pan"] == 1.0
 
@@ -860,8 +866,9 @@ def test_one_good_block_read_resets_the_demotion_streak():
     assert handle._effort_fail_streak == ArmHandle._EFFORT_DEMOTE_AFTER - 1
 
     reader.comm_result = 0
-    _, effort = handle._read_state_and_effort()
+    _, effort, status = handle._read_state_and_effort()
 
+    assert status == EFFORT_OK
     assert effort["shoulder_pan"] == -0.25
     assert handle._effort_fail_streak == 0
     assert handle._effort_mode == "block"
@@ -1397,3 +1404,49 @@ def test_the_trigger_sweeps_the_whole_jaw_with_no_dead_band(monkeypatch):
         assert b > a, (
             f"dead band: the jaw does not move between consecutive commands "
             f"({a} -> {b}). Sweep: {jaw}")
+
+
+def test_a_structurally_absent_effort_channel_reports_absent_not_a_failed_read():
+    """The distinction the recorder branches on (ruled 2026-08-27).
+
+    ABSENT means there is no effort channel on this arm at all, so every frame
+    degrades and dropping would trade a whole demonstration for one optional
+    column — the recorder writes 0.0 and declares the column flat. TRANSIENT
+    means a live channel missed ONE read, ~1 in 1800 at 60 Hz, and the frame is
+    dropped rather than have a false 0.0 reach a policy-visible feature.
+
+    Reported without attempting a read, because a path that has been demoted to
+    "none" has nothing to attempt — and an attempt that never happened must not
+    be reported as an attempt that failed.
+    """
+    from haller_hmi.arm import EFFORT_ABSENT
+
+    handle = _effort_handle({"shoulder_pan": 0, "gripper": 0})
+    handle._effort_mode = "none"
+    handle.robot.get_observation.return_value = {"shoulder_pan.pos": 1.0,
+                                                 "gripper.pos": 2.0}
+    handle.robot.bus.sync_reader.txRxPacket = MagicMock(
+        side_effect=AssertionError("must not touch the bus for effort"))
+
+    pos, effort, status = handle._read_state_and_effort()
+
+    assert status == EFFORT_ABSENT
+    assert effort == {}
+    assert pos["shoulder_pan"] == 1.0
+
+
+def test_state_snapshot_publishes_what_the_effort_channel_did():
+    """The recorder reads this off the TickSample; it has no other route to it.
+
+    Per-arm rather than per-joint: the block read is one round trip for the
+    whole arm, so its outcome cannot differ between joints.
+    """
+    handle = _effort_handle({"shoulder_pan": -250, "gripper": 0})
+    handle._effort_mode = "block"
+    handle._joint_limits_deg = {j: (-90.0, 90.0) for j in EFFORT_JOINTS}
+
+    snap = handle.state_snapshot()
+
+    assert snap["effort_status"] == EFFORT_OK
+    handle._effort_mode = "none"
+    assert handle.state_snapshot()["effort_status"] == "absent"
