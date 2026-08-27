@@ -69,6 +69,7 @@ __all__ = [
     "DatasetBusyError",
     "dataset_detail",
     "dataset_fps",
+    "dataset_rate_provenance",
     "dataset_root",
     "delete_dataset",
     "episode_trace",
@@ -171,6 +172,74 @@ def dataset_fps(repo_id: str) -> int | None:
     except (KeyError, TypeError, ValueError):
         return None
     return fps if fps > 0 else None
+
+
+#: The recorder's provenance block inside `info.json`. Spelled literally rather
+#: than imported: `recorder.py` owns the constant but imports lerobot, and
+#: `lab/` runs in the serving process where that import is banned. This is an
+#: ON-DISK FORMAT key like `fps` on the line above, not a shared Python name —
+#: and `test_the_provenance_key_matches_the_recorders` pins the two spellings
+#: equal at the source, because the drift is silent in the worst direction:
+#: every Haller dataset would read as "not measured".
+RATE_INFO_KEY = "haller_rate"
+
+
+def dataset_rate_provenance(repo_id: str) -> dict:
+    """Is this dataset's `fps` ATTESTED as measured, and what was measured?
+
+    `{"measured": bool | None, "measured_hz": float | None}`.
+
+    `dataset_fps` above answers what the number IS. This answers whether it
+    means anything — and the two are genuinely different questions, because
+    nothing in `info.json`'s `fps` records where it came from. Both real
+    datasets on this box carry `fps: 30` with no provenance block at all: they
+    predate invariant 10, so their 30 is the rate the sampler was ASKED for.
+    That is mechanism 3 itself, sitting in the dataset the rollout gate's link
+    chain was verified against.
+
+    So check (a) can compare a declaration against a declaration, pass, and
+    stamp agreement. The gate is still right — that integer is the only number
+    available — but a PASS means two different things depending on when the
+    dataset was recorded, and until this function existed nothing on the wire
+    said which.
+
+    Three values, and the third is not a failure:
+
+    * `True`  — a `haller_rate` block is present, so `fps` is `round(measured_hz)`
+      and was re-attested within `FPS_FAITHFUL_FRACTION` on every append. Not
+      merely measured once: a dataset cannot GROW past that tolerance.
+    * `False` — the dataset reads, and carries no such block. Nothing attests
+      its `fps` was ever measured. Note what this does NOT claim: not "it was
+      declared", only "there is no evidence either way". A third tool that
+      measured honestly and wrote no block lands here too.
+    * `None`  — no dataset to ask. The link broke, or it cannot be read.
+
+    **This never refuses.** Ruled by the integrator 2026-08-27, and the
+    reasoning is worth keeping next to the code because the wrong instinct is
+    live in this package: the rollout gate DOES refuse a rate below the floor,
+    so "refuse when unsure" has a precedent here that does not apply. Refusing
+    on absent provenance would block the only real trained checkpoint on this
+    box over a number that is probably fine, converting a caveat into a
+    blockade. Refusing is the wrong response to "we cannot tell"; recording
+    that we cannot tell is the right one.
+    """
+    root = dataset_root(repo_id)
+    if not root.exists():
+        return {"measured": None, "measured_hz": None}
+    info = _info(root)
+    if not info:
+        return {"measured": None, "measured_hz": None}
+    block = info.get(RATE_INFO_KEY)
+    if not isinstance(block, dict):
+        return {"measured": False, "measured_hz": None}
+    try:
+        measured_hz = float(block["measured_hz"])
+    except (KeyError, TypeError, ValueError):
+        # The block is present, so the recorder wrote it and `fps` IS measured.
+        # A malformed figure inside it costs the audit value, never the
+        # discriminator — those are two claims and only one is damaged.
+        return {"measured": True, "measured_hz": None}
+    return {"measured": True, "measured_hz": measured_hz}
 
 
 def _dir_size(root: Path) -> int:

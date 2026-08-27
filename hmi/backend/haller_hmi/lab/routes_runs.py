@@ -412,8 +412,9 @@ def _spec_of(payload: dict, marker: str = "repo_id") -> dict:
 def _trained_rate(policy_path: str) -> dict:
     """The rate the checkpoint at `policy_path` was TRAINED at.
 
-    `{fps, repo_id, source, reason}`. `fps` is None exactly when a link of the
-    chain could not be read and `reason` then names which one — see
+    `{fps, repo_id, source, reason, measured, measured_hz}`. `fps` is None
+    exactly when a link of the chain could not be read and `reason` then names
+    which one — see
     `runs.trained_dataset` for why no link is ever guessed around, and for the
     check that nothing in a checkpoint carries a rate directly.
 
@@ -422,19 +423,27 @@ def _trained_rate(policy_path: str) -> dict:
     `info.json`, so it can record the two numbers but cannot compare them —
     which makes a divergence reconstructible after the fact rather than
     detected before the arm moves.
+
+    `measured` says whether that `fps` is ATTESTED as measured — see
+    `catalog.dataset_rate_provenance`. It never gates anything and never
+    refuses; it is stamped so a later reader can tell whether the agreement
+    check (a) reported meant anything. Today it is `False` on every dataset on
+    this box, including the one the only real trained checkpoint here used.
     """
     found = runs_mod.trained_dataset(policy_path)
     repo_id = found["repo_id"]
     if not repo_id:
         return {"fps": None, "repo_id": None, "source": None,
-                "reason": found["reason"]}
+                "reason": found["reason"],
+                "measured": None, "measured_hz": None}
     try:
         fps = catalog.dataset_fps(repo_id)
     except ValueError as e:
         # `dataset_root` refuses a repo-id that escapes the cache. Arriving from
         # a file on disk rather than from a URL makes that stranger, not safer.
         return {"fps": None, "repo_id": repo_id,
-                "source": found["config_path"], "reason": str(e)}
+                "source": found["config_path"], "reason": str(e),
+                "measured": None, "measured_hz": None}
     if fps is None:
         return {
             "fps": None, "repo_id": repo_id, "source": found["config_path"],
@@ -443,9 +452,15 @@ def _trained_rate(policy_path: str) -> dict:
                 "here — renamed, pruned or deleted — so the rate it was trained "
                 "at cannot be recovered from it"
             ),
+            "measured": None, "measured_hz": None,
         }
+    # Only asked once `fps` is in hand: provenance about a number we could not
+    # read is a question with no subject. Cannot raise here — `dataset_fps`
+    # above already resolved the same root through the same `dataset_root`.
+    prov = catalog.dataset_rate_provenance(repo_id)
     return {"fps": fps, "repo_id": repo_id, "source": found["config_path"],
-            "reason": ""}
+            "reason": "",
+            "measured": prov["measured"], "measured_hz": prov["measured_hz"]}
 
 
 def _rate_matches(declared: float, trained_fps: int) -> bool:
@@ -861,6 +876,14 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
                 "control_hz_trained_repo_id": trained["repo_id"],
                 "control_hz_trained_source": trained["source"],
                 "control_hz_trained_reason": trained["reason"],
+                # WHETHER the trained rate was ever measured, and what was
+                # measured. `control_hz_trained` above is the number; these say
+                # whether it means anything. Without them every PASS reads the
+                # same, while a PASS against a pre-invariant-10 dataset is a
+                # declaration agreeing with a declaration. Never a refusal —
+                # ruled 2026-08-27; see `catalog.dataset_rate_provenance`.
+                "control_hz_trained_measured": trained["measured"],
+                "control_hz_trained_measured_hz": trained["measured_hz"],
                 "control_hz_mismatch_override": override,
                 "duration_s": duration_s,
                 "device": str(spec_in.get("device") or DEFAULT_DEVICE),

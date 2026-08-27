@@ -287,6 +287,108 @@ def test_a_dataset_whose_metadata_cannot_be_read_has_no_fps(home):
     assert catalog.dataset_fps(REPO) is None
 
 
+# ============================================================================
+# catalog.dataset_rate_provenance — whether the trained fps means anything
+# ============================================================================
+#
+# Check (a) compares an int against an int. Nothing in `info.json`'s `fps`
+# records where that int came from, so a PASS against a pre-invariant-10
+# dataset is a declaration agreeing with a declaration. These pin the
+# discriminator, and — the load-bearing one — that it never refuses.
+
+def _write_rate_block(home, block, repo_id=REPO):
+    """Give a dataset the recorder's provenance block."""
+    info_path = home / repo_id / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    if block is None:
+        info.pop(catalog.RATE_INFO_KEY, None)
+    else:
+        info[catalog.RATE_INFO_KEY] = block
+    info_path.write_text(json.dumps(info))
+
+
+def test_the_provenance_key_matches_the_recorders(home):
+    """`catalog` spells `haller_rate` literally; `recorder.py` owns it.
+
+    It cannot be imported — `recorder.py` imports lerobot and `lab/` is banned
+    from it in the serving process — so the two spellings are pinned equal HERE,
+    at the source, without importing anything. Crude on purpose, like
+    `test_the_forbidden_path_appears_nowhere_in_this_module`.
+
+    The drift is silent and in the worst direction: rename the recorder's key
+    and every Haller-recorded dataset starts reading as "not measured", which
+    is the exact claim this field exists to make truthfully. Nothing else
+    fails, because absence is a legitimate value.
+    """
+    recorder_src = (
+        Path(__file__).resolve().parents[2] / "haller_hmi" / "recorder.py"
+    ).read_text()
+    assert f'RATE_INFO_KEY = "{catalog.RATE_INFO_KEY}"' in recorder_src, (
+        f"recorder.py no longer spells its rate block "
+        f"{catalog.RATE_INFO_KEY!r}; catalog.dataset_rate_provenance would "
+        f"report every measured dataset as unmeasured"
+    )
+
+
+def test_a_dataset_with_the_recorders_block_is_attested_as_measured(home):
+    make_dataset(home / REPO, n_episodes=1, fps=30)
+    _write_rate_block(home, {"fps_written": 30, "measured_hz": 29.87,
+                             "samples": 300, "target_hz": 30})
+    assert catalog.dataset_rate_provenance(REPO) == {
+        "measured": True, "measured_hz": 29.87}
+
+
+def test_a_dataset_without_the_block_is_not_attested_and_does_not_refuse(home):
+    """Both real datasets on this box are this case, including the one the only
+    real trained checkpoint here used. `False` means "nothing attests it", NOT
+    "it was declared" — a third tool that measured honestly and wrote no block
+    lands here too, and the field must not claim more than it knows."""
+    make_dataset(home / REPO, n_episodes=1, fps=30)
+    assert catalog.dataset_rate_provenance(REPO) == {
+        "measured": False, "measured_hz": None}
+
+
+def test_a_dataset_that_is_not_there_cannot_be_asked_about_provenance(home):
+    assert catalog.dataset_rate_provenance("local/gone") == {
+        "measured": None, "measured_hz": None}
+
+
+def test_unreadable_metadata_is_no_answer_rather_than_not_measured(home):
+    """`None` and `False` are different claims and the difference is the point:
+    `False` says the dataset carries no attestation, `None` says there was no
+    dataset to ask. Collapsing them would report a missing dataset as a
+    measured-rate failure."""
+    make_dataset(home / REPO, n_episodes=1)
+    (home / REPO / "meta" / "info.json").write_text("{truncated mid-writ")
+    assert catalog.dataset_rate_provenance(REPO) == {
+        "measured": None, "measured_hz": None}
+
+
+@pytest.mark.parametrize("block", [
+    {"fps_written": 30},                       # no measured_hz at all
+    {"measured_hz": "twenty-nine"},            # unparseable
+    {"measured_hz": None},
+])
+def test_a_damaged_figure_costs_the_audit_value_not_the_discriminator(
+        home, block):
+    """The block being PRESENT is what says the recorder wrote this dataset, so
+    `fps` is measured however mangled the figure beside it is. Two claims, and
+    only one is damaged — folding them together would downgrade a genuinely
+    measured dataset to unattested over a bad float."""
+    make_dataset(home / REPO, n_episodes=1, fps=30)
+    _write_rate_block(home, block)
+    assert catalog.dataset_rate_provenance(REPO) == {
+        "measured": True, "measured_hz": None}
+
+
+@pytest.mark.parametrize("block", ["not-a-dict", 30, [1, 2]])
+def test_a_block_that_is_not_an_object_is_not_an_attestation(home, block):
+    make_dataset(home / REPO, n_episodes=1, fps=30)
+    _write_rate_block(home, block)
+    assert catalog.dataset_rate_provenance(REPO) == {
+        "measured": False, "measured_hz": None}
+
+
 def test_the_listing_still_says_thirty_for_the_dataset_the_gate_refuses(home):
     """The two functions disagree ON PURPOSE, and this pins the disagreement.
 
@@ -337,6 +439,118 @@ def test_both_rates_are_stamped_into_the_spec_that_launched(home, store, client)
     assert spec["control_hz_trained_repo_id"] == REPO
     assert spec["control_hz_trained_source"] == str(ckpt / "train_config.json")
     assert spec["control_hz_mismatch_override"] is False
+
+
+def test_the_spec_records_whether_the_trained_rate_was_ever_measured(
+        home, store, client):
+    """`control_hz_trained` is the number; this says whether it means anything.
+
+    Without it every PASS reads identically, and a PASS against a
+    pre-invariant-10 dataset is a declaration agreeing with a declaration. The
+    contract already makes both numbers reconstructible after the arm has
+    moved; this makes the WORTH of their agreement reconstructible too.
+    """
+    make_dataset(home / REPO, n_episodes=2, fps=30)
+    _write_rate_block(home, {"fps_written": 30, "measured_hz": 30.04,
+                             "samples": 300, "target_hz": 30})
+    ckpt = make_checkpoint(home / "ckpt")
+    run_id = client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 30}).json()["id"]
+
+    spec = spec_of(store, run_id)
+    assert spec["control_hz_trained"] == 30
+    assert spec["control_hz_trained_measured"] is True
+    assert spec["control_hz_trained_measured_hz"] == 30.04
+
+
+def test_an_unattested_rate_launches_and_says_so_rather_than_refusing(
+        home, store, client):
+    """**The load-bearing one.** Ruled 2026-08-27: do NOT refuse on absent
+    provenance.
+
+    This package refuses a rollout below the rate floor on purpose, so "refuse
+    when unsure" has a live precedent here that does not apply. Refusing would
+    block the only real trained checkpoint on this box over a number that is
+    probably fine, converting a caveat into a blockade. Refusing is the wrong
+    response to "we cannot tell"; recording that we cannot tell is the right
+    one. So a 200 AND the honest stamp, asserted together — a test for only the
+    stamp would pass on a route that refused.
+    """
+    make_dataset(home / REPO, n_episodes=2, fps=30)   # no rate block: legacy
+    ckpt = make_checkpoint(home / "ckpt")
+    response = client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 30})
+
+    assert response.status_code == 200, response.json()
+    spec = spec_of(store, response.json()["id"])
+    assert spec["control_hz_trained"] == 30
+    assert spec["control_hz_trained_measured"] is False
+    assert spec["control_hz_trained_measured_hz"] is None
+
+
+def test_provenance_is_no_answer_when_the_link_to_the_dataset_broke(
+        home, store, client):
+    """`False` would be a claim about a dataset nobody found. The rate is None
+    here, so its provenance has no subject and must not read as a verdict.
+
+    `allow_rate_mismatch` and `action_names` are both required to REACH the
+    stamp: an unresolvable dataset refuses first for having no declared rate to
+    compare, and again for nothing naming the action vector. Without them this
+    test asserts about a spec that was never written — it failed exactly that
+    way when first run.
+    """
+    make_dataset(home / REPO, n_episodes=2, fps=30)
+    ckpt = make_checkpoint(home / "ckpt", repo_id="local/gone")
+    run_id = client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 30,
+        "allow_rate_mismatch": True,
+        "action_names": ["shoulder_pan.pos", "gripper.pos"],
+    }).json()["id"]
+
+    spec = spec_of(store, run_id)
+    assert spec["control_hz_trained"] is None
+    assert spec["control_hz_trained_measured"] is None
+    assert spec["control_hz_trained_measured_hz"] is None
+
+
+def test_provenance_never_changes_what_the_gate_decides(home, store, client):
+    """Attested or not, check (a) is the same exact match on the same integers.
+
+    Asserted in BOTH directions on ONE dataset state, because the risk is that
+    provenance quietly becomes an input to the gate — a refusal that consults
+    it would be a second question wearing the first one's answer.
+    """
+    make_dataset(home / REPO, n_episodes=2, fps=30)
+    ckpt = make_checkpoint(home / "ckpt")
+
+    # Unattested: agreement still passes, divergence still refuses.
+    assert client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 30}).status_code == 200
+    assert client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 25}).status_code == 400
+
+    # Attested: identical verdicts.
+    _write_rate_block(home, {"fps_written": 30, "measured_hz": 29.9})
+    assert client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 30}).status_code == 200
+    assert client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 25}).status_code == 400
+
+
+def test_a_measured_rate_that_rounded_is_stamped_unrounded(home, store, client):
+    """The audit value's whole reason to exist: `fps` 30 against a measured
+    29.62 passes check (a) exactly and sits 1.3% off — inside gate (b)'s 10%
+    floor, so nothing downstream ever mentions it. The spec is the only place
+    that distance survives."""
+    make_dataset(home / REPO, n_episodes=2, fps=30)
+    _write_rate_block(home, {"fps_written": 30, "measured_hz": 29.62})
+    ckpt = make_checkpoint(home / "ckpt")
+    run_id = client.post("/lab/runs/rollout", json={
+        "policy_path": str(ckpt), "control_hz": 30}).json()["id"]
+
+    spec = spec_of(store, run_id)
+    assert spec["control_hz_trained"] == 30
+    assert spec["control_hz_trained_measured_hz"] == 29.62
 
 
 def test_an_undeclared_rate_defaults_to_the_one_the_policy_was_trained_at(
