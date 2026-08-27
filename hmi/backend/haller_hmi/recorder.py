@@ -105,6 +105,9 @@ import pyarrow.parquet as pq
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+from .arm import EFFORT_ABSENT, EFFORT_OK, EFFORT_TRANSIENT
+from .safety import MIN_RATE_FRACTION
+
 try:  # lerobot's own info.json writer — keeps formatting identical to its own
     from lerobot.datasets.io_utils import write_info as _lerobot_write_info
 except ImportError:  # pragma: no cover - only if lerobot moves the helper
@@ -289,6 +292,21 @@ class RecorderState:
     # which is what distinguishes a clean place from a cube that qualified for
     # three frames and then rolled off the pad.
     success_frames: int = 0
+    # WHY a tick was not written, attributed to the thing that caused it.
+    # Nested per surface and never flattened: a camera named for a side and an
+    # arm named for a side would collapse to one confident wrong answer.
+    # `skipped_frames` is the total and these say where it went.
+    drops_cameras: dict[str, int] = field(default_factory=dict)
+    drops_arms: dict[str, int] = field(default_factory=dict)
+    # Arms that wrote a flat 0.0 effort column this take because they have no
+    # effort channel at all. Declared in info.json, so a flat column is never
+    # left to be read as "no contact" — see `_write_effort_metadata`.
+    effort_absent_arms: set = field(default_factory=set)
+    # The rate the tick was MEASURED at when this episode opened, and the fps
+    # written into info.json. One number, set together — see
+    # `_freeze_fps`.
+    fps_declared: int | None = None
+    fps_measured_at_open: float | None = None
 
 
 @dataclass
@@ -309,6 +327,10 @@ class DatasetRecorder:
     # and makes `info.json` say the episodes are unlabelled. See the module
     # docstring for why a constant-zero reward column would be worse than none.
     task_monitor: object | None = None
+    # THE tick. Every recorded row's state, action, effort and wall clock come
+    # off ONE sample from here, which is what makes them one moment
+    # (invariant 8). None keeps the pre-Phase-2 telemetry path.
+    tick_bus: object | None = None
     left_arm_id: str = "left"
     right_arm_id: str = "right"
     # The dataset's own directory. None -> $HF_LEROBOT_HOME/<repo_id>, which
@@ -322,6 +344,10 @@ class DatasetRecorder:
 
     _dataset: LeRobotDataset | None = field(default=None, init=False)
     _task_handle: asyncio.Task | None = field(default=None, init=False)
+    # The record loop's bus subscription, held so the stop path can close
+    # it: a closed subscription ends the loop's wait immediately instead
+    # of leaving it parked until its next timeout.
+    _tick_sub: object | None = field(default=None, init=False)
     _state: RecorderState = field(default_factory=RecorderState, init=False)
     # One writer-side flag so the save/discard tail can happen exactly once
     # no matter who reaches it first: the operator's /record/stop, or the
@@ -344,6 +370,18 @@ class DatasetRecorder:
 
     # ---- public API ------------------------------------------------------
 
+    def _drop_tick(self, surface: str, key: str) -> None:
+        """One tick not written, attributed to what caused it.
+
+        `skipped_frames` is the total the HUD shows; the nested buckets say
+        where it went. Called once per dropped tick — every caller returns
+        immediately after — so the total and the buckets stay reconcilable.
+        """
+        self._state.skipped_frames += 1
+        bucket = (self._state.drops_cameras if surface == "cameras"
+                  else self._state.drops_arms)
+        bucket[key] = bucket.get(key, 0) + 1
+
     def status(self) -> dict:
         s = self._state
         return {
@@ -361,6 +399,16 @@ class DatasetRecorder:
             "auto_scored": self.task_monitor is not None,
             "success": s.success,
             "success_frames": s.success_frames,
+            # Nested, always, both keys always present. A consumer that has to
+            # ask whether the shape is flat this time will eventually guess.
+            "drops": {"cameras": dict(s.drops_cameras),
+                      "arms": dict(s.drops_arms)},
+            "fps_declared": s.fps_declared,
+            "fps_measured": (self.tick_bus.measured_hz()
+                             if self.tick_bus is not None else None),
+            # Emitted rather than mirrored in the UI, so a dashboard cannot
+            # come to disagree with the system it is monitoring.
+            "record_rate_gate": MIN_RATE_FRACTION,
         }
 
     async def start_episode(self, repo_id: str, task: str) -> None:
@@ -436,6 +484,17 @@ class DatasetRecorder:
                     [f"{c['id']}->{c['key']}" for c in cam_specs],
                     self.task_monitor is not None)
 
+    def _end_tick_stream(self) -> None:
+        """Wake the record loop now rather than at its next timeout.
+
+        `get()` returns None immediately on a closed subscription, so the loop
+        re-checks `recording`, finds it false and leaves. Without this every
+        stop would wait out the loop's poll interval.
+        """
+        sub = self._tick_sub
+        if sub is not None:
+            sub.close()
+
     async def stop_episode(self, save: bool = True) -> dict:
         """Stop the loop and either save or discard the episode buffer.
 
@@ -444,6 +503,7 @@ class DatasetRecorder:
         just reports status.
         """
         self._state.recording = False
+        self._end_tick_stream()
         if self._task_handle is not None:
             try:
                 # Generous on purpose: the loop exits within one telemetry
@@ -1223,47 +1283,101 @@ class DatasetRecorder:
         }
         self._persist_info(info)
 
-    def _committed_action_for(self, arm_id: str, joints: list[str], measured: dict) -> list[float]:
-        """Commanded target degrees for one arm, from the human-teleop session.
+    @staticmethod
+    def _committed_action_for(sample, side: str | None, joints: list[str],
+                              measured: dict) -> list[float]:
+        """Commanded target degrees for one arm, from THIS TICK'S sample.
 
-        Falls back to the measured position for any joint the teleop isn't
-        currently driving (idle, tracking-lost, or not running) so the action
-        vector is always fully defined.
+        Was `human_teleop.status()["goal_deg"]`, scraped live at frame-build
+        time — a third instant, pairing an action from one moment with a state
+        from another. That is mechanism 1, and reading both off one sample is
+        the whole of the fix: there is no longer a second instant available to
+        pair with, so it cannot regress by drifting.
+
+        The side comes from the recorder's own `_sides()` rather than by
+        mapping arm_id back through the session's left_arm/right_arm, which is
+        what the scrape had to do. One fewer place for the two to disagree.
+
+        Falls back to the measured position for any joint not being driven, so
+        the action vector is always fully defined — and a sample published
+        while no session is running carries an EMPTY `goal_deg`, so a take
+        recorded with teleop idle logs action == measured exactly as before.
         """
-        ht = self.human_teleop.status()
-        goal_deg = ht.get("goal_deg", {}) if ht.get("running") else {}
-        # Map this arm_id onto the session's left/right side.
-        side = None
-        if ht.get("left_arm") == arm_id:
-            side = "left"
-        elif ht.get("right_arm") == arm_id:
-            side = "right"
-        side_goal = goal_deg.get(side, {}) if side else {}
+        side_goal = sample.goal_deg.get(side, {}) if side else {}
         return [float(side_goal.get(j, measured.get(j, 0.0))) for j in joints]
 
-    def _build_frame(self, tele_frame: dict) -> dict | None:
-        """Assemble one LeRobotDataset frame from a telemetry frame + cameras."""
+    def _build_frame(self, sample) -> dict | None:
+        """Assemble one LeRobotDataset frame from ONE TickSample + cameras.
+
+        Every column below comes off the same sample, so a row is one moment
+        rather than three (invariant 8).
+        """
         state_vec: list[float] = []
         action_vec: list[float] = []
         effort_vec: list[float] = []
-        for _side, arm_id in self._sides():
+        for side, arm_id in self._sides():
             joints = self._joint_order(arm_id)
-            arm_snap = tele_frame.get("arms", {}).get(arm_id)
+            arm_snap = sample.arms.get(arm_id)
             if arm_snap is None:
-                self._state.skipped_frames += 1
-                return None  # arm telemetry missing this tick — skip frame
-            measured = {j: float(arm_snap["joints"][j]["pos"]) for j in joints}
-            state_vec += [measured[j] for j in joints]
-            action_vec += self._committed_action_for(arm_id, joints, measured)
-            # 0.0, not a skipped frame: an arm whose load register is
-            # unreadable (or a handle that predates the effort channel) still
-            # produced a perfectly good state/action/image tick, and dropping
-            # those would trade a whole demonstration for one optional column.
-            # Same fallback style as `base` below.
-            effort_vec += [float(arm_snap["joints"][j].get("effort", 0.0))
-                           for j in joints]
+                # The read failed upstream, so there is no position for this
+                # arm this tick. Mechanism 2's lost race decodes tick 0 to
+                # -180.0 deg, not to zero, so there is no safe stand-in.
+                self._drop_tick("arms", arm_id)
+                return None
 
-        base = tele_frame.get("base", {})
+            # The effort branch (ruled 2026-08-27). These two are NOT the same
+            # event and collapsing them is how a false 0.0 reaches a
+            # policy-visible feature:
+            #
+            #   TRANSIENT - the channel is live and this ONE read missed.
+            #     ~1 in 1800 at 60 Hz, so dropping costs ~0.1% of a take. A
+            #     recorded 0.0 here would say "no load" at a moment when there
+            #     was load, and nothing downstream could tell it from a real
+            #     measurement.
+            #   ABSENT - there is no effort channel on this arm at all. EVERY
+            #     frame degrades, so dropping would trade a whole demonstration
+            #     for one optional column. 0.0 is written and the column is
+            #     flat, which is already the documented sentinel for "no effort
+            #     channel on that take" (see this module's docstring).
+            #
+            # The docstring is what settles it rather than the trade: with a
+            # flat column meaning "no channel", SPARSE zeros are a third thing
+            # it denies exists.
+            effort_status = arm_snap.get("effort_status")
+            if effort_status is None:
+                # A snapshot from before the field existed. It cannot have
+                # been a transient failure — that classification did not exist
+                # when it was written — so the only honest readings are OK
+                # where the channel reported and ABSENT where it never did.
+                # Never TRANSIENT: inventing a drop for a legacy snapshot
+                # would discard frames that were fine.
+                effort_status = (
+                    EFFORT_OK
+                    if any("effort" in v
+                           for v in arm_snap.get("joints", {}).values())
+                    else EFFORT_ABSENT)
+            if effort_status == EFFORT_TRANSIENT:
+                self._drop_tick("arms", arm_id)
+                return None
+
+            measured = sample.joints_deg(arm_id)
+            if any(j not in measured for j in joints):
+                # A partial read is a degraded read: the frozen schema needs
+                # every joint, and substituting for the missing ones is the
+                # same defect as substituting for a whole arm.
+                self._drop_tick("arms", arm_id)
+                return None
+            state_vec += [measured[j] for j in joints]
+            action_vec += self._committed_action_for(sample, side, joints,
+                                                     measured)
+            efforts = sample.effort_norm(arm_id)
+            # 0.0 only reaches here on the ABSENT branch, where it is the
+            # declared sentinel rather than a stand-in for a lost reading.
+            effort_vec += [float(efforts.get(j, 0.0)) for j in joints]
+            if effort_status == EFFORT_ABSENT:
+                self._state.effort_absent_arms.add(arm_id)
+
+        base = dict(sample.base)
         base_vec = [float(base.get("linear", 0.0)), float(base.get("angular", 0.0))]
 
         frame: dict = {
@@ -1274,14 +1388,14 @@ class DatasetRecorder:
             # When this telemetry frame was built, relative to episode start —
             # see the feature's comment for why it is not an absolute epoch.
             "observation.wall_clock": np.asarray(
-                [float(tele_frame.get("t", time.time()))
-                 - (self._state.started_at or 0.0)], dtype=np.float32),
+                [float(sample.t_unix) - (self._state.started_at or 0.0)],
+                dtype=np.float32),
             "task": self._state.task,
         }
         for c in self._cam_specs:
             rgb = self.cameras[c["id"]].latest_rgb()
             if rgb is None:
-                self._state.skipped_frames += 1
+                self._drop_tick("cameras", c["key"])
                 return None  # a required camera has no fresh frame — skip tick
             frame[f"observation.images.{c['key']}"] = rgb
 
@@ -1352,7 +1466,11 @@ class DatasetRecorder:
         column[-1] = np.asarray([True], dtype=bool)
 
     async def _run(self) -> None:
-        stream = self.telemetry.subscribe()
+        # Every sample, so a subscription rather than `latest()`: this is the
+        # one consumer for which a skipped tick is a hole in a dataset.
+        sub = self.tick_bus.subscribe(
+            name="recorder", loop=asyncio.get_running_loop())
+        self._tick_sub = sub
         # Mid-take stop detection. If the teleop session was driving and
         # stops — E-STOP, WS-grace auto-stop, a manual stop — every further
         # frame would log action == measured with the arms torque-off: a
@@ -1361,7 +1479,14 @@ class DatasetRecorder:
         # the flag, so it is unaffected.
         teleop_was_running = bool(self.human_teleop.status().get("running"))
         try:
-            async for tele_frame in stream:
+            while self._state.recording:
+                # A bounded wait rather than an unbounded one: if the producer
+                # dies mid-take, an unbounded `get()` would park here forever
+                # and the take would never notice it had stopped being
+                # recorded. A timeout returns None, the loop re-checks
+                # `recording` and the teleop-stopped condition, and waits
+                # again.
+                sample = await sub.get(timeout=1.0)
                 if not self._state.recording:
                     break
                 teleop_running = bool(self.human_teleop.status().get("running"))
@@ -1370,8 +1495,10 @@ class DatasetRecorder:
                     self._finish_episode(save=True)
                     break
                 teleop_was_running = teleop_was_running or teleop_running
+                if sample is None:
+                    continue
                 try:
-                    frame = self._build_frame(tele_frame)
+                    frame = self._build_frame(sample)
                     if frame is None:
                         continue
                     self._dataset.add_frame(frame)
@@ -1380,4 +1507,5 @@ class DatasetRecorder:
                     logger.exception("recorder: frame failed: %s", e)
                     self._state.last_error = str(e)
         finally:
-            await stream.aclose()
+            sub.close()
+            self._tick_sub = None

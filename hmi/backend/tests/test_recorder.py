@@ -21,6 +21,8 @@ from haller_hmi.recorder import (
     SO101_JOINT_ORDER,
 )
 from haller_hmi.sim.task import SuccessSpec
+from haller_hmi.arm import EFFORT_ABSENT, EFFORT_OK, EFFORT_TRANSIENT
+from haller_hmi.tick import TickBus, TickSample
 
 SIX = list(SO101_JOINT_ORDER)  # canonical SO-101 motor order
 
@@ -215,7 +217,8 @@ def _recorder(human_status, cams=None, monitor=None):
     tele = _FakeTelemetry(arms)
     cams = cams if cams is not None else _FakeCameras([_FakeCamera("top")])
     return DatasetRecorder(telemetry=tele, human_teleop=_FakeHumanTeleop(human_status),
-                           cameras=cams, task_monitor=monitor)
+                           cameras=cams, task_monitor=monitor,
+                           tick_bus=TickBus())
 
 
 def _joints_block(val, effort=0.0):
@@ -224,6 +227,29 @@ def _joints_block(val, effort=0.0):
     pass `effort=None` to model a snapshot that predates the effort channel."""
     joint = {"pos": val} if effort is None else {"pos": val, "effort": effort}
     return {"joints": {j: dict(joint) for j in SIX}}
+
+
+def _sample(tele_like: dict, *, goal=None, arm_errors=None) -> TickSample:
+    """A TickSample from a telemetry-frame-shaped dict.
+
+    The recorder consumes the tick now, not a telemetry frame, but WHAT a row
+    should contain did not change — only where it comes from. Keeping the
+    call sites in their original shape keeps these tests about the row.
+
+    `goal` is the commanded action, which used to be scraped live off
+    `human_teleop.status()` at frame-build time — a third instant, and
+    mechanism 1. It arrives on the sample now, so a test that wants an action
+    puts it here rather than in the fake session's status.
+    """
+    return TickSample(
+        seq=0, t_mono=0.0, t_unix=float(tele_like.get("t", 0.0)),
+        arms=tele_like.get("arms", {}), base=tele_like.get("base", {}),
+        goal_deg=goal or {}, arm_errors=arm_errors or {},
+    )
+
+
+def _tick_bus() -> TickBus:
+    return TickBus()
 
 
 # ---- tests ---------------------------------------------------------------
@@ -319,9 +345,9 @@ def test_dataset_key_names_the_feature_and_the_frame():
     assert not any("_sim" in k for k in feats)   # the id never reaches the schema
 
     r._state.task = "t"
-    frame = r._build_frame({"arms": {"left": _joints_block(0.0),
+    frame = r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
                                      "right": _joints_block(0.0)},
-                            "base": {}})
+                            "base": {}}))
     assert frame["observation.images.left_wrist"].shape == (48, 64, 3)
     assert frame["observation.images.right_wrist"].shape == (48, 64, 3)
     assert set(frame) - {"observation.images.left_wrist",
@@ -330,22 +356,28 @@ def test_dataset_key_names_the_feature_and_the_frame():
         "observation.base", "observation.wall_clock", "task"}
 
 
-def test_committed_action_maps_side_and_falls_back_to_measured():
-    status = {
-        "running": True, "left_arm": "left", "right_arm": "right",
-        "goal_deg": {"left": {"shoulder_pan": 12.0}, "right": {}},
-    }
-    r = _recorder(status)
+def test_committed_action_comes_off_the_same_sample_as_the_state():
+    """The action used to be scraped off `human_teleop.status()` at
+    frame-build time — a third instant, pairing an action from one moment with
+    a state from another. It comes off THIS TICK'S sample now, so there is no
+    second instant left to pair with."""
+    r = _recorder({"running": True})
+    sample = _sample({}, goal={"left": {"shoulder_pan": 12.0}, "right": {}})
     measured = {j: 1.0 for j in SIX}
-    left = r._committed_action_for("left", SIX, measured)
+
+    left = r._committed_action_for(sample, "left", SIX, measured)
     assert left[0] == 12.0        # shoulder_pan = commanded
     assert left[1:] == [1.0] * 5  # untouched joints fall back to measured
-    assert r._committed_action_for("right", SIX, measured) == [1.0] * 6  # empty goal
+    assert r._committed_action_for(sample, "right", SIX, measured) == [1.0] * 6
 
 
-def test_action_falls_back_to_measured_when_not_running():
+def test_action_falls_back_to_measured_when_nothing_is_commanded():
+    """A sample published while no session runs carries an EMPTY goal_deg, so
+    a take recorded with teleop idle logs action == measured, as before."""
     r = _recorder({"running": False})
-    assert r._committed_action_for("left", SIX, {j: 3.0 for j in SIX}) == [3.0] * 6
+    idle = _sample({})
+    assert r._committed_action_for(idle, "left", SIX,
+                                   {j: 3.0 for j in SIX}) == [3.0] * 6
 
 
 def test_build_frame_assembles_state_action_base_images():
@@ -362,7 +394,7 @@ def test_build_frame_assembles_state_action_base_images():
         "arms": {"left": _joints_block(2.0), "right": _joints_block(4.0)},
         "base": {"linear": 0.5, "angular": -0.25},
     }
-    frame = r._build_frame(tele_frame)
+    frame = r._build_frame(_sample(tele_frame, goal=status["goal_deg"]))
     assert frame is not None
     assert frame["observation.state"].dtype == np.float32
     assert frame["observation.state"].shape == (12,)
@@ -383,11 +415,11 @@ def test_build_frame_carries_effort_left_then_right():
     r = _recorder({"running": False}, cams=_FakeCameras([]))
     r._cam_specs = []
     r._state.task = "t"
-    frame = r._build_frame({
+    frame = r._build_frame(_sample({
         "arms": {"left": _joints_block(0.0, effort=-0.25),
                  "right": _joints_block(0.0, effort=0.5)},
         "base": {},
-    })
+    }))
     eff = frame["observation.effort"]
     assert eff.dtype == np.float32
     assert eff.shape == (12,)
@@ -403,11 +435,11 @@ def test_missing_effort_key_is_zero_and_does_not_skip_the_frame():
     r = _recorder({"running": False}, cams=_FakeCameras([]))
     r._cam_specs = []
     r._state.task = "t"
-    frame = r._build_frame({
+    frame = r._build_frame(_sample({
         "arms": {"left": _joints_block(1.0, effort=None),   # no "effort" key
                  "right": _joints_block(2.0, effort=0.75)},
         "base": {},
-    })
+    }))
     assert frame is not None                   # NOT skipped, unlike a missing arm
     assert r._state.skipped_frames == 0
     np.testing.assert_allclose(frame["observation.effort"][:6], [0.0] * 6)
@@ -421,7 +453,7 @@ def test_build_frame_skips_when_camera_frame_missing():
     r._state.task = "t"
     tele_frame = {"arms": {"left": _joints_block(0.0), "right": _joints_block(0.0)},
                   "base": {"linear": 0.0, "angular": 0.0}}
-    assert r._build_frame(tele_frame) is None
+    assert r._build_frame(_sample(tele_frame)) is None
 
 
 def test_build_frame_skips_when_arm_telemetry_missing():
@@ -430,7 +462,7 @@ def test_build_frame_skips_when_arm_telemetry_missing():
     r._state.task = "t"
     tele_frame = {"arms": {"left": _joints_block(0.0)},  # right arm absent this tick
                   "base": {"linear": 0.0, "angular": 0.0}}
-    assert r._build_frame(tele_frame) is None
+    assert r._build_frame(_sample(tele_frame)) is None
 
 
 def test_skipped_frames_counts_dropped_ticks():
@@ -439,12 +471,12 @@ def test_skipped_frames_counts_dropped_ticks():
     r._state.task = "t"
     assert r._state.skipped_frames == 0
     # A stale camera skips the tick and counts it.
-    assert r._build_frame({"arms": {"left": _joints_block(0.0),
+    assert r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
                                     "right": _joints_block(0.0)},
-                           "base": {}}) is None
+                           "base": {}})) is None
     assert r._state.skipped_frames == 1
     # A missing arm skips the tick and counts it too.
-    assert r._build_frame({"arms": {"left": _joints_block(0.0)}, "base": {}}) is None
+    assert r._build_frame(_sample({"arms": {"left": _joints_block(0.0)}, "base": {}})) is None
     assert r._state.skipped_frames == 2
     assert r.status()["skipped_frames"] == 2
 
@@ -476,7 +508,7 @@ def test_calibration_metadata_is_keyed_like_the_state_columns():
 
 def test_sim_arm_gets_the_same_shape_from_its_declared_limits():
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeSimArm(SIX)})
-    r = DatasetRecorder(telemetry=_FakeTelemetry(arms),
+    r = DatasetRecorder(tick_bus=TickBus(), telemetry=_FakeTelemetry(arms),
                         human_teleop=_FakeHumanTeleop({"running": False}),
                         cameras=_FakeCameras([]))
     cal = r._calibration_metadata()
@@ -514,8 +546,8 @@ def test_unscored_rig_never_claims_a_score():
 
     r._cam_specs = []
     r._state.task = "t"
-    frame = r._build_frame({"arms": {"left": _joints_block(0.0),
-                                     "right": _joints_block(0.0)}, "base": {}})
+    frame = r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
+                                     "right": _joints_block(0.0)}, "base": {}}))
     assert REWARD_FEATURE not in frame
     assert DONE_FEATURE not in frame
 
@@ -543,8 +575,8 @@ def _scored_recorder(verdicts, cams=None, **kw):
 
 
 def _tick(r):
-    return r._build_frame({"arms": {"left": _joints_block(0.0),
-                                    "right": _joints_block(0.0)}, "base": {}})
+    return r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
+                                    "right": _joints_block(0.0)}, "base": {}}))
 
 
 def test_reward_is_sparse_one_on_success_zero_otherwise():
@@ -678,54 +710,59 @@ class _SeqTeleop:
         return self._seq.pop(0) if self._seq else self._last
 
 
-class _EndlessStream:
-    """Yields identical valid telemetry frames until cancelled.
+class _TickPump:
+    """Publishes valid samples onto a bus until stopped.
 
-    `limit` caps the frame count so a test can let the stream run dry —
-    when it does, the record loop exits the way a real telemetry stop would.
+    Replaces the endless telemetry stream: the record loop consumes the tick
+    now, so what a test has to keep supplying is samples, not frames.
     """
-    def __init__(self, limit: int | None = None):
-        self.closed = False
-        self._limit = limit
-        self._n = 0
 
-    def __aiter__(self):
-        return self
+    def __init__(self, bus, period: float = 0.001):
+        self._bus = bus
+        self._period = period
+        self._task = None
+        self.published = 0
 
-    async def __anext__(self):
-        if self._limit is not None and self._n >= self._limit:
-            await asyncio.sleep(3600)  # park: stream is dry, loop must not spin
-        self._n += 1
-        await asyncio.sleep(0.001)
-        return {
-            "arms": {"left": _joints_block(1.0), "right": _joints_block(2.0)},
-            "base": {"linear": 0.0, "angular": 0.0},
-        }
+    def start(self):
+        self._task = asyncio.get_event_loop().create_task(self._run())
 
-    async def aclose(self):
-        self.closed = True
+    async def _run(self):
+        token = self._bus.attach_producer("test-pump")
+        try:
+            while True:
+                token.publish(arms={"left": _joints_block(0.0),
+                                    "right": _joints_block(0.0)},
+                              goal_deg={})
+                self.published += 1
+                await asyncio.sleep(self._period)
+        finally:
+            token.detach()
 
-
-class _StreamTelemetry(_FakeTelemetry):
-    def __init__(self, arms, stream, hz=20.0):
-        super().__init__(arms, hz)
-        self._stream = stream
-
-    def subscribe(self):
-        return self._stream
+    async def stop(self):
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
 
 
 def _runnable_recorder(teleop_seq):
-    """A recorder wired for _run(): fake streaming telemetry + dataset.
+    """A recorder wired for _run(): a tick pump + a fake dataset.
 
-    status() consumption per loop iteration is 3: one for the stop-transition
-    check in _run, plus one per arm inside _build_frame. Plus one before the
-    loop initializes `teleop_was_running`. Size `teleop_seq` accordingly.
+    status() consumption is now ONE per loop iteration, plus one before the
+    loop initialises `teleop_was_running` — it used to be three, because
+    `_build_frame` asked the session for the commanded goal once per arm.
+    The action comes off the sample now, so the recorder no longer
+    interrogates the session while building a row at all. Size `teleop_seq`
+    accordingly.
     """
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
-    stream = _EndlessStream(limit=1000)
+    bus = TickBus()
     r = DatasetRecorder(
-        telemetry=_StreamTelemetry(arms, stream),
+        tick_bus=bus,
+        telemetry=_FakeTelemetry(arms),
         human_teleop=_SeqTeleop(teleop_seq),
         cameras=_FakeCameras([]),
     )
@@ -734,46 +771,58 @@ def _runnable_recorder(teleop_seq):
     r._state.task = "t"
     r._episode_open = True
     r._state.recording = True
-    return r, stream
+    return r, _TickPump(bus)
 
 
 async def test_teleop_stop_mid_take_saves_and_closes():
     running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
     stopped = {"running": False}
-    # 1 init + 3 iterations x (1 check + 2 build) = 10 running, then stopped.
-    r, stream = _runnable_recorder([running] * 10 + [stopped])
-    await asyncio.wait_for(r._run(), timeout=5.0)
+    # 1 init + 3 iterations x 1 check = 4 running, then stopped.
+    r, pump = _runnable_recorder([running] * 4 + [stopped])
+    pump.start()
+    try:
+        await asyncio.wait_for(r._run(), timeout=5.0)
+    finally:
+        await pump.stop()
     assert r._dataset.saved == 1
     assert r._dataset.cleared == 0
     assert r._state.recording is False
     assert r._episode_open is False
     assert r._state.episode_frames == 3  # frames before the stop were kept
-    assert stream.closed
+    assert r._tick_sub is None           # the loop released its subscription
 
 
 async def test_teleop_never_running_does_not_auto_stop():
     """A bring-up take (no teleop) must not be auto-closed by the loop."""
-    r, stream = _runnable_recorder([{"running": False}])
+    r, pump = _runnable_recorder([{"running": False}])
+    pump.start()
     task = asyncio.get_event_loop().create_task(r._run())
-    await asyncio.sleep(0.05)  # let a few frames land
-    assert r._state.episode_frames > 0
-    assert r._episode_open is True     # no transition -> no auto-close
-    assert r._dataset.saved == 0
-    r._state.recording = False         # normal operator stop
-    await asyncio.wait_for(task, timeout=5.0)
+    try:
+        await asyncio.sleep(0.05)  # let a few frames land
+        assert r._state.episode_frames > 0
+        assert r._episode_open is True     # no transition -> no auto-close
+        assert r._dataset.saved == 0
+        r._state.recording = False         # normal operator stop
+        await asyncio.wait_for(task, timeout=5.0)
+    finally:
+        await pump.stop()
     await r.stop_episode(save=False)
     assert r._dataset.cleared == 1
-    assert stream.closed
+    assert r._tick_sub is None
 
 
 async def test_stop_episode_after_auto_save_is_a_noop():
     running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
     stopped = {"running": False}
-    # 1 init + 2 iterations x 3 = 7 running, then stopped on iter 3's check.
+    # 1 init + 2 iterations x 1 = 3 running, then stopped on iter 3's check.
     # Two frames, not one: a one-frame take is refused outright — see
     # MIN_SAVEABLE_FRAMES — and this test is about stop being idempotent.
-    r, stream = _runnable_recorder([running] * 7 + [stopped])
-    await asyncio.wait_for(r._run(), timeout=5.0)
+    r, pump = _runnable_recorder([running] * 3 + [stopped])
+    pump.start()
+    try:
+        await asyncio.wait_for(r._run(), timeout=5.0)
+    finally:
+        await pump.stop()
     assert r._dataset.saved == 1
     # Operator hits /record/stop a beat later: must not save or clear again.
     status = await r.stop_episode(save=True)
@@ -797,6 +846,7 @@ async def test_stop_episode_with_never_started_dataset_is_graceful():
 def _real_recorder(root, monitor=None):
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     return DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([]),
@@ -880,6 +930,7 @@ async def test_repo_switch_closes_out_the_first_dataset(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     rec = DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([]),
@@ -905,6 +956,7 @@ async def test_video_take_streams_h264_and_reloads(tmp_path):
     cam = _FakeCamera("top", 64, 48)  # has latest_rgb -> admitted to the schema
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     rec = DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([cam]),
@@ -946,9 +998,9 @@ async def _drive_scored(rec, repo_id: str, task: str, verdicts) -> None:
     reward/done columns under test are the ones the record loop produces."""
     await rec.start_episode(repo_id, task)
     for _ in verdicts:
-        frame = rec._build_frame({"arms": {"left": _joints_block(1.0),
+        frame = rec._build_frame(_sample({"arms": {"left": _joints_block(1.0),
                                            "right": _joints_block(2.0)},
-                                  "base": {"linear": 0.0, "angular": 0.0}})
+                                  "base": {"linear": 0.0, "angular": 0.0}}))
         assert frame is not None
         rec._dataset.add_frame(frame)
         rec._state.episode_frames += 1
@@ -1002,6 +1054,7 @@ def _real_recorder_with_camera(root, monitor=None):
     """
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     return DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([_FakeCamera("top", 64, 48)]),
@@ -1113,10 +1166,10 @@ async def test_wall_clock_is_relative_and_survives_float32(tmp_path):
     # A 200 s take: far enough into the episode that an absolute epoch would
     # round these three ticks onto at most two distinct float32 values.
     for dt in (0.0, 100.0, 200.0):
-        frame = rec._build_frame({"t": start + dt,
-                                  "arms": {"left": _joints_block(1.0),
-                                           "right": _joints_block(2.0)},
-                                  "base": {"linear": 0.0, "angular": 0.0}})
+        frame = rec._build_frame(_sample({
+            "t": start + dt,
+            "arms": {"left": _joints_block(1.0), "right": _joints_block(2.0)},
+            "base": {"linear": 0.0, "angular": 0.0}}))
         rec._dataset.add_frame(frame)
         rec._state.episode_frames += 1
     await rec.stop_episode(save=True)
@@ -1307,6 +1360,7 @@ async def test_the_recorded_set_is_frozen_at_start_and_read_fresh_next_take(tmp_
                          _FakeCamera("wrist", 64, 48, record=False)])
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     rec = DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=cams, root=str(tmp_path / "a"))
@@ -1319,6 +1373,7 @@ async def test_the_recorded_set_is_frozen_at_start_and_read_fresh_next_take(tmp_
     # A new repo, because adding a camera changes the schema and resuming the
     # old dataset would (correctly) refuse.
     rec2 = DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=cams, root=str(tmp_path / "b"))
@@ -1349,6 +1404,7 @@ async def _drive_video(rec, repo, task, n, root=None):
 def _video_recorder(root, cams=None):
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     return DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=cams if cams is not None else _FakeCameras([_FakeCamera("top", 64, 48)]),
@@ -1577,6 +1633,7 @@ async def test_the_log_keeps_two_repos_apart(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     rec = DatasetRecorder(
+        tick_bus=TickBus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([]))   # root=None, like the server
@@ -1592,3 +1649,128 @@ async def test_the_log_keeps_two_repos_apart(tmp_path, monkeypatch):
     assert rec.session_episodes("smoke/first")[0]["task"] == "a"
     assert rec.session_episodes("smoke/second")[0]["task"] == "b"
     rec.close()
+
+
+# ---- the effort branch and where a dropped tick is attributed -------------
+
+def _arm_block(val, *, effort=0.0, status=None):
+    """One arm's snapshot, optionally declaring what its effort channel did."""
+    block = _joints_block(val, effort=effort)
+    if status is not None:
+        block["effort_status"] = status
+    return block
+
+
+def test_a_transient_effort_failure_drops_the_frame_and_says_which_arm():
+    """Ruled 2026-08-27. A live channel that missed ONE read is ~1 in 1800 at
+    60 Hz, so dropping costs ~0.1% of a take — while a recorded 0.0 would say
+    "no load" at a moment when there was load, in a column
+    `dataset_to_policy_features` hands to the policy as an input feature."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    frame = r._build_frame(_sample({"arms": {
+        "left": _arm_block(1.0, effort=0.3, status=EFFORT_OK),
+        "right": _arm_block(2.0, effort=0.0, status=EFFORT_TRANSIENT),
+    }, "base": {}}))
+
+    assert frame is None
+    assert r._state.drops_arms == {"right": 1}
+    assert r._state.drops_cameras == {}
+    assert r._state.skipped_frames == 1
+
+
+def test_a_structurally_absent_effort_channel_records_zero_and_keeps_the_frame():
+    """EVERY frame degrades on an arm with no effort channel, so dropping
+    would trade a whole demonstration for one optional column. A flat-zero
+    column is already this module's documented sentinel for exactly that."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    frame = r._build_frame(_sample({"arms": {
+        "left": _arm_block(1.0, effort=0.0, status=EFFORT_ABSENT),
+        "right": _arm_block(2.0, effort=0.5, status=EFFORT_OK),
+    }, "base": {}}))
+
+    assert frame is not None
+    assert r._state.skipped_frames == 0
+    np.testing.assert_allclose(frame["observation.effort"][:6], [0.0] * 6)
+    np.testing.assert_allclose(frame["observation.effort"][6:], [0.5] * 6)
+    assert "left" in r._state.effort_absent_arms
+    assert "right" not in r._state.effort_absent_arms
+
+
+def test_a_snapshot_predating_the_status_field_is_never_read_as_transient():
+    """Inventing a drop for a legacy snapshot would discard frames that were
+    fine. It cannot have been a transient failure — that classification did
+    not exist when the snapshot was written."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    frame = r._build_frame(_sample({"arms": {
+        "left": _joints_block(1.0, effort=None),    # no effort key at all
+        "right": _joints_block(2.0, effort=0.75),   # effort, but no status
+    }, "base": {}}))
+
+    assert frame is not None
+    assert r._state.skipped_frames == 0
+    assert "left" in r._state.effort_absent_arms
+    assert "right" not in r._state.effort_absent_arms
+
+
+def test_drops_are_nested_and_both_surfaces_are_always_present():
+    """Preserving a distinction through the type and discarding it before the
+    operator sees it is worse than never typing it: a camera named for a side
+    and an arm named for a side collapse to one confident wrong answer."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    drops = r.status()["drops"]
+    assert drops == {"cameras": {}, "arms": {}}
+
+
+def test_a_stale_camera_is_attributed_to_the_camera_by_its_dataset_key():
+    r = _recorder({"running": False},
+                  cams=_FakeCameras([_FakeCamera("top", frame=None)]))
+    r._cam_specs = r._active_camera_specs()
+    r._state.task = "t"
+
+    assert r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
+                                            "right": _joints_block(0.0)},
+                                   "base": {}})) is None
+    assert r.status()["drops"] == {"cameras": {"top": 1}, "arms": {}}
+
+
+def test_the_total_and_the_buckets_reconcile():
+    """`skipped_frames` is the number the HUD shows and the buckets say where
+    it went. One increment per dropped tick, so they cannot come apart."""
+    r = _recorder({"running": False},
+                  cams=_FakeCameras([_FakeCamera("top", frame=None)]))
+    r._cam_specs = r._active_camera_specs()
+    r._state.task = "t"
+
+    both_arms = {"left": _joints_block(0.0), "right": _joints_block(0.0)}
+    r._build_frame(_sample({"arms": both_arms, "base": {}}))          # camera
+    r._build_frame(_sample({"arms": {"left": _joints_block(0.0)},     # arm
+                            "base": {}}))
+    status = r.status()
+    bucketed = (sum(status["drops"]["cameras"].values())
+                + sum(status["drops"]["arms"].values()))
+    assert bucketed == status["skipped_frames"] == 2
+
+
+def test_a_partial_joint_read_is_a_degraded_read():
+    """The schema is frozen at start, so a missing joint has no honest value.
+    Substituting for it is the same defect as substituting for a whole arm."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    partial = {"joints": {j: {"pos": 1.0, "effort": 0.0}
+                          for j in list(SIX)[:-1]}}   # one joint short
+    assert r._build_frame(_sample({"arms": {"left": partial,
+                                            "right": _joints_block(0.0)},
+                                   "base": {}})) is None
+    assert r._state.drops_arms == {"left": 1}
