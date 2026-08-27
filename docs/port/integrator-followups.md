@@ -63,47 +63,57 @@ and dies when that event happens. Add the trigger, not just the task.
   it is squeezed into 0..63.6 with a dead band over the lower half of the trigger. Not a
   baseline, not a fixture, not a smoke-test target for anything that reads the gripper.
 
-## Three ways a test can be shaped like the code instead of the claim
+## Ways a test can be shaped like the code instead of the claim
 
-All found in this port, all the same failure: the suite looked green because each test
-matched the shape of the implementation rather than the shape of the promise.
+Each produced a green suite over a real defect: the test matched the shape of the
+implementation rather than the shape of the promise.
 
 1. **A claim about a SEQUENCE cannot be pinned by tests about single transitions.** Ten
-   takes without leaving ARMED passed trivially on a one-cycle test. Fixed by ten full
-   cycles with a status reconcile inside each.
-2. **An IMPOSSIBLE fixture invents a world where the bug cannot exist.** A limits window
-   the real loader can never emit converts an untested path into an apparently-tested
-   one — worse than no fixture at all.
+   takes without leaving ARMED passed trivially on a one-cycle test. The test walks the
+   same control flow the code does, so it adopts the code's ordering assumptions.
+2. **A fixture can encode the INTENDED contract while production encodes something else,
+   and nothing compares the two.** The gripper fixture `(0.0, 100.0)` was RIGHT — lerobot
+   hardcodes the gripper to `RANGE_0_100` regardless of `use_degrees`
+   (`so_follower.py:59`). `_load_joint_limits` is what is wrong: it tick-centres every
+   motor without checking `norm_mode` (`arm.py:337-348`), handing a percent channel a
+   symmetric degrees window. The test passed because it tested the fixture's world, which
+   was correct — while production's was not. **Nothing anywhere pins
+   `_load_joint_limits`'s output against what lerobot actually expects per `norm_mode`.**
+   That missing contract test is the real gap.
 3. **A per-point assertion cannot see a dead zone; only a sweep can.** Every gripper test
-   checked that a command produced *some* sane value. None checked the mapping was a
-   bijection onto the jaw's actual travel, so half the trigger doing nothing was invisible.
+   checked a command produced *some* sane value. None checked the mapping was a bijection
+   onto the jaw's travel, so half a dead trigger was invisible.
 
-**Why each one fails, which is the same reason three times.** In a sequence claim tested
-per-step, the test walks the same control flow the code does, so any ordering assumption
-the code makes the test makes too. In an impossible fixture, the test's WORLD is built
-from the code's assumptions rather than from what the real loader can emit, so a mismatch
-between two real components has nowhere to appear. In a per-point assertion, the test
-checks the code's output at the points the code handles, never the property the claim is
-actually about. **In all three the test inherits the code's blind spot, because it was
-written from the code.**
+**The common mechanism:** the test inherits the code's blind spot, because it was written
+from the code. **The counter-discipline:** write the assertion from the CLAIM, in the
+claim's own terms, before reading the implementation — a sweep for a mapping, an
+end-to-end for a sequence, and for a contract, a test that compares the two real
+components rather than either against a fixture.
 
-**The counter-discipline:** write the assertion from the CLAIM, in the claim's own terms,
-before reading the implementation — a sweep for a mapping, a real-loader-derived fixture
-for a world, an end-to-end for a sequence.
+**Decision rule, from getting the fixture call wrong:** prefer the test that catches the
+OBSERVED failure over the more elegant one. Elegance is not a coverage argument.
 
-**And a decision rule that came out of getting this wrong once:** when choosing between
-two tests, prefer the one that catches the OBSERVED failure over the more elegant one.
-Elegance is not a coverage argument. (The premise-vs-scanner call was nearly made the
-other way on exactly that mistake — the elegant test would have left the defect that
-motivated it free to recur.)
+### Retracted, 2026-08-27 — "the impossible fixture"
+
+An earlier version of this file claimed `gripper: (0.0, 100.0)` was a window the loader
+could never produce, and generalised that into "an impossible fixture invents a world
+where the bug cannot exist". **That was wrong and is withdrawn.** The window was correct
+and production was not. On re-checking, the other flagged fixtures
+(`shoulder_lift: (-100, 0)`, `elbow_flex: (0, 100)`, `elbow_flex: (0, 40)` in
+`test_so101_ik.py`) are legitimate too: they are arbitrary INPUT to `SO101DecoupledIK`,
+whose contract is to honour whatever limits it is handed, and asymmetry is the point of
+two of them. So the lesson had **zero** real instances and is removed rather than
+softened. The defect it was attached to is real and unchanged; only the diagnosis moved.
 
 ## Standing rules that came out of rulings
 
-- **Every window `_load_joint_limits` can produce is EXACTLY symmetric about zero** — it
-  centres on `(range_min + range_max)/2` and offsets both ends. So any asymmetric limits
-  fixture is impossible by construction, which turns "is this fixture realistic?" from a
-  judgement call into a one-line assertion runnable over every fixture in the suite. It
-  found `gripper: (0.0, 100.0)` in two files and `elbow_flex: (0.0, 40.0)` in a third.
+- **The symmetry rule holds only for fixtures standing in for loader OUTPUT.**
+  `_load_joint_limits` centres on `(range_min + range_max)/2`, so every window it emits
+  is symmetric about zero — but that says nothing about fixtures which are deliberately
+  arbitrary INPUT to a component that accepts arbitrary limits (`SO101DecoupledIK` is
+  contractually required to honour whatever it is handed). A scanner without that scope
+  qualifier flags three legitimate fixtures on its first run, and a check that cries wolf
+  is disabled by week two. Encode the scope or do not build it.
 
 - **The message that only matters when something has gone wrong is the one that was
   not legible.** Two HUD strings were found clipped off the in-headset panel, both in
