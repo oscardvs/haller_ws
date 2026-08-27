@@ -56,34 +56,11 @@ a run can see the directory.
 1. **The sim walk of V3–V13**, once the routes are mounted. Every item in
    `headset-checklist.md` carries a note saying which half vitest already holds and what the
    run adds, so this is a short list of backend assertions, not a rediscovery.
-2. **Retire the `episodesTotal()` FALLBACKS** — not the function — once `episode_index` is
-   real in `GET /record/status`. **Corrected 2026-08-27 by `haller-ws-6e`; the wording below
-   replaces "delete `episodesTotal()` and its five tests", which is not executable.** The
-   same correction is owed to `integrator-followups.md`, which is the integrator's file.
+2. ~~Retire the `episodesTotal()` fallbacks.~~ **DONE at `ccd79d6`**, once the routes
+   landed at `9360e8b` and `episode_index` went real. What it actually took, and why it
+   was not the two-line deletion the follow-up described, is under **The index and the
+   count** below. Do not re-open it; do read that section before touching either number.
 
-   Two things were wrong with it, and both were checked at `fc3b6c5`:
-
-   - **The tests are not in `lib/vrTeleop.ts`.** The function is
-     (`lib/vrTeleop.ts:1865`); its five tests are `__tests__/vrTeleopProtocol.test.ts:385-415`.
-   - **The deletion is PARTIAL.** Three consumers, and only two of them are fallbacks:
-     `VRTeleopPanel.tsx:1160-1162` (the HUD chip's `episodes`) and `:1226-1227`
-     (`episodeIdx`, which names the take) both prefer `episode_index` and fall back, so
-     both fallback arms go. But `:1221`'s `datasetEpisodes` also feeds `:1348-1349`'s
-     `` `${datasetEpisodes} in dataset` ``, and **that is a COUNT, not an index.**
-     `episode_index` is the gate's index for the take in hand; it is not the number of
-     episodes in the dataset, and after a `delete_episodes` prune it renumbers besides.
-     **Two numbers that coincide on the happy path are not the same fact.**
-
-   All five tests pin the COUNT — the `onDisk` read, the take floor, the fresher-disk-read
-   win, the per-repo baseline, and the null. **Not one of them is about the fallback path**,
-   so every one of them survives `episode_index` landing, and deleting them would strip the
-   only coverage from a function that still has a live caller. The lerobot RAM-buffering
-   this papers over (`lib/vrTeleop.ts:1852-1863`) is not fixed by `episode_index` either —
-   it is a fact about `meta/episodes.jsonl`, and the count stalls at 7 with or without a
-   gate index.
-
-   **So: delete the two fallback arms and whatever pins them. Keep `episodesTotal()`, keep
-   its five tests, keep `DatasetTally` and `refreshEpisodes`.**
 3. **V11 goes FIRST in the hardware session.** Not last. The invariant-5 modal exception
    rests on it, and a lapse found at the start of the evening is a design change with time
    to make it; found at midnight it is a wasted session with new servos on the bench.
@@ -123,6 +100,70 @@ as tests so it cannot lapse quietly:
 
 If either stops being true the exception lapses and the prompt's stick binding comes out.
 That is not my call or yours — it goes back to the integrator.
+
+### The index and the count — two facts, and the HUD held them in one field
+
+**Resolved at `ccd79d6` (`haller-ws-6e`, 2026-08-27). The follow-up said "delete
+`episodesTotal()` and its five tests"; that was wrong twice over and is now corrected in
+`integrator-followups.md` too.**
+
+`episode_index` is the gate's index for **the take in hand**. `episodesTotal()` is the
+**size of the dataset**. They agree for as long as nothing has been pruned and every index
+is a 0-based sequential offset into the dataset — which is the whole happy path, and is
+exactly why one field looked like enough. **Two numbers that coincide on the happy path are
+not the same fact.**
+
+The retirement was not two lines because `RecorderHudLike.episodes` had **three** readers,
+not two, and the third was reached through the field rather than through `episodesTotal`,
+so a grep for the function never found it:
+
+- `takeNaming()` and the `● REC` row read it as an **INDEX**;
+- the idle menu's `hold A/X to ARM  (N in dataset)` reads it as a **COUNT**.
+
+And on a gated backend `episode_index` is **null exactly while idle** — the recorder sets it
+at ARM (`recorder.py:842`) and clears it at STOP (`:990`, `:1016`). So the one reader that
+wanted a count was the one reader guaranteed a null. Retiring the fallback without splitting
+the field would have silently dropped the dataset count off the idle menu.
+
+Split into `episodeIndex` and `datasetCount`. **Renamed rather than reused**, for the reason
+`record_rate_gate` became `record_rate_tolerance` instead of keeping its name: a different
+meaning gets a different name so a stale reader **breaks at the type** instead of plausibly
+painting the wrong number. It did break — four sites, all in tests, all loud, none silent.
+
+`episodesTotal()` **stays**, with its five tests (`__tests__/vrTeleopProtocol.test.ts:385-415`
+— not in `lib/vrTeleop.ts`, whatever the follow-up said), `DatasetTally` and
+`refreshEpisodes`. All five pin the COUNT, none the fallback, so all five survived. The
+lerobot RAM buffering it papers over is a fact about `meta/episodes.jsonl`: **`N in dataset`
+still stalls at 7 while the operator banks their tenth, on both surfaces, gate or no gate.**
+
+One visible consequence, and it is the retirement working rather than a regression: an
+ungated backend now reads `◆ ARMED take 3`, not `ep 34`. `take 3` is true of this page-load;
+`ep 34` off a count was right only by coincidence, and V13's own wording said `take N` all
+along.
+
+### The toasts read the ask back instead of the outcome
+
+**Fixed at `ccd79d6`.** Track A's contract extension made this reachable: a `{save, rearm}`
+whose save lands and whose **re-arm is refused** is a **200** carrying `state:"idle"` and an
+`invalidated_reason` — deliberately not a 409, because a 409 would report a banked take as a
+failure. **So a 200 stopped being evidence that the ask was honoured**, and `stopAct` was
+building its toast from `act.rearm`.
+
+The result would have been `· armed for the next` printed over a gate that was **down**, at
+the one moment the operator is deciding whether to keep driving. The 250 ms poll reconciles
+the state and the HUD paints `GATE DROPPED — <reason>` a quarter-second later, so the client
+self-corrected — but **the toast is what gets read at the decision**, and it substituted a
+wrong conclusion rather than withholding one. Same class as the clipped
+`acquiring 1.2s  (no tracking)`, one surface over.
+
+It reads `st.state` under a **server** gate and the ask under a **local** one — where `rearm`
+was never sent and the re-arm is this page's own, so reading `state` there would invent a
+refusal that did not happen. The copy leads with `saved`: **a refused re-arm must not read as
+a lost take.**
+
+The other half of that extension needs nothing from us: a deliberate stand-down from ARMED
+lands idle with the reason **null**, so the HUD correctly says nothing. An operator act is
+not a fault.
 
 ### 404 vs 409 on the arm probe
 

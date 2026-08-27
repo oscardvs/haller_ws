@@ -252,15 +252,15 @@ The workflow claim, run as a workflow: arm once, then A/X hold → drive → A/X
   in RAM: takes 1–9 leave `meta/episodes/` empty, and from take 10 the parquet on
   disk has no footer if the writer was ever reopened. Nine takes would not show
   it. Reload the dataset afterwards and confirm all ten rows read back.
-- **Also watch:** the HUD's episode counter. It currently falls back to
-  `episodesTotal()`, a guess that exists only to paper over that same buffering,
-  and it stalls at 7 while the operator banks their tenth. Once
-  `/record/status` reports a real `episode_index` **the two INDEX fallbacks go —
-  the guess itself stays.** `episode_index` names the take in hand; the row that
-  reads `N in dataset` is a COUNT, and the RAM buffering that stalls it at 7 is a
-  fact about `meta/episodes.jsonl` that no gate index touches. So this stays worth
-  watching after the mount. See `trackD-handoff.md` item 2 — corrected 2026-08-27,
-  because `integrator-followups.md` still says the whole function goes.
+- **Also watch:** the HUD's episode counter — **and this item did not go away with
+  the mount.** The two INDEX fallbacks were retired at `ccd79d6`, so the chip's
+  `ep N` is now the gate's `episode_index` and nothing else. But the row that reads
+  `N in dataset` is a **COUNT**, it is still `episodesTotal()`, and the lerobot RAM
+  buffering that stalls it at 7 is a fact about `meta/episodes.jsonl` that no gate
+  index touches. **So the tenth take is still the one that shows it**, on the idle
+  menu and on the desktop card both. Watch `ep N` and `N in dataset` separately:
+  they are two numbers now, and after a prune they are allowed to disagree.
+  See `trackD-handoff.md`, "The index and the count".
 
 ---
 
@@ -376,15 +376,32 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 > harness. And nothing lands on disk before ROLL, with the 0 -> 4 write that
 > makes the empty directory falsifiable.
 >
-> **NOT MEASURED — two clauses.** The silent upgrade against a backend that DOES
-> mount the routes: not runnable until the mount, and the exact mirror of the
-> first clause, whose window closes at the same moment. And the operator-facing
-> strings — one `toast.info` per session, `◆ ARMED take N (local gate)` — which
-> are vitest-pinned but have not been read on a device.
+> **NOT MEASURED — two clauses, and one of them is now FORFEITED.**
+>
+> - **The silent upgrade** against a backend that DOES mount the routes: runnable
+>   from `9360e8b` onward, and it belongs to the sim walk.
+> - **The operator-facing strings** — one `toast.info` per session,
+>   `◆ ARMED take N (local gate)` — vitest-pinned, never read on a device, and
+>   **now unreachable on Haller's own backend.** The routes are mounted; the client
+>   upgrades silently, which is what it is supposed to do. Reaching them again
+>   would mean running a pre-`9360e8b` backend on purpose. Device-gated, servos
+>   absent, hardware session batched — holding the mount for them would have cost
+>   Track A the critical path for weeks and still not got them.
+>   **KNOWINGLY FORFEITED, not lost.** Also filed in `integrator-followups.md`.
+>   A sequencing item that expires is worth a line saying it was forfeited, or the
+>   next reader spends a session hunting something that cannot be had.
 
-`POST /record/arm` / `/record/roll` are not mounted yet — that is the
-integrator's follow-up, gated on Track A reporting the bodies. Until then the
-client probes once and holds ARMED itself.
+**MOUNTED at `9360e8b`.** `POST /record/arm` and `/record/roll` are live and
+`/record/stop` took `rearm`; all four record bodies are `extra="forbid"`. The
+routes-absent half of this item is closed for good — everything above it is the
+last measurement anyone will ever be able to take of that state.
+
+Two notes for the sim walk, from the client side. `◆ ARMED take N` is now what an
+**ungated** backend honestly gets, because the index fallback is retired
+(`ccd79d6`) — so seeing `take N` against a gated backend means `episode_index`
+did not arrive, which is a finding rather than cosmetics. And `extra="forbid"`
+makes a body-shape mismatch a **422**, which `isMissingRoute` (404/405 only)
+correctly leaves on the refusal branch, never on the local-gate branch.
 
 - **PASS:** the ARM hold gets 404/405, exactly one `toast.info` per session
   saying the backend has no start gate yet, the chip reads
