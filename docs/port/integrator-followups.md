@@ -499,6 +499,57 @@ applies to any probe that prunes, not only to a matrix.
   the 2026-08-21 incident verbatim, arriving by a new road. An arm with a latched
   shoulder alarm ends up HALF LIMP while the report prints "TORQUE STILL ENABLED".
 
+- **A FABRICATED fact is worse than a rotted one, because no commit made it wrong.**
+  The copied-fact class assumes a comment that was TRUE when written and rotted on
+  somebody else's commit — you can find the commit and learn something. `lib/api.ts` typed
+  `started_at`/`finished_at` as `number | null` with a comment asserting the backend writes
+  `time.time()`. **It never did.** `runs.py::_now()` returns
+  `isoformat(timespec="seconds")`, the catalog sorts them as strings, and the kit writes
+  the same ISO string — so the claim was false the day it was typed. Consequence: every AT
+  cell in the run list and every `started` in the detail rendered `—`, and RunDetail's
+  elapsed was gated the same way, so **no run had ever reported its duration.** Silent,
+  type-checking, never throwing. There is no bisect that finds this; only pointing the real
+  producer at the real consumer does. The fixed pane now reads `RAN 53m 10s` for a
+  19:33:50 -> 20:27:00 run — arithmetic nobody put in the code.
+
+- **A column whose job is telling rows apart needs a DISTINCTNESS assertion; no
+  per-item check can see it.** All thirteen checkpoint rows rendered `pretrained_model`,
+  because the wire sends the MODEL directory (what a rollout is pointed at) and the step
+  directory is its PARENT — so every last segment was identical and every per-row
+  assertion passed. This is the histogram rule one level down: there, a swapped pair left
+  every count unchanged; here, a collapsed column leaves every row individually valid.
+  Assert that a discriminating column HAS as many distinct values as it has rows.
+  Neighbouring instance from the same pass: `Checkpoint.step` is `null` for lerobot's
+  `last` alias — sent null ON PURPOSE, as the only thing distinguishing the alias from
+  what it points at — while the type said `number`, so the one row that most needed
+  identifying rendered a blank step beside twelve identical names.
+
+- **A subordinate REQUEST must not be able to blank the workspace either.** The
+  PaneBoundary rule one level up: a real ACT run logs 12 numeric keys against
+  `compare.py::MAX_KEYS = 8`, so the 400 reached the outer catch, left `state` null, and
+  replaced the whole Compare pane — losing the run list, the legend and the hparam diff
+  over a chart that could not be drawn. A refused sub-request is data, not an exception:
+  it now reads `RUNS 2/2 · 12 shared metrics` with `curves refused: too many keys: 12 — at
+  most 8 per request` **in the backend's own words**, and everything that did not depend
+  on the curves stays on screen.
+
+- **The BROWSER is a shared resource on this box, like the git index.** The Playwright
+  MCP profile is held by whichever session grabbed it first (`Browser is already in use
+  ... use --isolated`), and contending for it means driving Oscar's own Chrome. Drive an
+  isolated headless chromium over CDP from `~/.cache/ms-playwright/chromium-1208` with its
+  own `--user-data-dir` and port, killed after each probe. Same for the built frontend:
+  **do not `next build` the shared `.next`** while other sessions serve from it — build in
+  a detached worktree with its OWN `node_modules`, because Turbopack rejects a symlinked
+  one pointing outside the project root.
+
+- **A probe of any surface that owns a mutating call gets a COPY, never a link.** The
+  gate-matrix rule generalises past matrices. The runs surface has `DELETE /lab/runs/{id}`
+  and a delete button, so a hardlink or symlink into the real run store would have put
+  Oscar's only real 60k-step training run — 7 GB, no backup — behind a button on a page
+  under test. Copy, and omit what the wire provably never sends (`_checkpoint_wire` emits
+  `{step, path, has_model}` only, so weight blobs are invisible to every route the
+  frontend calls and need not be copied at all).
+
 - **A copied fact is only wrong once someone changes it elsewhere — and until then,
   the happy path fits.** Third instance of the legibility class, one level up. Track D's
   HUD carried `declared * 0.9` with a comment asserting it matched the recorder's gate.

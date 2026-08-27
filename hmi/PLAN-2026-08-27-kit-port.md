@@ -177,8 +177,9 @@ into two 5-DoF arms. Budget it as new work with new tests, not as a port with a 
 6. **Interpreter split.** The serving venv (`~/venvs/haller-hmi`, lerobot 0.5.1) stays
    where it is. Detached runners — train, rollout, export — get a new
    `~/venvs/haller-lab` with lerobot 0.6.1. Verified today: `haller-hmi` = 0.5.1,
-   `vr-teleop-kit/.venv` = 0.6.1; **`~/venvs/haller-lab` does not exist yet** and is a
-   Phase-0 deliverable.
+   `vr-teleop-kit/.venv` = 0.6.1. **`~/venvs/haller-lab` NOW EXISTS at lerobot 0.6.1**
+   (confirmed 2026-08-27 pm; `/lab/system` reports `runner_python_exists: true`,
+   `lerobot_version: 0.6.1`). That Phase-0 deliverable is DONE.
 
 ## Unverified — every one of these is a Phase-0 go/no-go
 
