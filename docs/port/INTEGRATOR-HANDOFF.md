@@ -72,13 +72,23 @@ its 5 tests once `episode_index` is real.
         +  0  69f5f4e, 1c34f16, 8aebdb6, afca93e, 7540d92, 52c8fad  — docs
         + 31  965fa32  Phase 2d: arm/roll/stop + test_record_gate.py (Track A)
         + 16  6f0ac90  rollout rate-provenance stamp (Track B)
-        +  1  728a80c  mid-take auto-save off the loop (Track A) — UNREPORTED; the
-                       arithmetic found it, which is the second time that rule has
-                       named a commit no track mentioned
+        +  1  728a80c  mid-take auto-save off the loop (Track A) — see the note below;
+                       it WAS reported and the messages crossed
         +  0  3e68420, ae51fb4  — frontend + docs (Track C)
         +  1  9360e8b  the per-call bus-wiring test (integrator)
         ----
         1681  9360e8b  (haller-ws-84, detached worktree)
+
+**`728a80c` was NOT an unreported landing, and this document said it was.** The integrator
+found it by the ladder failing to close, concluded it had not been reported, and filed it as
+a second instance of "report the landing". Track A had reported it — their message opened
+with *"`728a80c` landed"* and carried its own `1679 @ 6f0ac90 + 1 = 1680` measurement — and
+the two messages crossed. Corrected on their word, checked against the message log.
+**The real lesson is a different one, and it is theirs:** on a four-session tree, *"I did not
+hear it"* and *"it was not said"* are not the same fact, **and the arithmetic cannot tell them
+apart.** The ladder is still the right instrument — it surfaced a commit the integrator did
+not know about, which is exactly its job — but the residual it names is an ACCOUNTING gap,
+never an attribution. Attribution needs the message log, and asking costs one line.
 
   Two rungs are asserted from commit SCOPE rather than re-run, and say so: `2202e7c` is
   one docs file, and `abdc52e`'s only code touch is a test docstring (`test_server_mount.py`
