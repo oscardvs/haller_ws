@@ -21,6 +21,7 @@
  * it, and it is the meaningful half.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { toast } from "sonner";
 import { act, render, screen } from "@testing-library/react";
 
 import {
@@ -35,13 +36,14 @@ vi.mock("sonner", () => ({
 // vi.hoisted, because vi.mock factories are lifted above the module body and a
 // plain const would not exist yet when the factory runs.
 const { recordArm, recordRoll, recordStop, humanTeleopHome, estop,
-        humanTeleopStop } = vi.hoisted(() => ({
+        humanTeleopStop, recordStart } = vi.hoisted(() => ({
   recordArm: vi.fn(),
   recordRoll: vi.fn(),
   recordStop: vi.fn(),
   humanTeleopHome: vi.fn(),
   estop: vi.fn(),
   humanTeleopStop: vi.fn(),
+  recordStart: vi.fn(),
 }));
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -69,6 +71,7 @@ vi.mock("../lib/api", async (importOriginal) => {
       humanTeleopStop,
       humanTeleopHome,
       recordArm,
+      recordStart,
       recordRoll,
       recordStop,
       estop,
@@ -76,6 +79,7 @@ vi.mock("../lib/api", async (importOriginal) => {
   };
 });
 
+import { ApiError } from "../lib/api";
 import { VRTeleopPanel } from "../components/VRTeleopPanel";
 
 // ---- the fake headset -------------------------------------------------------
@@ -197,6 +201,10 @@ beforeEach(async () => {
   humanTeleopHome.mockResolvedValue({ sides: ["left", "right"] });
   estop.mockResolvedValue({ ok: true });
   humanTeleopStop.mockResolvedValue({ ok: true });
+  recordStart.mockResolvedValue({
+    recording: true, state: "recording", repo_id: "local/t", task: "t",
+    episode_frames: 0, skipped_frames: 0, started_at: null, last_error: null,
+  });
   hs = fakeHeadset();
   (globalThis as unknown as { WebSocket: unknown }).WebSocket = class {
     readyState = 0;
@@ -460,5 +468,89 @@ describe("the E-STOP", () => {
     await act(async () => { enter.click(); });
     await pressEstop("right", 2000, 2);
     expect(estop).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---- V13: the fallback against a backend that has no start gate ------------
+
+describe("the local gate, on a backend without /record/arm", () => {
+  /** What an unmounted FastAPI route actually answers. */
+  const notMounted = () =>
+    recordArm.mockRejectedValue(new ApiError(404, "Not Found"));
+
+  it("holds ARMED itself, and still writes nothing before ROLL", async () => {
+    // The operator-facing half of the gate is the only half the fallback can
+    // give: nothing is written while you get ready. It is also the half that
+    // cost Oscar two 60 s episodes of himself putting a headset on, so it is
+    // the half worth having before the routes land.
+    notMounted();
+    await enterSession();
+    const t = await holdAX(hs, 1000);            // idle -> armed, locally
+
+    expect(recordArm).toHaveBeenCalledTimes(1);
+    expect(recordRoll).not.toHaveBeenCalled();
+    expect(recordStart).not.toHaveBeenCalled(); // NOTHING has been opened yet
+
+    await holdAX(hs, t);                         // armed -> rolling
+    // ROLL goes through the plain /record/start the page was holding back.
+    expect(recordStart).toHaveBeenCalledTimes(1);
+    expect(recordRoll).not.toHaveBeenCalled();
+  });
+
+  it("says so once per session, not once per take", async () => {
+    // A caveat repeated every take is a caveat the operator learns to dismiss.
+    notMounted();
+    await enterSession();
+    let t = await holdAX(hs, 1000);
+    t = await holdAX(hs, t);                     // roll
+    t = await holdAX(hs, t);                     // prompt
+    await holdStick(hs, "left", t, 120);         // keep -> re-arms, probes again
+
+    expect(recordArm).toHaveBeenCalledTimes(2);  // it re-probes every arm...
+    const noted = (toast.info as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => String(c[0]).includes("no start gate"));
+    expect(noted).toHaveLength(1);               // ...and says it once
+  });
+
+  it("shows the caveat on the desktop card, not only in a toast", async () => {
+    // The toast is gone in seconds. The HUD carries "(local gate)" for as long
+    // as it is true and the desktop card now does too — a caveat the operator
+    // can only have seen once is a caveat they do not have.
+    notMounted();
+    await enterSession();
+    await holdAX(hs, 1000);
+    expect(await screen.findByText(/local gate/)).toBeInTheDocument();
+  });
+
+  it("upgrades silently the first time /record/arm answers", async () => {
+    // No toast, no caveat, no code path the operator has to know about. The
+    // fallback existing at all is a fact about the backend, not about them.
+    await enterSession();                        // recordArm resolves by default
+    const t = await holdAX(hs, 1000);
+    const noted = (toast.info as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => String(c[0]).includes("no start gate"));
+    expect(noted).toHaveLength(0);
+    expect(screen.queryByText(/local gate/)).toBeNull();
+
+    await holdAX(hs, t);
+    expect(recordRoll).toHaveBeenCalledTimes(1);
+    expect(recordStart).not.toHaveBeenCalled();  // the server gate owns ROLL
+  });
+
+  it("treats a 409 as a refusal, never as a missing route", async () => {
+    // The distinction the fallback turns on. 404 is "this backend has no gate";
+    // 409 is the gate WORKING — a colliding camera key, a measured rate under
+    // the floor — and swallowing one as the other would arm locally against a
+    // recorder that had just refused, which is the worst of both.
+    recordArm.mockRejectedValue(new ApiError(409, "camera key collision: top"));
+    await enterSession();
+    await holdAX(hs, 1000);
+    expect(screen.queryByText(/local gate/)).toBeNull();
+    const refused = (toast.error as ReturnType<typeof vi.fn>).mock.calls
+      .filter((c) => String(c[0]).includes("camera key collision"));
+    expect(refused).toHaveLength(1);
+    // And it did not silently roll on anyway.
+    expect(recordRoll).not.toHaveBeenCalled();
+    expect(recordStart).not.toHaveBeenCalled();
   });
 });

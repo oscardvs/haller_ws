@@ -200,6 +200,11 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // decision. Mirrored into state for the desktop panel; the XR loop and the
   // status poll both read the ref.
   const [take, setTake] = useState<TakeState>("idle");
+  // Mirrors gateServerRef for the desktop card. The in-scene HUD carries
+  // "(local gate)" for as long as it is true; the toast that announced it is
+  // gone in seconds, and a caveat the operator can only have seen once is a
+  // caveat they do not have.
+  const [localGate, setLocalGate] = useState(false);
   // The knobs the operator moved this page-load, mirrored out of the ref for
   // the desktop panel's ◆ markers.
   const [dirtyTune, setDirtyTune] = useState<string[]>([]);
@@ -629,6 +634,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     try {
       const st = await api.recordArm(repoId, task);
       gateServerRef.current = true;
+      setLocalGate(false);
       recStatusRef.current = st;
       setRecStatus(st);
       toast.success(`armed → ${repoId} — nothing written until you roll`);
@@ -643,6 +649,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
         // into the take instead of now, and the episode index is a guess. It
         // upgrades silently the first time /record/arm answers 200.
         gateServerRef.current = false;
+        setLocalGate(true);
         if (!gateNotedRef.current) {
           gateNotedRef.current = true;
           toast.info("no start gate on this backend — armed locally: nothing is "
@@ -1309,7 +1316,12 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
             // ARMED must never read like REC: it is loaded and writing
             // nothing, and an operator who cannot tell them apart has been
             // given the gate's cost without its benefit.
-            <span className="text-haller-warn font-bold">◆ ARMED {takeName}</span>
+            <span className="text-haller-warn font-bold">
+              ◆ ARMED {takeName}
+              {localGate && (
+                <span className="font-normal"> (local gate — schema not frozen)</span>
+              )}
+            </span>
           )}
           {recStatus?.recording && (
             <span className="text-red-400 font-bold animate-haller-rec">

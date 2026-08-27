@@ -306,11 +306,17 @@ VR (teleop stopping invalidates an armed gate on the backend's own rule).
 
 ### V13. Local gate against a backend without `/record/arm` ☐
 
-> **Partly pinned** — the `(local gate)` chip paints. The 404 probe, the
-> one-toast-per-session, and the silent upgrade all need two backends to run
-> against. **Cheap trick:** the second half is testable today by pointing at a
-> backend WITHOUT the routes, which is every backend right now — so V13's first
-> half can go green before Phase 1 lands, and only its upgrade half waits.
+> **Now pinned headlessly, both halves.** `__tests__/vrTeleopXRLoop.test.tsx`
+> drives the fallback through the real XR loop: a 404 from `api.recordArm` holds
+> ARMED locally and `POST /record/start` is not called until ROLL; the caveat is
+> announced once per SESSION rather than once per take; a 409 is treated as a
+> refusal and never as a missing route (arming locally against a recorder that
+> had just refused would be the worst of both); and a backend that answers 200
+> upgrades silently, with no toast and no caveat. Each was confirmed falsifiable
+> by mutation.
+> **What this run still adds:** that an unmounted FastAPI route really answers
+> 404, and that nothing lands on disk before ROLL. The test asserts the client
+> makes no call; only the run can see the directory.
 
 `POST /record/arm` / `/record/roll` are not mounted yet — that is the
 integrator's follow-up, gated on Track A reporting the bodies. Until then the
