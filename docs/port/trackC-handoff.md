@@ -65,6 +65,17 @@ Three things that cost hours to learn:
 - **Screenshots must be written under `/home/odesha/haller_ws/.playwright-mcp/`.**
   The Playwright MCP refuses paths outside the repo root; that directory is
   gitignored (`51844b9`).
+- **`.next/` is shared exactly like the git index.** One tree, one build
+  output. `next build` mints a new `BUILD_ID` and replaces the chunk
+  directory, so building while another session is serving from the same tree
+  can leave THEIR running server pointing at chunk paths that no longer exist.
+  The page then renders and its JavaScript 404s — which looks identical to the
+  `next dev` non-hydration trap above, and will send whoever hits it to the
+  wrong cause. So: `ss -ltnp | grep next-server` BEFORE building, not just
+  before choosing a port. If someone else is serving, coordinate or wait.
+  (Observed 2026-08-27: two sessions on :3993, second `next start` refused with
+  EADDRINUSE — which is the safe failure. The unsafe one is the build that
+  precedes it and succeeds silently.)
 
 The two real datasets under `~/robot-data/lerobot/local/` are the point of
 using a real backend: one is 6-channel single-arm with one camera key, the
