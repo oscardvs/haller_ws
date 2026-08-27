@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 TICKS_PER_REV = 4096
 DEG_PER_TICK = 360.0 / TICKS_PER_REV
 
+# `MotorNormMode` values, as lerobot spells them on the wire. Compared as
+# strings so a handle built against a stub motor (the sim path, the test
+# fakes) works without importing the enum, and pinned by
+# `test_norm_mode_spellings_still_match_lerobots` so a rename upstream fails
+# loudly here instead of silently falling through to the degrees branch.
+_NORM_0_100 = "range_0_100"
+_NORM_M100_100 = "range_m100_100"
+
 # Reads that ANCHOR a relative motion take a median of this many. One corrupted
 # Feetech status packet is enough to place an anchor most of a revolution away,
 # and everything downstream is measured FROM the anchor — so the bad value is
@@ -335,18 +343,50 @@ class ArmHandle:
         self._effort_race_count = 0
 
     def _load_joint_limits(self) -> dict[str, tuple[float, float]]:
-        # SO101Follower stores calibration as dict[motor_name, MotorCalibration]
-        # with range_min/range_max in raw ticks. We center on the mid-point of
-        # that range and convert to degrees — symmetric clamping, independent
-        # of the motor's homing_offset.
+        """Per-joint clamp window, IN THE UNIT THAT JOINT IS READ AND WRITTEN IN.
+
+        The unit is per motor, not per robot. lerobot sets the five body joints
+        from `use_degrees` but pins the gripper to RANGE_0_100 unconditionally
+        (`so_follower.py:50,59`), so one arm reports degrees on five joints and
+        a 0..100 percentage on the sixth. `_normalize`/`_unnormalize` are the
+        authority and this mirrors them exactly:
+
+          DEGREES        tick range centred on its own mid-point, converted —
+                         symmetric about zero by construction, and independent
+                         of the motor's homing_offset.
+          RANGE_0_100    (0, 100).
+          RANGE_M100_100 (-100, 100).
+
+        Reading the unit off the motor rather than assuming degrees is
+        load-bearing, not tidiness. Before 2026-08-27 every joint got the
+        degrees treatment, so the gripper's window came out (-63.59, +63.59) on
+        this rig — and `_to_degrees` maps the converter's [0, 1] onto whatever
+        window it is handed. Measured consequence: commands 0.00 through 0.50
+        all landed at or below 0 and lerobot clamped them to a shut jaw, so the
+        whole lower half of the trigger did nothing, and 1.00 reached 63.59 %
+        rather than the open stop. The jaw ran its entire travel in the top
+        half of the trigger and never fully opened. Every gripper column
+        recorded before that date is compressed into 0..63.6 with a dead band.
+        """
         out: dict[str, tuple[float, float]] = {}
         if self.robot is None or not self.robot.calibration:
             return out
+        motors = self.robot.bus.motors
         for motor, mc in self.robot.calibration.items():
-            center = (mc.range_min + mc.range_max) / 2.0
-            min_deg = (mc.range_min - center) * DEG_PER_TICK
-            max_deg = (mc.range_max - center) * DEG_PER_TICK
-            out[motor] = (min_deg, max_deg)
+            norm = getattr(motors.get(motor), "norm_mode", None)
+            # Exact match, never a substring test: "0_100" is also a substring
+            # of "range_m100_100", so `in` would silently give the ±100 joints
+            # a 0..100 window — the same class of unit error this method is
+            # being fixed for.
+            name = str(getattr(norm, "value", norm) or "")
+            if name == _NORM_0_100:
+                out[motor] = (0.0, 100.0)
+            elif name == _NORM_M100_100:
+                out[motor] = (-100.0, 100.0)
+            else:
+                center = (mc.range_min + mc.range_max) / 2.0
+                out[motor] = ((mc.range_min - center) * DEG_PER_TICK,
+                              (mc.range_max - center) * DEG_PER_TICK)
         return out
 
     def _anchor_read(self) -> dict[str, float]:

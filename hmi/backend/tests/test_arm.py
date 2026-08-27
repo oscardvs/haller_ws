@@ -1,10 +1,12 @@
 # hmi/backend/tests/test_arm.py
+import itertools
 import logging
 from unittest.mock import MagicMock
 
 import pytest
 from lerobot.motors.encoding_utils import encode_sign_magnitude
 
+import haller_hmi.arm as arm_mod
 from haller_hmi.arm import ArmManager, ArmHandle
 from haller_hmi.config import ArmConfig, MotionConfig
 from haller_hmi.safety import Mode, ModeError
@@ -13,13 +15,19 @@ from haller_hmi.safety import Mode, ModeError
 def _make_handle(monkeypatch) -> ArmHandle:
     # Patch SO101Follower so we never touch real hardware.
     fake_robot = MagicMock()
+    # `norm_mode` is not decoration: lerobot sets the five body joints from
+    # `use_degrees` and pins the gripper to RANGE_0_100 regardless
+    # (so_follower.py:50,59), and `_load_joint_limits` reads it to decide the
+    # UNIT of each clamp window. A MagicMock with no norm_mode auto-creates one
+    # that matches nothing, so every joint would silently take the degrees
+    # branch — a fake that cannot express the difference the code turns on.
     fake_robot.bus.motors = {
-        "shoulder_pan": MagicMock(id=1),
-        "shoulder_lift": MagicMock(id=2),
-        "elbow_flex": MagicMock(id=3),
-        "wrist_flex": MagicMock(id=4),
-        "wrist_roll": MagicMock(id=5),
-        "gripper": MagicMock(id=6),
+        "shoulder_pan": MagicMock(id=1, norm_mode="degrees"),
+        "shoulder_lift": MagicMock(id=2, norm_mode="degrees"),
+        "elbow_flex": MagicMock(id=3, norm_mode="degrees"),
+        "wrist_flex": MagicMock(id=4, norm_mode="degrees"),
+        "wrist_roll": MagicMock(id=5, norm_mode="degrees"),
+        "gripper": MagicMock(id=6, norm_mode="range_0_100"),
     }
     fake_robot.calibration = {
         "shoulder_pan":  MagicMock(range_min=0,    range_max=4095),
@@ -1290,31 +1298,102 @@ def test_disable_torque_walks_per_motor_and_never_uses_the_bulk_write(monkeypatc
         "re-energises on leaving STOP only `if not handle.torque_enabled`")
 
 
-def test_every_window_load_joint_limits_can_emit_is_symmetric(monkeypatch):
-    """The premise behind the fixture rule: `_load_joint_limits` centres each
-    window on its tick mid-point, so EVERY window it can produce is exactly
-    symmetric about zero.
+def test_every_degrees_window_load_joint_limits_can_emit_is_symmetric(monkeypatch):
+    """The premise behind the fixture rule, scoped to the joints it holds for.
 
-    COROLLARY FOR FIXTURE AUTHORS: any asymmetric window standing in for
-    `ArmHandle.joint_limits_deg` is impossible — the real loader cannot emit
-    it. (`gripper: (0.0, 100.0)` was one such fixture; it happened to be the
-    range lerobot actually uses for that joint, which is why the mismatch was a
-    loader bug and not a test bug.) The rule does NOT apply to limits handed
-    directly to a component that accepts arbitrary ranges — `SO101DecoupledIK`
-    takes whatever it is given, and asymmetric ranges are the point of some of
-    its tests.
+    `_load_joint_limits` centres a DEGREES joint on its tick mid-point, so
+    every degrees window it can produce is exactly symmetric about zero.
+
+    COROLLARY FOR FIXTURE AUTHORS: an asymmetric window standing in for a
+    DEGREES joint in `ArmHandle.joint_limits_deg` is impossible — the real
+    loader cannot emit it. The corollary does NOT extend to the percent joints
+    (the gripper's (0, 100) is correct and asymmetric), and it does NOT extend
+    to limits handed straight to a component that accepts arbitrary ranges:
+    `SO101DecoupledIK` honours whatever it is given, and asymmetric ranges are
+    the point of several of its tests.
 
     Pinned as the premise rather than as a scan over fixture literals: if the
     loader ever stops centring, this fails at the root instead of the fixtures
     quietly becoming legal again.
     """
     handle = _make_handle(monkeypatch)
+    body = [j for j in handle.robot.bus.motors if j != "gripper"]
     for lo_t, hi_t in ((0, 4095), (2045, 3492), (1000, 1200), (7, 4000)):
         handle.robot.calibration = {
             j: MagicMock(range_min=lo_t, range_max=hi_t)
             for j in handle.robot.bus.motors
         }
-        for joint, (lo, hi) in handle._load_joint_limits().items():
+        limits = handle._load_joint_limits()
+        for joint in body:
+            lo, hi = limits[joint]
             assert lo == pytest.approx(-hi), (
                 f"{joint} window ({lo}, {hi}) from ticks {lo_t}..{hi_t} is not "
                 "symmetric — the fixture corollary above no longer holds")
+
+
+def test_the_gripper_window_is_its_own_unit_not_degrees(monkeypatch):
+    """lerobot pins the gripper to RANGE_0_100 regardless of `use_degrees`
+    (`so_follower.py:59`), so its clamp window is a PERCENTAGE and must not be
+    derived from ticks like the degrees joints.
+
+    Before 2026-08-27 it got the degrees treatment and came out
+    (-63.59, +63.59) on this rig's calibration — see `_load_joint_limits` for
+    what that did to the trigger.
+    """
+    handle = _make_handle(monkeypatch)
+    handle.robot.calibration = {
+        j: MagicMock(range_min=2045, range_max=3492)
+        for j in handle.robot.bus.motors
+    }
+    limits = handle._load_joint_limits()
+
+    assert limits["gripper"] == (0.0, 100.0)
+    # The degrees joints are untouched by the fix, on the same tick range.
+    assert limits["shoulder_pan"] == pytest.approx((-63.59, 63.59), abs=0.01)
+
+
+def test_norm_mode_spellings_still_match_lerobots():
+    """`_load_joint_limits` compares `norm_mode` as a STRING so it works
+    against a stub motor. That only stays correct while lerobot spells them
+    this way — a rename upstream would fall through to the degrees branch and
+    silently hand the gripper a tick-derived window again, which is the exact
+    defect being fixed.
+    """
+    from lerobot.motors import MotorNormMode
+
+    assert MotorNormMode.RANGE_0_100.value == arm_mod._NORM_0_100
+    assert MotorNormMode.RANGE_M100_100.value == arm_mod._NORM_M100_100
+    # The substring trap that makes equality load-bearing: the ±100 spelling
+    # CONTAINS the 0..100 one's distinctive part, so an `in` test would give
+    # the ±100 joints a 0..100 window.
+    assert "0_100" in arm_mod._NORM_M100_100
+    assert arm_mod._NORM_0_100 != arm_mod._NORM_M100_100
+
+
+def test_the_trigger_sweeps_the_whole_jaw_with_no_dead_band(monkeypatch):
+    """The mapping claim, tested as a mapping rather than at points.
+
+    Every earlier gripper test asserted that SOME command produced a sane
+    value. None asserted the mapping was a bijection onto the jaw's travel, and
+    a per-point assertion structurally cannot see a dead band — only a sweep
+    can. Walking the trigger is the test that would have caught the original
+    defect, where commands 0.00 through 0.50 all collapsed onto a shut jaw.
+    """
+    from haller_hmi.human_teleop import HumanTeleopSession
+
+    handle = _make_handle(monkeypatch)
+    handle.robot.calibration = {
+        j: MagicMock(range_min=2045, range_max=3492)
+        for j in handle.robot.bus.motors
+    }
+    lo, hi = handle._load_joint_limits()["gripper"]
+
+    steps = [i / 20.0 for i in range(21)]
+    jaw = [HumanTeleopSession._to_degrees("gripper", v, lo, hi) for v in steps]
+
+    assert jaw[0] == pytest.approx(0.0), "trigger closed must reach the shut stop"
+    assert jaw[-1] == pytest.approx(100.0), "trigger open must reach the OPEN stop"
+    for a, b in itertools.pairwise(jaw):
+        assert b > a, (
+            f"dead band: the jaw does not move between consecutive commands "
+            f"({a} -> {b}). Sweep: {jaw}")
