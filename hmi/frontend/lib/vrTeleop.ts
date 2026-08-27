@@ -551,6 +551,10 @@ export type RecorderHudLike = {
    *  worth abandoning early. */
   fpsMeasured?: number | null;
   fpsDeclared?: number | null;
+  /** The fraction of declared the RECORDER is actually refusing at, published
+   *  by it rather than copied here — a HUD holding its own threshold drifts
+   *  from the 409 and the two end up telling the operator different stories. */
+  rateGate?: number | null;
   /** Why an ARMED gate fell back to idle. Not an error — the gate saying why
    *  it dropped. Silent un-arming is the failure the gate exists to prevent. */
   invalidatedReason?: string | null;
@@ -587,10 +591,12 @@ function recHealthLine(
   if (!rec) return null;
   const measured = rec.fpsMeasured;
   const declared = rec.fpsDeclared;
-  // 90% of declared is the backend's own refusal threshold; matching it keeps
-  // the HUD and the 409 telling one story.
+  // The recorder's own refusal threshold, read rather than assumed. 0.9 is the
+  // fallback for a backend that does not publish one.
+  const gate = typeof rec.rateGate === "number" && rec.rateGate > 0
+    ? rec.rateGate : 0.9;
   if (typeof measured === "number" && typeof declared === "number"
-      && measured < declared * 0.9) {
+      && measured < declared * gate) {
     return {
       text: `RATE ${measured.toFixed(0)}/${declared.toFixed(0)} fps`,
       color: "#f28b82",

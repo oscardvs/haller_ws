@@ -7,6 +7,7 @@ import {
   TUNING_KNOBS, WRIST_PIVOT_KEY,
   type EndChoice, type RecorderHudLike, type TakeState,
 } from "../lib/vrTeleop";
+import { worstDropSource } from "../components/VRTeleopPanel";
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -714,5 +715,69 @@ describe("every painted row fits the box it is painted in", () => {
   it("states the budgets it is checking, so a change to one is deliberate", () => {
     expect(MENU_MAX_CHARS).toBe(36);
     expect(STATUS_MAX_CHARS).toBe(39);
+  });
+});
+
+describe("worstDropSource", () => {
+  // Invariant 9 makes a degraded read a dropped frame, so a take that is
+  // shedding rows has to say so while it is still being driven. "30% dropped"
+  // is unactionable; "30% dropped, all of them the left wrist camera" sends
+  // the operator to a cable.
+  it("names the single heaviest source across cameras and arms", () => {
+    expect(worstDropSource({
+      cameras: { top: 3, left_wrist: 128 },
+      arms: { left_arm: 12 },
+    })).toBe("cam left_wrist");
+    expect(worstDropSource({
+      cameras: { top: 3 },
+      arms: { left_arm: 240 },
+    })).toBe("arm left_arm");
+  });
+
+  it("says which KIND, because a camera and an arm can share a name", () => {
+    // The reason the recorder reports two maps rather than one: arms are
+    // `left`/`right` and nothing stops a camera being named for a side. A bare
+    // "left" would send the operator to the wrong end of the rig, confidently.
+    expect(worstDropSource({ cameras: { left: 9 }, arms: { left: 4 } }))
+      .toBe("cam left");
+    expect(worstDropSource({ cameras: { left: 4 }, arms: { left: 9 } }))
+      .toBe("arm left");
+  });
+
+  it("stays silent when nothing has dropped, which is the common case", () => {
+    // A line painted every frame for a rig that is fine is a line the operator
+    // stops reading.
+    expect(worstDropSource(undefined)).toBeNull();
+    expect(worstDropSource({})).toBeNull();
+    expect(worstDropSource({ cameras: {}, arms: {} })).toBeNull();
+    expect(worstDropSource({ cameras: { top: 0 } })).toBeNull();
+  });
+
+  it("reads a half-filled report rather than needing both maps", () => {
+    expect(worstDropSource({ arms: { right_arm: 5 } })).toBe("arm right_arm");
+    expect(worstDropSource({ cameras: { top: 5 } })).toBe("cam top");
+  });
+});
+
+describe("the rate gate the HUD warns at", () => {
+  const at = (measured: number, rateGate?: number) => {
+    const { ctx, text } = stubCtx();
+    paintHud(ctx, driving, {
+      ...rollingRec, fpsMeasured: measured, fpsDeclared: 30, rateGate,
+    }, menu);
+    return text();
+  };
+
+  it("warns at the threshold the RECORDER published, not a copy of it", () => {
+    // The recorder refuses a take below its own gate. A HUD holding a second
+    // copy drifts from the 409 and the two tell the operator different
+    // stories — so a backend running a stricter gate must move this line too.
+    expect(at(28, 0.95)).toContain("RATE 28/30");
+    expect(at(28, 0.9)).not.toContain("RATE");
+  });
+
+  it("falls back to 0.9 for a backend that publishes no gate", () => {
+    expect(at(26)).toContain("RATE 26/30");
+    expect(at(28)).not.toContain("RATE");
   });
 });

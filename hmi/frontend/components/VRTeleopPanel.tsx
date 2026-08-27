@@ -34,8 +34,8 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
 import {
-  api, ApiError, cameraStreamUrl, type CameraInfo, type HumanTeleopStatus,
-  type RecordStatus,
+  api, ApiError, cameraStreamUrl, recordRateGate, type CameraInfo,
+  type HumanTeleopStatus, type RecordDrops, type RecordStatus,
 } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
@@ -140,19 +140,19 @@ async function recorderTakeState(): Promise<TakeState> {
  *  cable to go check, not a table. Reads both shapes the status has carried:
  *  a flat `{key: n}` and the `{cameras, arms}` split. Null when nothing has
  *  dropped, which is the common case and must not paint a line. */
-function worstDropSource(drops: unknown): string | null {
-  if (!drops || typeof drops !== "object") return null;
-  const split = drops as { cameras?: unknown; arms?: unknown };
-  const maps: unknown[] = split.cameras || split.arms
-    ? [split.cameras, split.arms] : [drops];
+export function worstDropSource(drops: RecordDrops | undefined): string | null {
+  if (!drops) return null;
   let worst: string | null = null;
   let most = 0;
-  for (const m of maps) {
-    if (!m || typeof m !== "object") continue;
-    for (const [key, n] of Object.entries(m as Record<string, unknown>)) {
-      if (typeof n === "number" && n > most) {
+  // The kind is carried into the label, not discarded: arms are `left`/`right`
+  // and nothing stops a camera being named for a side, so a bare "left" would
+  // send the operator to the wrong end of the rig. That collision is the whole
+  // reason this arrives as two maps instead of one.
+  for (const [kind, map] of [["cam", drops.cameras], ["arm", drops.arms]] as const) {
+    for (const [key, n] of Object.entries(map ?? {})) {
+      if (n > most) {
         most = n;
-        worst = key;
+        worst = `${kind} ${key}`;
       }
     }
   }
@@ -1127,6 +1127,9 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
             worstDrop: worstDropSource(rs?.drops),
             fpsMeasured: rs?.fps_measured ?? null,
             fpsDeclared: rs?.fps_declared ?? null,
+            // The recorder publishes the gate it is actually refusing at, so the
+            // HUD reads it instead of holding a second copy that can drift.
+            rateGate: recordRateGate(rs),
             invalidatedReason: rs?.invalidated_reason ?? null,
             localGate: gateServerRef.current === false,
             takes: takesRef.current,
