@@ -267,6 +267,30 @@ this port adds. These are not goals. They are the pass/fail.
    is state and action read inside the same tick, or the row is not written. *(new)*
 9. **A degraded read is a dropped frame, not a recorded one.** No `isAvailable()`
    failure, no comm failure, no stale side may reach a parquet row. *(new)*
+
+   **Scope, ruled 2026-08-27 after Track A escalated a real ambiguity.** The invariant
+   governs TRANSIENT degradation, and it separates two cases a single code comment had
+   been carrying:
+
+   - **Transient** (a lost `SyncReaderRace`, one tick, channel otherwise live) — **DROP
+     the frame**, count it in `drops.arms`. It costs ~1 frame in 1000 (`arm.py:76-86`
+     puts the block reader's race at ~1 in 30 s at 60 Hz), and it buys a column that is
+     honest BY CONSTRUCTION rather than by an accompanying counter nobody reads at
+     training time. `observation.effort` is POLICY-VISIBLE — `dataset_to_policy_features`
+     classifies by prefix, so it reaches a policy as `FeatureType.STATE` — which makes a
+     raced `0.0` a sensor reading in the training set saying *no load* where there was
+     load, indistinguishable from a measured `0.0`.
+   - **Structural absence** (load register unreadable, or a handle predating the effort
+     channel) — **record `0.0`, do NOT drop**, and DECLARE it. Here every frame degrades,
+     so dropping really would "trade a whole demonstration for one optional column"
+     (`recorder.py:1258-1263`, whose comment is correct and is about *this* case only).
+     A flat-zero column announces itself; `recorder.py:78-79` already says a flat zero
+     means "no effort channel on that take", not "no contact".
+
+   The precedent is `next.reward` (`recorder.py:60-67`): rather than emit a constant 0.0
+   on a rig with no auto-scorer — "a lie that reads exactly like *every episode failed*" —
+   an unscored dataset gets no reward column at all. Sparse false zeros in a live effort
+   column are the same lie at lower density and with less warning attached.
 10. **`fps` in `info.json` is measured, or the episode does not open.** *(new)*
 11. **Recorded pixels are never cosmetically altered.** `facing:"operator"` mirroring
     stays display-only, as it is today. The librealsense switch is a *correctness* fix

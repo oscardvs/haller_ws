@@ -3,7 +3,8 @@
 Written 2026-08-27 on branch `feat/kit-port` by Track D (`haller-ws-1a`), the
 headset client.
 
-**Nothing below has been run.** Not one item, not once. The second arm's servos
+**Almost nothing below has been run.** V13 is ◐ — its device-free half was measured
+against a live backend on 2026-08-27 (see the item). Every other item: not once. The second arm's servos
 are on order and the wrist camera is not on hand; per PLAN-2026-08-27 decision 4
 the whole port is built without hardware and the verification is batched into ONE
 session when the servos land. One SO-101 arm is attached to the desktop today, so
@@ -14,7 +15,14 @@ This file is the headset half. `hardware-checklist.md` holds the arm-and-bus hal
 (H1–H7, U3, U6, U8); U6 appears in both and is expanded here, since the test for
 it is a pairing an operator reads with a headset on.
 
-Status legend: ☐ not yet run · ✅ passed · ❌ failed (finding recorded) · ⊘ dropped
+Status legend: ☐ not yet run · ◐ partly run (clauses named) · ✅ passed ·
+❌ failed (finding recorded) · ⊘ dropped
+
+**◐ exists because V13 forced it.** An item split across the route mount has clauses
+that are not co-runnable: V13's first PASS needs the routes ABSENT and its second needs
+them MOUNTED, so no single session can ever tick it whole. A ◐ must name which clauses
+were measured and which were not — a partial state that does not say which half is just
+a ☐ that has stopped being honest.
 
 ---
 
