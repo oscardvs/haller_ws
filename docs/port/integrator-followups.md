@@ -201,6 +201,26 @@ softened. The defect it was attached to is real and unchanged; only the diagnosi
   table where a binding without an action is a type error rather than a dead key. Family
   with the cadence sweep and the copied rate gate.
 
+- **A histogram match is not a per-item match.** Two independent graders agreeing on
+  28 PASS / 9 SUSPECT / 9 FAIL is weak evidence: a swapped pair leaves every count
+  unchanged. The real check is per-episode across every field — 46 x 12, including the
+  `why` strings byte for byte. What made the eventual agreement informative is that the
+  second implementation got its measures WRONG first (max instead of mean for tracking,
+  summed |diff| instead of range for sweep) and graded 46/46 FAIL. The failure was loud,
+  so a silent partial agreement was never on the table.
+
+- **Two gates guarding the same decision means one of them is wrong right now.** Prune
+  compared `typed === "DELETE"`; delete compared `typed.trim() === repoId`. A pasted
+  trailing space passed one and blocked the other — same operator, same keyboard, two
+  rules. Divergent guards are worse than either rule chosen consistently, because the
+  operator learns one and is betrayed by the other.
+
+- **Never offer a retry that cannot succeed.** After a failed autoclassify apply, the
+  button stayed live holding a token the server had already rejected — and a 409 there
+  means the dataset moved, so that token can only 409 again. Drop the read and put the
+  operator back at preview rather than inviting them to press a button that is guaranteed
+  to fail.
+
 - **The surface that OWNS a fact publishes it; the other reads it.** Ruled after Track C
   asked Track A for the fps-refusal threshold instead of picking its own. A UI that
   invents its own copy of a number is how a dashboard ends up disagreeing with the
