@@ -46,8 +46,13 @@ def _lifespan_code() -> str:
 def test_the_lifespan_mounts_the_idle_sampler():
     """Without this the tick has no producer while idle, and arming refuses.
 
-    `rate_ok` returns None on an unmeasured rate and the gate treats None as a
-    refusal — so an unmounted sampler fails CLOSED. Safe, and completely broken.
+    `recorder._freeze_fps` RAISES when `rate_detail()` is None, so an unmounted
+    sampler fails CLOSED — arming is impossible rather than silently permitted.
+    Safe, and completely broken.
+
+    (This cited `rate_ok` until 2026-08-27. The conclusion was right and the
+    mechanism named was not: `rate_ok` has no production caller at all. Caught by
+    Track A grepping AFTER their deletion — the compiler sees neither citation.)
     """
     src = _lifespan_source()
     assert "IdleSampler(" in src
