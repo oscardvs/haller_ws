@@ -7,6 +7,7 @@ state/action assembly so a refactor can't silently corrupt recorded data.
 """
 import asyncio
 import dataclasses
+import json
 import time
 
 import numpy as np
@@ -1932,6 +1933,51 @@ async def test_appending_is_gated_against_the_DATASET_fps_not_a_fresh_rounding(t
     with pytest.raises(RuntimeError, match="fps 30"):
         await r.start_episode("smoke/append", "t")
     r.close()
+
+
+async def test_a_FRESH_PROCESS_resuming_is_still_appending(tmp_path):
+    """The same claim, from the state the test above cannot reach.
+
+    That test keeps ONE recorder, so `self._dataset` is already open when the
+    second arm runs — and `_existing_fps` used to read only that handle. Every
+    assertion it makes was true and the path it walks is the rarer one: the
+    ordinary workflow is restart the HMI, resume yesterday's dataset, record.
+
+    `_freeze_fps` runs BEFORE `_open_dataset`, so on the first arm of a process
+    the handle is None. The gate then compared the measured rate against
+    `round(measured)` — its own rounding — which cannot disagree with the
+    measurement, so it PASSED in exactly the case it exists to catch. Measured
+    before this test was written: accepted at 3.20% off, `fps_declared`
+    reporting 29 against an `info.json` saying 30, and `haller_rate.fps_written`
+    recording a 29 that was never written anywhere.
+
+    That last one is the reason this is not merely a missed refusal.
+    `fps_declared` must be exactly the `fps` in `info.json` — a ratio taken
+    against a declared number that nothing wrote is mechanism 3 arriving
+    through the machinery built to end it, and the audit block that exists to
+    let a later reader recover the true time base was recording the false one.
+
+    A SECOND recorder over the same root is the whole fixture: it is a fresh
+    process in every way that matters here.
+    """
+    root = tmp_path / "ds"
+    first = _real_recorder(root)
+    await first.start_episode("smoke/resume", "t")
+    for _ in range(3):
+        first._dataset.add_frame(_real_frame("t", first._state.episode_uid))
+        first._state.episode_frames += 1
+    await first.stop_episode(save=True)
+    first.close()
+    assert json.loads((root / "meta" / "info.json").read_text())["fps"] == 30
+
+    second = _real_recorder(root)
+    assert second._dataset is None, "the fixture must model a cold handle"
+    second.tick_bus = _bus_at(29.04)   # 0.14% from 29, but 3.20% from the file
+    with pytest.raises(RuntimeError, match="fps 30"):
+        await second.arm("smoke/resume", "t")
+    # And nothing was left claiming the rate it refused.
+    assert second.status()["fps_declared"] is None
+    second.close()
 
 
 async def test_the_unrounded_measurement_is_recorded_beside_the_integer(tmp_path):

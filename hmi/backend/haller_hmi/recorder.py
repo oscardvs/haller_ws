@@ -1766,13 +1766,49 @@ class DatasetRecorder:
         return fps, rate
 
     def _existing_fps(self, repo_id: str) -> int | None:
-        """This dataset's already-written `fps`, if we are appending to it."""
+        """This dataset's already-written `fps`, if we are appending to it.
+
+        TWO SOURCES, and the second one is not an optimisation. The open handle
+        answers when this process has already recorded into this dataset; the
+        info.json ON DISK answers when it has not, which is every FIRST arm of
+        every process — and resuming yesterday's dataset after restarting the
+        HMI is the most ordinary workflow there is.
+
+        Reading only the handle was a live defect. `_freeze_fps` runs BEFORE
+        `_open_dataset`, so on a fresh process `self._dataset` is None, this
+        returned None, and the gate then compared the measured rate against
+        `round(measured)` — its own rounding — instead of against the time base
+        the dataset actually carries. Measured: a dataset created at 30, a rig
+        since fallen to 29.04, and the arm was ACCEPTED at 3.20% off with
+        `fps_declared` reporting 29 while `info.json` said 30 and
+        `haller_rate.fps_written` recorded a 29 that was never written.
+
+        Three things were wrong at once and the third is the worst. The gate
+        passed in exactly the case it exists to catch, because a reference
+        derived from the measurement can never disagree with it. The payload
+        contradicted the file — the one thing the contract says must never come
+        apart, since a ratio against a declared number that nothing wrote is
+        mechanism 3 arriving through the machinery built to end it. And the
+        audit block, whose whole job is to let a later reader recover the true
+        time base, recorded the false one.
+        """
         ds = self._dataset
-        if ds is None or ds.repo_id != repo_id:
-            return None
+        if ds is not None and ds.repo_id == repo_id:
+            try:
+                return int(ds.meta.info["fps"])
+            except Exception:
+                return None
+        # Not open here yet — but a dataset on disk still fixes the time base,
+        # and every frame this take writes will be timestamped against it.
+        info_path = self._dataset_root(repo_id) / "meta" / "info.json"
         try:
-            return int(ds.meta.info["fps"])
+            return int(json.loads(info_path.read_text())["fps"])
         except Exception:
+            # No dataset, or one we cannot read. Either way there is no
+            # existing time base to honour, and `_freeze_fps` falls back to
+            # `round(measured)` — which is correct for a CREATE and is the only
+            # honest answer when the file cannot be read: an unreadable
+            # info.json fails again, and louder, inside `_open_dataset`.
             return None
 
     def _write_rate_metadata(self, rate: dict, fps: int) -> None:
