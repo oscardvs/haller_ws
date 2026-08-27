@@ -249,23 +249,94 @@ says "nothing further is worth doing", believe them.
 
 ---
 
-## Live state — 2026-08-27 evening, at `5238478`
+## Live state — 2026-08-27 evening, at `abdc52e`
 
 **All four "why it failed here" mechanisms are CLOSED.** 1 (three uncoordinated samplers)
 died at `54bf6fd`; 2 (`isAvailable()`) in Phase 1; 3 (declared-not-measured `fps`) at
 `95d2507`; 4 was retracted as a mis-attributed sensor. **The port's central thesis is now
 testable rather than argued.**
 
-**Phase 2 is at 2c-complete.** Next is **2d — `/record/arm|roll|stop`**, Track A's, and it
-is the last blocker in the port.
+**Phase 2 is at 2c-complete and 2d is IN FLIGHT** — `/record/arm|roll|stop`, Track A's, the
+last blocker in the port. `recorder.py` is theirs and open; expect the tree dirty there.
 
-### The one promise the integrator owes
+### The one promise the integrator owed — DISCHARGED, and it cost nothing
 
-**Track D gets WARNED BEFORE the record routes are mounted, in this order:** Track A
-reports committed bodies -> integrator tells Track D -> Track D confirms ready -> mount.
-V13 is the only checklist item split ACROSS the mount: its first PASS needs the routes
-ABSENT and its second needs them MOUNTED, so **no session can ever tick it whole** and
-mounting destroys the half that is still measurable. `server.py` is the integrator's.
+**Track D gets WARNED BEFORE the record routes are mounted, in this order:** Track A reports
+committed bodies -> integrator tells Track D -> Track D confirms ready -> mount. V13 is the
+only checklist item split ACROSS the mount: its first PASS needs the routes ABSENT and its
+second needs them MOUNTED, so **no session can ever tick it whole** and mounting destroys the
+half that is still measurable. `server.py` is the integrator's.
+
+**Asked and answered 2026-08-27: Track D says DO NOT HOLD.** Both pre-mount halves were
+already measured and committed by `haller-ws-3f` at `1a6a9e8`/`e8d6942`, and they are worth
+copying because both are FALSIFIABLE rather than merely absent:
+
+- **404 measured WITH CONTROLS.** `/record/arm` 404 and `/record/roll` 404, *and*
+  `POST /record/start` **422** (exists, rejects a bad body) and `GET /record/status` **200**.
+  A server that 404s everything reads identically without those two.
+- **Nothing on disk before ROLL, measured falsifiably.** 0 entries, then the same `find`
+  watched `/record/start` take it **0 -> 4**. An empty directory is also what a harness that
+  cannot write produces; the 0->4 is what makes the absence evidence.
+
+So the mount now runs on **Track A's report alone**. Still tell Track D when it happens.
+
+**One V13 clause is KNOWINGLY FORFEITED at the mount** — the operator-facing `toast.info`
+and `◆ ARMED take N (local gate)` read through the optics, which become unreachable once the
+client stops falling back. Device-gated, servos absent, hardware session batched. Holding the
+mount for it would cost the critical path weeks and still not get it. Recorded in the
+follow-ups so nobody later thinks it is gettable.
+
+### What 2d must fix on the way past — `/record/stop` is a CHANGE, not an ADD
+
+Found by Track D against the LIVE pydantic model, not by reading. `RecordStopBody`
+(`server.py:155-156`) has exactly one field, `save`; pydantic's default `extra="ignore"`
+makes `model_validate({"save": False, "rearm": True})` return `{'save': False}`. **The
+headset's REDO — "re-record, SAME index" — is therefore executed as DISCARD -> IDLE, and
+answers 200.**
+
+`/record/arm` and `/record/roll` are pure adds, so absent is LOUD: 404 lands on the client's
+local-gate branch by design. `/record/stop` is the opposite shape — a live route with a
+second caller (`lib/recorder.ts:132`, one-arg, unaffected) where a partial implementation is
+indistinguishable from a correct one at the wire. **A route that 404s is loud; a route that
+200s and drops a field is the failure this port keeps refusing.**
+
+Ruled: `rearm` present, all four rows honoured, and **`extra="forbid"` on `RecordStopBody`** —
+`{save}` alone stays valid, only UNKNOWN fields are rejected, and every future mismatch on
+that route becomes a 422 instead of a silent 200.
+
+**AMENDED WITHIN THE HOUR, by Track D correcting their own finding and the integrator's
+ruling on it: `rearm` and `extra="forbid"` LAND IN ONE COMMIT, and neither before
+`/record/arm` answers 200.** If ever separated, `rearm` first and forbid second — never the
+reverse. The ruling was right in content and wrong in SEQUENCING, and sequencing is the half
+that costs a take:
+
+    partial mount, KEEP = {save:true, rearm:true}
+      extra="ignore", no rearm  -> 200. Take BANKED, rearm dropped. Wrong state, take SAFE.
+      extra="forbid", no rearm  -> 422. THE TAKE IS NOT SAVED.
+
+For `save:true`, forbid-without-`rearm` is **strictly worse than the silent 200 it was issued
+to fix** — losing a banked take is the one outcome the call site says must not happen. Landed
+together it is strictly better and the ruling stands.
+
+Two things this is worth keeping for. First, **the defect is not live today and that makes it
+more urgent, not less**: `VRTeleopPanel.tsx:726-733` only sends `rearm` when
+`gateServerRef.current` is true, which needs `api.recordArm()` to have returned 200, so the
+hazard is armed by the mount itself — it fires on the day being scheduled. Second, the guard
+already existed one branch over. `:728-731` reads *"sending a field it has never heard of
+risks a 422 on the one call that must not fail: the one that saves the take"* — written for
+the LOCAL-gate branch. The ruling extended the identical risk onto the SERVER-gate branch,
+**where that guard by construction cannot apply, because there sending `rearm` is the entire
+point.** A hazard that is guarded on the path you are looking at, and unguarded on the path
+your change creates.
+
+### Allocation is name-keyed and names do not survive a resume
+
+The evening rotation's preventative "you are not assigned" note went to three sessions. **All
+three were the PREVIOUS cohort's A, B and C, resumed under new names**, each holding a
+correct-as-written context saying it was mid-flight. The self-selection mode the note was
+written for did not occur once. See the follow-ups entry — the cheap guard is that a handoff
+commit is the moment its author's own assignment ends, and the decisive question for any
+claimant is *what did you last commit?*
 
 ### The rate-gate migration — COMPLETE, all four steps
 
