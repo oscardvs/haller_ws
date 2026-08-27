@@ -63,12 +63,14 @@ class JsonlMetricsHandler(logging.Handler):
         super().__init__(level=logging.INFO)
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Line buffered: `lab/runs.read_metrics` consumes WHOLE LINES ONLY, so a
-        # flush per row is what makes a point appear on the chart as it is
-        # logged instead of in 8 KB bursts an hour apart.
-        # Held open for the handler's LIFETIME — hours of training — and closed
-        # in `close()`. A context manager here would shut it before the first
-        # metric was logged.
+        # Line buffered, and appended to: `lab/runs.read_metrics` consumes WHOLE
+        # LINES ONLY at a byte offset the page hands back, so a flush per row is
+        # what puts a point on the chart as it is logged rather than in 8 KB
+        # bursts, and a truncation here would leave every stored offset pointing
+        # into the middle of a different row.
+        #
+        # The handle is held for the handler's LIFETIME — hours — and released
+        # in `close()`; a context manager would shut it before the first metric.
         self._fh = open(self.path, "a", buffering=1)  # noqa: SIM115
         self._tracker_cls = tracker_cls if tracker_cls is not None else _tracker_class()
 

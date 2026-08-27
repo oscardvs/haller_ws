@@ -133,6 +133,25 @@ def _reset_probe_cache() -> None:
         _probe_cache = None
 
 
+def _runnable(python: Path) -> str | None:
+    """What `runs.launch` would actually execute, or None if nothing would.
+
+    `Path.exists()` alone is the wrong question, and reachably so:
+    `runner_python()` returns `$HALLER_LAB_PYTHON` verbatim, and that variable
+    is ALSO read by `scripts/setup_lab_venv.sh:26` with a different meaning —
+    the base interpreter to build the venv FROM, defaulting to the bare name
+    `python3.12`. A shell that exported it to build the venv and then started
+    the HMI hands `runner_python()` a bare name. `Popen` resolves that on
+    `$PATH` and launches it happily (measured here: `python3.12` resolves to the
+    SERVING venv), so reporting "the interpreter is missing" would name the
+    wrong defect — the interpreter is there, it is the wrong one, and
+    `torch_available` is what says so.
+    """
+    if python.exists():
+        return str(python)
+    return shutil.which(str(python))
+
+
 def _probe(python: Path) -> dict:
     """Ask `python` about itself in a child. NEVER raises, never returns None.
 
@@ -140,16 +159,17 @@ def _probe(python: Path) -> dict:
     observation of one interpreter, cached as a unit by `_probe_cached`.
     """
     answer = {"exists": False, "torch_available": False, "lerobot_version": None}
-    if not python.exists():
+    runnable = _runnable(python)
+    if runnable is None:
         # The cheapest possible "no lab venv": no spawn at all. This is the
-        # fresh-checkout state and the most common non-answer, so it costs one
-        # stat rather than a process.
+        # fresh-checkout state and the most common non-answer, so it costs a
+        # stat rather than a process that cannot start.
         return answer
     answer["exists"] = True
 
     try:
         done = subprocess.run(
-            [str(python), "-c", PROBE_SOURCE],
+            [runnable, "-c", PROBE_SOURCE],
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT_S,

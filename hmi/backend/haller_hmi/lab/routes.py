@@ -37,6 +37,8 @@ from fastapi import APIRouter
 
 from ..api.deps import LabDeps
 from .routes_datasets import build_datasets_router
+from .routes_runs import build_runs_router
+from .routes_system import build_system_router
 
 
 def build_lab_router(
@@ -60,9 +62,18 @@ def build_lab_router(
     )
 
     router = APIRouter()
-    # Sub-routers are included in the order a reader would look for them.
-    # `/lab/runs/**` and `/lab/system` join here as they land; nothing about
-    # the mount in `server.py` changes when they do, which is the point of
-    # this file existing at all rather than server.py including three routers.
+    # All three sub-routers are here now, in the order a reader would look for
+    # them: datasets (with the four legacy `/record`, `/cameras` paths), runs,
+    # system. `server.py`'s mount line did not change when the last two landed,
+    # which is the point of this file existing at all rather than `server.py`
+    # including three routers.
+    #
+    # `include_router` APPENDS, so declaration order survives the compose — and
+    # inside the runs router that order is load-bearing: `/lab/runs/metrics` is
+    # declared before `/lab/runs/{run_id}`, which would otherwise capture
+    # `metrics` as a run id (it satisfies `RUN_ID_RE`) and answer the cross-run
+    # chart with `404 no run metrics`. Nothing here may re-sort the routes.
     router.include_router(build_datasets_router(deps))
+    router.include_router(build_runs_router(deps))
+    router.include_router(build_system_router(deps))
     return router

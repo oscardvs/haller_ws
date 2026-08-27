@@ -356,6 +356,29 @@ def test_a_banner_ahead_of_the_payload_still_parses(tmp_path, client, monkeypatc
     assert body["lerobot_version"] == "0.6.1"
 
 
+def test_a_bare_interpreter_name_on_the_path_counts_as_present(
+    tmp_path, client, monkeypatch,
+):
+    """`$HALLER_LAB_PYTHON` can hold a bare NAME, and reachably so:
+    `scripts/setup_lab_venv.sh:26` reads the same variable to mean the base
+    interpreter to build the venv FROM, defaulting to `python3.12`. `Popen`
+    resolves that on `$PATH` and `runs.launch` would spawn it, so
+    `Path.exists()` alone would report a runnable interpreter as missing and
+    point at the wrong defect — it is present, it is the WRONG one, and
+    `torch_available` is the field that says so."""
+    python, tally = _counting_interpreter(
+        tmp_path, "python3.12", stdout='{"torch": false, "lerobot_version": null}')
+    monkeypatch.setenv("PATH", f"{tmp_path}:{python.parent}")
+    monkeypatch.setenv(runs.LAB_PYTHON_ENV, python.name)
+
+    body = _system(client)
+
+    assert body["runner_python"] == python.name       # what is configured
+    assert body["runner_python_exists"] is True       # ...and it is runnable
+    assert body["torch_available"] is False           # ...and it is not the lab venv
+    assert _spawns(tally) == 1
+
+
 # ============================================================================
 # the cache
 # ============================================================================
