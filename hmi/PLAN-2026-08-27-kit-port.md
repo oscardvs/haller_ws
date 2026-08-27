@@ -287,6 +287,15 @@ this port adds. These are not goals. They are the pass/fail.
      A flat-zero column announces itself; `recorder.py:78-79` already says a flat zero
      means "no effort channel on that take", not "no contact".
 
+   **The sharpest argument is one neither side cited first** (Track A, verifying the
+   ruling rather than accepting it): `recorder.py:78-79` — the effort feature's own
+   docstring — already says *"0.0 is also what an unreadable load register writes, so a
+   flat-zero column means 'no effort channel on that take', not 'no contact'."* The column
+   therefore ALREADY documents flat-zero as the sentinel for "no channel". Sparse zeros
+   are neither honest data nor that sentinel; they are a third thing the docstring denies
+   exists, and recording them would make a SHIPPED COMMENT FALSE. The ruling is not merely
+   the better trade — it is what keeps that docstring true.
+
    The precedent is `next.reward` (`recorder.py:60-67`): rather than emit a constant 0.0
    on a rig with no auto-scorer — "a lie that reads exactly like *every episode failed*" —
    an unscored dataset gets no reward column at all. Sparse false zeros in a live effort

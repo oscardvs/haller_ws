@@ -39,7 +39,7 @@ another. Mechanisms 1–3 are **one fix**: one sampler that owns the tick.
   on one `seq`.
 
 Consumers: `human_teleop._loop` performs the SINGLE bus read (decimated by a
-config `read_divisor`), commits, publishes. `telemetry.py` becomes a decimating
+config **`sample_hz`** — see below), commits, publishes. `telemetry.py` becomes a decimating
 consumer and stops touching the bus. `recorder.py` consumes the bus.
 
 `snapshot()` returns state and `goal_deg` under ONE lock at the same `seq`.
@@ -144,3 +144,25 @@ recompute, none of the hand-rolled pop's five 409 refusals.
 Every lerobot-0.5.1 workaround in `recorder.py` stays untouched —
 `MIN_SAVEABLE_FRAMES = 2`, `video_files_size_in_mb = 0`, the two-direction
 resume schema check. Each encodes a dataset-destroying incident.
+
+## `sample_hz`, not `read_divisor` — corrected 2026-08-27
+
+An earlier version of this document specified the session loop's single read as
+*"decimated by a config `read_divisor`"*. **A divisor is denominated in TICKS and
+therefore lies at every cadence but one:** `read_divisor: 2` is 30 Hz of samples at
+`hz=60` and 5 Hz at `hz=10`, and `hz` is a field of `POST /teleop/human/start`. Because
+`fps` is frozen from the measured sample rate at ARM time, the recorder's declared frame
+rate would have silently followed the control rate — mechanism 3 re-entering through the
+machinery built to close it.
+
+This is `_rate_cap_deg_per_tick` again: the same defect Track A fixed at `99a736d`, and
+the house rule they wrote against it — *a constant expressed in ticks or frames is
+calibrated for exactly one cadence and lies at every other* — appearing in a constant
+this contract proposed one commit later. **The rule was written down and the next
+constant was still specified in ticks**, which is worth more as a warning than as an
+embarrassment: the model to copy is `lpf_tau_s`, a time constant the loop converts per
+tick.
+
+**Built as `sample_hz`: a RATE, converted to a divisor against the loop's real period**,
+so the sampler targets one real cadence at any `hz`. Unset samples every tick and changes
+nothing. Pinned across five cadences plus the degenerate zero/negative cases.

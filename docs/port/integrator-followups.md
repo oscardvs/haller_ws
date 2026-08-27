@@ -468,6 +468,27 @@ applies to any probe that prunes, not only to a matrix.
   ported `max(pressure, 0.35)` sat below the 0.5 deg haptic dead zone and would have
   SILENCED the buzz at the exact pose it was added to raise.
 
+- **A fake MORE PERMISSIVE than production is the impossible-fixture rule pointing the
+  other way — and it is the more common direction.** The recorded rule says an impossible
+  fixture invents a world where the bug cannot EXIST. Its mirror invents one where the bug
+  cannot be SEEN, and `MagicMock()` is permissive BY DEFAULT, so every convenience fake
+  drifts this way for free. Live instance: ruff's `SIM118` rewrote `self._arms.keys()` to
+  `for arm_id in self._arms`, which is correct for a dict — but `ArmManager` has
+  `__getitem__`/`keys`/`values` and **no `__iter__`**, so iteration falls back to the
+  legacy integer protocol and raises `KeyError: unknown arm id 0` on the FIRST tick and
+  every tick, stopping the session ~2.5 s after every start via
+  `MAX_CONSECUTIVE_TICK_ERRORS`. **The entire existing suite stayed green**, because
+  `_fake_arm_manager` in `test_human_teleop.py` is a bare `MagicMock` — which supports
+  `__iter__` and yields nothing. So the producer sampled no arms, published empty samples,
+  and every test passed. The fix is cheap and mechanical: **`MagicMock(spec=RealClass)`**,
+  which restricts magic methods to the ones the real class actually has.
+  Two corollaries. **An autofixer is a caller that has not read your class** — a lint rule
+  encoding a dict assumption will apply it to anything dict-SHAPED, so the reason a form
+  must stay belongs at the call site with the `noqa`, not in anyone's memory. And the
+  new tests were checked for SENSITIVITY rather than presence: reintroducing the `SIM118`
+  form failed 6 of 15, which is what distinguishes a test that covers a line from one that
+  would notice it changing.
+
 - **A fixture that is not merely simplified but IMPOSSIBLE is worse than no fixture.**
   The gripper defect survived because a test hardcoded `gripper: (0.0, 100.0)` — a
   window `_load_joint_limits` can never produce. It converted an untested path into an
