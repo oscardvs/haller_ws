@@ -366,11 +366,30 @@ export function RunDetail({
         </div>
       </Panel>
 
-      {/* Metrics get whatever height the column has; checkpoints and the log
-          take what they need below, capped. Before this split the three shared
-          one long scroll, and reading the log meant scrolling past every
-          chart. The metrics Panel is `relative` because MetricGrid's maximised
-          chart positions its overlay against it. */}
+      {/* A ROLLOUT'S STDOUT IS THE WHOLE ACCOUNT. It logs no metrics and
+          writes no checkpoints — what it has is the handshake, the measured
+          control rate, the rate alerts, the target count, and the traceback
+          when it refuses. Given the train layout it got a metrics panel
+          promising "waiting for the first logged step…" about a stream that
+          does not exist, an empty checkpoints panel offering to roll out a
+          rollout, and the one thing worth reading squeezed into a 240px strip
+          under both. So the log takes the column. */}
+      {isRollout ? (
+        <Panel className="min-h-0 flex-1">
+          <PanelHead
+            title="log"
+            right={logLines > 0 ? `${logLines} lines` : undefined}
+          />
+          <div className="flex min-h-0 flex-1 flex-col p-2.5">
+            <RunLogTail text={log} fill />
+          </div>
+        </Panel>
+      ) : (
+      /* Metrics get whatever height the column has; checkpoints and the log
+         take what they need below, capped. Before this split the three shared
+         one long scroll, and reading the log meant scrolling past every
+         chart. The metrics Panel is `relative` because MetricGrid's maximised
+         chart positions its overlay against it. */
       <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] gap-2 overflow-hidden">
         <Panel className="relative">
           <PanelHead
@@ -382,7 +401,7 @@ export function RunDetail({
             }
           />
           <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-            <MetricGrid rows={rows} steps={spec.steps ?? null} />
+            <MetricGrid rows={rows} steps={spec.steps ?? null} live={live} />
           </div>
         </Panel>
 
@@ -403,6 +422,7 @@ export function RunDetail({
           </Panel>
         </div>
       </div>
+      )}
 
       {rollout && (
         <RolloutDialog

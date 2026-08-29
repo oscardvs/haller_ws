@@ -99,11 +99,16 @@ const SCALE_OPTIONS: readonly { value: Scale; label: string; hint: string }[] = 
 export function MetricGrid({
   rows,
   steps,
+  live = true,
 }: {
   rows: MetricRow[];
   /** The planned length from the run's spec. Fixes the step axis so a run
    *  that is 5% done looks 5% done instead of rescaling every tick. */
   steps?: number | null;
+  /** Whether more rows can still arrive. Only the empty state reads it, and
+   *  it defaults to the optimistic answer so a caller that does not know the
+   *  run's status gets the old wording rather than a wrong verdict. */
+  live?: boolean;
 }) {
   // Sticky so a glance at another tab does not reset the axis and the
   // smoothing the operator just dialled in.
@@ -242,7 +247,13 @@ export function MetricGrid({
   if (rows.length === 0) {
     return (
       <div className="flex min-h-[100px] flex-col">
-        <Empty>waiting for the first logged step…</Empty>
+        {/* "Waiting" is a promise, and a run that has stopped will never keep
+            it: a failed run that died before its first step said "waiting for
+            the first logged step…" forever, which reads as a page that has
+            not caught up rather than as a run with nothing to plot. */}
+        <Empty>
+          {live ? "waiting for the first logged step…" : "this run logged no metrics"}
+        </Empty>
       </div>
     );
   }

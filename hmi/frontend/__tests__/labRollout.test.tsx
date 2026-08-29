@@ -454,6 +454,49 @@ describe("RunDetail reads a rollout's spec, not a training run's", () => {
     expect(screen.queryByText(/batch/i)).toBeNull();
   });
 
+  it("gives the log the column, and offers neither metrics nor checkpoints", async () => {
+    // A rollout logs no metrics and writes no checkpoints. Rendered in the
+    // train layout it promised "waiting for the first logged step…" about a
+    // stream that does not exist, showed an empty checkpoints panel offering
+    // to roll out a rollout, and put the traceback — the only account of what
+    // happened — in a 240px strip under both. Live, on the first cockpit
+    // rollout, that traceback was the whole answer.
+    mountRun(stamped);
+    await waitFor(() => expect(screen.getByText(/trained at/i)).toBeTruthy());
+    expect(screen.getByLabelText("run log tail")).toBeTruthy();
+    expect(screen.queryByText(/waiting for the first logged step/i)).toBeNull();
+    expect(screen.queryByText("checkpoints")).toBeNull();
+    expect(screen.queryByRole("button", { name: /roll out/i })).toBeNull();
+  });
+
+  it("does not promise a first step to a run that has stopped", async () => {
+    // The train branch, where the panel belongs: a run that died before its
+    // first step will never log one, and "waiting" reads as a page that has
+    // not caught up rather than as a run with nothing to plot.
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/metrics")) {
+          return new Response(JSON.stringify({ offset: 0, rows: [] }), { status: 200 });
+        }
+        if (url.includes("/log")) {
+          return new Response(JSON.stringify({ offset: 0, text: "" }), { status: 200 });
+        }
+        if (url.includes("/checkpoints")) {
+          return new Response(JSON.stringify({ checkpoints: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          id: "train-x", kind: "train", name: "died early", status: "failed",
+          started_at: null, finished_at: null, spec: { policy_type: "act" },
+        }), { status: 200 });
+      },
+    );
+    render(<RunDetail runId="train-x" />);
+    await waitFor(() =>
+      expect(screen.getByText(/this run logged no metrics/i)).toBeTruthy());
+    expect(screen.queryByText(/waiting for the first logged step/i)).toBeNull();
+  });
+
   it("says a waived rate floor out loud", async () => {
     // `allow_slow` is a gate the operator turned off. A run that ran under its
     // own floor must not read like one that never approached it.
