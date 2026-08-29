@@ -271,6 +271,11 @@ export function TrainPane({
               runId={selected}
               onChanged={onRunChanged}
               onDeleted={onDeleted}
+              // A rollout launched off one of this run's checkpoints is a NEW
+              // run, and the same handover the launcher above already uses:
+              // select it, refetch the list, say what the right column just
+              // became. The checkpoint's own run keeps its place in the list.
+              onLaunched={onLaunched}
             />
           </PaneBoundary>
         </div>

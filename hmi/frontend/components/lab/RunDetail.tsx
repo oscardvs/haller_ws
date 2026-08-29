@@ -25,13 +25,15 @@ import { toast } from "sonner";
 
 import {
   lab, isBusy, isForbidden, isMissing, reason, metricX, REMOTE_REFUSED,
-  type MetricRow, type Run, type RunStatus, type TrainSpec,
+  type Checkpoint, type MetricRow, type Run, type RunStatus, type RolloutRecord,
+  type TrainSpec,
 } from "@/lib/lab";
 import { Button, Empty, Panel, PanelHead, Refusal, Stat } from "@/components/lab/ui";
 import { fmtDuration } from "@/components/lab/charts/svg";
 import { StatusPill, epochSeconds, fullWhen, runLabel, shortWhen } from "@/components/lab/RunList";
 import { MetricGrid } from "@/components/lab/MetricGrid";
 import { CheckpointList } from "@/components/lab/CheckpointList";
+import { RolloutDialog } from "@/components/lab/RolloutDialog";
 import { RunLogTail } from "@/components/lab/RunLogTail";
 import { TagChips } from "@/components/lab/TagChips";
 
@@ -41,10 +43,14 @@ export function RunDetail({
   runId,
   onChanged,
   onDeleted,
+  onLaunched,
 }: {
   runId: string | null;
   onChanged?: (r: Run) => void;
   onDeleted?: (id: string) => void;
+  /** A rollout started from one of this run's checkpoints. A DIFFERENT run
+   *  than the one on screen — the caller decides whether to follow it. */
+  onLaunched?: (r: Run) => void;
 }) {
   const [run, setRun] = useState<Run | null>(null);
   const [rows, setRows] = useState<MetricRow[]>([]);
@@ -57,6 +63,9 @@ export function RunDetail({
   const [refusal, setRefusal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [armed, setArmed] = useState(false);
+  /** The checkpoint the operator asked to roll out, which is what opens the
+   *  launcher. Null closes it. */
+  const [rollout, setRollout] = useState<Checkpoint | null>(null);
   /** The clock the elapsed readout is measured against, advanced by the poll
    *  below. Read from `Date.now()` during render it was impure AND wrong: a
    *  running run's elapsed froze at whatever moment React last happened to
@@ -165,7 +174,10 @@ export function RunDetail({
   }, [rows]);
 
   const label = run ? runLabel(run) : (runId ?? "—");
-  const spec: Partial<TrainSpec> = run?.spec ?? {};
+  /** `kind` is what says which shape arrived; both are partial, because a
+   *  run's spec is whatever the launching route wrote. */
+  const spec: Partial<TrainSpec & RolloutRecord> = run?.spec ?? {};
+  const isRollout = run?.kind === "rollout";
   const argv = run?.argv?.join(" ") ?? null;
   /** `finished_at` where the run has one, otherwise the poll's clock. `now` is
    *  0 until the first tick of a RUNNING run — a run that has neither has no
@@ -275,19 +287,26 @@ export function RunDetail({
             <>
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <Stat label="kind" value={run.kind} />
-                <Stat label="policy" value={spec.policy_type ?? "—"} />
-                <Stat label="episodes" value={spec.episodes?.length ?? "—"} />
-                <Stat label="steps" value={spec.steps ?? "—"} />
-                <Stat label="batch" value={spec.batch_size ?? "—"} />
-                <Stat label="device" value={spec.device ?? "—"} />
-                <Stat
-                  label="eval split"
-                  value={
-                    typeof spec.eval_split === "number"
-                      ? `${Math.round(spec.eval_split * 100)}%`
-                      : "—"
-                  }
-                />
+                {/* A rollout's spec answers different questions than a train
+                    run's, and rendering the train fields against it printed a
+                    row of — that read as a run with nothing in it. */}
+                {isRollout ? <RolloutStats spec={spec} /> : (
+                  <>
+                    <Stat label="policy" value={spec.policy_type ?? "—"} />
+                    <Stat label="episodes" value={spec.episodes?.length ?? "—"} />
+                    <Stat label="steps" value={spec.steps ?? "—"} />
+                    <Stat label="batch" value={spec.batch_size ?? "—"} />
+                    <Stat label="device" value={spec.device ?? "—"} />
+                    <Stat
+                      label="eval split"
+                      value={
+                        typeof spec.eval_split === "number"
+                          ? `${Math.round(spec.eval_split * 100)}%`
+                          : "—"
+                      }
+                    />
+                  </>
+                )}
                 <Stat label="ran" value={fmtDuration(elapsed)} />
                 <span title={fullWhen(run.started_at)}>
                   <Stat label="started" value={shortWhen(run.started_at)} />
@@ -302,6 +321,21 @@ export function RunDetail({
                   />
                 )}
               </div>
+
+              {/* The checkpoint this rollout loaded. The repo below it is the
+                  dataset it was TRAINED on, which the route resolves from the
+                  checkpoint rather than from anything the operator had open. */}
+              {isRollout && (
+                <div className="flex items-baseline gap-2">
+                  <span className="label-micro shrink-0 text-muted-foreground">policy</span>
+                  <span
+                    className="min-w-0 truncate font-mono text-[10px]"
+                    title={spec.policy_path ?? undefined}
+                  >
+                    {spec.policy_path ?? "—"}
+                  </span>
+                </div>
+              )}
 
               <div className="flex items-baseline gap-2">
                 <span className="label-micro shrink-0 text-muted-foreground">repo</span>
@@ -353,7 +387,13 @@ export function RunDetail({
         </Panel>
 
         <div className="flex max-h-[45%] min-h-0 flex-col gap-2 overflow-y-auto">
-          {run && <CheckpointList runId={runId} status={run.status} />}
+          {run && (
+            <CheckpointList
+              runId={runId}
+              status={run.status}
+              onRollout={setRollout}
+            />
+          )}
 
           <Panel className="shrink-0">
             <PanelHead title="log" right={logLines > 0 ? `${logLines} lines` : undefined} />
@@ -363,6 +403,76 @@ export function RunDetail({
           </Panel>
         </div>
       </div>
+
+      {rollout && (
+        <RolloutDialog
+          checkpoint={rollout}
+          // The dataset THIS run trained on. The launcher uses it to know
+          // whether it must ask which arm the policy drives; the run it starts
+          // resolves its own from the checkpoint.
+          repoId={spec.repo_id ?? null}
+          onClose={() => setRollout(null)}
+          onLaunched={(r) => {
+            setRollout(null);
+            onLaunched?.(r);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/* ---- a rollout's own stats ---------------------------------------------- */
+
+/**
+ * What a rollout was asked to do, and where its rate came from.
+ *
+ * The rate is two facts, not one: what it ran at, and what the policy was
+ * trained at. A run that got them for free reads the same as one where
+ * somebody typed a number and ticked the override, unless both are shown —
+ * which is exactly why the route stamps `control_hz_declared_by` and
+ * `control_hz_mismatch_override` whether or not anything was overridden.
+ */
+function RolloutStats({ spec }: { spec: Partial<RolloutRecord> }) {
+  const trained = spec.control_hz_trained;
+  const override = spec.control_hz_mismatch_override === true;
+  return (
+    <>
+      <span
+        title={
+          spec.control_hz_declared_by === "request"
+            ? "declared in the request"
+            : "the rate the policy was trained at"
+        }
+      >
+        <Stat
+          label="rate"
+          value={typeof spec.control_hz === "number" ? `${spec.control_hz} Hz` : "—"}
+          colour={override ? "var(--haller-warn)" : undefined}
+        />
+      </span>
+      <span
+        title={
+          spec.control_hz_trained_measured === true
+            ? `measured on the training dataset (${spec.control_hz_trained_measured_hz ?? "?"} Hz)`
+            : "declared by the training dataset, never measured"
+        }
+      >
+        <Stat
+          label="trained at"
+          value={typeof trained === "number" ? `${trained} Hz` : "unknown"}
+          colour={override ? "var(--haller-warn)" : undefined}
+        />
+      </span>
+      <Stat
+        label="for"
+        value={typeof spec.duration_s === "number" ? `${spec.duration_s} s` : "—"}
+      />
+      <Stat label="device" value={spec.device ?? "—"} />
+      {spec.side ? <Stat label="arm" value={spec.side} /> : null}
+      {spec.allow_slow === true && (
+        <Stat label="rate floor" value="waived" colour="var(--haller-warn)" />
+      )}
+    </>
   );
 }
