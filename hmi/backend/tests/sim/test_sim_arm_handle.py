@@ -255,3 +255,28 @@ def test_send_goal_drops_a_joint_the_seed_read_could_not_measure(monkeypatch):
 
     assert "shoulder_pan" not in sent
     assert sent["gripper"] == pytest.approx(1.2)
+
+
+def test_a_sim_arm_reports_its_effort_as_measured_even_with_torque_off():
+    """0.0 with torque off is the RIGHT number, not a missing one.
+
+    `state_snapshot` zeroes effort when torque is off because the actuator's
+    bias term would otherwise saturate at -1.0 and report a limp arm as
+    straining — which is exactly what a real limp arm reads. So it is a
+    measurement, and the status stays OK.
+
+    Calling it ABSENT would make the recorder declare the whole effort column
+    flat; calling it TRANSIENT would drop every frame of a torque-off take.
+    Both would be wrong about a number that is right, and the mistake is
+    tempting because the effort dict is empty in exactly the way a failed read
+    leaves it.
+    """
+    from haller_hmi.arm import EFFORT_OK
+
+    _world, handle = _make_world_and_handle()
+
+    assert handle.state_snapshot()["effort_status"] == EFFORT_OK
+    handle.disable_torque()
+    snap = handle.state_snapshot()
+    assert snap["effort_status"] == EFFORT_OK
+    assert all(j["effort"] == 0.0 for j in snap["joints"].values())

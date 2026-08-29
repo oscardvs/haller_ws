@@ -1,13 +1,18 @@
 /**
- * WebXR → the VR frame the backend's `vr_input.py` expects.
+ * WebXR → the frame the backend's `QuestTeleoperator` converts.
  *
- * This file is deliberately thin. Unlike `mediapipe.ts`, which fuses landmarks
- * into finished `SideFrame`s, nothing here computes geometry: it samples the
- * headset and controller poses and ships them raw. The shoulder estimate, the
- * two-link elbow IK and the synthetic hand all live server-side in
- * `vr_input.py`, where they can be tested against the real retargeter and
- * cannot drift from its coordinate conventions. Read that module's docstring
- * before changing the wire shape below.
+ * This file is deliberately thin: nothing here solves for joints. It samples
+ * the headset and controller poses and ships them raw, and the clutch-relative
+ * mapping and the 3+2 decoupled IK both live server-side in
+ * `haller_hmi/vr_teleop/`, where they are tested against the real arm model
+ * and cannot drift from its coordinate conventions.
+ *
+ * One geometric correction DOES belong here, because only the client has the
+ * grip pose to build it from: the read-out point is shifted back along the
+ * controller's own axis onto roughly where the operator's wrist turns
+ * (`wristPivotM`). Without it a pure wrist twist swings the grip point
+ * through an arc that the mapper can only read as translation nobody asked
+ * for.
  *
  * Minimal WebXR types are declared locally rather than pulling in
  * `@types/webxr`: we touch about a dozen members of the API, and a dependency
@@ -27,6 +32,11 @@ type XRPose = { transform: XRRigidTransform; emulatedPosition: boolean };
 
 export type XRGamepadLike = {
   buttons: readonly { pressed: boolean; value: number }[];
+  /** `xr-standard` puts the thumbstick on 2/3 and a touchpad on 0/1; a
+   *  controller with only a stick may report it on either pair. The only
+   *  analog inputs this client has left, and therefore where the tuning
+   *  menu and the precision modifier had to go — see `stickAxes`. */
+  axes?: readonly number[];
   hapticActuators?: readonly {
     pulse?: (intensity: number, durationMs: number) => unknown;
   }[];
@@ -66,14 +76,25 @@ type NavigatorXR = {
 /** `xr-standard` gamepad mapping. Index, not name, is what the spec guarantees. */
 export const BUTTON_TRIGGER = 0;
 export const BUTTON_SQUEEZE = 1;
-/** A on the right controller, X on the left. */
+/** A on the right controller, X on the left — the precision modifier, HELD.
+ *  The kit's `PRECISION_BUTTON_INDEX = 4`, restored. A modifier belongs on
+ *  the button the thumb already rests on while gripping; it is the take
+ *  boundary that must be hard to hit by accident, and that now lives on B. */
 export const BUTTON_AX = 4;
-/** xr-standard thumbstick click. Free on both controllers — see
- *  `thumbstickPressed` for why the menu had to land here. */
+/** xr-standard thumbstick click — "go home". The kit's
+ *  `REST_RAMP_BUTTON_INDEX = 3`: one click, one velocity-limited ramp to the
+ *  rest pose. */
 export const BUTTON_THUMBSTICK = 3;
-/** B on the right controller, Y on the left — the E-STOP. Chosen over A/X
- *  because the thumb rests ON A/X while gripping; B/Y takes a deliberate
- *  reach, and an E-STOP that fires by accident teaches people to disable it. */
+/** B on the right controller, Y on the left — episode control, per hand.
+ *  B ends the take and banks it; Y discards it and re-records. This is the
+ *  kit's mapping, documented in `examples/record_so101.py`:
+ *
+ *      B (right controller)  end the current episode / end the reset phase
+ *      Y (left controller)   discard + re-record the current episode
+ *
+ *  There is NO controller E-STOP. It lives on the desktop HMI and the bench
+ *  cutoff — the kit never had one on the sticks, and binding a take boundary
+ *  and a safety stop to the same thumb is what forced the old A/X juggle. */
 export const BUTTON_BY = 5;
 
 // ---- wire shape ------------------------------------------------------------
@@ -87,26 +108,21 @@ export type ControllerSample = {
   /** Analog trigger [0,1]. 1 = fully squeezed = gripper closed. */
   trigger: number;
   /** Grip button — this hand's dead-man. Each squeeze speaks only for its
-   *  own arm on the backend; see vr_input.py's `dead_man_sides`. */
+   *  own arm on the backend; see the session's `dead_man_sides`. */
   squeeze: boolean;
   tracked: boolean;
+  /** Fine-work modifier: the backend multiplies both mapping gains by
+   *  `precision_factor` while this is set. Absent reads as false. */
+  precision?: boolean;
 };
 
 export type VRFrame = {
   type: "vr_keypoints";
   ts_ms: number;
-  /** Either grip — kept for the status chip and for backends that predate the
-   *  per-side split. The split itself rides on each controller's `squeeze`. */
+  /** Either grip — kept for the status chip. The per-side split itself rides
+   *  on each controller's `squeeze`. */
   dead_man: boolean;
-  /** "none" (default): identical arms mounted side by side, no mirroring —
-   *  egocentric frames already give opposite pan signs for symmetric
-   *  gestures. "both": a rig whose two mounts are true mirror images. */
-  mirror_mode?: "none" | "both";
-  /** "pose" (default): clutch-relative hand-position tracking — squeezing a
-   *  grip anchors your hand to the arm's current pose and deltas drive the
-   *  gripper through IK. "joints": the original body-angle copying. */
-  vr_mode?: "pose" | "joints";
-  /** How the operator's hand maps onto the gripper (position mode only).
+  /** How the operator's hand maps onto the gripper.
    *  "behind" (default): egocentric — the replica arm moves exactly like
    *  your own (goggles on, push forward = the arm extends INTO the default
    *  over-the-shoulder view). "mirror": face-to-face, the arm as your
@@ -116,14 +132,7 @@ export type VRFrame = {
   head: { position: Vec3; orientation: Quat } | null;
   left: ControllerSample | null;
   right: ControllerSample | null;
-  /** Optional per-operator limb lengths, metres. Absent keys use BodyModel defaults. */
-  body?: Partial<Record<
-    "shoulder_drop" | "shoulder_back" | "shoulder_half_width" |
-    "upper_arm" | "fore_arm" | "hand_len" | "hand_half_width", number
-  >>;
 };
-
-export type BodyOverride = NonNullable<VRFrame["body"]>;
 
 export function xrSupported(): Promise<boolean> {
   const xr = (navigator as unknown as NavigatorXR).xr;
@@ -306,43 +315,36 @@ export function controllerRays(
   return out;
 }
 
-type XRViewLike = {
-  projectionMatrix: Float32Array;
-  transform: { inverse: { matrix: Float32Array } };
-};
-
-export type SceneDrawOpts = {
-  /** Status/menu canvas — text only, repainted at ~10 Hz. */
-  panel: HTMLCanvasElement | null;
-  panelDirty: boolean;
-  /** Workspace camera <img> (MJPEG). Textured EVERY frame — this is what
-   *  makes the tile track at display rate instead of the panel's 10 Hz. */
-  cam: HTMLImageElement | null;
-  /** Mirror the tile horizontally (display only) — for cameras that face
-   *  the operator. */
-  camMirrored?: boolean;
-  camWidthM?: number;
-  anchor?: HudAnchor;
-};
-
 export type XRScene = {
-  /** Clear both eyes; draw the camera tile and the status panel as two
-   *  separate world quads at `anchor` — the panel BELOW the tile, never on
-   *  top of the view it annotates. */
-  render(frame: XRFrameLike, refSpace: unknown, opts: SceneDrawOpts): void;
+  /** Clear both eyes and draw nothing. The scene has no content: the
+   *  operator is looking at their own bench through passthrough, which is the
+   *  whole point of an AR session. */
+  render(frame: XRFrameLike, refSpace: unknown): void;
 };
 
 const _NOOP_SCENE: XRScene = { render: () => {} };
 
+/** Bare passthrough. Sets up the XR GL layer an immersive session requires,
+ *  clears both eyes to transparent, and draws NOTHING.
+ *
+ *  This used to composite a status panel, a workspace-camera tile, a tuning
+ *  list, a view menu and an end-of-take prompt onto quads in front of the
+ *  operator. All of it is gone. The kit's in-headset client draws nothing at
+ *  all — `examples/record_so101.py` puts it plainly, "in passthrough you see
+ *  the real scene anyway" — and a panel hanging in front of a bench is
+ *  something to look past while doing fine work with a real arm.
+ *
+ *  What replaced it as the feedback channel is what the kit already used:
+ *  haptics. `recorderHapticCue` fires on every take transition and
+ *  `ikHapticCues` on every limit, and both reach the operator without asking
+ *  them to look away from their hands. Everything the panel used to say is on
+ *  the desktop page, where reading it costs nothing.
+ */
 export function attachRenderScene(
   session: XRSessionLike,
   mode: TeleopXRSession["mode"],
 ): XRScene {
-  type LayerLike = {
-    framebuffer: unknown;
-    getViewport?: (v: unknown) =>
-      { x: number; y: number; width: number; height: number } | null;
-  };
+  type LayerLike = { framebuffer: unknown };
   type LayerCtor = new (s: XRSessionLike, gl: unknown) => LayerLike;
   const XRWebGLLayerCtor = (globalThis as { XRWebGLLayer?: LayerCtor }).XRWebGLLayer;
   if (!XRWebGLLayerCtor || !session.updateRenderState) return _NOOP_SCENE;
@@ -353,166 +355,20 @@ export function attachRenderScene(
   if (!gl) return _NOOP_SCENE;
   const layer = new XRWebGLLayerCtor(session, gl);
   session.updateRenderState({ baseLayer: layer });
+  // Transparent in AR so passthrough shows through untouched. The VR fallback
+  // still needs SOMETHING behind the scene or the compositor shows a void.
   const [r, g, b, a] = mode === "immersive-ar"
-    ? [0, 0, 0, 0]           // transparent: passthrough shows through
-    : [0.05, 0.05, 0.07, 1]; // VR fallback: deliberate near-black, not a void
-
-  // Minimal textured-quad pipeline. Compiled lazily on the first HUD frame so
-  // the overlay-capable path never pays for it.
-  let prog: WebGLProgram | null = null;
-  let uMVP: WebGLUniformLocation | null = null;
-  let panelTex: WebGLTexture | null = null;
-  let camTex: WebGLTexture | null = null;
-  let camTexValid = false;
-  let lastCamUploadMs = 0;
-
-  /** Column-major T(pos+yOff) · RotY(yaw) · S(w, h, 1). `mirrorX` flips the
-   *  quad for operator-facing cameras — display only, the source pixels are
-   *  never touched. */
-  function quadModel(
-    anchor: HudAnchor, w: number, h: number, yOffset: number, mirrorX: boolean,
-  ): Float32Array {
-    const c = Math.cos(_rad(anchor.yawDeg)), s = Math.sin(_rad(anchor.yawDeg));
-    const sx = mirrorX ? -w : w;
-    return new Float32Array([
-      c * sx, 0, -s * sx, 0,
-      0, h, 0, 0,
-      s, 0, c, 0,
-      anchor.pos[0], anchor.pos[1] + yOffset, anchor.pos[2], 1,
-    ]);
-  }
-
-  function ensurePipeline(): boolean {
-    if (prog) return true;
-    if (!gl) return false;
-    const compile = (type: number, src: string) => {
-      const s = gl.createShader(type);
-      if (!s) return null;
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      return gl.getShaderParameter(s, gl.COMPILE_STATUS) ? s : null;
-    };
-    const vs = compile(gl.VERTEX_SHADER,
-      "attribute vec3 aPos; attribute vec2 aUV; uniform mat4 uMVP;" +
-      "varying vec2 vUV;" +
-      "void main(){ gl_Position = uMVP * vec4(aPos, 1.0); vUV = aUV; }");
-    const fs = compile(gl.FRAGMENT_SHADER,
-      "precision mediump float; varying vec2 vUV; uniform sampler2D uTex;" +
-      "void main(){ gl_FragColor = texture2D(uTex, vUV); }");
-    if (!vs || !fs) return false;
-    const p = gl.createProgram();
-    if (!p) return false;
-    gl.attachShader(p, vs);
-    gl.attachShader(p, fs);
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return false;
-    // Interleaved x,y,z,u,v — unit quad centred on the origin, v flipped so
-    // canvas row 0 lands at the TOP of the quad.
-    const verts = new Float32Array([
-      -0.5, -0.5, 0, 0, 1,
-       0.5, -0.5, 0, 1, 1,
-      -0.5,  0.5, 0, 0, 0,
-       0.5,  0.5, 0, 1, 0,
-    ]);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-    const aPos = gl.getAttribLocation(p, "aPos");
-    const aUV = gl.getAttribLocation(p, "aUV");
-    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 20, 12);
-    gl.enableVertexAttribArray(aUV);
-    uMVP = gl.getUniformLocation(p, "uMVP");
-    const mkTex = () => {
-      const t = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      return t;
-    };
-    panelTex = mkTex();
-    camTex = mkTex();
-    prog = p;
-    return true;
-  }
+    ? [0, 0, 0, 0]
+    : [0.05, 0.05, 0.07, 1];
 
   return {
-    render(frame, refSpace, opts) {
-      const fb = (session.renderState?.baseLayer ?? layer).framebuffer;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb as WebGLFramebuffer | null);
+    render(frame: XRFrameLike, refSpace: unknown): void {
+      const pose = frame.getViewerPose(refSpace);
+      if (!pose) return;
+      const active = (session.renderState?.baseLayer ?? layer) as LayerLike;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, active.framebuffer as WebGLFramebuffer | null);
       gl.clearColor(r, g, b, a);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      const panel = opts.panel;
-      if (!panel || !ensurePipeline()) return;
-      const pose = frame.getViewerPose(refSpace) as unknown as
-        { views?: XRViewLike[] } | null | undefined;
-      const views = pose?.views;
-      if (!views?.length) return;
-      gl.useProgram(prog);
-      gl.disable(gl.DEPTH_TEST);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
-      // Panel text: repainted at ~10 Hz, uploaded only when it changed.
-      gl.bindTexture(gl.TEXTURE_2D, panelTex);
-      if (opts.panelDirty) {
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, panel);
-      }
-      // Camera tile: textured straight from the MJPEG <img> — one
-      // native-resolution sampling step, no canvas composite in between.
-      // Uploads are THROTTLED to the stream's own 30 fps rather than done
-      // per display frame: a 960x720 RGBA upload at 72-90 Hz measurably
-      // stalls the Quest browser's main thread, and a stalled main thread
-      // starves the 30 Hz publish loop — which the backend correctly reads
-      // as tracking loss and answers with a re-acquire. The stream carries
-      // no new pixels between its own frames anyway.
-      const cam = opts.cam;
-      const camReady = Boolean(cam && cam.complete && cam.naturalWidth > 0);
-      const nowMs = performance.now();
-      if (cam && camReady && nowMs - lastCamUploadMs >= 33) {
-        gl.bindTexture(gl.TEXTURE_2D, camTex);
-        try {
-          gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cam);
-          camTexValid = true;
-          lastCamUploadMs = nowMs;
-        } catch {
-          /* a mid-frame MJPEG boundary can throw; keep the previous texture */
-        }
-      }
-
-      const anchor = opts.anchor ?? DEFAULT_HUD_ANCHOR;
-      const camW = opts.camWidthM && opts.camWidthM > 0 ? opts.camWidthM : 1.1;
-      const camAspect = camReady && cam
-        ? cam.naturalHeight / cam.naturalWidth : 0.75;
-      const drawCam = camTexValid && cam !== null;
-      const layout = clusterLayout(
-        camW, camAspect, panel.height / panel.width, drawCam);
-
-      const active = (session.renderState?.baseLayer ?? layer) as LayerLike;
-      const camModel = quadModel(anchor, camW, layout.camH, 0,
-                                 Boolean(opts.camMirrored));
-      const panelModel = quadModel(anchor, layout.panelW, layout.panelH,
-                                   layout.panelYOff, false);
-      for (const view of views) {
-        const vp = active.getViewport?.(view);
-        if (!vp) continue;
-        gl.viewport(vp.x, vp.y, vp.width, vp.height);
-        const pv = mat4Multiply(view.projectionMatrix,
-                                view.transform.inverse.matrix);
-        if (drawCam) {
-          gl.bindTexture(gl.TEXTURE_2D, camTex);
-          gl.uniformMatrix4fv(uMVP, false, mat4Multiply(pv, camModel));
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        }
-        gl.bindTexture(gl.TEXTURE_2D, panelTex);
-        gl.uniformMatrix4fv(uMVP, false, mat4Multiply(pv, panelModel));
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      }
     },
   };
 }
@@ -527,14 +383,79 @@ export type HudStatusLike = {
   acquire?: Partial<Record<"left" | "right", {
     authority: string;
     remaining_ms: number | null;
-    blocking: string[];
-    error_deg?: Record<string, number>;
     reason: string;
   }>>;
 } | null;
 
-/** The slice of recorder status the in-scene HUD shows. */
-export type RecorderHudLike = { recording: boolean; episode_frames: number } | null;
+/** The slice of recorder status the in-scene HUD shows. `takes` counts what
+ *  this session has saved — the recorder reports frames, not an episode
+ *  index, and an operator mid-run wants to know how many good ones are in
+ *  the bag. */
+export type RecorderHudLike = {
+  /** Where the take is. Absent on a backend that predates the start gate, in
+   *  which case `recording` alone still paints. */
+  state?: TakeState;
+  recording: boolean;
+  episode_frames: number;
+  /** Ticks seen and NOT written. A degraded read is a dropped frame, not a
+   *  recorded one (port invariant 9) — so a take shedding rows has to say so
+   *  while it is still being driven, not in review. */
+  skipped_frames?: number;
+  /** The single worst drop source, already reduced: "left_wrist", not a
+   *  table. An operator needs a cable to go check. */
+  worstDrop?: string | null;
+  /** Measured against declared. `fps` in info.json is measured or the episode
+   *  does not open (port invariant 10); a rate that has sagged is a take
+   *  worth abandoning early. */
+  fpsMeasured?: number | null;
+  fpsDeclared?: number | null;
+  /** The recorder's own verdict on whether the measured rate is FAITHFUL to
+   *  the declared one — `recordRateFaithful`, not a threshold. The panel reads
+   *  it; this painter holds no band of its own, so it cannot drift from the
+   *  refusal the operator gets at arm time. `null` means NOT ANSWERABLE: the
+   *  rate is unmeasured, or the backend publishes no tolerance. */
+  rateFaithful?: boolean | null;
+  /** Why an ARMED gate fell back to idle. Not an error — the gate saying why
+   *  it dropped. Silent un-arming is the failure the gate exists to prevent. */
+  invalidatedReason?: string | null;
+  /** True while the page is holding ARMED itself because the backend has no
+   *  /record/arm yet: nothing is written before ROLL, but the schema is not
+   *  frozen, the 409s arrive late and the episode index is a guess. */
+  localGate?: boolean;
+  /** Takes this page has saved — the fallback count, and the floor under the
+   *  dataset-wide one. */
+  takes?: number;
+  /** The gate's index for the take in hand — `episode_index` off
+   *  `GET /record/status`, and nothing else. **Null whenever no take is
+   *  armed:** the recorder sets it at ARM and clears it at STOP, so idle is
+   *  null by construction, and a backend with no start gate never sends it at
+   *  all. The take is then named `take N` off this page's own counter, which
+   *  is true of the page-load, rather than `ep N` off a count that would be
+   *  right only by coincidence.
+   *
+   *  This REPLACED a field called `episodes` that every reader below took as
+   *  an index except the idle menu, which took it as a count. The two agreed
+   *  for as long as `episode_index` did not exist. A different meaning got a
+   *  different name so a stale reader breaks at the type rather than painting
+   *  the wrong number — same reasoning as `record_rate_tolerance`. */
+  episodeIndex?: number | null;
+  /** How many episodes the DATASET holds. A count, and the idle menu is its
+   *  only reader. **Not interchangeable with `episodeIndex`:** that one names
+   *  the take in hand and renumbers across a prune, this one counts what is on
+   *  disk and is still guessed past lerobot's RAM buffer (`episodesTotal`).
+   *  They coincide on the happy path and are not the same fact. Null when no
+   *  dataset has been read — a fresh repo, or the endpoint refused. */
+  datasetCount?: number | null;
+} | null;
+
+
+
+/** Which hand drives which arm this session. Null on a hand with no arm: an
+ *  absent side is a fact about the rig, not a fault, and the operator must be
+ *  able to see the arm set from inside the headset — a session started on the
+ *  wrong preset is otherwise only discovered 60 s into a take. */
+export type ArmSetLike = { left: string | null; right: string | null } | null;
+
 
 /**
  * Repaint the in-scene HUD. Layout: workspace camera on top (when a frame is
@@ -554,201 +475,62 @@ export type VrMenuLike = {
    *  operator must be able to SEE which mapping their hands are wired to —
    *  a wrong stance reads as "the arm goes the opposite way". */
   stance?: "behind" | "mirror" | "front";
+  /** Which hand drives which arm this session, when the pairing is known. */
+  armSet?: ArmSetLike;
+  /** The live-tuning list, when the operator has it open. */
+  tuning?: {
+    open: boolean;
+    index: number;
+    values: Readonly<Record<string, number>>;
+    /** Knobs the operator moved this page-load — the ones the page re-asserts
+     *  over the server's per-connection defaults. Marked, because a value that
+     *  survives a reconnect while its neighbours revert is otherwise
+     *  witchcraft. */
+    dirty?: readonly string[];
+  } | null;
+  /** True while the precision modifier is held. Shown prominently: a
+   *  modifier you cannot see is one you leave on. */
+  precision?: boolean;
+  /** The end-of-take decision is open. Modal: it takes over the menu box and
+   *  both stick clicks until the operator picks. Four outcomes exist — keep,
+   *  keep_stop, redo, drop — but the headset binds only the two that return
+   *  to ARMED, because in a session whose point is banking takes the next one
+   *  is always the expected next thing. Standing down is the desktop's, where
+   *  a button costs nothing and collides with no trained gesture. */
+  endPrompt?: boolean;
+  /** True for a moment after the operator held the left stick during the
+   *  prompt — the trained in-session home gesture, which must not fire
+   *  through the tail of a take they may be about to keep. Answered rather
+   *  than silently dropped: a gesture the operator has trained gets told no. */
+  homeRefused?: boolean;
 } | null;
 
-/** Repaint the status/menu PANEL — text only. The workspace camera is not
- *  composited here any more: it renders as its own quad, textured at native
- *  resolution every display frame (see `attachRenderScene`), while this
- *  canvas repaints at ~10 Hz. Splitting them is what stopped the
- *  instructions from hovering on top of the view, and what let the tile
- *  track at display rate instead of the panel's cadence. */
-export function paintHud(
-  ctx: CanvasRenderingContext2D,
-  status: HudStatusLike,
-  rec: RecorderHudLike = null,
-  menu: VrMenuLike = null,
-): void {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = "rgba(8, 10, 14, 0.82)";
-  ctx.fillRect(0, 0, W, H);
-
-  // Two hard columns: status text on the left, the menu box on the right,
-  // and a CLIP on the status column — an acquisition line listing several
-  // blocking joints is arbitrarily long, and letting it run under the menu
-  // is exactly the overlapping-menus mess this layout replaces. Long match
-  // lines WRAP inside the column instead of being cut: which joint is off
-  // and which way is the one thing the operator needs mid-countdown.
-  const leftW = Math.round(W * 0.55) - 24;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, leftW + 24, H);
-  ctx.clip();
-
-  ctx.textAlign = "left";
-  ctx.font = "bold 30px monospace";
-  let y = 46;
-  const state = (status?.state ?? "—").toUpperCase();
-  const col = status?.collision;
-  ctx.fillStyle = "#e8eaed";
-  ctx.fillText(state, 24, y);
-  if (rec?.recording) {
-    // Right-aligned to the column's edge so it cannot collide with the
-    // state: the one line that must be readable at a glance while driving.
-    ctx.fillStyle = "#f28b82";
-    ctx.textAlign = "right";
-    ctx.fillText(`● REC ${rec.episode_frames}`, leftW, y);
-    ctx.textAlign = "left";
-  }
-  if (col?.enabled) {
-    y += 38;
-    const slack = col.slack_m;
-    ctx.fillStyle = col.limited ? "#f28b82"
-      : (slack ?? 1) < 0 ? "#fdd663" : "#9aa0a6";
-    ctx.font = "28px monospace";
-    ctx.fillText(
-      col.limited
-        ? `COLLISION HOLD ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`
-        : `clearance ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`,
-      24, y);
-  }
-  ctx.font = "28px monospace";
-  const wrapInto = (text: string, x: number, maxW: number): string[] => {
-    const words = text.split(" ");
-    const lines: string[] = [];
-    let cur = "";
-    for (const w of words) {
-      const cand = cur ? `${cur} ${w}` : w;
-      if (cur && ctx.measureText(cand).width > maxW - x) {
-        lines.push(cur);
-        cur = w;
-      } else {
-        cur = cand;
-      }
-    }
-    if (cur) lines.push(cur);
-    return lines;
-  };
-  for (const side of ["left", "right"] as const) {
-    y += 38;
-    const acq = status?.acquire?.[side];
-    const grip = status?.clutch?.sides?.[side] ?? status?.clutch?.engaged;
-    ctx.fillStyle = "#9aa0a6";
-    ctx.fillText(`${side === "left" ? "L" : "R"} ${grip ? "●" : "○"}`, 24, y);
-    if (!acq) continue;
-    ctx.fillStyle = acq.authority === "driving" ? "#81c995"
-      : acq.authority === "acquiring" ? "#fdd663" : "#9aa0a6";
-    let line = acq.authority;
-    let match = "";
-    if (acq.authority === "acquiring") {
-      if (acq.remaining_ms !== null) line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
-      if (acq.blocking.length) {
-        // Signed errors, so the operator knows which WAY to move, not just
-        // which joint is off: "elbow_flex +61°" means reach further.
-        match = "match: " + acq.blocking.map((j) => {
-          const e = acq.error_deg?.[j];
-          return e === undefined ? j
-            : `${j} ${e > 0 ? "+" : ""}${e.toFixed(0)}°`;
-        }).join(", ");
-      }
-    }
-    if (acq.reason === "no_tracking") line += "  (no tracking)";
-    ctx.fillText(line, 120, y);
-    // The match list goes on its own wrapped line(s): it is the one thing
-    // the operator needs mid-countdown, and it can name several joints.
-    for (const seg of match ? wrapInto(match, 120, leftW) : []) {
-      y += 32;
-      ctx.fillText(seg, 120, y);
-    }
-  }
-  y += 38;
-  if (status?.last_error) {
-    ctx.fillStyle = "#f28b82";
-    ctx.fillText(status.last_error.slice(0, 60), 24, y);
-  } else {
-    ctx.fillStyle = "#9aa0a6";
-    ctx.fillText("grips = drive · trigger = gripper · B/Y = E-STOP", 24, y);
-  }
-  ctx.restore();
-
-  if (menu) paintMenu(ctx, menu, rec);
-}
-
-/** The view menu, bottom-right of the HUD.
+/* Character budgets, and why they are numbers rather than a measureText call.
  *
- *  It states the bindings rather than only reflecting state, because in a
- *  headset there is nowhere else to look them up: the record command in
- *  particular was previously documented only in a markdown file, which is no
- *  use with a headset on and both hands clutched.
+ * The panel canvas is 1024 wide. The status column is clipped at 563 px and
+ * the menu box has 392 px between its padding and its right-aligned value
+ * column. Monospace advances at 0.6 em, so a row's width is (chars × 0.6 ×
+ * fontPx) and the budgets below fall straight out of that:
+ *
+ *     status  22px from x=24 → 515 / 13.2 = 39 chars
+ *     menu    18px body      → 392 / 10.8 = 36 chars
+ *     menu    20px title     → 392 / 12.0 = 32 chars
+ *
+ * measureText is not used because this runs inside the XR loop at ~10 Hz and
+ * the answer is a compile-time property of the copy, not of the frame. The
+ * budgets are pinned by tests instead, which is where a too-long line should
+ * be caught — not on someone's face in a headset, where the failure mode is
+ * silent truncation of whatever sits at the end of the row.
  */
-function paintMenu(
-  ctx: CanvasRenderingContext2D,
-  menu: NonNullable<VrMenuLike>,
-  rec: RecorderHudLike,
-): void {
-  const W = ctx.canvas.width;
-  const pad = 18;
-  const lineH = 30;
-  // +1 for the reset-arms binding, +1 for the grab-to-move hint.
-  const rows = menu.views.length + 5 + (menu.stance ? 1 : 0);
-  const boxW = Math.round(W * 0.42);
-  const boxH = rows * lineH + pad * 2;
-  const x = W - boxW - 24;
-  const yTop = 16;
+export const STATUS_MAX_CHARS = 39;
+export const MENU_MAX_CHARS = 36;
+export const MENU_TITLE_MAX_CHARS = 32;
 
-  // Fully opaque: the status column is clipped away from this box, and
-  // nothing may ghost through from behind either.
-  ctx.fillStyle = "rgb(10, 12, 16)";
-  ctx.fillRect(x, yTop, boxW, boxH);
-  ctx.strokeStyle = "rgba(154, 160, 166, 0.45)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x, yTop, boxW, boxH);
 
-  ctx.textAlign = "left";
-  let y = yTop + pad + 22;
-  ctx.font = "bold 24px monospace";
-  ctx.fillStyle = "#e8eaed";
-  ctx.fillText(`VIEW  (L stick click = next)`, x + pad, y);
-  y += lineH;
 
-  ctx.font = "22px monospace";
-  for (const v of menu.views) {
-    const on = v.id === menu.activeViewId;
-    ctx.fillStyle = on ? "#8ab4f8" : "#9aa0a6";
-    ctx.fillText(`${on ? "▸" : " "} ${v.label}`, x + pad, y);
-    y += lineH;
-  }
-  if (!menu.views.length) {
-    ctx.fillStyle = "#9aa0a6";
-    ctx.fillText("  (no cameras)", x + pad, y);
-    y += lineH;
-  }
 
-  ctx.fillStyle = "#9aa0a6";
-  ctx.fillText(`SIZE  ${menu.tileSize}  (R stick = next)`, x + pad, y);
-  y += lineH;
 
-  if (menu.stance) {
-    const words = { behind: "egocentric", mirror: "mirror", front: "camera-true" };
-    ctx.fillText(`STANCE  ${words[menu.stance]}  (set on panel)`, x + pad, y);
-    y += lineH;
-  }
 
-  const recording = Boolean(rec?.recording);
-  ctx.fillStyle = recording ? "#f28b82" : "#9aa0a6";
-  ctx.fillText(
-    recording
-      ? `● REC ${rec?.episode_frames ?? 0} — hold A/X to STOP + save`
-      : "hold A/X to START a take",
-    x + pad, y);
-  y += lineH;
-
-  ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("hold L stick = reset arms home", x + pad, y);
-  y += lineH;
-  ctx.fillText("point + trigger (grip open) = move HUD", x + pad, y);
-}
 
 function poseToPair(pose: XRPose | null | undefined) {
   if (!pose) return null;
@@ -779,9 +561,9 @@ export function sampleVRFrame(
   session: XRSessionLike,
   frame: XRFrameLike,
   refSpace: unknown,
-  opts: { tsMs: number; body?: BodyOverride; forceDisengaged?: boolean;
-          mirrorMode?: "none" | "both"; vrMode?: "pose" | "joints";
-          stance?: "behind" | "mirror" | "front" },
+  opts: { tsMs: number; forceDisengaged?: boolean;
+          stance?: "behind" | "mirror" | "front";
+          wristPivotM?: number },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));
 
@@ -796,25 +578,40 @@ export function sampleVRFrame(
       && Boolean(buttons[BUTTON_SQUEEZE]?.pressed);
     if (squeeze) deadMan = true;
 
-    const pose = src.gripSpace ? poseToPair(frame.getPose(src.gripSpace, refSpace)) : null;
-    // Orientation comes from the TARGET RAY, not the grip. On Quest Touch
-    // controllers the grip frame is tilted ~50-60° from where a relaxed hand
-    // actually points (it follows the handle, not the knuckles), and the
-    // backend synthesizes the whole hand from this orientation — with the
-    // grip frame, holding a controller naturally reads as a steeply
-    // pitched-down wrist, which both drives wrist_flex oddly and makes the
-    // acquisition gate nearly unmatchable. The ray frame is each vendor's
-    // own answer to "where is this hand pointing"; position stays on the
-    // grip (the ray origin sits forward of the palm).
-    const ray = src.targetRaySpace
-      ? poseToPair(frame.getPose(src.targetRaySpace, refSpace)) : null;
+    // ONE pose space for position AND orientation — the kit's form (its page
+    // samples gripSpace || targetRaySpace for the whole pose). The constant
+    // grip-vs-ray tilt cancels exactly in the mapper's clutch-relative delta
+    // q_now · q_prev⁻¹, so a single space loses nothing; what the old
+    // grip-position + ray-orientation mix bought was two phantom ~50-60°
+    // rotation increments per ray dropout — one frame where getPose(ray)
+    // returned null silently swapped the orientation source to the grip
+    // frame and back, and the incremental mapper read each swap as real
+    // hand rotation. The kit's 46 episodes were driven single-space.
+    const space = src.gripSpace ?? src.targetRaySpace;
+    const pose = space ? poseToPair(frame.getPose(space, refSpace)) : null;
+    // Read-out point: the pose position shifted back along the controller's
+    // own +Z (which points toward the operator in WebXR grip space) onto
+    // roughly the operator's wrist pivot. See DEFAULT_WRIST_PIVOT_M — a pure
+    // twist about a palm-centred point is an ARC, and the mapper has no way
+    // to tell that arc from translation the operator never asked for.
+    const pivotM = opts.wristPivotM ?? 0;
+    const back = pose && pivotM !== 0
+      ? _rotateByQuat(pose.orientation, [0, 0, pivotM]) : null;
+    // Precision is PER HAND — the kit reads the driving hand's own A/X. A
+    // single global flag re-anchored and re-scaled the arm the OTHER hand
+    // was mid-reach with.
+    const precision = Boolean(buttons[BUTTON_AX]?.pressed);
     const sample: ControllerSample = pose
       ? {
-          position: pose.position,
-          orientation: (ray ?? pose).orientation,
+          position: back
+            ? [pose.position[0] + back[0], pose.position[1] + back[1],
+               pose.position[2] + back[2]]
+            : pose.position,
+          orientation: pose.orientation,
           trigger: buttons[BUTTON_TRIGGER]?.value ?? 0,
           squeeze,
           tracked: true,
+          ...(precision ? { precision: true } : {}),
         }
       : {
           position: [0, 0, 0],
@@ -831,13 +628,10 @@ export function sampleVRFrame(
     type: "vr_keypoints",
     ts_ms: opts.tsMs,
     dead_man: deadMan,
-    ...(opts.vrMode ? { vr_mode: opts.vrMode } : {}),
     ...(opts.stance ? { stance: opts.stance } : {}),
-    ...(opts.mirrorMode ? { mirror_mode: opts.mirrorMode } : {}),
     head,
     left,
     right,
-    ...(opts.body ? { body: opts.body } : {}),
   };
 }
 
@@ -857,21 +651,16 @@ export function disengagedFrame(tsMs: number): VRFrame {
 
 /** True while B (right) or Y (left) is down on any controller. The panel
  *  edge-detects this into exactly one POST /estop per press. */
-export function estopPressed(session: XRSessionLike): boolean {
+/** True while ONE named controller's episode button (B right / Y left) is
+ *  down. Per-hand, because the two hands mean OPPOSITE things: B banks the
+ *  take, Y throws it away. Raw — the panel edge-detects, so a held button
+ *  fires once rather than once per frame. */
+export function episodePressed(
+  session: XRSessionLike, hand: "left" | "right",
+): boolean {
   for (const src of session.inputSources) {
-    if (src.handedness !== "left" && src.handedness !== "right") continue;
+    if (src.handedness !== hand) continue;
     if (src.gamepad?.buttons[BUTTON_BY]?.pressed) return true;
-  }
-  return false;
-}
-
-/** True while A (right) or X (left) is down on any controller — the record
- *  toggle. Deliberately NOT edge-detected here: the panel runs it through
- *  `holdToggle` so a brush of the thumb cannot start or end a take. */
-export function axPressed(session: XRSessionLike): boolean {
-  for (const src of session.inputSources) {
-    if (src.handedness !== "left" && src.handedness !== "right") continue;
-    if (src.gamepad?.buttons[BUTTON_AX]?.pressed) return true;
   }
   return false;
 }
@@ -890,6 +679,45 @@ export function thumbstickPressed(
   for (const src of session.inputSources) {
     if (src.handedness !== hand) continue;
     if (src.gamepad?.buttons[BUTTON_THUMBSTICK]?.pressed) return true;
+  }
+  return false;
+}
+
+/** Thumbstick deflection for one hand, as (x, y) in [-1, 1].
+ *
+ *  `xr-standard` puts the stick on axes 2/3 and a touchpad on 0/1; a
+ *  controller carrying only one analog pair reports the stick on 0/1, so take
+ *  whichever is present. y is POSITIVE toward the operator — pushing the
+ *  stick away reads negative, which is the sign convention every caller here
+ *  assumes.
+ *
+ *  These four axes are the only inputs this client had left. Every button is
+ *  spoken for by a dead-man, a safety action or the recorder, so the tuning
+ *  menu and the precision modifier both had to land here.
+ */
+export function stickAxes(
+  session: XRSessionLike, hand: "left" | "right",
+): [number, number] {
+  for (const src of session.inputSources) {
+    if (src.handedness !== hand) continue;
+    const a = src.gamepad?.axes;
+    if (!a) continue;
+    return [a[2] ?? a[0] ?? 0, a[3] ?? a[1] ?? 0];
+  }
+  return [0, 0];
+}
+
+/** The kit's fine-work modifier, back on A/X where the kit put it.
+ *
+ *  It moved to the left stick only because A/X had been taken by the record
+ *  toggle. With the take boundary on B — a deliberate reach, which is what a
+ *  take boundary wants — A/X is free again, and a modifier is exactly the
+ *  binding that suits a button the thumb already rests on: hold it, it
+ *  applies; let go, it stops. Either hand, so a one-handed driver keeps it. */
+export function precisionHeld(session: XRSessionLike): boolean {
+  for (const src of session.inputSources) {
+    if (src.handedness !== "left" && src.handedness !== "right") continue;
+    if (src.gamepad?.buttons[BUTTON_AX]?.pressed) return true;
   }
   return false;
 }
@@ -1004,4 +832,482 @@ export function hapticCues(
     else if (before !== undefined) cues.push({ hand, intensity: 0.45, durationMs: 100 });
   }
   return cues;
+}
+
+// ---- the take machine -------------------------------------------------------
+
+/** Where a take is in its life.
+ *
+ *  ARMED is the start gate: full-rate teleop, the dataset open and its schema
+ *  frozen, and NOT ONE FRAME WRITTEN. Stock lerobot-record starts episode 0 the
+ *  instant the process boots, which is unusable solo in a headset. */
+export type TakeState = "idle" | "armed" | "rolling" | "prompt";
+
+/** What the operator decided about a take that just ended. `redo` is a
+ *  first-class outcome, not a failure: 11 of the kit's 46 episodes were
+ *  rejected, a rate only visible because both outcomes exist.
+ *
+ *  The two that return to ARMED are the headset's, because the next take is
+ *  always the expected next thing in a session whose point is banking them.
+ *  The two that stand down to IDLE are desktop-only — there is no room on the
+ *  controller for a gesture that does not collide with a trained one. */
+export type EndChoice = "keep" | "keep_stop" | "redo" | "drop";
+
+export type TakeEvent =
+  /** B, right hand — the kit's "end the current episode / end the reset
+   *  phase". One button walks the whole ladder: ARM, ROLL, then bank the
+   *  take and re-arm for the next one. */
+  | { kind: "end_episode" }
+  /** Y, left hand — the kit's "discard + re-record the current episode".
+   *  Only ever throws away a take that is still in progress; see `stepTake`
+   *  for why it will not reach back for one already written. */
+  | { kind: "rerecord" }
+  | { kind: "choose"; choice: EndChoice }
+  /** The recorder's own state, from the status poll. Truth outranks the
+   *  client's guess — a take that ended some other way takes the prompt with
+   *  it, and a gate that was invalidated must not keep saying ARMED. */
+  | { kind: "recorder"; state: TakeState; invalidated?: boolean }
+  /** Session teardown: whatever was on the HUD dies with it. */
+  | { kind: "abort" };
+
+/** The REST act a transition demands, or null. */
+export type TakeAct =
+  | { do: "arm" }
+  | { do: "roll" }
+  | { do: "stop"; save: boolean; rearm: boolean };
+
+export type TakeTransition = { state: TakeState; act: TakeAct | null };
+
+/**
+ * Step the take machine. Pure: the caller fires `act` and commits `state`.
+ *
+ * `ev.invalidated` deliberately does not change the transition — an
+ * invalidated gate lands in `idle` exactly as a stand-down does. It rides
+ * along so the caller can tell the two apart and SAY which happened: silent
+ * un-arming is the precise failure the gate exists to prevent.
+ */
+export function stepTake(state: TakeState, ev: TakeEvent): TakeTransition {
+  if (ev.kind === "abort") return { state: "idle", act: null };
+  if (ev.kind === "recorder") {
+    // Reconcile, never act. The recorder has no concept of a prompt and must
+    // never invent one.
+    if (ev.state === "prompt") return { state, act: null };
+    // The prompt is a client-side overlay on a recorder that is genuinely
+    // still rolling — `/record/stop` takes the save decision AT stop time —
+    // so a "rolling" report must not slam it shut four times a second.
+    if (ev.state === "rolling" && state === "prompt") {
+      return { state: "prompt", act: null };
+    }
+    return { state: ev.state, act: null };
+  }
+  if (ev.kind === "choose") {
+    // Only the prompt takes a decision; anywhere else this is a stale click.
+    if (state !== "prompt") return { state, act: null };
+    const save = ev.choice === "keep" || ev.choice === "keep_stop";
+    const rearm = ev.choice === "keep" || ev.choice === "redo";
+    return { state: rearm ? "armed" : "idle", act: { do: "stop", save, rearm } };
+  }
+  if (ev.kind === "rerecord") {
+    // Y — bin the take in progress and line the next one up. The kit's
+    // re-record, with one deliberate limit: it reaches only for a take that
+    // is still OPEN. In lerobot-record, Y during the reset phase re-records
+    // the episode just written; here that episode is already on disk, and a
+    // single button press in a headset is the wrong gesture for deleting
+    // written data. Binning a live take costs nothing; the desk keeps
+    // DELETE LAST EPISODE for the other case.
+    if (state === "rolling" || state === "prompt") {
+      return { state: "armed", act: { do: "stop", save: false, rearm: true } };
+    }
+    return { state, act: null };
+  }
+  // end_episode — B. The kit's ladder, and the prompt is deliberately not on
+  // it: B banks the take and re-arms, because in a session whose point is
+  // banking takes the next one is always the expected next thing. The prompt
+  // stays for the desk, which has room for a question the controller does not.
+  if (state === "idle") return { state: "armed", act: { do: "arm" } };
+  if (state === "armed") return { state: "rolling", act: { do: "roll" } };
+  return { state: "armed", act: { do: "stop", save: true, rearm: true } };
+}
+
+// ---- recorder haptics -------------------------------------------------------
+
+/** What the hands feel when the recorder moves. Both hands get it: inside a
+ *  headset the haptic is the fastest channel there is, and "did that take
+ *  actually start" is a question the operator must never have to guess at.
+ *  Pure, and keyed on the transition rather than the state, so a steady state
+ *  buzzes nothing. Returns null when nothing changed. */
+export function recorderHapticCue(
+  prev: TakeState, next: TakeState, choice?: EndChoice | null,
+): { intensity: number; durationMs: number } | null {
+  if (prev === next) return null;
+  // Loaded, nothing written.
+  if (prev === "idle" && next === "armed") return { intensity: 0.35, durationMs: 90 };
+  // Frames are landing. The firmest cue in the vocabulary, deliberately: this
+  // is the only moment that costs data if it is missed.
+  if (prev === "armed" && next === "rolling") return { intensity: 0.8, durationMs: 220 };
+  if (prev === "rolling" && next === "prompt") return { intensity: 0.45, durationMs: 120 };
+  if (prev === "prompt" && next === "rolling") return { intensity: 0.2, durationMs: 60 };
+  if (prev === "prompt" && next === "armed") {
+    // Banked and binned both land in ARMED, so the HUD alone cannot tell them
+    // apart while the operator's eyes are on the workspace. The hands can.
+    if (choice === "keep") return { intensity: 0.6, durationMs: 180 };
+    if (choice === "redo") return { intensity: 0.3, durationMs: 90 };
+    return null;
+  }
+  if (prev === "prompt" && next === "idle") {
+    if (choice === "keep_stop") return { intensity: 0.6, durationMs: 180 };
+    // `drop`, or the recorder ending it underneath us — same weight, because
+    // from the operator's side it is the same outcome.
+    return { intensity: 0.25, durationMs: 80 };
+  }
+  // The gate dropped: invalidated, or the session ended. Weak, but never
+  // silent — un-arming without a word is the failure the gate prevents.
+  if (prev === "armed" && next === "idle") return { intensity: 0.15, durationMs: 50 };
+  return null;
+}
+
+// ---- the backend's ik_state push --------------------------------------------
+//
+// The socket answers every frame batch with the teleoperator's own view of
+// what the solver is doing. It is the only channel that can tell the operator
+// WHY an arm feels wrong — the status poll knows about authority and
+// collisions, not about a wrist being asked for a twist two axes cannot
+// deliver.
+
+/** One side of the `ik_state` payload. Every field optional: the backend
+ *  reports a short dict for an untracked or open-gripped hand, and a client
+ *  that indexes into the long one unconditionally crashes inside the XR
+ *  loop, which on a headset looks like the page dying. */
+export type IkSideDiag = {
+  tracked?: boolean;
+  engaged?: boolean;
+  driving?: boolean;
+  /** 0..1 trouble mix the backend already computed — limit pressure, reach
+   *  absorption, singularity proximity and orientation deficit, gated and
+   *  maxed rather than averaged. */
+  haptic?: number;
+  limit_pressure_deg?: number;
+  pos_err_m?: number;
+  /** Smallest singular value of the position Jacobian, m/rad. The honest
+   *  conditioning number on a 25 cm arm — see the port handover on why this
+   *  and not |det J|. */
+  sigma_min?: number;
+  singularity?: number;
+  /** The 1-DoF orientation deficit of a 5-DoF wrist, radians of demand the
+   *  two wrist axes cannot serve. */
+  orient_residual?: number;
+  pos_absorbed?: number;
+  rot_absorbed?: number;
+};
+
+export type IkSides = Partial<Record<"left" | "right", IkSideDiag>>;
+
+/** Config values as they travel on the wire — numbers, with the two boolean
+ *  knobs and the stance enum riding along. */
+export type TuningValues = Record<string, number | boolean | string | null>;
+
+export type VrSocketMessage =
+  | { kind: "ik_state"; config: TuningValues | null; sides: IkSides }
+  | { kind: "config_applied"; config: TuningValues };
+
+/**
+ * Read one server → client message off the teleop socket.
+ *
+ * Tolerates both names the contract uses for the same payload: the relay
+ * answered `request_settings` with its `ik_state` dict, and the unified
+ * socket answers with `settings`. Anything else — a frame echoed by a second
+ * client, a keep-alive — returns null rather than throwing, because this runs
+ * on the socket's message handler and a throw there is silent.
+ */
+export function parseVrSocketMessage(raw: unknown): VrSocketMessage | null {
+  let msg: unknown = raw;
+  if (typeof raw === "string") {
+    try { msg = JSON.parse(raw); } catch { return null; }
+  }
+  if (!msg || typeof msg !== "object") return null;
+  const m = msg as { type?: unknown; config?: unknown; sides?: unknown };
+  let config = (m.config && typeof m.config === "object")
+    ? m.config as TuningValues : null;
+  if (m.type === "ik_state" || m.type === "settings") {
+    const sides = (m.sides && typeof m.sides === "object")
+      ? m.sides as IkSides : {};
+    // A `settings` reply that spreads the config at the top level instead of
+    // nesting it reads the same way here. Cheap, and the failure it prevents
+    // is silent: sliders that simply never seed, showing defaults the robot
+    // does not have.
+    if (config === null && m.type === "settings") {
+      const { type: _t, sides: _s, ...rest } = msg as Record<string, unknown>;
+      void _t; void _s;
+      if (Object.keys(rest).length) config = rest as TuningValues;
+    }
+    return { kind: "ik_state", config, sides };
+  }
+  if (m.type === "config_applied") {
+    return { kind: "config_applied", config: config ?? {} };
+  }
+  return null;
+}
+
+/** Orientation residual (rad) above which the wrist is visibly short of the
+ *  demand. The backend gates its own haptic mix at the same number; matching
+ *  it keeps the buzz and the HUD line telling one story. */
+export const ORIENT_DEFICIT = 0.5;
+/** Re-arm threshold for the deficit's one-shot buzz. Controller pose jitter
+ *  makes the residual flutter around ORIENT_DEFICIT, and with a single
+ *  threshold every flutter is a fresh "edge" — a 0.9-intensity pulse every
+ *  50 ms, felt as a trembling controller. The cue re-arms only after the
+ *  residual has genuinely receded below this. */
+export const ORIENT_DEFICIT_CLEAR = 0.4;
+
+/** Below this the backend's mixed trouble signal is noise, not information.
+ *  The kit's floor, kept. */
+export const HAPTIC_FLOOR = 0.08;
+
+/**
+ * What a driving hand should feel from the solver's own diagnostics.
+ *
+ * Two cues, and the sharper one wins. The continuous one is the backend's
+ * gated trouble mix, passed through as a light 60 ms buzz — the operator
+ * feels the workspace edge, the joint stops and the singular set. The
+ * discrete one fires on the EDGE of the orientation deficit: the wrist has
+ * run out of axes, and the answer is to move the hand rather than twist
+ * harder, so it gets a distinct hard pulse instead of blending into the hum
+ * it would otherwise be part of.
+ *
+ * Pure, and edge-triggered off `prev`, so a sustained deficit buzzes once
+ * rather than every 50 ms for as long as the operator holds the pose.
+ */
+export function ikHapticCues(prev: IkSides, next: IkSides): HapticCue[] {
+  const cues: HapticCue[] = [];
+  for (const hand of ["left", "right"] as const) {
+    const d = next[hand];
+    if (!d?.driving) continue;
+    // Hysteresis: fire on crossing ORIENT_DEFICIT, re-arm only below
+    // ORIENT_DEFICIT_CLEAR — a residual hovering at the threshold is one
+    // sustained deficit, not a new edge every sample.
+    const wasShort = (prev[hand]?.orient_residual ?? 0) > ORIENT_DEFICIT_CLEAR;
+    const isShort = (d.orient_residual ?? 0) > ORIENT_DEFICIT;
+    if (isShort && !wasShort) {
+      cues.push({ hand, intensity: 0.9, durationMs: 140 });
+      continue;
+    }
+    const h = d.haptic ?? 0;
+    if (h >= HAPTIC_FLOOR) {
+      cues.push({ hand, intensity: Math.min(1, h), durationMs: 60 });
+    }
+  }
+  return cues;
+}
+
+// ---- live tuning ------------------------------------------------------------
+
+export type TuningKnob = {
+  key: string;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+  /** Client-side only: never sent as a `config_update`, persisted here. */
+  local?: boolean;
+};
+
+/** The read-out point offset, in metres, back along the controller axis onto
+ *  roughly where the operator's wrist turns. The reference stack solves for
+ *  this with a five-second in-VR ritual; this is the same idea as one
+ *  adjustable number. Client-side, because only the client has the grip pose
+ *  to apply it to. 0.05 is the kit's shipped default — the old 0.09
+ *  overshot an uncalibrated axis by 80%, and an overshot pivot REVERSES the
+ *  ghost translation it exists to cancel: the tool wanders on every twist. */
+export const WRIST_PIVOT_KEY = "wrist_pivot_m";
+export const DEFAULT_WRIST_PIVOT_M = 0.05;
+
+/**
+ * The knobs the in-headset list exposes, in order.
+ *
+ * Kept to the ones an operator reaches for mid-session: a list you walk with
+ * a thumbstick stops being usable somewhere around a dozen rows, and the rest
+ * of `QuestTeleopConfig` belongs on the desktop panel where there is room for
+ * it. Ranges mirror the backend's BOUNDS — it clamps regardless, this just
+ * stops the stick asking for something that will be refused.
+ */
+export const TUNING_KNOBS: readonly TuningKnob[] = [
+  { key: "scale_translation", label: "translation gain", min: 0.1, max: 4, step: 0.05 },
+  { key: "scale_rotation", label: "rotation gain", min: 0.1, max: 4, step: 0.05 },
+  { key: "precision_factor", label: "precision factor", min: 0.05, max: 1, step: 0.05 },
+  { key: "pos_reach_limit", label: "reach limit (m)", min: 0, max: 0.6, step: 0.01 },
+  { key: "rot_reach_limit", label: "twist limit (rad)", min: 0, max: 2, step: 0.05 },
+  { key: "pose_filter_alpha", label: "pose smoothing", min: 0.05, max: 1, step: 0.05 },
+  { key: "max_dq_deg_pos", label: "step cap arm (°)", min: 0.25, max: 15, step: 0.25 },
+  { key: "max_dq_deg_rot", label: "step cap wrist (°)", min: 0.25, max: 30, step: 0.25 },
+  { key: "lam_pos", label: "IK damping", min: 0.001, max: 0.2, step: 0.001 },
+  { key: "w0", label: "singularity ramp", min: 0.001, max: 0.1, step: 0.001 },
+  { key: WRIST_PIVOT_KEY, label: "wrist pivot (m)", min: 0, max: 0.2, step: 0.005, local: true },
+];
+
+/** The rest of what `QuestTeleopConfig` will take, desktop panel only —
+ *  numbers you set once against a bench measurement, not mid-take. The two
+ *  workspace floors are here rather than in the headset list on purpose:
+ *  they bound the DEMAND and keep working when the collision guard is off,
+ *  which is not a thing to nudge with a thumbstick while driving. */
+export const DESK_ONLY_KNOBS: readonly TuningKnob[] = [
+  { key: "lam0", label: "posture damping", min: 0, max: 0.5, step: 0.005 },
+  { key: "mu", label: "posture bias", min: 0, max: 0.2, step: 0.005 },
+  { key: "lam_rot", label: "wrist damping", min: 0.001, max: 1, step: 0.005 },
+  { key: "min_tip_z", label: "tip floor (m)", min: -0.2, max: 0.4, step: 0.005 },
+  { key: "min_wrist_z", label: "wrist floor (m)", min: -0.2, max: 0.4, step: 0.005 },
+];
+
+export const ALL_KNOBS: readonly TuningKnob[] = [...TUNING_KNOBS, ...DESK_ONLY_KNOBS];
+
+export function clampKnob(knob: TuningKnob, value: number): number {
+  if (!Number.isFinite(value)) return knob.min;
+  return Math.min(knob.max, Math.max(knob.min, value));
+}
+
+/** Knob value for display. Three decimals across the board so the column
+ *  does not jitter in width as a value crosses 1. */
+export function formatKnob(value: number | undefined | null): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(3) : "—";
+}
+
+/** One deliberate stick push per this many ms. Without it a held stick walks
+ *  the whole list in a frame. The kit's number. */
+export const TUNING_REPEAT_MS = 220;
+
+export type TuningNav = { index: number; lastStepMs: number };
+
+export type TuningStep = {
+  nav: TuningNav;
+  /** The knob to write, or null when this push only moved the cursor. */
+  patch: { key: string; value: number } | null;
+};
+
+/**
+ * Walk and adjust the tuning list from one thumbstick sample. Pure.
+ *
+ * Pulling the stick back walks DOWN the list, pushing it away walks up; left
+ * and right step the selected knob by its own step, clamped to its own range.
+ * Vertical wins over horizontal so a diagonal push cannot both move the
+ * cursor and change a value.
+ */
+export function stepTuning(
+  nav: TuningNav,
+  axes: readonly [number, number],
+  now: number,
+  values: Readonly<Record<string, number>>,
+  knobs: readonly TuningKnob[] = TUNING_KNOBS,
+): TuningStep {
+  if (!knobs.length) return { nav, patch: null };
+  const index = Math.min(Math.max(nav.index, 0), knobs.length - 1);
+  if (now - nav.lastStepMs < TUNING_REPEAT_MS) return { nav: { ...nav, index }, patch: null };
+  const [x, y] = axes;
+  if (Math.abs(y) > 0.6) {
+    return {
+      nav: { index: cycleIndex(knobs.length, index, y > 0 ? 1 : -1), lastStepMs: now },
+      patch: null,
+    };
+  }
+  if (Math.abs(x) > 0.6) {
+    const knob = knobs[index];
+    const current = values[knob.key];
+    const base = typeof current === "number" && Number.isFinite(current)
+      ? current : knob.min;
+    const next = clampKnob(knob, base + (x > 0 ? knob.step : -knob.step));
+    return { nav: { index, lastStepMs: now }, patch: { key: knob.key, value: next } };
+  }
+  return { nav: { ...nav, index }, patch: null };
+}
+
+// ---- who owns a tuned value -------------------------------------------------
+
+/** Merge the server's clamped echo (`config_applied`). Whatever the robot took
+ *  IS the value — a box that snaps to a different number is the robot telling
+ *  you what it accepted, and re-asserting the unclamped ask would fight it. */
+export function applyServerConfig(
+  local: Readonly<Record<string, number>>,
+  server: TuningValues | null,
+): Record<string, number> {
+  const values: Record<string, number> = { ...local };
+  if (!server) return values;
+  for (const [key, v] of Object.entries(server)) {
+    // The wire carries booleans and the stance enum alongside the numbers;
+    // only the numbers are knobs.
+    if (typeof v === "number" && Number.isFinite(v)) values[key] = v;
+  }
+  return values;
+}
+
+/**
+ * Reconcile a fresh connection's `settings` against what the operator tuned.
+ *
+ * `QuestTeleopConfig` lives PER CONNECTION and HumanTeleopClient reconnects
+ * after 50 ms, so a socket blip silently reverts every knob — and gains that
+ * quietly halve feel exactly like an arm that has started lagging. The page is
+ * therefore the source of truth for the knobs the operator moved, and only
+ * those: the server owns everything untouched.
+ *
+ * `reassert` is what to send straight back as a `config_update`. Knobs marked
+ * `local` in ALL_KNOBS never leave the client and never appear in it.
+ */
+export function reconcileConfig(
+  local: Readonly<Record<string, number>>,
+  dirty: readonly string[],
+  server: TuningValues | null,
+  knobs: readonly TuningKnob[] = ALL_KNOBS,
+): { values: Record<string, number>; reassert: Record<string, number> } {
+  const values: Record<string, number> = { ...local };
+  const reassert: Record<string, number> = {};
+  if (!server) return { values, reassert };
+  const moved = new Set(dirty);
+  const clientOnly = new Set(knobs.filter((k) => k.local).map((k) => k.key));
+  for (const [key, v] of Object.entries(server)) {
+    if (typeof v !== "number" || !Number.isFinite(v)) continue;
+    if (!moved.has(key)) {
+      values[key] = v;
+      continue;
+    }
+    const mine = values[key];
+    // Belt and braces: a `local` knob is never sent, so the server cannot be
+    // reporting one — and must not be handed one back if it somehow is.
+    if (!clientOnly.has(key) && typeof mine === "number" && Number.isFinite(mine)) {
+      reassert[key] = mine;
+    }
+  }
+  // A dirty key the server does not report is left alone and NOT re-asserted:
+  // a knob the server has never heard of is not a knob it will accept.
+  return { values, reassert };
+}
+
+// ---- dataset tally ----------------------------------------------------------
+
+/** What one read of `GET /record/episodes` told us, plus where this page's own
+ *  take counter stood the first time it read THIS dataset. */
+export type DatasetTally = {
+  repoId: string | null;
+  /** Episodes the dataset meta reports on disk. */
+  onDisk: number;
+  baselineOnDisk: number;
+  baselineTakes: number;
+};
+
+/**
+ * Episodes in the dataset — the number the HUD counts from.
+ *
+ * `onDisk` alone is not enough: lerobot buffers ten episodes' metadata in RAM
+ * before it writes `meta/episodes.jsonl`, so a disk read can sit that far
+ * behind during a long run, and an episode counter that stalls at 7 while the
+ * operator banks their tenth take is worse than none. The floor is what this
+ * page has saved since it first read this dataset. Whichever is larger is the
+ * true count; the two converge as soon as the buffer flushes.
+ *
+ * Returns null when nothing has been read — the caller falls back to its own
+ * take counter rather than printing a confident zero.
+ */
+export function episodesTotal(
+  tally: DatasetTally | null, takes: number,
+): number | null {
+  if (!tally) return null;
+  const savedSince = Math.max(0, takes - tally.baselineTakes);
+  return Math.max(tally.onDisk, tally.baselineOnDisk + savedSince);
 }

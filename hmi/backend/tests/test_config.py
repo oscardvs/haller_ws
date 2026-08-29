@@ -1,5 +1,5 @@
-"""Config schema accepts `source: sim` on arms, `source: sim_camera` on cameras,
-and an optional top-level `sim_leader` block."""
+"""Config schema accepts `source: sim` on arms and `source: sim_camera` on
+cameras."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,7 +9,12 @@ import pytest
 from haller_hmi.config import load_config
 
 
-def test_sim_arm_and_sim_camera_and_sim_leader(tmp_path: Path):
+def test_sim_arm_and_sim_camera(tmp_path: Path):
+    """The `sim_leader:` block is in the yaml on purpose: shipped configs
+    (config.leader-follower-sim.yaml) still carry one, and the schema no longer
+    has a field for it — the sim leader's source comes from the
+    POST /teleop/sim/start body. An unknown top-level key must therefore load
+    as a no-op rather than raise, or those configs stop booting."""
     cfg_file = tmp_path / "sim.yaml"
     cfg_file.write_text(
         """
@@ -44,9 +49,7 @@ sim_leader:
     assert cfg.arms[0].sim_arm_name == "left"
     assert cfg.cameras[0].source == "sim_camera"
     assert cfg.cameras[0].mjcf_camera == "overhead"
-    assert cfg.sim_leader is not None
-    assert cfg.sim_leader.source == "mouse"
-    assert cfg.sim_leader.dataset_path is None
+    assert not hasattr(cfg, "sim_leader")
 
 
 def test_arm_source_defaults_to_real(tmp_path: Path):
@@ -241,3 +244,82 @@ def test_load_config_reads_motion_block(tmp_path):
     assert cfg.motion.max_speed_deg_s == 30.0
     assert cfg.motion.large_move_deg == 20.0
     assert cfg.motion.ramp_hz == 50.0
+
+
+def test_lpf_tau_defaults_zero_disables_and_negative_rejects():
+    """The session smoothing time constant: 0.100 s unless a config says
+    otherwise. ZERO is valid and means the filter is off — the kit ships no
+    output filter, and config.solo-real.yaml takes exactly that (see the
+    compounding note on MotionConfig.lpf_tau_s). Negative stays refused."""
+    assert MotionConfig().lpf_tau_s == 0.100
+    assert MotionConfig(lpf_tau_s=0.02).lpf_tau_s == 0.02
+    assert MotionConfig(lpf_tau_s=0.0).lpf_tau_s == 0.0
+    with pytest.raises(ValueError, match="lpf_tau_s"):
+        MotionConfig(lpf_tau_s=-0.1)
+
+
+def test_teleop_section_loads_allowed_keys(tmp_path):
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "arms: []\ncameras: []\n"
+        "teleop:\n  pose_filter_alpha: 1.0\n  pos_reach_limit: 0.0\n"
+        "  floor_enabled: false\n  stance: behind\n"
+    )
+    cfg = load_config(p)
+    assert cfg.teleop == {
+        "pose_filter_alpha": 1.0,
+        "pos_reach_limit": 0.0,
+        "floor_enabled": False,
+        "stance": "behind",
+    }
+
+
+def test_teleop_section_defaults_to_empty(tmp_path):
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text("arms: []\ncameras: []\n")
+    assert load_config(p).teleop == {}
+
+
+def test_teleop_section_rejects_unknown_keys(tmp_path):
+    """A typo'd knob silently meaning 'default' is exactly the 'the change
+    didn't take' trap the section exists to end — so it is a LOAD error, and
+    the message points at the session-side home of the one knob people will
+    reach for here (motion.lpf_tau_s)."""
+    from haller_hmi.config import load_config
+    p = tmp_path / "c.yaml"
+    p.write_text("arms: []\ncameras: []\nteleop:\n  reach_limit: 0.0\n")
+    with pytest.raises(ValueError, match="reach_limit"):
+        load_config(p)
+    p.write_text("arms: []\ncameras: []\nteleop:\n  lpf_tau_s: 0.02\n")
+    with pytest.raises(ValueError, match="motion.lpf_tau_s"):
+        load_config(p)
+
+
+def test_shipped_solo_raw_config_loads_and_is_actually_raw():
+    """config.solo-raw.yaml is the tracing config: every advisory shaping
+    stage off, the motion envelope and joint limits kept. Pinned so a future
+    knob rename cannot quietly turn one of its neutralizations back into a
+    default."""
+    from haller_hmi.config import load_config
+    cfg = load_config(
+        Path(__file__).resolve().parents[1] / "config.solo-raw.yaml")
+    assert cfg.motion.max_speed_deg_s == 90.0
+    # 0.0 = the filter actually OFF. The 0.02 this pinned before was only
+    # ever "as close to off as validation allowed" — raw means raw.
+    assert cfg.motion.lpf_tau_s == 0.0
+    assert cfg.collision.enabled is False
+    # Both derived floors land below the arm's reachable minima (tip
+    # -0.297 m, wrist -0.132 m): geometrically inert even if floor_enabled
+    # were flipped back on from the panel.
+    assert cfg.collision.table_z_m == -0.40
+    t = cfg.teleop
+    assert t["pose_filter_alpha"] == 1.0
+    assert t["scale_rotation"] == 1.0
+    assert t["pos_reach_limit"] == 0.0 and t["rot_reach_limit"] == 0.0
+    assert t["floor_enabled"] is False and t["yaw_on_engage"] is False
+    # And every key must survive apply_update unclamped — a raw value the
+    # bounds quietly pull back would be the trap all over again.
+    from haller_hmi.vr_teleop.config import QuestTeleopConfig, apply_update
+    assert apply_update(QuestTeleopConfig(), dict(t)) == t

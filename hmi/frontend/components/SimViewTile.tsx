@@ -3,13 +3,12 @@
 /**
  * SimViewTile — picture-in-picture of the MuJoCo scene, pinned to the viewport.
  *
- * The teleop page renders the operator's webcam, so without this there is no
- * way to watch the robot while driving it: you either look at your own hands
- * or you open the raw MJPEG endpoint in a second window.
+ * Against a sim backend there is no physical arm to look at, so without this
+ * there is no way to watch the robot while driving it: you open the raw MJPEG
+ * endpoint in a second window, or you fly blind.
  *
- * Deliberately self-contained and rendered by the *page*, not by
- * HumanTeleopPanel — it reads nothing from the teleop session and owns no
- * shared state, so it can sit alongside that panel without touching it.
+ * Deliberately self-contained: it reads nothing from the teleop session and
+ * owns no shared state, so it can sit alongside any panel without touching it.
  *
  * Renders nothing at all when no sim camera is configured, which is the case
  * for every real-hardware config.
@@ -32,9 +31,9 @@ export function SimViewTile({
   placement = "pinned",
 }: {
   /** `pinned` floats over the deep-link teleop page, which has no room
-   *  reserved for it. `inline` is the cockpit, whose teleop tab gives the tile
-   *  a column of its own — which is also what finally retires the overlap
-   *  hazard noted below, since an in-flow tile cannot cover anything. */
+   *  reserved for it — hence the clearance note below. `inline` is the
+   *  cockpit, whose Teleop tab gives the tile a column of its own, and an
+   *  in-flow tile cannot cover anything. */
   placement?: "pinned" | "inline";
 } = {}) {
   const [cam, setCam] = useState<CameraInfo | null>(null);
@@ -55,7 +54,7 @@ export function SimViewTile({
   return (
     // Pinned: bottom-left, lifted clear of the dead-man state badge that sits
     // at the very bottom of the teleop panel — that badge must never be
-    // covered, and neither must the mouth-clutch card beside it.
+    // covered.
     <div
       className={
         placement === "pinned"

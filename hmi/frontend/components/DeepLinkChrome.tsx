@@ -3,11 +3,11 @@
 /**
  * Header + telemetry rail for the routes that are NOT the cockpit.
  *
- * `/base`, `/arm/[id]`, `/settings` and `/teleop/human` survive the v3
- * redesign as unlinked deep links — nothing in the cockpit navigates to them,
- * but bookmarks, a second monitor and "open just the left arm" all still work.
- * They used to inherit this chrome from the root layout; the cockpit needs a
- * bare document, so they carry it themselves now.
+ * `/settings` and `/teleop/vr` are unlinked deep links — nothing in the
+ * cockpit navigates to them, but a bookmark, a second monitor and the headset
+ * opening the teleop page directly all still work. They used to inherit this
+ * chrome from the root layout; the cockpit needs a bare document, so they
+ * carry it themselves now.
  *
  * The E-STOP is here for the same reason it is in the cockpit header: there is
  * no route in this app from which the operator cannot stop the robot.

@@ -12,7 +12,12 @@ import { useEffect, useState, type RefObject } from "react";
 
 import { useTelemetry } from "@/lib/telemetry";
 import { useRecorder } from "@/lib/recorder";
-import { slugify, type TabId, type Viewport } from "./lib";
+import type { TabId, Viewport } from "./lib";
+
+// The definition moved to lib/recorder.ts (with the draft store that owns its
+// inputs) so lib never imports from components; the re-export keeps this
+// module's long-standing import sites honest.
+export { repoIdFor } from "@/lib/recorder";
 
 export function CommandBar({
   tab,
@@ -146,14 +151,14 @@ function hintFor(
         return "narrow layout — one arm at a time, pick it above the card";
       }
       return "drag joints to command · wasd or arrows drive the base";
-    case "human":
-      return "hold SPACE (or open MOUTH) to close the dead-man — this tab only";
+    case "teleop":
+      return "the headset drives · per-hand grip is the dead-man · B/Y is E-STOP";
     case "calibrate":
       return "every arm must be in manual before a session starts";
     case "cameras":
       return "the Operate tab's chips pick which of these is the primary view";
-    case "dataset":
-      return "start human teleop first — the take logs its commanded targets as action";
+    case "data":
+      return "collect · review · train · runs — review sorts and filters server-side";
     case "settings":
       return "config is read-only — edit hmi/backend/config.yaml and restart";
   }
@@ -172,9 +177,4 @@ function useClock(): string {
     return () => clearInterval(t);
   }, []);
   return now;
-}
-
-/** Shared by the Record popover and the Dataset tab. */
-export function repoIdFor(hfUser: string, task: string): string {
-  return `${hfUser || "local"}/haller_${slugify(task)}`;
 }

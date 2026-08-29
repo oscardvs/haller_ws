@@ -19,7 +19,12 @@ def app_with_mocks(monkeypatch, tmp_path):
         "mode": "manual",
         "joints": {"shoulder_pan": {"pos": 0.0, "min": -120.0, "max": 120.0, "torque": True}},
     }
-    arm.config = MagicMock(id="right", calibration_id="haller_right")
+    # `source`/`sim_arm_name` are real ArmConfig fields that GET /config now
+    # reports; a bare MagicMock would answer them with a Mock, which
+    # serialises as `{}` and quietly fails the contract the cockpit types
+    # against rather than the route.
+    arm.config = MagicMock(id="right", calibration_id="haller_right",
+                           source="real", sim_arm_name=None)
     # A real ModeGuard, not a MagicMock: motion.move_to() now calls
     # handle.guard.assert_manual() directly (the old route called the
     # separately-mocked handle.send_goal() instead, which never touched the
@@ -37,7 +42,12 @@ def app_with_mocks(monkeypatch, tmp_path):
         "gripper":      MagicMock(model="sts3215", id=6),
     }
     arm.robot.bus.model_resolution_table = {"sts3215": 4096}
-    arm.robot.bus.sync_read.return_value = {"shoulder_pan": 1000, "gripper": 3500}
+    # Centred, because capture_neutral now VERIFIES the re-centre landed
+    # (post-read within RECENTER_TOL_TICKS of 2047) — a mock reporting an
+    # off-centre pose is a mock simulating a failed homing write.
+    arm.robot.bus.sync_read.return_value = {"shoulder_pan": 2048, "gripper": 2048}
+    arm.robot.bus.set_half_turn_homings.return_value = {
+        "shoulder_pan": 0, "gripper": 0}
     arm.robot.calibration = None
     arm.torque_enabled = True
 
@@ -110,13 +120,31 @@ def app_with_mocks(monkeypatch, tmp_path):
     teleop_mock.status.return_value = {"running": False, "leader": None, "follower": None}
     srv_mod.teleop = teleop_mock
     human_teleop_mock = MagicMock()
+    # The teleop socket assembles `ik_state` from the session's per-side
+    # KitSideTeleop diagnostics; a bare Mock's return is not JSON-serialisable
+    # and the send would fail silently (caught), so the socket tests would
+    # hang waiting for a push that never comes.
+    human_teleop_mock.ik_sides.return_value = {"left": {}, "right": {}}
     human_teleop_mock.status.return_value = {
         "running": False, "state": "idle",
-        "left_arm": None, "right_arm": None, "swap": False,
+        "left_arm": None, "right_arm": None,
         "started_at": None, "last_error": None,
         "tracking": {"left": {"age_ms": None, "lost": False},
                      "right": {"age_ms": None, "lost": False}},
         "goal_deg": {"left": {}, "right": {}},
+        "clutch": {"engaged": False,
+                   "sides": {"left": False, "right": False},
+                   "reason": "clutch_open"},
+        # `authority` and `remaining_ms` are keys the frontend HUD types
+        # against — the stub carries them so a route test drives the same
+        # shape the real session publishes.
+        "acquire": {
+            "acquire_ms": 1000.0,
+            "left":  {"authority": "held", "reason": "clutch_open",
+                      "remaining_ms": None, "ramp": None},
+            "right": {"authority": "held", "reason": "clutch_open",
+                      "remaining_ms": None, "ramp": None},
+        },
     }
     srv_mod.human_teleop = human_teleop_mock
     # sim_teleop is deliberately NOT a MagicMock (unlike teleop/human_teleop

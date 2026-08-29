@@ -7,20 +7,31 @@ state/action assembly so a refactor can't silently corrupt recorded data.
 """
 import asyncio
 import dataclasses
+import json
+import time
 
 import numpy as np
 import pytest
 
+from haller_hmi.arm import EFFORT_ABSENT, EFFORT_OK, EFFORT_TRANSIENT
 from haller_hmi.recorder import (
     CALIBRATION_INFO_KEY,
     DONE_FEATURE,
+    EFFORT_INFO_KEY,
+    EPISODE_UID_FEATURE,
+    FPS_FAITHFUL_FRACTION,
+    IDLE,
+    RATE_ALERT_AFTER_S,
+    RATE_INFO_KEY,
+    RECORDING,
     REWARD_FEATURE,
     SCORING_INFO_KEY,
+    SO101_JOINT_ORDER,
     WALL_CLOCK_INFO_KEY,
     DatasetRecorder,
-    SO101_JOINT_ORDER,
 )
 from haller_hmi.sim.task import SuccessSpec
+from haller_hmi.tick import RATE_MIN_SAMPLES, TickBus, TickSample
 
 SIX = list(SO101_JOINT_ORDER)  # canonical SO-101 motor order
 
@@ -161,6 +172,37 @@ class _FakeTaskMonitor:
 
 
 class _FakeCameras:
+    """Stands in for CameraManager, including the RUNTIME recorded set.
+
+    `is_recorded`/`set_record` mirror the real manager: seeded from each
+    camera's `record` config flag, owned here afterwards. Modelling that is
+    the point — the recorder now asks the manager which cameras record, so a
+    fake that only carried `cfg.record` would leave the real path untested."""
+
+    def __init__(self, cams):
+        self._c = {c.id: c for c in cams}
+        self._record = {c.id: bool(getattr(c.cfg, "record", True)) for c in cams}
+
+    def keys(self):
+        return self._c.keys()
+
+    def __getitem__(self, k):
+        return self._c[k]
+
+    def is_recorded(self, k):
+        return self._record[k]
+
+    def set_record(self, k, record):
+        if k not in self._c:
+            raise KeyError(k)
+        self._record[k] = bool(record)
+        return self._record[k]
+
+
+class _LegacyFakeCameras:
+    """A manager from before the runtime set — no `is_recorded` at all. Pins
+    the recorder's fallback onto `cfg.record`."""
+
     def __init__(self, cams):
         self._c = {c.id: c for c in cams}
 
@@ -184,7 +226,8 @@ def _recorder(human_status, cams=None, monitor=None):
     tele = _FakeTelemetry(arms)
     cams = cams if cams is not None else _FakeCameras([_FakeCamera("top")])
     return DatasetRecorder(telemetry=tele, human_teleop=_FakeHumanTeleop(human_status),
-                           cameras=cams, task_monitor=monitor)
+                           cameras=cams, task_monitor=monitor,
+                           tick_bus=_measured_bus())
 
 
 def _joints_block(val, effort=0.0):
@@ -193,6 +236,45 @@ def _joints_block(val, effort=0.0):
     pass `effort=None` to model a snapshot that predates the effort channel."""
     joint = {"pos": val} if effort is None else {"pos": val, "effort": effort}
     return {"joints": {j: dict(joint) for j in SIX}}
+
+
+def _measured_bus(hz: float = 30.0) -> TickBus:
+    """A bus whose rate window is already filled, at exactly `hz`.
+
+    `start_episode` refuses without a measurement — fps is measured or the
+    episode does not open — so any test that opens one has to supply a rate.
+
+    The clock is INJECTED, so `measured_hz()` is exactly `hz` and
+    `round(measured)` is exact. No test here measures this box, and none of
+    them can be starved by the three other sessions sharing it.
+    """
+    bus = TickBus()
+    for i in range(RATE_MIN_SAMPLES + 1):
+        bus.publish_once("test-rate", target_hz=hz, t_mono=i / hz)
+    return bus
+
+
+def _sample(tele_like: dict, *, goal=None, arm_errors=None) -> TickSample:
+    """A TickSample from a telemetry-frame-shaped dict.
+
+    The recorder consumes the tick now, not a telemetry frame, but WHAT a row
+    should contain did not change — only where it comes from. Keeping the
+    call sites in their original shape keeps these tests about the row.
+
+    `goal` is the commanded action, which used to be scraped live off
+    `human_teleop.status()` at frame-build time — a third instant, and
+    mechanism 1. It arrives on the sample now, so a test that wants an action
+    puts it here rather than in the fake session's status.
+    """
+    return TickSample(
+        seq=0, t_mono=0.0, t_unix=float(tele_like.get("t", 0.0)),
+        arms=tele_like.get("arms", {}), base=tele_like.get("base", {}),
+        goal_deg=goal or {}, arm_errors=arm_errors or {},
+    )
+
+
+def _tick_bus() -> TickBus:
+    return TickBus()
 
 
 # ---- tests ---------------------------------------------------------------
@@ -288,33 +370,40 @@ def test_dataset_key_names_the_feature_and_the_frame():
     assert not any("_sim" in k for k in feats)   # the id never reaches the schema
 
     r._state.task = "t"
-    frame = r._build_frame({"arms": {"left": _joints_block(0.0),
+    frame = r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
                                      "right": _joints_block(0.0)},
-                            "base": {}})
+                            "base": {}}))
     assert frame["observation.images.left_wrist"].shape == (48, 64, 3)
     assert frame["observation.images.right_wrist"].shape == (48, 64, 3)
     assert set(frame) - {"observation.images.left_wrist",
                          "observation.images.right_wrist"} == {
         "observation.state", "action", "observation.effort",
-        "observation.base", "observation.wall_clock", "task"}
+        "observation.base", "observation.wall_clock", EPISODE_UID_FEATURE,
+        "task"}
 
 
-def test_committed_action_maps_side_and_falls_back_to_measured():
-    status = {
-        "running": True, "left_arm": "left", "right_arm": "right",
-        "goal_deg": {"left": {"shoulder_pan": 12.0}, "right": {}},
-    }
-    r = _recorder(status)
+def test_committed_action_comes_off_the_same_sample_as_the_state():
+    """The action used to be scraped off `human_teleop.status()` at
+    frame-build time — a third instant, pairing an action from one moment with
+    a state from another. It comes off THIS TICK'S sample now, so there is no
+    second instant left to pair with."""
+    r = _recorder({"running": True})
+    sample = _sample({}, goal={"left": {"shoulder_pan": 12.0}, "right": {}})
     measured = {j: 1.0 for j in SIX}
-    left = r._committed_action_for("left", SIX, measured)
+
+    left = r._committed_action_for(sample, "left", SIX, measured)
     assert left[0] == 12.0        # shoulder_pan = commanded
     assert left[1:] == [1.0] * 5  # untouched joints fall back to measured
-    assert r._committed_action_for("right", SIX, measured) == [1.0] * 6  # empty goal
+    assert r._committed_action_for(sample, "right", SIX, measured) == [1.0] * 6
 
 
-def test_action_falls_back_to_measured_when_not_running():
+def test_action_falls_back_to_measured_when_nothing_is_commanded():
+    """A sample published while no session runs carries an EMPTY goal_deg, so
+    a take recorded with teleop idle logs action == measured, as before."""
     r = _recorder({"running": False})
-    assert r._committed_action_for("left", SIX, {j: 3.0 for j in SIX}) == [3.0] * 6
+    idle = _sample({})
+    assert r._committed_action_for(idle, "left", SIX,
+                                   {j: 3.0 for j in SIX}) == [3.0] * 6
 
 
 def test_build_frame_assembles_state_action_base_images():
@@ -331,7 +420,7 @@ def test_build_frame_assembles_state_action_base_images():
         "arms": {"left": _joints_block(2.0), "right": _joints_block(4.0)},
         "base": {"linear": 0.5, "angular": -0.25},
     }
-    frame = r._build_frame(tele_frame)
+    frame = r._build_frame(_sample(tele_frame, goal=status["goal_deg"]))
     assert frame is not None
     assert frame["observation.state"].dtype == np.float32
     assert frame["observation.state"].shape == (12,)
@@ -352,11 +441,11 @@ def test_build_frame_carries_effort_left_then_right():
     r = _recorder({"running": False}, cams=_FakeCameras([]))
     r._cam_specs = []
     r._state.task = "t"
-    frame = r._build_frame({
+    frame = r._build_frame(_sample({
         "arms": {"left": _joints_block(0.0, effort=-0.25),
                  "right": _joints_block(0.0, effort=0.5)},
         "base": {},
-    })
+    }))
     eff = frame["observation.effort"]
     assert eff.dtype == np.float32
     assert eff.shape == (12,)
@@ -372,11 +461,11 @@ def test_missing_effort_key_is_zero_and_does_not_skip_the_frame():
     r = _recorder({"running": False}, cams=_FakeCameras([]))
     r._cam_specs = []
     r._state.task = "t"
-    frame = r._build_frame({
+    frame = r._build_frame(_sample({
         "arms": {"left": _joints_block(1.0, effort=None),   # no "effort" key
                  "right": _joints_block(2.0, effort=0.75)},
         "base": {},
-    })
+    }))
     assert frame is not None                   # NOT skipped, unlike a missing arm
     assert r._state.skipped_frames == 0
     np.testing.assert_allclose(frame["observation.effort"][:6], [0.0] * 6)
@@ -390,7 +479,7 @@ def test_build_frame_skips_when_camera_frame_missing():
     r._state.task = "t"
     tele_frame = {"arms": {"left": _joints_block(0.0), "right": _joints_block(0.0)},
                   "base": {"linear": 0.0, "angular": 0.0}}
-    assert r._build_frame(tele_frame) is None
+    assert r._build_frame(_sample(tele_frame)) is None
 
 
 def test_build_frame_skips_when_arm_telemetry_missing():
@@ -399,7 +488,7 @@ def test_build_frame_skips_when_arm_telemetry_missing():
     r._state.task = "t"
     tele_frame = {"arms": {"left": _joints_block(0.0)},  # right arm absent this tick
                   "base": {"linear": 0.0, "angular": 0.0}}
-    assert r._build_frame(tele_frame) is None
+    assert r._build_frame(_sample(tele_frame)) is None
 
 
 def test_skipped_frames_counts_dropped_ticks():
@@ -408,12 +497,12 @@ def test_skipped_frames_counts_dropped_ticks():
     r._state.task = "t"
     assert r._state.skipped_frames == 0
     # A stale camera skips the tick and counts it.
-    assert r._build_frame({"arms": {"left": _joints_block(0.0),
+    assert r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
                                     "right": _joints_block(0.0)},
-                           "base": {}}) is None
+                           "base": {}})) is None
     assert r._state.skipped_frames == 1
     # A missing arm skips the tick and counts it too.
-    assert r._build_frame({"arms": {"left": _joints_block(0.0)}, "base": {}}) is None
+    assert r._build_frame(_sample({"arms": {"left": _joints_block(0.0)}, "base": {}})) is None
     assert r._state.skipped_frames == 2
     assert r.status()["skipped_frames"] == 2
 
@@ -445,7 +534,7 @@ def test_calibration_metadata_is_keyed_like_the_state_columns():
 
 def test_sim_arm_gets_the_same_shape_from_its_declared_limits():
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeSimArm(SIX)})
-    r = DatasetRecorder(telemetry=_FakeTelemetry(arms),
+    r = DatasetRecorder(tick_bus=_measured_bus(), telemetry=_FakeTelemetry(arms),
                         human_teleop=_FakeHumanTeleop({"running": False}),
                         cameras=_FakeCameras([]))
     cal = r._calibration_metadata()
@@ -483,8 +572,8 @@ def test_unscored_rig_never_claims_a_score():
 
     r._cam_specs = []
     r._state.task = "t"
-    frame = r._build_frame({"arms": {"left": _joints_block(0.0),
-                                     "right": _joints_block(0.0)}, "base": {}})
+    frame = r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
+                                     "right": _joints_block(0.0)}, "base": {}}))
     assert REWARD_FEATURE not in frame
     assert DONE_FEATURE not in frame
 
@@ -512,8 +601,8 @@ def _scored_recorder(verdicts, cams=None, **kw):
 
 
 def _tick(r):
-    return r._build_frame({"arms": {"left": _joints_block(0.0),
-                                    "right": _joints_block(0.0)}, "base": {}})
+    return r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
+                                    "right": _joints_block(0.0)}, "base": {}}))
 
 
 def test_reward_is_sparse_one_on_success_zero_otherwise():
@@ -610,17 +699,37 @@ def test_scoring_block_carries_the_predicate_and_the_exact_thresholds():
 # land here. Otherwise the take keeps appending action == measured frames
 # while the arms sag torque-off, and nothing marks where it went wrong.
 
+class _FakeDatasetMeta:
+    """`meta.total_episodes` is the index the NEXT episode will take, and
+    `save_episode` advances it — modelled because `_finish_episode` reads it to
+    stamp the session log, exactly as it does against a real dataset.
+
+    `info` is here for the same reason `repo_id` is on the dataset: the real
+    `LeRobotDataset` carries both, and `_existing_fps` reads them on every arm.
+    A fake MISSING something production has fails loudly, which is fine; a fake
+    that is MORE permissive than production is the dangerous direction, so
+    neither is invented — both mirror a real attribute.
+    """
+
+    def __init__(self, fps: int = 30):
+        self.total_episodes = 0
+        self.info = {"fps": fps}
+
+
 class _FakeDataset:
-    def __init__(self):
+    def __init__(self, repo_id: str = "smoke/gate", fps: int = 30):
         self.saved = 0
         self.cleared = 0
         self.frames: list[dict] = []
+        self.repo_id = repo_id
+        self.meta = _FakeDatasetMeta(fps)
 
     def add_frame(self, frame):
         self.frames.append(frame)
 
     def save_episode(self):
         self.saved += 1
+        self.meta.total_episodes += 1
 
     def clear_episode_buffer(self, delete_images=True):
         self.cleared += 1
@@ -636,54 +745,59 @@ class _SeqTeleop:
         return self._seq.pop(0) if self._seq else self._last
 
 
-class _EndlessStream:
-    """Yields identical valid telemetry frames until cancelled.
+class _TickPump:
+    """Publishes valid samples onto a bus until stopped.
 
-    `limit` caps the frame count so a test can let the stream run dry —
-    when it does, the record loop exits the way a real telemetry stop would.
+    Replaces the endless telemetry stream: the record loop consumes the tick
+    now, so what a test has to keep supplying is samples, not frames.
     """
-    def __init__(self, limit: int | None = None):
-        self.closed = False
-        self._limit = limit
-        self._n = 0
 
-    def __aiter__(self):
-        return self
+    def __init__(self, bus, period: float = 0.001):
+        self._bus = bus
+        self._period = period
+        self._task = None
+        self.published = 0
 
-    async def __anext__(self):
-        if self._limit is not None and self._n >= self._limit:
-            await asyncio.sleep(3600)  # park: stream is dry, loop must not spin
-        self._n += 1
-        await asyncio.sleep(0.001)
-        return {
-            "arms": {"left": _joints_block(1.0), "right": _joints_block(2.0)},
-            "base": {"linear": 0.0, "angular": 0.0},
-        }
+    def start(self):
+        self._task = asyncio.get_event_loop().create_task(self._run())
 
-    async def aclose(self):
-        self.closed = True
+    async def _run(self):
+        token = self._bus.attach_producer("test-pump")
+        try:
+            while True:
+                token.publish(arms={"left": _joints_block(0.0),
+                                    "right": _joints_block(0.0)},
+                              goal_deg={})
+                self.published += 1
+                await asyncio.sleep(self._period)
+        finally:
+            token.detach()
 
-
-class _StreamTelemetry(_FakeTelemetry):
-    def __init__(self, arms, stream, hz=20.0):
-        super().__init__(arms, hz)
-        self._stream = stream
-
-    def subscribe(self):
-        return self._stream
+    async def stop(self):
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
 
 
 def _runnable_recorder(teleop_seq):
-    """A recorder wired for _run(): fake streaming telemetry + dataset.
+    """A recorder wired for _run(): a tick pump + a fake dataset.
 
-    status() consumption per loop iteration is 3: one for the stop-transition
-    check in _run, plus one per arm inside _build_frame. Plus one before the
-    loop initializes `teleop_was_running`. Size `teleop_seq` accordingly.
+    status() consumption is now ONE per loop iteration, plus one before the
+    loop initialises `teleop_was_running` — it used to be three, because
+    `_build_frame` asked the session for the commanded goal once per arm.
+    The action comes off the sample now, so the recorder no longer
+    interrogates the session while building a row at all. Size `teleop_seq`
+    accordingly.
     """
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
-    stream = _EndlessStream(limit=1000)
+    bus = TickBus()
     r = DatasetRecorder(
-        telemetry=_StreamTelemetry(arms, stream),
+        tick_bus=bus,
+        telemetry=_FakeTelemetry(arms),
         human_teleop=_SeqTeleop(teleop_seq),
         cameras=_FakeCameras([]),
     )
@@ -691,47 +805,59 @@ def _runnable_recorder(teleop_seq):
     r._cam_specs = []
     r._state.task = "t"
     r._episode_open = True
-    r._state.recording = True
-    return r, stream
+    r._state.state = RECORDING
+    return r, _TickPump(bus)
 
 
 async def test_teleop_stop_mid_take_saves_and_closes():
     running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
     stopped = {"running": False}
-    # 1 init + 3 iterations x (1 check + 2 build) = 10 running, then stopped.
-    r, stream = _runnable_recorder([running] * 10 + [stopped])
-    await asyncio.wait_for(r._run(), timeout=5.0)
+    # 1 init + 3 iterations x 1 check = 4 running, then stopped.
+    r, pump = _runnable_recorder([running] * 4 + [stopped])
+    pump.start()
+    try:
+        await asyncio.wait_for(r._run(), timeout=5.0)
+    finally:
+        await pump.stop()
     assert r._dataset.saved == 1
     assert r._dataset.cleared == 0
     assert r._state.recording is False
     assert r._episode_open is False
     assert r._state.episode_frames == 3  # frames before the stop were kept
-    assert stream.closed
+    assert r._tick_sub is None           # the loop released its subscription
 
 
 async def test_teleop_never_running_does_not_auto_stop():
     """A bring-up take (no teleop) must not be auto-closed by the loop."""
-    r, stream = _runnable_recorder([{"running": False}])
+    r, pump = _runnable_recorder([{"running": False}])
+    pump.start()
     task = asyncio.get_event_loop().create_task(r._run())
-    await asyncio.sleep(0.05)  # let a few frames land
-    assert r._state.episode_frames > 0
-    assert r._episode_open is True     # no transition -> no auto-close
-    assert r._dataset.saved == 0
-    r._state.recording = False         # normal operator stop
-    await asyncio.wait_for(task, timeout=5.0)
+    try:
+        await asyncio.sleep(0.05)  # let a few frames land
+        assert r._state.episode_frames > 0
+        assert r._episode_open is True     # no transition -> no auto-close
+        assert r._dataset.saved == 0
+        r._state.state = IDLE              # normal operator stop
+        await asyncio.wait_for(task, timeout=5.0)
+    finally:
+        await pump.stop()
     await r.stop_episode(save=False)
     assert r._dataset.cleared == 1
-    assert stream.closed
+    assert r._tick_sub is None
 
 
 async def test_stop_episode_after_auto_save_is_a_noop():
     running = {"running": True, "left_arm": "left", "right_arm": "right", "goal_deg": {}}
     stopped = {"running": False}
-    # 1 init + 2 iterations x 3 = 7 running, then stopped on iter 3's check.
+    # 1 init + 2 iterations x 1 = 3 running, then stopped on iter 3's check.
     # Two frames, not one: a one-frame take is refused outright — see
     # MIN_SAVEABLE_FRAMES — and this test is about stop being idempotent.
-    r, stream = _runnable_recorder([running] * 7 + [stopped])
-    await asyncio.wait_for(r._run(), timeout=5.0)
+    r, pump = _runnable_recorder([running] * 3 + [stopped])
+    pump.start()
+    try:
+        await asyncio.wait_for(r._run(), timeout=5.0)
+    finally:
+        await pump.stop()
     assert r._dataset.saved == 1
     # Operator hits /record/stop a beat later: must not save or clear again.
     status = await r.stop_episode(save=True)
@@ -755,6 +881,7 @@ async def test_stop_episode_with_never_started_dataset_is_graceful():
 def _real_recorder(root, monitor=None):
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     return DatasetRecorder(
+        tick_bus=_measured_bus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([]),
@@ -763,13 +890,23 @@ def _real_recorder(root, monitor=None):
     )
 
 
-def _real_frame(task: str) -> dict:
+def _real_frame(task: str, uid: int = 1) -> dict:
+    """A frame built BY HAND, bypassing `_build_frame`.
+
+    These tests exercise the dataset round trip — create, save, resume,
+    reload — so the values are deliberately trivial; what matters is that the
+    key set matches the frozen schema. That makes the literal `uid` here a
+    fixture constant rather than a claim about production, so what
+    `_build_frame` actually stamps is pinned separately and against the real
+    path (see the `episode_uid` tests), never inferred from this.
+    """
     return {
         "observation.state": np.zeros(12, dtype=np.float32),
         "action": np.zeros(12, dtype=np.float32),
         "observation.effort": np.zeros(12, dtype=np.float32),
         "observation.base": np.zeros(2, dtype=np.float32),
         "observation.wall_clock": np.zeros(1, dtype=np.float32),
+        EPISODE_UID_FEATURE: np.asarray([uid], dtype=np.int64),
         "task": task,
     }
 
@@ -777,7 +914,10 @@ def _real_frame(task: str) -> dict:
 async def _drive(rec, task: str, n_frames: int) -> None:
     await rec.start_episode("smoke/roundtrip", task)
     for _ in range(n_frames):
-        rec._dataset.add_frame(_real_frame(task))
+        # The recorder's OWN uid for this take, not a literal: these frames go
+        # to disk and get read back, so carrying the real value is what lets a
+        # round-trip test say anything about the column at all.
+        rec._dataset.add_frame(_real_frame(task, rec._state.episode_uid))
         rec._state.episode_frames += 1
     await rec.stop_episode(save=True)
 
@@ -794,7 +934,13 @@ async def test_create_then_resume_appends_episodes(tmp_path):
     for key in ("observation.state", "action", "observation.effort",
                 "observation.base"):
         assert key in ds.features
-    assert ds.meta.fps == 20
+    # 30, not 20, and that IS the fix. `_FakeTelemetry` here is 20 Hz, and fps
+    # used to be `int(round(1.0 / telemetry._period))` — the rate telemetry was
+    # ASKED for, never checked against a clock. It now comes from the MEASURED
+    # tick rate, which this test's bus holds at 30. Mechanism 3 in one
+    # assertion: the declared number and the measured one were free to differ,
+    # and every timestamp in every episode came from the declared one.
+    assert ds.meta.fps == 30
 
 
 async def test_calibration_metadata_round_trips_through_info_json(tmp_path):
@@ -838,6 +984,7 @@ async def test_repo_switch_closes_out_the_first_dataset(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     rec = DatasetRecorder(
+        tick_bus=_measured_bus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([]),
@@ -863,6 +1010,7 @@ async def test_video_take_streams_h264_and_reloads(tmp_path):
     cam = _FakeCamera("top", 64, 48)  # has latest_rgb -> admitted to the schema
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     rec = DatasetRecorder(
+        tick_bus=_measured_bus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([cam]),
@@ -904,9 +1052,9 @@ async def _drive_scored(rec, repo_id: str, task: str, verdicts) -> None:
     reward/done columns under test are the ones the record loop produces."""
     await rec.start_episode(repo_id, task)
     for _ in verdicts:
-        frame = rec._build_frame({"arms": {"left": _joints_block(1.0),
+        frame = rec._build_frame(_sample({"arms": {"left": _joints_block(1.0),
                                            "right": _joints_block(2.0)},
-                                  "base": {"linear": 0.0, "angular": 0.0}})
+                                  "base": {"linear": 0.0, "angular": 0.0}}))
         assert frame is not None
         rec._dataset.add_frame(frame)
         rec._state.episode_frames += 1
@@ -960,6 +1108,7 @@ def _real_recorder_with_camera(root, monitor=None):
     """
     arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
     return DatasetRecorder(
+        tick_bus=_measured_bus(),
         telemetry=_FakeTelemetry(arms, hz=20.0),
         human_teleop=_FakeHumanTeleop({"running": False}),
         cameras=_FakeCameras([_FakeCamera("top", 64, 48)]),
@@ -1071,10 +1220,10 @@ async def test_wall_clock_is_relative_and_survives_float32(tmp_path):
     # A 200 s take: far enough into the episode that an absolute epoch would
     # round these three ticks onto at most two distinct float32 values.
     for dt in (0.0, 100.0, 200.0):
-        frame = rec._build_frame({"t": start + dt,
-                                  "arms": {"left": _joints_block(1.0),
-                                           "right": _joints_block(2.0)},
-                                  "base": {"linear": 0.0, "angular": 0.0}})
+        frame = rec._build_frame(_sample({
+            "t": start + dt,
+            "arms": {"left": _joints_block(1.0), "right": _joints_block(2.0)},
+            "base": {"linear": 0.0, "angular": 0.0}}))
         rec._dataset.add_frame(frame)
         rec._state.episode_frames += 1
     await rec.stop_episode(save=True)
@@ -1198,3 +1347,869 @@ async def test_an_unscored_recorder_runs_unchanged_with_no_sim_world(tmp_path):
     assert status["auto_scored"] is False
     assert status["success"] is None
     assert status["last_error"] is None
+
+
+# ---- the runtime recorded set --------------------------------------------
+#
+# Which cameras record is now a per-take decision the operator makes from the
+# cockpit (POST /cameras/{id}/record), not a config edit and a restart. The
+# config flag is only the value the rig booted with.
+
+def test_the_runtime_set_overrides_the_config_flag():
+    cams = _FakeCameras([_FakeCamera("top"), _FakeCamera("wrist", record=False)])
+    r = _recorder({"running": False}, cams=cams)
+    assert [s["id"] for s in r._active_camera_specs()] == ["top"]
+
+    cams.set_record("wrist", True)     # operator switches it on between takes
+    cams.set_record("top", False)      # ...and this one off
+    assert [s["id"] for s in r._active_camera_specs()] == ["wrist"]
+
+
+def test_a_manager_without_the_runtime_set_still_reads_the_config_flag():
+    """The fallback in `_active_camera_specs`: a camera manager that predates
+    the runtime set behaves exactly as it always did."""
+    cams = _LegacyFakeCameras([_FakeCamera("top"), _FakeCamera("wrist", record=False)])
+    r = _recorder({"running": False}, cams=cams)
+    assert [s["id"] for s in r._active_camera_specs()] == ["top"]
+
+
+async def test_switching_a_camera_on_can_collide_and_is_refused_at_start(tmp_path):
+    """config._cameras_from makes this check at LOAD time over the config
+    flags, and cannot be the only one: the recorded set is runtime state now,
+    so a clean config can be driven into a colliding set from the cockpit.
+
+    The failure it prevents is silent — two cameras keyed `top` build ONE
+    feature and every frame carries whichever was written last."""
+    cams = _FakeCameras([
+        _FakeCamera("threequarter_sim", dataset_key="top"),
+        _FakeCamera("overhead_sim", dataset_key="top", record=False),
+    ])
+    r = _recorder({"running": False}, cams=cams)
+    assert len(r._active_camera_specs()) == 1      # loads clean
+
+    cams.set_record("overhead_sim", True)          # ...and now it does not
+    with pytest.raises(RuntimeError, match="observation.images.top"):
+        await r.start_episode("smoke/collide", "lift the cube")
+
+
+def test_a_runtime_toggle_that_avoids_the_collision_is_fine():
+    """The check is about the recorded set, not the config: two cameras may
+    share a dataset_key as long as only one of them is recording."""
+    cams = _FakeCameras([
+        _FakeCamera("threequarter_sim", dataset_key="top"),
+        _FakeCamera("overhead_sim", dataset_key="top", record=False),
+    ])
+    r = _recorder({"running": False}, cams=cams)
+    cams.set_record("overhead_sim", True)
+    cams.set_record("threequarter_sim", False)
+    specs = r._active_camera_specs()
+    r._reject_colliding_keys(specs)                # does not raise
+    assert [s["id"] for s in specs] == ["overhead_sim"]
+
+
+async def test_the_recorded_set_is_frozen_at_start_and_read_fresh_next_take(tmp_path):
+    """A toggle flipped BETWEEN takes changes the next take's schema; the
+    open take keeps the columns it opened with."""
+    cams = _FakeCameras([_FakeCamera("top", 64, 48),
+                         _FakeCamera("wrist", 64, 48, record=False)])
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    rec = DatasetRecorder(
+        tick_bus=_measured_bus(),
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=cams, root=str(tmp_path / "a"))
+    await rec.start_episode("smoke/frozen", "t")
+    assert [c["id"] for c in rec._cam_specs] == ["top"]
+    cams.set_record("wrist", True)                 # mid-take: must not apply
+    assert [c["id"] for c in rec._cam_specs] == ["top"]
+    await rec.stop_episode(save=False)
+
+    # A new repo, because adding a camera changes the schema and resuming the
+    # old dataset would (correctly) refuse.
+    rec2 = DatasetRecorder(
+        tick_bus=_measured_bus(),
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=cams, root=str(tmp_path / "b"))
+    await rec2.start_episode("smoke/frozen2", "t")
+    assert [c["id"] for c in rec2._cam_specs] == ["top", "wrist"]
+    await rec2.stop_episode(save=False)
+
+
+# ---- delete the last episode ---------------------------------------------
+#
+# The operator's undo. This is the section that had to prove the feature is
+# possible at all: lerobot 0.5.1's own `delete_episodes` copies the whole
+# dataset to a new repo_id, so the in-place pop is ours, and the only thing
+# that makes it safe is that we force one video file per episode.
+
+async def _drive_video(rec, repo, task, n, root=None):
+    """A take with a real video column, driven frame by frame."""
+    await rec.start_episode(repo, task)
+    for i in range(n):
+        frame = _real_frame(task)
+        frame["observation.images.top"] = np.full((48, 64, 3), (i + 1) * 15,
+                                                  dtype=np.uint8)
+        rec._dataset.add_frame(frame)
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=True)
+
+
+def _video_recorder(root, cams=None):
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    return DatasetRecorder(
+        tick_bus=_measured_bus(),
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=cams if cams is not None else _FakeCameras([_FakeCamera("top", 64, 48)]),
+        root=str(root))
+
+
+async def test_delete_last_then_record_again_round_trips(tmp_path):
+    """THE feasibility gate: record -> delete -> record again, and the dataset
+    is still one lerobot 0.5.1 can load AND resume.
+
+    Both halves matter. Loading proves the frames, videos and metadata still
+    line up; resuming proves the counters the writer reads to place the next
+    take (`info.json` total_frames/total_episodes and the final episode row's
+    `dataset_to_index`) were left consistent with each other."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    root = tmp_path / "ds"
+    repo = "smoke/pop"
+
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "lift the cube", 6)
+    await _drive_video(rec, repo, "lift the cube", 7)
+    rec.close()
+
+    out = _video_recorder(root).delete_last_episode(repo)
+    assert out["deleted_index"] == 1
+    assert out["deleted_frames"] == 7
+    assert out["total_episodes"] == 1
+    assert out["total_frames"] == 6
+
+    ds = LeRobotDataset(repo, root=root)
+    assert ds.meta.total_episodes == 1
+    assert ds.meta.total_frames == 6
+    assert len(ds) == 6
+    # The surviving episode's video still decodes — frame 0 was solid grey 15.
+    assert abs(float(ds[0]["observation.images.top"].mean()) - 15 / 255) < 0.02
+
+    # ...and the next take lands at index 1 again, appending cleanly.
+    rec3 = _video_recorder(root)
+    await _drive_video(rec3, repo, "lift the cube", 5)
+    rec3.close()
+
+    ds2 = LeRobotDataset(repo, root=root)
+    assert ds2.meta.total_episodes == 2
+    assert ds2.meta.total_frames == 11
+    assert len(ds2) == 11
+    # No hole and no repeat in the global frame index, which is what a stale
+    # total_frames would have produced.
+    assert [int(ds2[i]["index"]) for i in range(11)] == list(range(11))
+    assert sorted({int(ds2[i]["episode_index"]) for i in range(11)}) == [0, 1]
+
+
+async def test_delete_last_removes_only_its_own_video_file(tmp_path):
+    """One video file per episode is what makes the pop an unlink instead of a
+    re-encode — so the surviving episode's file must still be there."""
+    root = tmp_path / "ds"
+    repo = "smoke/pop_vid"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    await _drive_video(rec, repo, "t", 4)
+    rec.close()
+
+    videos = sorted((root / "videos" / "observation.images.top").rglob("*.mp4"))
+    assert len(videos) == 2
+    _video_recorder(root).delete_last_episode(repo)
+    left = sorted((root / "videos" / "observation.images.top").rglob("*.mp4"))
+    assert [p.name for p in left] == [videos[0].name]
+
+
+async def test_delete_last_takes_the_episode_back_out_of_stats(tmp_path):
+    """`save_episode` folds each take into meta/stats.json incrementally, so a
+    popped take that is not removed from the aggregate stays in the dataset's
+    normalisation statistics forever — invisibly."""
+    import json
+    root = tmp_path / "ds"
+    repo = "smoke/pop_stats"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 5)
+    after_first = json.loads((root / "meta" / "stats.json").read_text())
+    await _drive_video(rec, repo, "t", 6)
+    rec.close()
+    after_second = json.loads((root / "meta" / "stats.json").read_text())
+    assert after_second != after_first          # the 2nd take moved the aggregate
+
+    _video_recorder(root).delete_last_episode(repo)
+    popped = json.loads((root / "meta" / "stats.json").read_text())
+    assert popped["observation.images.top"]["count"] == after_first["observation.images.top"]["count"]
+    assert popped["observation.images.top"]["mean"] == after_first["observation.images.top"]["mean"]
+
+
+async def test_delete_last_refuses_the_only_episode(tmp_path):
+    """A zero-episode dataset is not a state the writer can resume from, and
+    "throw the last one away" means "delete the repo" — the operator's call."""
+    root = tmp_path / "ds"
+    repo = "smoke/pop_one"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    rec.close()
+    with pytest.raises(RuntimeError, match="only episode"):
+        _video_recorder(root).delete_last_episode(repo)
+
+
+async def test_delete_last_refuses_while_an_episode_is_open(tmp_path):
+    root = tmp_path / "ds"
+    repo = "smoke/pop_open"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    await rec.start_episode(repo, "t")           # second take, still running
+    with pytest.raises(RuntimeError, match="stop recording"):
+        rec.delete_last_episode(repo)
+    await rec.stop_episode(save=False)
+
+
+def test_delete_last_on_an_unknown_repo_says_so(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _video_recorder(tmp_path / "nothing").delete_last_episode("smoke/absent")
+
+
+async def test_delete_last_flushes_our_own_buffered_metadata_first(tmp_path):
+    """The trap this ordering exists for: LeRobotDatasetMetadata buffers up to
+    ten episodes' metadata in RAM. Popping against a dataset we still hold open
+    would read a meta/episodes/ that is missing the very take being deleted —
+    and then the flush would write it back."""
+    root = tmp_path / "ds"
+    repo = "smoke/pop_buffered"
+    rec = _video_recorder(root)
+    await _drive_video(rec, repo, "t", 4)
+    await _drive_video(rec, repo, "t", 5)
+    # NO close(): both episodes are saved but their metadata is still buffered.
+    assert rec._dataset is not None
+
+    out = rec.delete_last_episode(repo)           # same recorder, open handle
+    assert out["deleted_index"] == 1
+    assert rec._dataset is None                   # handle dropped, so the next
+    assert out["total_episodes"] == 1             # take re-resumes from disk
+
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    ds = LeRobotDataset(repo, root=root)
+    assert ds.meta.total_episodes == 1
+    assert ds.meta.total_frames == 4
+
+
+async def test_delete_last_across_sessions_pops_the_right_take(tmp_path):
+    """Each recording SESSION starts its own data and metadata files (lerobot
+    rotates on resume), so the last take can be the only episode in its files.
+    Emptied files are removed rather than left as zero-row parquet."""
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    root = tmp_path / "ds"
+    repo = "smoke/pop_sessions"
+    for n in (4, 5, 6):                            # three separate recorders
+        r = _video_recorder(root)
+        await _drive_video(r, repo, "t", n)
+        r.close()
+    assert len(list((root / "meta" / "episodes").rglob("*.parquet"))) == 3
+
+    out = _video_recorder(root).delete_last_episode(repo)
+    assert out["deleted_index"] == 2 and out["total_frames"] == 9
+    assert len(list((root / "meta" / "episodes").rglob("*.parquet"))) == 2
+
+    ds = LeRobotDataset(repo, root=root)
+    assert ds.meta.total_episodes == 2
+    assert len(ds) == 9
+
+
+# ---- the session episode log ---------------------------------------------
+#
+# `meta/episodes/` lags reality while a dataset is open (lerobot buffers ten
+# episodes in RAM, and the file it eventually writes has no footer until
+# finalize). The recorder therefore remembers what it saved, and the listing
+# route overlays it. The log must vouch for saved takes and ONLY saved takes.
+
+async def test_the_session_log_records_each_saved_take(tmp_path):
+    rec = _video_recorder(tmp_path / "ds")
+    await _drive_video(rec, "smoke/log", "take one", 4)
+    await _drive_video(rec, "smoke/log", "take two", 6)
+    assert rec.session_episodes("smoke/log") == [
+        {"repo_id": "smoke/log", "index": 0, "frames": 4, "task": "take one"},
+        {"repo_id": "smoke/log", "index": 1, "frames": 6, "task": "take two"},
+    ]
+    assert rec.session_episodes("smoke/other") == []
+    rec.close()
+
+
+def _video_frame(task):
+    frame = _real_frame(task)
+    frame["observation.images.top"] = np.zeros((48, 64, 3), dtype=np.uint8)
+    return frame
+
+
+async def test_a_discarded_take_is_never_logged(tmp_path):
+    """save=False is the operator throwing the take away — it must not appear
+    in a browser that claims to say what was collected."""
+    rec = _video_recorder(tmp_path / "ds")
+    await rec.start_episode("smoke/discard", "fumbled")
+    for _ in range(3):
+        rec._dataset.add_frame(_video_frame("fumbled"))
+        rec._state.episode_frames += 1
+    await rec.stop_episode(save=False)
+    assert rec.session_episodes("smoke/discard") == []
+    rec.close()
+
+
+async def test_a_take_too_short_to_save_is_never_logged(tmp_path):
+    """A sub-MIN_SAVEABLE_FRAMES take is discarded by _finish_episode rather
+    than written, so nothing may vouch for it either."""
+    rec = _video_recorder(tmp_path / "ds")
+    await rec.start_episode("smoke/short", "misclick")
+    rec._dataset.add_frame(_video_frame("misclick"))
+    rec._state.episode_frames += 1              # one frame; minimum is 2
+    await rec.stop_episode(save=True)
+    assert rec.session_episodes("smoke/short") == []
+    assert "discarded" in (rec.status()["last_error"] or "")
+    rec.close()
+
+
+async def test_deleting_a_take_removes_it_from_the_session_log(tmp_path):
+    rec = _video_recorder(tmp_path / "ds")
+    await _drive_video(rec, "smoke/logpop", "take one", 4)
+    await _drive_video(rec, "smoke/logpop", "take two", 5)
+    rec.delete_last_episode("smoke/logpop")
+    assert [e["index"] for e in rec.session_episodes("smoke/logpop")] == [0]
+
+
+async def test_the_log_keeps_two_repos_apart(tmp_path, monkeypatch):
+    """A new task draft in the cockpit is a new repo_id. Each repo keeps its
+    own takes, and the indices restart per repo exactly as the datasets do."""
+    monkeypatch.setenv("HF_LEROBOT_HOME", str(tmp_path))
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    rec = DatasetRecorder(
+        tick_bus=_measured_bus(),
+        telemetry=_FakeTelemetry(arms, hz=20.0),
+        human_teleop=_FakeHumanTeleop({"running": False}),
+        cameras=_FakeCameras([]))   # root=None, like the server
+    for repo, task in (("smoke/first", "a"), ("smoke/second", "b")):
+        await rec.start_episode(repo, task)
+        for _ in range(3):
+            rec._dataset.add_frame(_real_frame(task))
+            rec._state.episode_frames += 1
+        await rec.stop_episode(save=True)
+
+    assert [e["index"] for e in rec.session_episodes("smoke/first")] == [0]
+    assert [e["index"] for e in rec.session_episodes("smoke/second")] == [0]
+    assert rec.session_episodes("smoke/first")[0]["task"] == "a"
+    assert rec.session_episodes("smoke/second")[0]["task"] == "b"
+    rec.close()
+
+
+# ---- the effort branch and where a dropped tick is attributed -------------
+
+def _arm_block(val, *, effort=0.0, status=None):
+    """One arm's snapshot, optionally declaring what its effort channel did."""
+    block = _joints_block(val, effort=effort)
+    if status is not None:
+        block["effort_status"] = status
+    return block
+
+
+def test_a_transient_effort_failure_drops_the_frame_and_says_which_arm():
+    """Ruled 2026-08-27. A live channel that missed ONE read is ~1 in 1800 at
+    60 Hz, so dropping costs ~0.1% of a take — while a recorded 0.0 would say
+    "no load" at a moment when there was load, in a column
+    `dataset_to_policy_features` hands to the policy as an input feature."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    frame = r._build_frame(_sample({"arms": {
+        "left": _arm_block(1.0, effort=0.3, status=EFFORT_OK),
+        "right": _arm_block(2.0, effort=0.0, status=EFFORT_TRANSIENT),
+    }, "base": {}}))
+
+    assert frame is None
+    assert r._state.drops_arms == {"right": 1}
+    assert r._state.drops_cameras == {}
+    assert r._state.skipped_frames == 1
+
+
+def test_a_structurally_absent_effort_channel_records_zero_and_keeps_the_frame():
+    """EVERY frame degrades on an arm with no effort channel, so dropping
+    would trade a whole demonstration for one optional column. A flat-zero
+    column is already this module's documented sentinel for exactly that."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    frame = r._build_frame(_sample({"arms": {
+        "left": _arm_block(1.0, effort=0.0, status=EFFORT_ABSENT),
+        "right": _arm_block(2.0, effort=0.5, status=EFFORT_OK),
+    }, "base": {}}))
+
+    assert frame is not None
+    assert r._state.skipped_frames == 0
+    np.testing.assert_allclose(frame["observation.effort"][:6], [0.0] * 6)
+    np.testing.assert_allclose(frame["observation.effort"][6:], [0.5] * 6)
+    assert "left" in r._state.effort_absent_arms
+    assert "right" not in r._state.effort_absent_arms
+
+
+def test_a_snapshot_predating_the_status_field_is_never_read_as_transient():
+    """Inventing a drop for a legacy snapshot would discard frames that were
+    fine. It cannot have been a transient failure — that classification did
+    not exist when the snapshot was written."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    frame = r._build_frame(_sample({"arms": {
+        "left": _joints_block(1.0, effort=None),    # no effort key at all
+        "right": _joints_block(2.0, effort=0.75),   # effort, but no status
+    }, "base": {}}))
+
+    assert frame is not None
+    assert r._state.skipped_frames == 0
+    assert "left" in r._state.effort_absent_arms
+    assert "right" not in r._state.effort_absent_arms
+
+
+def test_drops_are_nested_and_both_surfaces_are_always_present():
+    """Preserving a distinction through the type and discarding it before the
+    operator sees it is worse than never typing it: a camera named for a side
+    and an arm named for a side collapse to one confident wrong answer."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    drops = r.status()["drops"]
+    assert drops == {"cameras": {}, "arms": {}}
+
+
+def test_a_stale_camera_is_attributed_to_the_camera_by_its_dataset_key():
+    r = _recorder({"running": False},
+                  cams=_FakeCameras([_FakeCamera("top", frame=None)]))
+    r._cam_specs = r._active_camera_specs()
+    r._state.task = "t"
+
+    assert r._build_frame(_sample({"arms": {"left": _joints_block(0.0),
+                                            "right": _joints_block(0.0)},
+                                   "base": {}})) is None
+    assert r.status()["drops"] == {"cameras": {"top": 1}, "arms": {}}
+
+
+def test_the_total_and_the_buckets_reconcile():
+    """`skipped_frames` is the number the HUD shows and the buckets say where
+    it went. One increment per dropped tick, so they cannot come apart."""
+    r = _recorder({"running": False},
+                  cams=_FakeCameras([_FakeCamera("top", frame=None)]))
+    r._cam_specs = r._active_camera_specs()
+    r._state.task = "t"
+
+    both_arms = {"left": _joints_block(0.0), "right": _joints_block(0.0)}
+    r._build_frame(_sample({"arms": both_arms, "base": {}}))          # camera
+    r._build_frame(_sample({"arms": {"left": _joints_block(0.0)},     # arm
+                            "base": {}}))
+    status = r.status()
+    bucketed = (sum(status["drops"]["cameras"].values())
+                + sum(status["drops"]["arms"].values()))
+    assert bucketed == status["skipped_frames"] == 2
+
+
+def test_a_partial_joint_read_is_a_degraded_read():
+    """The schema is frozen at start, so a missing joint has no honest value.
+    Substituting for it is the same defect as substituting for a whole arm."""
+    r = _recorder({"running": False}, cams=_FakeCameras([]))
+    r._cam_specs = []
+    r._state.task = "t"
+
+    partial = {"joints": {j: {"pos": 1.0, "effort": 0.0}
+                          for j in list(SIX)[:-1]}}   # one joint short
+    assert r._build_frame(_sample({"arms": {"left": partial,
+                                            "right": _joints_block(0.0)},
+                                   "base": {}})) is None
+    assert r._state.drops_arms == {"left": 1}
+
+
+# ---- fps is measured, or the episode does not open (invariant 10) --------
+
+def _bus_at(hz: float, target_hz: float | None = None) -> TickBus:
+    """A bus measuring exactly `hz`, optionally aiming at something else."""
+    bus = TickBus()
+    for i in range(RATE_MIN_SAMPLES + 1):
+        bus.publish_once("probe", target_hz=target_hz, t_mono=i / hz)
+    return bus
+
+
+async def test_an_episode_does_not_open_without_a_measured_rate(tmp_path):
+    """Invariant 10. `fps` was `int(round(1.0 / telemetry._period))` — the rate
+    telemetry was ASKED for — and every timestamp in every episode was
+    synthesised from it. An unmeasured rate now refuses rather than guessing."""
+    r = _real_recorder(tmp_path / "ds")
+    r.tick_bus = TickBus()          # a bus nobody has published to
+    with pytest.raises(RuntimeError, match="not measured"):
+        await r.start_episode("smoke/norate", "t")
+
+
+def test_a_recorder_cannot_EXIST_without_a_bus():
+    """Invariant 10, moved from first-use to BUILD time — same guarantee, and
+    the earliest point it can be made.
+
+    This test used to build a valid recorder, assign `r.tick_bus = None`, and
+    assert that `start_episode` refused. The claim was right; the mechanism it
+    named is gone, because `tick_bus` is now a required field and that
+    post-hoc assignment is something production cannot do. Testing it would be
+    testing an impossible input.
+
+    The reason the guarantee moved is the defect it caused. `tick_bus` was
+    optional with a `None` default, left over from Phase 2a when a telemetry
+    path existed and `None` genuinely worked. 2c deleted that mode and left the
+    default, `server.py` then built a recorder without a bus, and
+    `/record/start` 409'd on the live backend for two phases with the suite
+    green — because a refusal at first use is indistinguishable from a rig that
+    is merely not ready yet. Refusing at construction makes `_lifespan` die at
+    startup instead.
+
+    Both roads are closed, and they are different roads: the required field
+    closes OMISSION, `__post_init__` closes an explicit `None`, which no
+    signature can express.
+    """
+    arms = _FakeArms({"left": _FakeArm(SIX), "right": _FakeArm(SIX)})
+    kw = {"telemetry": _FakeTelemetry(arms),
+          "human_teleop": _FakeHumanTeleop({"running": False}),
+          "cameras": _FakeCameras([])}
+
+    with pytest.raises(TypeError, match="tick_bus"):
+        DatasetRecorder(**kw)                        # omitted
+
+    with pytest.raises(ValueError, match="requires a tick_bus"):
+        DatasetRecorder(tick_bus=None, **kw)         # passed as None
+
+    DatasetRecorder(tick_bus=_measured_bus(), **kw)  # and one that works
+
+
+async def test_fps_is_the_rounded_MEASUREMENT_and_never_the_target(tmp_path):
+    """The trap the whole phase exists to avoid: the target shapes where the
+    measurement lands and must never become the written number. A sampler
+    aiming at 30 while achieving 28 writes 28."""
+    r = _real_recorder(tmp_path / "ds")
+    r.tick_bus = _bus_at(28.0, target_hz=30.0)
+    await r.start_episode("smoke/rounded", "t")
+    try:
+        assert r._dataset.meta.info["fps"] == 28
+        assert r.status()["fps_declared"] == 28
+    finally:
+        await r.stop_episode(save=False)
+        r.close()
+
+
+async def test_a_rate_too_far_from_the_integer_refuses_and_names_the_direction(tmp_path):
+    """29.7 rounds to 30, and 1% of drift is 10 ms per second of take — 600 ms
+    over a minute, linear in take length. The direction is the actionable half:
+    slow is load, fast is a rate mismatch with an existing dataset."""
+    r = _real_recorder(tmp_path / "ds")
+    r.tick_bus = _bus_at(29.7)
+    with pytest.raises(RuntimeError, match="slow"):
+        await r.start_episode("smoke/drift", "t")
+
+
+async def test_appending_is_gated_against_the_DATASET_fps_not_a_fresh_rounding(tmp_path):
+    """Two episodes in one dataset must not carry opposite-signed drift.
+
+    Without this the second take would round 29.0 to 29, score a 0% error and
+    open happily — inside a dataset whose timestamps are all synthesised as
+    frame_index/30. The gate compares against what the dataset was CREATED
+    with, so the mismatch is caught instead of compounded.
+    """
+    root = tmp_path / "ds"
+    r = _real_recorder(root)
+    await r.start_episode("smoke/append", "t")
+    for _ in range(3):
+        r._dataset.add_frame(_real_frame("t"))
+        r._state.episode_frames += 1
+    await r.stop_episode(save=True)
+
+    assert r._dataset.meta.info["fps"] == 30
+    r.tick_bus = _bus_at(29.0)      # a fresh rounding would call this 29 and pass
+    with pytest.raises(RuntimeError, match="fps 30"):
+        await r.start_episode("smoke/append", "t")
+    r.close()
+
+
+async def test_a_FRESH_PROCESS_resuming_is_still_appending(tmp_path):
+    """The same claim, from the state the test above cannot reach.
+
+    That test keeps ONE recorder, so `self._dataset` is already open when the
+    second arm runs — and `_existing_fps` used to read only that handle. Every
+    assertion it makes was true and the path it walks is the rarer one: the
+    ordinary workflow is restart the HMI, resume yesterday's dataset, record.
+
+    `_freeze_fps` runs BEFORE `_open_dataset`, so on the first arm of a process
+    the handle is None. The gate then compared the measured rate against
+    `round(measured)` — its own rounding — which cannot disagree with the
+    measurement, so it PASSED in exactly the case it exists to catch. Measured
+    before this test was written: accepted at 3.20% off, `fps_declared`
+    reporting 29 against an `info.json` saying 30, and `haller_rate.fps_written`
+    recording a 29 that was never written anywhere.
+
+    That last one is the reason this is not merely a missed refusal.
+    `fps_declared` must be exactly the `fps` in `info.json` — a ratio taken
+    against a declared number that nothing wrote is mechanism 3 arriving
+    through the machinery built to end it, and the audit block that exists to
+    let a later reader recover the true time base was recording the false one.
+
+    A SECOND recorder over the same root is the whole fixture: it is a fresh
+    process in every way that matters here.
+    """
+    root = tmp_path / "ds"
+    first = _real_recorder(root)
+    await first.start_episode("smoke/resume", "t")
+    for _ in range(3):
+        first._dataset.add_frame(_real_frame("t", first._state.episode_uid))
+        first._state.episode_frames += 1
+    await first.stop_episode(save=True)
+    first.close()
+    assert json.loads((root / "meta" / "info.json").read_text())["fps"] == 30
+
+    second = _real_recorder(root)
+    assert second._dataset is None, "the fixture must model a cold handle"
+    second.tick_bus = _bus_at(29.04)   # 0.14% from 29, but 3.20% from the file
+    with pytest.raises(RuntimeError, match="fps 30"):
+        await second.arm("smoke/resume", "t")
+    # And nothing was left claiming the rate it refused.
+    assert second.status()["fps_declared"] is None
+    second.close()
+
+
+async def test_the_unrounded_measurement_is_recorded_beside_the_integer(tmp_path):
+    """`fps` is typed `int` by lerobot and cannot hold 29.98, so 29.98 -> 30
+    would otherwise be unrecoverable — and two datasets rounded in OPPOSITE
+    directions would be indistinguishable by their metadata while their time
+    bases ran apart."""
+    import json
+
+    root = tmp_path / "ds"
+    r = _real_recorder(root)
+    r.tick_bus = _bus_at(29.98, target_hz=30.0)
+    await r.start_episode("smoke/rateblock", "t")
+    for _ in range(3):
+        r._dataset.add_frame(_real_frame("t"))
+        r._state.episode_frames += 1
+    await r.stop_episode(save=True)
+    r.close()
+
+    info = json.loads((root / "meta" / "info.json").read_text())
+    block = info[RATE_INFO_KEY]
+    assert block["fps_written"] == 30
+    assert block["measured_hz"] == pytest.approx(29.98, rel=1e-6)
+    assert block["target_hz"] == 30.0          # recorded BECAUSE it is not fps
+    assert block["samples"] >= RATE_MIN_SAMPLES
+    assert block["window_s"] > 0
+    assert block["faithful_fraction"] == FPS_FAITHFUL_FRACTION
+
+
+# ---- the published gate keys --------------------------------------------
+
+def test_the_tolerance_is_published_and_a_floor_could_not_have_expressed_it():
+    """A symmetric tolerance and a one-sided floor are different quantities.
+
+    The removed `record_rate_gate` was a floor and readers used it as
+    `declared * gate`. Publishing 0.005 under that name would have left them
+    warning below half a percent of the declared rate: the warning would not
+    have become wrong, it would have silently ceased to exist. The old key is
+    now absent, so a stale reader gets nothing and falls back visibly.
+
+    The SHAPE claim below outlives the key that used to carry it. It was one
+    assertion comparing the two published numbers; with the floor gone it is
+    the same claim as arithmetic, because deleting it would have removed the
+    reason the rename happened along with the code.
+    """
+    from haller_hmi.safety import MIN_RATE_FRACTION
+
+    r = _recorder({"running": False})
+    status = r.status()
+    assert status["record_rate_tolerance"] == FPS_FAITHFUL_FRACTION
+    assert "record_rate_gate" not in status
+
+    # A floor has nothing to say about either failure this bound catches.
+    # Both cases are REACHABLE: 29.7 under a 30 Hz target is a rig not keeping
+    # up, and 29.25 against a dataset written at 29 is the round-down regime,
+    # also well under its target.
+    for measured, fps in ((29.7, 30), (29.25, 29)):
+        assert abs(measured - fps) / fps > FPS_FAITHFUL_FRACTION, "tolerance refuses"
+        assert measured >= fps * MIN_RATE_FRACTION, "a floor would have passed it"
+
+
+def test_the_gate_reads_the_constant_rather_than_a_copy_of_its_value(monkeypatch):
+    """When two numbers agree, agreement is not evidence of connection —
+    change one and watch the verdict follow."""
+    r = _recorder({"running": False})
+    r.tick_bus = _bus_at(29.7)                    # 1% off a rounded 30
+
+    with pytest.raises(RuntimeError):
+        r._freeze_fps("smoke/x")
+
+    monkeypatch.setattr("haller_hmi.recorder.FPS_FAITHFUL_FRACTION", 0.05)
+    fps, rate = r._freeze_fps("smoke/x")          # 1% now inside a 5% band
+    assert fps == 30
+    assert rate["hz"] == pytest.approx(29.7, rel=1e-9)
+
+
+# ---- the during-take alert ----------------------------------------------
+
+def test_a_rate_breach_alerts_only_once_it_has_LASTED():
+    """A momentary wobble is not a corrupted take. The threshold is in SECONDS
+    because a count of ticks would mean a different amount of real time at
+    every cadence."""
+    r = _recorder({"running": False})
+    r.tick_bus = _bus_at(29.0)
+    r._state.fps_declared = 30
+
+    r._check_rate()
+    assert r._state.rate_breach_since is not None
+    assert r.status()["alerts"] == []             # breached, but not yet held
+
+    r._state.rate_breach_since = time.time() - (RATE_ALERT_AFTER_S + 0.5)
+    alerts = r.status()["alerts"]
+    assert [a["code"] for a in alerts] == ["record_rate"]
+    assert alerts[0]["fps"] == 30
+
+
+def test_the_alert_is_two_sided_because_the_timestamp_column_is_synthetic():
+    """Running fast is as wrong as running slow — `frame_index / fps` does not
+    care which way the real rate went, only that it is not fps.
+
+    The FAST case here is deliberately one production can actually reach, and
+    the first version of this test was not. `31.0` against `fps=30` proves the
+    predicate is two-sided but is UNREACHABLE: the commit loop sleeps
+    `period - elapsed`, so the tick can never exceed its own target, and a rig
+    targeting 30 cannot measure 31. A fast branch demonstrated only by an
+    impossible input invites the conclusion that it never happens.
+
+    It does happen. `fps` is `round(measured)` and the target is a DIFFERENT
+    quantity, so in the round-DOWN regime `measured > fps` while still sitting
+    under the target:
+
+        target 30, arm at 29.10 -> fps = round = 29, err 0.345%  passes
+        mid-take rises to 29.25 -> fps frozen 29,   err 0.862%  FIRES, fast
+
+    Nothing exotic — no fractional `hz`, no misconfiguration, just an achieved
+    rate whose fractional part is below 0.5. This rig sits at 29.94, which
+    rounds UP, so every deviation it can show today is slow; a real rig slowed
+    by Feetech round trips (U3) may well land in the other regime. Found by
+    Track D refusing a premise rather than the conclusion it supported.
+    """
+    r = _recorder({"running": False})
+
+    # SLOW, in the round-up regime this rig is actually in.
+    r._state.fps_declared = 30
+    r._state.rate_breach_since = None
+    r.tick_bus = _bus_at(29.0)
+    r._check_rate()
+    assert r._state.rate_breach_since is not None, "29.0 vs 30 did not breach"
+
+    # FAST, in the round-down regime, and reachable under a 30 Hz target.
+    r._state.fps_declared = 29
+    r._state.rate_breach_since = None
+    r.tick_bus = _bus_at(29.25)
+    r._check_rate()
+    assert r._state.rate_breach_since is not None, "29.25 vs 29 did not breach"
+    alert_hz = 29.25
+    assert alert_hz > r._state.fps_declared, "this case must be FAST to count"
+
+
+def test_a_rate_that_rounds_down_passes_the_arm_gate_and_can_still_breach():
+    """The two comparisons are different, and that is what makes fast reachable.
+
+    The sleep floor bounds `measured <= target`. The gate compares `measured`
+    against `fps`, which is `round(measured)` — a different quantity. So a rate
+    can clear the arm gate and later breach it going FAST, without ever
+    approaching its target.
+    """
+    r = _recorder({"running": False})
+    r.tick_bus = _bus_at(29.10)                    # target 30, rounds DOWN to 29
+
+    fps, _rate = r._freeze_fps("smoke/rounddown")
+    assert fps == 29
+    assert 29.10 > fps                             # already fast, and it PASSED
+
+    r._state.fps_declared = fps
+    r.tick_bus = _bus_at(29.25)                    # still far below the target
+    r._check_rate()
+    assert r._state.rate_breach_since is not None
+
+
+def test_a_rate_back_inside_the_band_clears_the_breach():
+    r = _recorder({"running": False})
+    r._state.fps_declared = 30
+    r.tick_bus = _bus_at(29.0)
+    r._check_rate()
+    assert r._state.rate_breach_since is not None
+
+    r.tick_bus = _bus_at(29.99)
+    r._check_rate()
+    assert r._state.rate_breach_since is None
+    assert r.status()["alerts"] == []
+
+
+# ---- the flat effort column is declared ---------------------------------
+
+async def test_an_absent_effort_channel_is_declared_in_info_json(tmp_path):
+    """A flat-zero effort column already means "no effort channel on that
+    take". Naming the arms makes that readable instead of inferable — the same
+    reason an unscored dataset carries no reward column rather than zeros."""
+    import json
+
+    root = tmp_path / "ds"
+    r = _real_recorder(root)
+    await r.start_episode("smoke/effort", "t")
+    r._state.effort_absent_arms.add("right")
+    for _ in range(3):
+        r._dataset.add_frame(_real_frame("t"))
+        r._state.episode_frames += 1
+    await r.stop_episode(save=True)
+    r.close()
+
+    info = json.loads((root / "meta" / "info.json").read_text())
+    assert info[EFFORT_INFO_KEY]["flat_zero_arms"] == ["right"]
+
+
+async def test_a_take_with_every_channel_live_declares_nothing(tmp_path):
+    """An absent block is the honest report when nothing was absent."""
+    import json
+
+    root = tmp_path / "ds"
+    r = _real_recorder(root)
+    await r.start_episode("smoke/noeffortblock", "t")
+    for _ in range(3):
+        r._dataset.add_frame(_real_frame("t"))
+        r._state.episode_frames += 1
+    await r.stop_episode(save=True)
+    r.close()
+
+    info = json.loads((root / "meta" / "info.json").read_text())
+    assert EFFORT_INFO_KEY not in info
+
+
+async def test_the_refusal_names_the_right_remedy_for_a_FRESH_dataset(tmp_path):
+    """Creating and appending fail for different reasons and take different
+    remedies, and the split is by CASE not by direction.
+
+    On a fresh dataset `fps` IS `round(measured)`, so the only thing the error
+    can mean is that the achieved rate does not sit near a whole number — and
+    it reaches either direction, since 29.4 rounds DOWN to 29 and is then 1.4%
+    fast. "This rig is running faster than the dataset" would be nonsense
+    here: there is nothing to be fast relative to except a number derived from
+    the rig's own rate.
+    """
+    r = _real_recorder(tmp_path / "ds")
+    r.tick_bus = _bus_at(29.4)                    # rounds DOWN -> 29, so FAST
+    with pytest.raises(RuntimeError, match="whole number") as exc:
+        await r.start_episode("smoke/fresh", "t")
+    msg = str(exc.value)
+    assert "fast" in msg
+    assert "record into a new one" not in msg
+    # The nearest whole number to 29.4 is 29, NOT the 30 the sampler was
+    # aiming at. Naming the target here would put a number in front of the
+    # operator that appears nowhere in their dataset.
+    assert "29 is the nearest" in msg
+    assert "fps 29" in msg

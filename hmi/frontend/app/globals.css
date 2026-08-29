@@ -100,11 +100,18 @@
   --border: oklch(0.88 0 0);
   --input: oklch(0.88 0 0);
   --ring: oklch(0.68 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  /* Series ramp — five hues that stay apart from each other AND from the
+     status palette, so a compare chart never borrows the meaning of "fault".
+     These were shadcn's greyscale defaults and went unused while nothing
+     charted anything; five greys cannot carry five overlaid runs, so they are
+     re-cut here at the DARK theme's hues (152/245/78/27/neutral) and this
+     theme's lightness. Same rule as the status palette above: hue carries the
+     identity, L and C move per theme, every value >=4.5:1 on --card. */
+  --chart-1: oklch(0.53 0.15 152);
+  --chart-2: oklch(0.50 0.17 245);
+  --chart-3: oklch(0.56 0.13 78);
+  --chart-4: oklch(0.58 0.235 27);
+  --chart-5: oklch(0.45 0 0);
   --radius: 0.375rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);

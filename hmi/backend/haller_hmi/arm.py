@@ -22,6 +22,7 @@ from .safety import Mode, ModeGuard, clamp_joint_goal, limit_step, step_budget_d
 
 if TYPE_CHECKING:
     from .motion import MoveExecutor
+    from .vr_teleop.preflight import PreflightReport
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,91 @@ logger = logging.getLogger(__name__)
 # we derive these per-joint from each motor's calibrated range converted to degrees.
 TICKS_PER_REV = 4096
 DEG_PER_TICK = 360.0 / TICKS_PER_REV
+
+# `MotorNormMode` values, as lerobot spells them on the wire. Compared as
+# strings so a handle built against a stub motor (the sim path, the test
+# fakes) works without importing the enum, and pinned by
+# `test_norm_mode_spellings_still_match_lerobots` so a rename upstream fails
+# loudly here instead of silently falling through to the degrees branch.
+_NORM_0_100 = "range_0_100"
+_NORM_M100_100 = "range_m100_100"
+
+# Reads that ANCHOR a relative motion take a median of this many. One corrupted
+# Feetech status packet is enough to place an anchor most of a revolution away,
+# and everything downstream is measured FROM the anchor — so the bad value is
+# not a glitch, it is where the arm goes. Reads that only feed telemetry stay
+# single: at 20-60 Hz three round trips are the whole tick budget, and one bad
+# frame there costs one frame.
+ANCHOR_READS = 3
+
+
+class SyncReaderRace(ConnectionError):
+    """The shared `bus.sync_reader` was re-pointed under a block read.
+
+    A `ConnectionError` subclass so every caller that already treats a failed
+    block read as "no effort this tick" keeps working unchanged, and a distinct
+    type so `_demote_effort_path` can tell a lost race — which costs one tick's
+    effort column on a reader that is contended by design — from a bus that
+    genuinely cannot serve the read, which must retire the fast path.
+    """
+
+
+#: What an arm's effort channel did on ONE read, published in `state_snapshot`.
+#:
+#: The recorder branches on this and the two failures are NOT the same event
+#: (ruled 2026-08-27). `observation.effort` is policy-visible —
+#: `dataset_to_policy_features` classifies `observation.*` as FeatureType.STATE
+#: — so a false 0.0 is a sensor reading in the training set saying "no load" at
+#: a moment when there was load. And `recorder.py`'s effort docstring already
+#: defines a FLAT-ZERO column as the sentinel for "no effort channel on that
+#: take", so scattered zeros would be a third thing that docstring denies
+#: exists.
+#:
+#:   EFFORT_OK        this tick's effort is measured. Includes a genuine 0.0.
+#:   EFFORT_TRANSIENT the channel is live, THIS read did not land (a lost
+#:                    `sync_reader` race, a comm failure). One tick, ~1 in 1800
+#:                    at 60 Hz. The recorder DROPS the frame and counts it.
+#:   EFFORT_ABSENT    there is no effort channel on this arm at all. Every
+#:                    frame degrades, so dropping would trade a whole
+#:                    demonstration for one optional column. The recorder
+#:                    writes 0.0 and declares the column flat.
+EFFORT_OK = "ok"
+EFFORT_TRANSIENT = "transient"
+EFFORT_ABSENT = "absent"
+
+
+def _median_present_position(robot: SO101Follower,
+                             n: int = ANCHOR_READS) -> dict[str, int]:
+    """`Present_Position` in RAW TICKS, per-joint median of `n` reads.
+
+    `sorted(v)[len(v) // 2]`, not `statistics.median`: on an even count the
+    latter averages the two middle reads, and averaging a corrupted tick into
+    a good one parks the goal at a position no servo ever reported.
+
+    Same rule as `preflight.get_observation_median`, which cannot be reused
+    here: that one reads degrees through the calibration via `ArmHandle`, and
+    this runs on a bare `SO101Follower` inside `configure()`, before
+    `_load_joint_limits`, on the raw registers the goal write needs.
+
+    No availability gate, unlike `ArmHandle._read_block`, and the median is
+    why. `sync_read` shares `bus.sync_reader`, so a re-point under it makes
+    `getData` answer 0 for a raced joint — and 0 is the MINIMUM raw tick, so
+    it sorts to the outside of a 3-sample median and one race is absorbed
+    whole. Being fooled needs the SAME joint raced in TWO of the three reads,
+    i.e. two hits on the ~10 us `getData` loop of two separate reads. Callers
+    are `connect()` (no other thread is on this arm's bus yet) and
+    `enable_torque()` (telemetry at 20 Hz), which puts the residual around
+    1e-6 per park against ~1 in 30 s for the 60 Hz block reader. A gate that
+    REFUSED to park would also be the wrong trade here: not parking is the
+    lunge `_park_goal_on_present` exists to prevent.
+    """
+    reads = [robot.bus.sync_read("Present_Position", normalize=False)
+             for _ in range(n)]
+    out: dict[str, int] = {}
+    for joint in {k for r in reads for k in r}:
+        ticks = sorted(int(r[joint]) for r in reads if joint in r)
+        out[joint] = ticks[len(ticks) // 2]
+    return out
 
 
 def _write_calibration_to_motors(robot: SO101Follower) -> None:
@@ -50,6 +136,73 @@ def _write_calibration_to_motors(robot: SO101Follower) -> None:
     logger.info("arm %s: writing calibration from %s into motors",
                 robot.id, robot.calibration_fpath)
     robot.bus.write_calibration(robot.calibration)
+
+
+def _park_goal_on_present(robot: SO101Follower) -> None:
+    """Point every servo's Goal_Position at where the arm actually IS.
+
+    lerobot's `configure()` does its register writes inside
+    `bus.torque_disabled()`, and that context manager re-enables torque
+    unconditionally on the way out. Nothing between here and there ever tells
+    the servos where the arm is standing, so torque comes back on against
+    whatever Goal_Position the registers already held. On a cold power-up
+    that value is 0 for every joint, and enabling torque commands all six to
+    tick 0 at once, at whatever speed they can manage — from a rest pose
+    that is most of a revolution on the elbow and the wrist roll.
+
+    Measured on the bench 2026-08-21, one arm, cold power-up, before this
+    function existed: torque off on all six, every Goal_Position reading 0,
+    against a present pose of 642 / 1095 / 3715 / 1 / 3913 / 3312 raw. So
+    connect() alone was one command away from ~327 deg on the elbow and ~344
+    deg on the wrist roll.
+
+    Whether this is also what happened on 2026-08-01 — the arm that slewed
+    into the bench after a recalibration and took the 7.4 V DC-DC with it —
+    is not something the logs can still settle, and the note in
+    config.solo-real.yaml blames the Home that followed. Worth knowing that
+    the Home is not needed for it: on a cold bus the slew is already
+    committed when connect() returns, before any goal is ever sent.
+
+    So: raw ticks, read then written back, before lerobot's configure() runs.
+    Raw on purpose — Goal_Position and Present_Position share one register
+    space, so present-into-goal is exact whatever the calibration says, and
+    stays exact across the offsets `_write_calibration_to_motors` just wrote.
+    Torque is still off here, so this moves nothing; it only makes the
+    torque-enable that follows a hold instead of a lunge.
+
+    Median of three reads, never one: the tick parked here is the tick the
+    servo drives to the instant torque comes back, so a single corrupted read
+    re-enters this function's own failure through the read instead of through
+    the register — same slew, same distance, and nothing downstream to catch
+    it because the goal IS the reference.
+
+    lerobot's own note on connect() — "we assume that at connection time, arm
+    is in a rest position, and torque can be safely disabled to run
+    calibration" — is about *disabling* torque. Nothing there covers turning
+    it back on, which is the half that moves the arm.
+    """
+    present = _median_present_position(robot)
+    robot.bus.sync_write("Goal_Position", present, normalize=False)
+    logger.info(
+        "arm %s: parked Goal_Position on Present_Position before torque enable (raw ticks: %s)",
+        robot.id,
+        {j: int(v) for j, v in present.items()},
+    )
+
+
+def _configure_holding_position(robot: SO101Follower) -> None:
+    """`robot.configure()`, with the goal registers parked first."""
+    _park_goal_on_present(robot)
+    SO101Follower.configure(robot)
+    # lerobot's configure() just wrote P_Coefficient=16 ("to avoid
+    # shakiness") — a leader-follower streaming tune. At 16 the position
+    # loop is too soft to carry this arm through gravity-heavy poses: the
+    # shoulder and elbow trail the command, draw near-stall current, and
+    # can trip the servo overload latch. The kit restores the STS3215
+    # factory gain explicitly for exactly that reason, and tracking parity
+    # with the kit starts at the servo's own stiffness.
+    for motor in robot.bus.motors:
+        robot.bus.write("P_Coefficient", motor, 32)
 
 
 @dataclass
@@ -75,6 +228,9 @@ class ArmHandle:
     # in connect() by _probe_effort_path(), never per tick. See read_effort_norm.
     _effort_mode: str = "unprobed"
     _effort_fail_streak: int = 0
+    # Lost races to `bus.sync_reader` since connect. Counted, not folded into
+    # `_effort_fail_streak` — see _demote_effort_path.
+    _effort_race_count: int = 0
 
     # ---- effort (servo load) constants -----------------------------------
     #
@@ -138,6 +294,10 @@ class ArmHandle:
         # equivalent before connecting, so lerobot keeps its own ordering and
         # still applies the calibration before configure() touches the motors.
         self.robot.calibrate = partial(_write_calibration_to_motors, self.robot)
+        # Same substitution trick, for the step that actually moves the arm:
+        # configure() re-enables torque on its way out, and does it against
+        # goal registers nobody has set. See _park_goal_on_present.
+        self.robot.configure = partial(_configure_holding_position, self.robot)
         self.robot.connect(calibrate=True)
         # Load joint limits from the now-loaded calibration.
         self.joint_limits_deg = self._load_joint_limits()
@@ -151,33 +311,150 @@ class ArmHandle:
         # once per connect instead of forty times a second.
         self._effort_mode = self._probe_effort_path()
         self._effort_fail_streak = 0
+        self._effort_race_count = 0
         logger.info("arm %s: effort read path = %s", self.config.id, self._effort_mode)
+
+    def _release_torque_per_motor(self) -> list[str]:
+        """Torque off, one servo at a time. Returns the ids that refused.
+
+        lerobot's `bus.disconnect(disable_torque=True)` releases the arm with
+        a single `disable_torque()` that walks the motors and raises on the
+        first one to answer with an error. A servo in a latched alarm answers
+        with an error to everything, including "turn your torque off" — so the
+        one motor that most needs releasing is also the one that aborts the
+        walk, and every motor after it in the chain stays energised.
+
+        Bench, 2026-08-21: shoulder_lift (id 2) overloaded holding the arm
+        cantilevered, and the shutdown died on
+        `Failed to write 'Torque_Enable' on id_=2 with '0' after 6 tries.
+        [RxPacketError] Overload error!`. Torque afterwards read pan=0,
+        lift=0, elbow=1, wrist_flex=1, wrist_roll=1, gripper=1 — the backend
+        had exited and four joints were still holding. `Application shutdown
+        failed` was the only sign, in a log nobody reads while an arm is
+        stiff on the bench.
+
+        So: never let one servo's refusal decide the fate of the other five.
+        Per-motor, each in its own try, worst case six failures instead of
+        one abort.
+        """
+        assert self.robot is not None
+        refused: list[str] = []
+        for joint in list(self.robot.bus.motors):
+            try:
+                self.robot.bus.write("Torque_Enable", joint, 0, normalize=False)
+            except Exception:
+                refused.append(joint)
+                logger.exception(
+                    "arm %s: %s refused Torque_Enable=0; continuing to the rest",
+                    self.config.id, joint)
+        return refused
 
     def disconnect(self) -> None:
         if self.robot is not None:
-            self.robot.disconnect()
+            refused = self._release_torque_per_motor()
+            if refused:
+                logger.error(
+                    "arm %s: %d motor(s) would not release torque: %s. They are "
+                    "in an alarm state (overload/overheat is what does this) and "
+                    "will stay stiff until the arm is power-cycled.",
+                    self.config.id, len(refused), ", ".join(refused))
+            # Every motor has now been asked individually, so lerobot must not
+            # repeat the bulk walk that raises on the first refusal — that
+            # exception is what escaped `disconnect_all` and stranded the rest
+            # of the shutdown.
+            self.robot.config.disable_torque_on_disconnect = False
+            try:
+                self.robot.disconnect()
+            except Exception:
+                logger.exception("arm %s: port close failed", self.config.id)
             self.robot = None
+            self.torque_enabled = False
         # A later connect() re-probes: the same arm can come back on a
         # different adapter, or with different firmware, than it left on.
         self._effort_mode = "unprobed"
         self._effort_fail_streak = 0
+        self._effort_race_count = 0
 
     def _load_joint_limits(self) -> dict[str, tuple[float, float]]:
-        # SO101Follower stores calibration as dict[motor_name, MotorCalibration]
-        # with range_min/range_max in raw ticks. We center on the mid-point of
-        # that range and convert to degrees — symmetric clamping, independent
-        # of the motor's homing_offset.
+        """Per-joint clamp window, IN THE UNIT THAT JOINT IS READ AND WRITTEN IN.
+
+        The unit is per motor, not per robot. lerobot sets the five body joints
+        from `use_degrees` but pins the gripper to RANGE_0_100 unconditionally
+        (`so_follower.py:50,59`), so one arm reports degrees on five joints and
+        a 0..100 percentage on the sixth. `_normalize`/`_unnormalize` are the
+        authority and this mirrors them exactly:
+
+          DEGREES        tick range centred on its own mid-point, converted —
+                         symmetric about zero by construction, and independent
+                         of the motor's homing_offset.
+          RANGE_0_100    (0, 100).
+          RANGE_M100_100 (-100, 100).
+
+        Reading the unit off the motor rather than assuming degrees is
+        load-bearing, not tidiness. Before 2026-08-27 every joint got the
+        degrees treatment, so the gripper's window came out (-63.59, +63.59) on
+        this rig — and `_to_degrees` maps the converter's [0, 1] onto whatever
+        window it is handed. Measured consequence: commands 0.00 through 0.50
+        all landed at or below 0 and lerobot clamped them to a shut jaw, so the
+        whole lower half of the trigger did nothing, and 1.00 reached 63.59 %
+        rather than the open stop. The jaw ran its entire travel in the top
+        half of the trigger and never fully opened. Every gripper column
+        recorded before that date is compressed into 0..63.6 with a dead band.
+        """
         out: dict[str, tuple[float, float]] = {}
         if self.robot is None or not self.robot.calibration:
             return out
+        motors = self.robot.bus.motors
         for motor, mc in self.robot.calibration.items():
-            center = (mc.range_min + mc.range_max) / 2.0
-            min_deg = (mc.range_min - center) * DEG_PER_TICK
-            max_deg = (mc.range_max - center) * DEG_PER_TICK
-            out[motor] = (min_deg, max_deg)
+            norm = getattr(motors.get(motor), "norm_mode", None)
+            # Exact match, never a substring test: "0_100" is also a substring
+            # of "range_m100_100", so `in` would silently give the ±100 joints
+            # a 0..100 window — the same class of unit error this method is
+            # being fixed for.
+            name = str(getattr(norm, "value", norm) or "")
+            if name == _NORM_0_100:
+                out[motor] = (0.0, 100.0)
+            elif name == _NORM_M100_100:
+                out[motor] = (-100.0, 100.0)
+            else:
+                center = (mc.range_min + mc.range_max) / 2.0
+                out[motor] = ((mc.range_min - center) * DEG_PER_TICK,
+                              (mc.range_max - center) * DEG_PER_TICK)
         return out
 
-    def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
+    def _anchor_read(self) -> dict[str, float]:
+        """Positions in degrees, median of `ANCHOR_READS` reads.
+
+        For the reads that become a MOTION REFERENCE rather than a datapoint.
+        `limit_step` caps the commanded step against `_last_commanded`, so a
+        single corrupted seed does not produce a bounded error — it produces a
+        bounded step away from a garbage reference, i.e. a goal a whole
+        revolution from where the arm is, sent at full speed. The cap is only
+        as good as what it caps from.
+
+        Neither caller is on the steady-state path: the seed runs once per
+        connect or torque toggle, the retry only after a read has already
+        dropped a joint. The healthy 60 Hz tick reads nothing here at all —
+        that is what `_last_commanded` is for.
+
+        Deferred import for `__post_init__`'s reason, one module further out:
+        `vr_teleop` is a leaf of this package today and importing it at module
+        scope is the edit that would stop it being one.
+        """
+        from .vr_teleop.preflight import get_observation_median
+        return get_observation_median(self, ANCHOR_READS)
+
+    def send_goal(self, goal_deg: dict[str, float], *,
+                  speed_cap_deg_s: float | None = None) -> dict[str, float]:
+        """Write one goal, elapsed-time capped.
+
+        `speed_cap_deg_s` lets a caller that already rate-caps every step
+        bring its own ceiling — the teleop session passes its per-tick cap so
+        the discrete-move speed limit does not become the arm's teleop
+        ceiling (the kit's write path carries no cap at all; every write here
+        stays bounded, only the number is the caller's). None means
+        `motion.max_speed_deg_s`, which every discrete-path caller keeps.
+        """
         self.guard.assert_manual()
         assert self.robot is not None
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
@@ -186,12 +463,12 @@ class ArmHandle:
             # First command since connect or a torque toggle: seed from a real
             # read. Every later call limits against the last command, so the
             # 60 Hz teleop path costs no extra serial traffic.
-            self._last_commanded = self.read_joints_deg()
+            self._last_commanded = self._anchor_read()
         if any(j not in self._last_commanded for j in clamped):
             # A flaky read can drop a joint at seed time, or leave it dropped
             # from an earlier call. Retry so it rejoins as soon as one read
             # succeeds, rather than staying unmeasured indefinitely.
-            self._last_commanded = {**self._last_commanded, **self.read_joints_deg()}
+            self._last_commanded = {**self._last_commanded, **self._anchor_read()}
         # Don't move what you can't measure: a joint missing from
         # `_last_commanded` has no reference for limit_step to cap against,
         # and limit_step's own contract is to pass such a joint through
@@ -205,7 +482,9 @@ class ArmHandle:
         # on a fixed per-call cap and reintroduce the over-speed this fixed.
         dt = (1.0 / self.motion.ramp_hz) if self._last_command_at is None \
             else (now - self._last_command_at)
-        max_step_deg = step_budget_deg(dt, self.motion.max_speed_deg_s)
+        cap = self.motion.max_speed_deg_s if speed_cap_deg_s is None \
+            else speed_cap_deg_s
+        max_step_deg = step_budget_deg(dt, cap)
         capped = limit_step(self._last_commanded, measurable, max_step_deg)
         # lerobot expects keys suffixed with ".pos"
         action = {f"{j}.pos": v for j, v in capped.items()}
@@ -214,15 +493,45 @@ class ArmHandle:
         self._last_command_at = now
         return capped
 
-    def disable_torque(self) -> None:
+    def disable_torque(self) -> list[str]:
+        """Release every motor, and report the ones that refused.
+
+        Walks per motor rather than calling `bus.disable_torque()`, which
+        writes in a loop and RAISES ON THE FIRST REFUSAL — leaving every motor
+        after it energised. That is the 2026-08-21 incident (an overloaded
+        shoulder aborted the sweep mid-way and stranded four joints stiff),
+        and every caller of this method carried it: `/arm/{id}/mode` into STOP,
+        `/arm/{id}/torque`, the shutdown walk, `calibration.py`, and the
+        preflight drop. Fixing it here fixes all of them at once.
+
+        Returns the joints that would not release. Non-empty means the arm is
+        PART LIMP AND PART STIFF — the one state an operator must not be told
+        is "holding" — so a caller that reports torque state must report this
+        list, not just the fact that a release was attempted.
+        """
+        refused: list[str] = []
         if self.robot is not None:
-            self.robot.bus.disable_torque()
+            refused = self._release_torque_per_motor()
+            # Set unconditionally, even on a partial refusal: `post_arm_mode`
+            # re-energises on leaving STOP only `if not handle.torque_enabled`,
+            # so a stale True strands a limp arm displayed as holding with no
+            # way back short of a restart.
             self.torque_enabled = False
             self._last_commanded = None
             self._last_command_at = None
+        return refused
 
     def enable_torque(self) -> None:
         if self.robot is not None:
+            # Park before enabling, every time — not just at connect. The
+            # servo keeps whatever Goal_Position it last held, and anything
+            # that moved the arm or shifted its frame while torque was off
+            # (hand-repositioning, an E-STOP mid-motion, a homing-offset
+            # rewrite) turns that stale goal into a full-speed lunge on
+            # enable. 2026-08-24: a recalibration's offset rewrite did
+            # exactly that — the arm slewed to full extension the moment
+            # torque came back.
+            _park_goal_on_present(self.robot)
             self.robot.bus.enable_torque()
             self.torque_enabled = True
             self._last_commanded = None
@@ -256,6 +565,16 @@ class ArmHandle:
         """
         return max(-1.0, min(1.0, float(signed_load) / cls._LOAD_FULL_SCALE))
 
+    def _assert_block_held(self, bus, slices: list[tuple[int, int]]) -> None:
+        """Raise unless the shared reader still holds every slice `_read_block`
+        is about to take (or has just taken)."""
+        for i, addr in slices:
+            if not bus.sync_reader.isAvailable(i, addr, 2):
+                raise SyncReaderRace(
+                    f"block sync read @{self._BLOCK_ADDR}+{self._BLOCK_LEN}: "
+                    f"motor id {i} has no data at register {addr}"
+                )
+
     def _read_block(self) -> tuple[dict[str, float], dict[str, float]]:
         """One bus round trip -> (positions in deg, effort fractions).
 
@@ -264,9 +583,9 @@ class ArmHandle:
         a try/except and falls back. What the private bits are:
           - `_setup_sync_reader(ids, addr, len)` points the shared GroupSyncRead
             at a byte range instead of a named register,
-          - `getData(id, addr, 2)` slices a register out of that block; it
-            returns 0 for a range the block does not cover, which is why the
-            comm result is checked first rather than trusting the values,
+          - `getData(id, addr, 2)` slices a register out of that block and
+            answers 0 for anything the reader does not hold, so every slice is
+            gated on `isAvailable(id, addr, 2)` — see the race note below,
           - `_decode_sign` / `_normalize` are lerobot's own, so position comes
             out of here byte-identical to `get_observation()` — including the
             gripper's 0..100 normalisation, which differs from the other five
@@ -274,13 +593,42 @@ class ArmHandle:
 
         Not locked, deliberately: `bus.sync_reader` is already shared with the
         60 Hz teleop thread by lerobot's own `sync_read` with no lock anywhere
-        (see motion.py). This adds no new class of race — and a lost race here
-        degrades to `isAvailable() == False`, i.e. a 0 reading for one tick,
-        not to a garbage position.
+        (see motion.py). This adds no new class of race — but a lost race is
+        not harmless. The winner re-points the shared reader (`clearParam()`,
+        then a new start_address), and `getData` then answers 0. 0 is a
+        legitimate raw tick, not a sentinel: through `_decode_sign` /
+        `_normalize` it decodes to -180.0 deg on a full-range calibration, not
+        to zero degrees. In telemetry that is a visible teleport; in a
+        recorded episode it is a row that teaches a policy the arm was
+        somewhere it never was.
+
+        So every slice is availability-checked BEFORE any slice is read, and
+        checked again after the last one, and either miss raises
+        `SyncReaderRace`. What that does and does not buy, precisely:
+          - it is NOT a lock and does NOT make a 0 impossible. `getData` runs
+            `isAvailable` itself and answers 0 on a miss with NO raise
+            (group_sync_read.py), so a re-point landing between a check and
+            the matching `getData` still yields 0 for that slice.
+          - the two passes bracket every read, so a wrong value only escapes
+            if the reader spends the WHOLE bracket pointing at a window that
+            still covers both slices of every motor. lerobot's own reads are
+            single named registers and the only code that points the reader at
+            a window this wide is this method, so in practice that means a
+            second copy of this same read — a valid second reading of the same
+            arm, not garbage.
+          - the common case is closed outright: the contender is lerobot's own
+            `sync_read("Present_Position")`, which re-points to (56, 2) — that
+            fails the check at `_LOAD_ADDR` = 60 and raises.
+        Callers treat the raise as "no effort this tick" (see
+        `_read_state_and_effort`), which is the honest outcome for data that
+        did not arrive; `_demote_effort_path` deliberately does not count a
+        race as a comm failure.
         """
         assert self.robot is not None
         bus = self.robot.bus
         ids = [m.id for m in bus.motors.values()]
+        slices = [(i, addr) for i in ids
+                  for addr in (self._POS_ADDR, self._LOAD_ADDR)]
         bus._setup_sync_reader(ids, self._BLOCK_ADDR, self._BLOCK_LEN)
         comm = bus.sync_reader.txRxPacket()
         if not bus._is_comm_success(comm):
@@ -288,8 +636,14 @@ class ArmHandle:
                 f"block sync read @{self._BLOCK_ADDR}+{self._BLOCK_LEN} failed: "
                 f"{bus.packet_handler.getTxRxResult(comm)}"
             )
+        # Every slice checked before the first read: checking motor 6 only
+        # after motor 1 has been read widens the window for nothing.
+        self._assert_block_held(bus, slices)
         raw_pos = {i: bus.sync_reader.getData(i, self._POS_ADDR, 2) for i in ids}
         raw_load = {i: bus.sync_reader.getData(i, self._LOAD_ADDR, 2) for i in ids}
+        # And again: the reader has to have stayed ours across all the reads,
+        # not merely have been ours before the first.
+        self._assert_block_held(bus, slices)
         pos = bus._normalize(bus._decode_sign("Present_Position", raw_pos))
         return (
             {bus._id_to_name(i): float(v) for i, v in pos.items()},
@@ -338,7 +692,27 @@ class ArmHandle:
         return "none"
 
     def _demote_effort_path(self, exc: Exception) -> None:
-        """Step down one path after `_EFFORT_DEMOTE_AFTER` consecutive failures."""
+        """Step down one path after `_EFFORT_DEMOTE_AFTER` consecutive COMM
+        failures. A lost race is not one of those.
+
+        `_EFFORT_DEMOTE_AFTER` exists so one transient error cannot permanently
+        cost an extra round trip per tick, and `bus.sync_reader` is contended
+        by design at 60 Hz — so counting a race would hand three raced ticks
+        exactly the permanent demotion that constant is there to prevent. A
+        race means the fast path did not get its data this tick; it says
+        nothing about whether the bus can serve a block read, which is the only
+        question demotion answers. It does not clear the streak either: genuine
+        failures interleaved with races still add up.
+        """
+        if isinstance(exc, SyncReaderRace):
+            self._effort_race_count += 1
+            # First one per connect is worth a line; at 60 Hz the rest are not.
+            logger.log(
+                logging.WARNING if self._effort_race_count == 1 else logging.DEBUG,
+                "arm %s: effort read lost the shared sync_reader (%s); race #%d "
+                "since connect, path stays %s",
+                self.config.id, exc, self._effort_race_count, self._effort_mode)
+            return
         self._effort_fail_streak += 1
         if self._effort_fail_streak < self._EFFORT_DEMOTE_AFTER:
             return
@@ -380,9 +754,26 @@ class ArmHandle:
         self._effort_fail_streak = 0
         return effort
 
-    def _read_state_and_effort(self) -> tuple[dict[str, float], dict[str, float]]:
-        """Positions (deg) + effort for one telemetry tick, in as few round
-        trips as the arm allows: one on the block path, two otherwise."""
+    def _read_state_and_effort(
+        self,
+    ) -> tuple[dict[str, float], dict[str, float], str]:
+        """Positions (deg) + effort + what the effort channel DID, for one tick.
+
+        The third value is one of EFFORT_OK / EFFORT_TRANSIENT / EFFORT_ABSENT
+        and exists because the recorder must tell those two failures apart: a
+        live channel that missed one read is a dropped frame, a channel that
+        does not exist is a declared flat-zero column. Before this, both
+        arrived as an empty effort dict and the recorder could only guess —
+        and guessing wrong in the permissive direction writes false zeros into
+        a policy-visible feature.
+
+        As few round trips as the arm allows: one on the block path, two
+        otherwise.
+        """
+        if self._effort_mode == "none":
+            # Structurally absent: nothing to attempt, so this is not a failed
+            # read and must not be reported as one.
+            return self.read_joints_deg(), {}, EFFORT_ABSENT
         if self._effort_mode == "block":
             try:
                 pos, effort = self._read_block()
@@ -391,18 +782,28 @@ class ArmHandle:
                 # Deliberately no effort retry on this tick: a second attempt
                 # would pay a second serial timeout on a bus that just failed,
                 # and position — the channel telemetry actually needs — has
-                # still to be read. The demotion counter handles the rest.
-                return self.read_joints_deg(), {}
+                # still to be read. The demotion counter handles a bus that
+                # cannot serve the block read; a lost race is not that and is
+                # counted separately (see _demote_effort_path).
+                return self.read_joints_deg(), {}, EFFORT_TRANSIENT
             self._effort_fail_streak = 0
-            return pos, effort
+            return pos, effort, EFFORT_OK
         # Fallback path: lerobot's own position read, plus effort on its own
         # round trip if this arm can serve one at all. read_joints_deg raising
         # here is the pre-existing "arm telemetry failed" behaviour and stays.
-        return self.read_joints_deg(), self.read_effort_norm()
+        pos = self.read_joints_deg()
+        effort = self.read_effort_norm()
+        if effort:
+            return pos, effort, EFFORT_OK
+        # `read_effort_norm` swallows its own failure and may have demoted us
+        # to "none" on the way through. If it did, the channel is gone from
+        # here on; if it did not, this was one missed read on a live channel.
+        return pos, {}, (EFFORT_ABSENT if self._effort_mode == "none"
+                         else EFFORT_TRANSIENT)
 
     def state_snapshot(self) -> dict:
         assert self.robot is not None
-        pos, effort = self._read_state_and_effort()
+        pos, effort, effort_status = self._read_state_and_effort()
         joints = {}
         for joint, (lo, hi) in self.joint_limits_deg.items():
             joints[joint] = {
@@ -419,6 +820,10 @@ class ArmHandle:
         return {
             "mode": self.guard.mode.value,
             "torque": self.torque_enabled,
+            # What the effort channel did on THIS read — see EFFORT_OK above.
+            # Per-arm, not per-joint: the block read is one round trip for the
+            # whole arm, so its outcome cannot differ between joints.
+            "effort_status": effort_status,
             "joints": joints,
         }
 
@@ -491,6 +896,10 @@ class ArmManager:
         self._sim_task = sim_task
         self._handles: dict[str, "ArmHandle | SimArmHandle"] = {}
         self._world = None  # lazily constructed if any sim arm/camera needs it
+        # Kept, not logged-and-dropped: the log line scrolls away and the named
+        # offending joints are the only thing that tells an operator which
+        # servo to re-sweep. See preflight_reports().
+        self._preflight_reports: dict[str, PreflightReport] = {}
 
     def _ensure_world(self) -> "MuJoCoWorld":
         if self._world is not None:
@@ -556,11 +965,99 @@ class ArmManager:
             handle.motion = resolve_motion(cfg, self._motion)
             for peer in teleop_peers:
                 handle.executor.attach_peer(peer)
+            # On the books BEFORE the preflight, so an arm that faults during
+            # the check is still an arm disconnect_all releases. An energised
+            # arm missing from `_handles` is stranded stiff at shutdown.
             self._handles[cfg.id] = handle
+            self._preflight_arm(handle)
+
+    def _preflight_arm(self, handle) -> None:
+        """Check one just-connected arm and act on the report.
+
+        Ordering: `handle.connect()` has already run lerobot's `configure()`,
+        which is where `_park_goal_on_present` parks the goals and torque comes
+        back on. So the arm is energised and holding by the time this runs —
+        which is exactly why the check happens here and not later.
+
+        A failed preflight does NOT drop torque. The arm is holding its own
+        weight; cutting torque on a report about the calibration FILE drops it
+        onto the bench, which is the collapse the report exists to prevent.
+        `Mode.STOP` is the refusal instead — `send_goal` raises on it — and it
+        costs nothing to undo when the operator has looked. The one case where
+        torque must go is a first reading outside the limits, and preflight
+        drops that itself before returning, because it cannot wait for a round
+        trip through here.
+
+        Both effects are already in every `state_snapshot`, so the operator
+        sees an arm sitting in STOP in the HMI rather than an ERROR line in a
+        log nobody reads while an arm is on the bench.
+
+        Each arm in its own try, for `disconnect_all`'s reason one step
+        earlier: `run_preflight` promises never to raise, but a promise from
+        another module is not a guarantee, and a fault here must not leave the
+        arms behind this one connected, energised and unchecked.
+        """
+        from .vr_teleop.preflight import run_preflight
+
+        arm_id = getattr(handle.config, "id", "?")
+        try:
+            report = run_preflight(handle, logger)
+            self._preflight_reports[arm_id] = report
+            if report.ok():
+                if report.calibration_warnings:
+                    # run_preflight logs an ok report at INFO, and the per-joint
+                    # warnings it emits do not name the arm — on a bimanual rig
+                    # that is the half the operator needs.
+                    logger.warning("%s", report.message())
+                return
+            handle.guard.set(Mode.STOP)
+            logger.error(
+                "arm %s: preflight failed; arm set to mode %s and will refuse "
+                "goals until an operator clears it. Torque: %s",
+                arm_id, Mode.STOP.value,
+                # `torque_phrase()`, not the bare `torque_dropped` bool: the
+                # bool is True on a PARTIAL release, so branching on it prints
+                # "the arm is limp" about an arm that is limp in some joints
+                # and stiff in the rest — the state most likely to hurt
+                # someone who believes the log and reaches in.
+                report.torque_phrase())
+        except Exception:
+            logger.exception("arm %s: preflight raised; arm set to mode %s",
+                             arm_id, Mode.STOP.value)
+            handle.guard.set(Mode.STOP)
+
+    def preflight_reports(self) -> dict[str, PreflightReport]:
+        """Last preflight per arm id — the named offending joints, for a caller
+        that can put them in front of the operator."""
+        return dict(self._preflight_reports)
+
+    def rerun_preflight(self, arm_id: str) -> PreflightReport | None:
+        """Re-check ONE arm and replace its stored verdict.
+
+        Exists so an operator who has just repositioned an arm can ask again
+        without a backend restart. A restart is the worst possible way to
+        re-check: shutdown drops torque, the arm sags under its own weight,
+        and the next preflight reads a pose further outside the limits than
+        the one that failed — so fixing a flagged joint reveals the next one
+        rather than clearing the arm.
+
+        Deliberately the same call the connect path makes, not a softer one:
+        re-running must be able to FAIL, or it becomes a dismiss button.
+        """
+        handle = self._handles[arm_id]
+        self._preflight_arm(handle)
+        return self._preflight_reports.get(arm_id)
 
     def disconnect_all(self) -> None:
+        # Each arm in its own try: on a bimanual rig one arm's bad servo must
+        # not leave the OTHER arm energised, which is the same failure as
+        # ArmHandle._release_torque_per_motor one level up.
         for handle in self._handles.values():
-            handle.disconnect()
+            try:
+                handle.disconnect()
+            except Exception:
+                logger.exception("arm %s: disconnect failed; continuing",
+                                 getattr(handle.config, "id", "?"))
         if self._world is not None:
             self._world.stop()
             self._world = None

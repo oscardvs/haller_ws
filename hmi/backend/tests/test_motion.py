@@ -328,7 +328,7 @@ def test_teleop_owner_reads_a_real_running_teleop_session():
 def test_teleop_owner_reads_a_real_running_human_teleop_session():
     mgr = _two_arm_manager()
     session = HumanTeleopSession(mgr)
-    session.start(left_arm="left", right_arm="right", swap=False)
+    session.start(left_arm="left", right_arm="right")
     try:
         ex = MoveExecutor(_fake_handle())
         ex.attach_peer(session)
@@ -399,7 +399,7 @@ def test_human_teleop_session_start_refuses_while_a_ramp_is_in_flight():
     try:
         session = HumanTeleopSession(mgr)
         with pytest.raises(RuntimeError) as e:
-            session.start(left_arm="left", right_arm="right", swap=False)
+            session.start(left_arm="left", right_arm="right")
         assert "right" in str(e.value)
     finally:
         right.executor.cancel()

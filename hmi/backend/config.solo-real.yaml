@@ -1,0 +1,170 @@
+# hmi/backend/config.solo-real.yaml
+# ONE real arm, driven from the DESKTOP, no Jetson. Brought up by
+#   scripts/quest-teleop/up.sh --solo
+#
+# This is the first-hardware-run config: one arm on the bench, one hand on the
+# grip, half as much that can go wrong. It exists because the teleop session
+# used to require two arms unconditionally, so "test it on one arm" was not a
+# thing you could ask for.
+#
+# The arm here is the board whose USB-C still works (CH343, serial
+# 5B14030445), jumper on USB-SERVO, straight into a desktop USB port — the
+# same one config.desktop-real.yaml calls `left`. If the OTHER board is the
+# working one on the night, swap the port/calibration_id pair below; nothing
+# else in this file cares which physical arm it is.
+#
+# Which HAND drives it is NOT set here — it is chosen when the session starts.
+# By default the stance decides (behind: this arm, id "left", lands under the
+# operator's RIGHT hand); the "hand" picker next to the session presets — on
+# the VR page and in the cockpit launcher — overrides it explicitly, and the
+# preset caption always states the exact hand->arm mapping that will be
+# POSTed. Pick the hand the arm is actually under.
+#
+# When teleop misbehaves and you need to know WHICH stage is bending it, run
+# config.solo-raw.yaml (up.sh --solo --raw) — same rig, every advisory
+# shaping stage off.
+
+motion:
+  # DISCRETE moves only (Home, presets, plan_ramp) since 2026-08-29: the
+  # teleop session now passes its own ceiling (RATE_CAP_DEG_S, 240 deg/s ≈
+  # the servo's physical ~260 deg/s at 7.4 V) to send_goal, so this number
+  # no longer shadows teleop tracking. It used to be the binding teleop
+  # limiter — 90 here meant 90 deg/s on every joint against a kit that
+  # carries NO write-path cap (its --max-relative-target defaults to None)
+  # and lets the IK's per-solve caps + servo physics govern. Home stays
+  # gentle at 90; history: 60 after the 2026-08-01 bench incident, 90 from
+  # 2026-08-24 once park-on-present landed.
+  max_speed_deg_s: 90.0
+  large_move_deg: 30.0
+  ramp_hz: 50.0
+  # 0.0 = NO output filter — the kit's configuration, taken exactly
+  # (2026-08-29; was 0.02, before that the 0.100 default). The kit's only
+  # shaping between mapper and bus is its solver's per-solve caps. Here the
+  # filter sat after an IK that re-seeds from the COMMITTED pose every
+  # solve, so any attenuation compounds: at 0.100 the effective ceiling
+  # landed near 29 deg/s (the 2026-08-24 crawl); even at 0.02 the session
+  # committed only ~57% of each solve step per 60 Hz tick and added ~20 ms
+  # of lag. The cost of 0: controller jitter reaches the servos unshaped —
+  # the kit's bargain, and this rig is meant to feel like that rig. The
+  # pose_filter_alpha EMA on the CONTROLLER pose (converter side, kit
+  # parity 0.8) still stands; that one the kit ships too.
+  lpf_tau_s: 0.0
+
+collision:
+  # OFF for the first single-arm run, on purpose and against the config
+  # default. Two reasons, and the second is the real one:
+  #
+  #   1. With one arm there is no arm-vs-arm case at all. What is left is the
+  #      self-collision pairs (hand/forearm vs. the base column) and the bench
+  #      floors — a much smaller amount of guarding for a much larger amount
+  #      of "why did it stop".
+  #   2. The mounts below are still the SIM SCENE's placeholder +/-0.20 m.
+  #      Nobody has measured the real tower. A guard reasoning about
+  #      millimetres from geometry that is a guess is exactly what clamps an
+  #      arm that is plainly nowhere near anything, which is the complaint
+  #      this switch exists to answer.
+  #
+  # It is a runtime switch, not a restart: flip it from the VR page's Safety
+  # card or `POST /teleop/human/collision {"enabled": true}`. Off still
+  # MEASURES — `status().collision.slack_m` keeps updating — so the honest
+  # first-run procedure is to drive with it off, watch the number, and turn it
+  # on once the mounts have been measured and the number behaves.
+  #
+  # What stays on regardless: the teleop's own workspace floor (the commanded
+  # fingertip and wrist can never go below the bench), the per-joint limits,
+  # the acquisition ramp, the rate caps and the motion envelope above.
+  enabled: false
+  margin_m: 0.025
+  self_margin_m: 0.008
+  # The arm sits on the XLeRobot base plate above the table surface. The
+  # mount frame's z=0 is the plate, so the bench is below it — this feeds
+  # the teleop's workspace floors (tip may go to 5 mm above this plane,
+  # wrist to 35 mm) even with the guard off. -0.10 (the measured riser)
+  # still refused the last stretch on the bench 2026-08-24 — residual FK
+  # bias from the hand calibration — so this is set permissive; the true
+  # fix is pinning it to an FK reading taken with the fingertip touching
+  # the wood.
+  table_z_m: -0.25
+  mounts:
+    left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
+    right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
+
+# Matched to the kit's `SO101QuestTeleoperatorConfig`, joint for joint.
+#
+# The kit recorded 46 usable episodes with these numbers and this rig is meant
+# to feel like that rig. Everything below is a value Haller had drifted from;
+# the ones that already agreed (scale_translation 1.0, pose_filter_alpha 0.8,
+# pos_reach_limit 0.15, rot_reach_limit 0.6, mu, lam_rot, rot_err_hold) are
+# left to the defaults rather than restated here, so this list stays readable
+# as exactly the set of disagreements.
+teleop:
+  # 1.6 amplified the operator's twist by 60%. The kit maps 1:1, and a wrist
+  # that rotates further than your hand did is the single most obvious way
+  # teleop stops feeling like your own arm.
+  scale_rotation: 1.0
+  # The kit's fine-work multiplier, held on A/X.
+  precision_factor: 0.5
+  # The kit's per-joint per-tick caps, converted from radians: 0.06 rad and
+  # 0.24 rad. Haller's 8.0 was 40% under the kit's wrist cap, which reads as
+  # a wrist that lags the hand and then catches up.
+  max_dq_deg_pos: 3.44    # 0.06 rad
+  max_dq_deg_rot: 13.75   # 0.24 rad
+  # NO workspace floor — the kit has none, and this rig is meant to match it.
+  #
+  # Read this before turning it back on or leaving it off: with the floor on,
+  # `QuestTeleoperator._clamp_floor` LIFTS a commanded pose so the fingertip
+  # stays 5 mm and the wrist 35 mm above `collision.table_z_m`. Pushing your
+  # hand below the bench then slides the tool along it instead of descending,
+  # which is a real difference in feel and is what this rig was doing.
+  #
+  # What it costs: `collision.enabled` is false in this config too, so with
+  # both off NOTHING bounds the commanded height except the per-joint limits
+  # and the motion envelope. An operator who drives the tool into the bench
+  # gets a servo fighting the table. That is the kit's bargain, taken
+  # deliberately, and it is why `config.solo-raw.yaml` documents the same
+  # switch under a header warning.
+  floor_enabled: false
+
+arms:
+  - id: left
+    model: so101_follower
+    port: /dev/haller_arm_leader
+    calibration_id: haller_leader
+    enabled: true
+  # The second board stays out of this file entirely rather than sitting here
+  # with `enabled: false`. An arm the config mentions but does not enable is
+  # one more thing to misread at the bench at 22:00.
+
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+
+telemetry:
+  # 20 Hz, not the sim's 30: the half-duplex Feetech bus interleaves 60 Hz
+  # writes with these reads. The recorded dataset's fps follows this number.
+  hz: 20
+
+cameras:
+  - id: base_front
+    role: base
+    source: opencv
+    # Tower-mounted, facing the operator: the HUD mirrors this view for
+    # DISPLAY only (never for recording) so it reads like a mirror instead of
+    # left/right-flipped. See config.yaml's base_front for the full note.
+    facing: operator
+    index_or_path: /dev/haller_cam_mast
+    width: 640
+    height: 480
+    fps: 30
+    # The kit ACTs' one visual feature is observation.images.top (so101_pick_cube),
+    # so this view rolls out AND records under that key — precedent config.bimanual-sim.yaml:83.
+    dataset_key: top
+  - id: wrist_left
+    role: wrist
+    arm_id: left
+    # The gripper egocentric cams are IMX219 on Tegra CSI — there is no CSI on
+    # the desktop, so they stay out of the dataset schema here.
+    source: placeholder

@@ -1,0 +1,105 @@
+# hmi/backend/config.solo-raw.yaml
+# ONE real arm, desktop, EVERY advisory shaping stage neutralized. This is the
+# tracing config: when the arm does not go where the hand goes, run THIS, and
+# whatever error remains is one of exactly two things — pure lag against the
+# one remaining speed limiter (motion.max_speed_deg_s), or FK/calibration bias.
+# Nothing else is left to blame.
+#
+#   HALLER_HMI_CONFIG=config.solo-raw.yaml scripts/quest-teleop/up.sh --solo
+#   (or: scripts/quest-teleop/up.sh --solo --raw)
+#
+# Derived from config.solo-real.yaml (same arm, same port, same cameras).
+# What that config's tuning stack does to a fast reach, in order: the pose EMA
+# lags the hand, the IK's 3°-per-solve cap holds the target ~26 deg/s slow
+# (it compounds with the session filter — see MotionConfig.lpf_tau_s), the
+# 12 cm reach clutch then ABSORBS the overshoot for good, and the arm stops
+# somewhere the hand is not. Every stage below turns one of those off.
+#
+# WHAT STILL PROTECTS THE HARDWARE (none of this is disabled or disableable
+# here): the calibrated per-joint limit clamps (IK, session and send_goal all
+# apply them), send_goal's real-elapsed-time speed budget at max_speed_deg_s,
+# the session's 4°/tick cap (240 deg/s — headroom, not shaping), the 1 s
+# acquire countdown + 20 deg/s handover ramp, torque-enable park-on-present,
+# the mode guard and /estop. Keep a hand near the E-STOP anyway: with the
+# floors off, software no longer stops the fingertip at the bench.
+#
+# BEFORE trusting what you see, pin the FK once (the 2026-08-24 floor saga was
+# this): touch the fingertip to the bench, read status().collision.slack_m /
+# fk of the measured joints, and compare with a ruler. If FK says the tip is
+# centimetres from where it is, recalibrate (full sweep into both stops) —
+# no mapping knob can fix a biased zero.
+
+motion:
+  # With the IK caps raised below, THIS becomes the one binding speed limit,
+  # which is where everyone always believed it was. Raise past 90 only
+  # deliberately (2026-08-01: a slewing arm burnt the 7.4 V DC-DC).
+  max_speed_deg_s: 90.0
+  large_move_deg: 30.0
+  ramp_hz: 50.0
+  # 0.0 = filter fully OFF (legal since 2026-08-29) — this is the
+  # everything-off config, and the 0.02 it used to carry was only ever
+  # "as close to off as validation allowed". The kit ships no output filter.
+  lpf_tau_s: 0.0
+
+# Startup values for the live-tunable mapping knobs (vr_teleop/config.py).
+# Same keys and same clamps as a headset config_update; the panel can still
+# move them mid-session, but every reconnect starts back at THESE, so a test
+# run is reproducible from this file alone.
+teleop:
+  pose_filter_alpha: 1.0   # raw controller pose, no input EMA
+  scale_translation: 1.0   # 1:1 hand -> tool
+  scale_rotation: 1.0      # 1:1 twist (solo-real amplifies x1.6)
+  pos_reach_limit: 0.0     # 0 = absolute mapping: nothing is ever absorbed,
+  rot_reach_limit: 0.0     #     position error cannot silently accumulate
+  max_dq_deg_pos: 15.0     # IK stops being the binding constraint
+  max_dq_deg_rot: 30.0
+  # Off for diagnosis: "controller forward" is then the stance matrix alone,
+  # not corrected by where the headset pointed at the squeeze. Stand SQUARE
+  # behind the rig, or lateral motion will read as skewed — that skew being
+  # measurable is the point.
+  yaw_on_engage: false
+  # No demand floor. The bench is unprotected; see the header warning.
+  floor_enabled: false
+
+collision:
+  # Guard off AND its floors placed below the reachable workspace, so that a
+  # mid-session Safety-card toggle cannot quietly re-introduce clamping built
+  # on the unmeasured placeholder mounts below.
+  enabled: false
+  margin_m: 0.025
+  self_margin_m: 0.008
+  table_z_m: -0.40
+  mounts:
+    left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
+    right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
+
+arms:
+  - id: left
+    model: so101_follower
+    port: /dev/haller_arm_leader
+    calibration_id: haller_leader
+    enabled: true
+
+ros:
+  cmd_vel_topic: /cmd_vel
+  odom_topic: /odom
+  scan_topic: /scan
+  max_linear: 1.0
+  max_angular: 2.0
+
+telemetry:
+  hz: 20
+
+cameras:
+  - id: base_front
+    role: base
+    source: opencv
+    facing: operator
+    index_or_path: /dev/haller_cam_mast
+    width: 640
+    height: 480
+    fps: 30
+  - id: wrist_left
+    role: wrist
+    arm_id: left
+    source: placeholder

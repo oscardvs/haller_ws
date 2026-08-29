@@ -112,6 +112,7 @@ async def test_frame_contains_calibration_block_when_session_active():
     handle.robot.bus.motors = {"gripper": MagicMock(model="sts3215", id=6)}
     handle.robot.bus.model_resolution_table = {"sts3215": 4096}
     handle.robot.bus.sync_read.return_value = {"gripper": 2048}
+    handle.robot.bus.set_half_turn_homings.return_value = {"gripper": 0}
     handle.robot.calibration = None
     handle.torque_enabled = True
     arms.values.return_value = [handle]
@@ -130,6 +131,53 @@ async def test_frame_contains_calibration_block_when_session_active():
     assert block["state"] == "sweeping"
     assert "ticks" in block and "gripper" in block["ticks"]
     assert "min" in block and "max" in block
+
+
+@pytest.mark.asyncio
+async def test_calibration_block_survives_a_failed_arm_snapshot():
+    """From capture until save the bus has no calibration registered, so the
+    arm's normalized snapshot raises on EVERY tick. Block-presence is the
+    frontend's session-liveness signal and tick_sweep its only recorder, so
+    both must keep flowing when the snapshot cannot — an arm absent from the
+    snaps must still carry its calibration block."""
+    handle = MagicMock()
+    handle.state_snapshot.side_effect = RuntimeError("has no calibration registered")
+    handle.config = MagicMock(id="right")
+    arms = MagicMock()
+    arms.keys.return_value = ["right"]
+    arms.__getitem__.return_value = handle
+
+    ros = MagicMock()
+    ros.snapshot.return_value = MagicMock(linear=0.0, angular=0.0, odom={}, scan_min_range=None)
+
+    cal_mgr = CalibrationManager()
+    handle.guard = MagicMock()
+    handle.guard.mode = Mode.MANUAL
+    handle.robot = MagicMock()
+    handle.robot.bus.motors = {"gripper": MagicMock(model="sts3215", id=6)}
+    handle.robot.bus.model_resolution_table = {"sts3215": 4096}
+    handle.robot.bus.sync_read.return_value = {"gripper": 2048}
+    handle.robot.bus.set_half_turn_homings.return_value = {"gripper": 0}
+    handle.robot.calibration = None
+    handle.torque_enabled = True
+    arms.values.return_value = [handle]
+    session = cal_mgr.start(arms, "right")
+    session.capture_neutral(handle)
+
+    bcast = TelemetryBroadcaster(arms, ros, hz=200.0, calibration=cal_mgr)
+    bcast.start()
+    try:
+        sub = bcast.subscribe()
+        frame = await asyncio.wait_for(sub.__anext__(), timeout=0.2)
+    finally:
+        await bcast.stop()
+
+    block = frame["arms"]["right"]["calibration"]
+    assert block["state"] == "sweeping"
+    assert "gripper" in block["ticks"], "tick_sweep must still record the sweep"
+    assert "error" not in block, "a missing snapshot is not a calibration bus error"
+    assert cal_mgr.current is not None, "the session must not be auto-aborted"
+    assert any(a["code"] == "arm_telemetry_failed" for a in frame["alerts"])
 
 
 @pytest.mark.asyncio
@@ -178,6 +226,7 @@ async def test_bus_error_during_sweep_aborts_session_and_emits_alert():
     handle.robot.bus.motors = {"gripper": MagicMock(model="sts3215", id=6)}
     handle.robot.bus.model_resolution_table = {"sts3215": 4096}
     handle.robot.bus.sync_read.return_value = {"gripper": 2048}
+    handle.robot.bus.set_half_turn_homings.return_value = {"gripper": 0}
     handle.robot.calibration = None
     handle.torque_enabled = True
     arms.values.return_value = [handle]

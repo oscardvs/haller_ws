@@ -19,19 +19,34 @@
 #                                         # plugged into this machine
 #                                         # (config.desktop-real.yaml, or
 #                                         # $HALLER_HMI_CONFIG).
+#   scripts/quest-teleop/up.sh --solo     # ONE real arm on this desktop
+#                                         # (config.solo-real.yaml). The
+#                                         # first-hardware-run shape: one arm,
+#                                         # one hand, collision guard off by
+#                                         # default (flip it live from the VR
+#                                         # page's Safety card). Implies
+#                                         # --local.
 #   scripts/quest-teleop/up.sh --tailscale  # serve the SAME single origin on
 #                                         # the tailnet instead of the LAN.
 #                                         # Composes with the others, e.g.
 #                                         #   up.sh --insertion --tailscale
 #   scripts/quest-teleop/down.sh          # stop the desktop half
 #
-# --tailscale exists because a local network can be actively hostile. The ZTE
-# router has AP/client isolation on: the Quest and this desktop each reach the
-# router and NEITHER can reach the other (ARP to the headset goes FAILED, and
-# tcpdump here sees literally zero packets from it). Nothing on this machine
-# can fix that — the frames never leave the AP. Tailscale sidesteps the LAN
-# entirely by carrying the traffic over WireGuard, so the two only have to
-# reach the internet, not each other. The second win is the certificate:
+# --tailscale exists because a local network can be actively hostile. This one
+# is NOT AP isolation, though it looks exactly like it: `ZTE_DEC155` is one
+# SSID on two BSSIDs — 10:3C:59:DE:C1:55 (ch 6, 2.4 GHz) and
+# 10:3C:59:E0:C1:55 (ch 44, 5 GHz) — and the router does not bridge clients
+# across them. Split across radios, the Quest and this desktop each hold a
+# 192.168.0.x lease and reach the internet while neither can see the other:
+# ARP to the headset goes FAILED and tcpdump here sees literally zero packets
+# from it. The band is re-chosen on every association, so it comes and goes
+# with no config change. The cheap fix is to pin this box to the headset's
+# radio (`nmcli con modify ZTE_DEC155 802-11-wireless.bssid <BSSID>`; both are
+# worth trying, it is a two-shot experiment) — see hmi/QUICKSTART-QUEST.md.
+# --tailscale is what works when that fails, or when the split is not the
+# problem: it sidesteps the LAN entirely by carrying the traffic over
+# WireGuard, so the two only have to reach the internet, not each other. The
+# second win is the certificate:
 # `tailscale cert` issues a publicly-trusted one for the MagicDNS name, so the
 # self-signed interstitial disappears — and that interstitial is not cosmetic
 # here, because it can never be accepted for a WebSocket.
@@ -51,6 +66,8 @@ set -eo pipefail
 
 SIM=0
 LOCAL=0
+SOLO=0
+RAW=0
 TAILSCALE=0
 SIM_CFG="config.bimanual-sim.yaml"
 # A loop, not the old if/elif on $1: --tailscale picks the ORIGIN and the
@@ -65,10 +82,15 @@ while [ $# -gt 0 ]; do
         --sim)       SIM=1 ;;
         --insertion) SIM=1; SIM_CFG="config.bimanual-insertion.yaml" ;;
         --local)     LOCAL=1 ;;
+        --solo)      LOCAL=1; SOLO=1 ;;
+        # Solo with every advisory shaping stage neutralized — the tracing
+        # config. Modifies --solo rather than implying it, so the flag reads
+        # as what it is: a variant of the solo bring-up, not a fifth rig.
+        --raw)       RAW=1 ;;
         --tailscale) TAILSCALE=1 ;;
         *)
             printf 'up.sh: unknown option %s\n' "$1" >&2
-            printf 'usage: up.sh [--sim|--insertion|--local] [--tailscale]\n' >&2
+            printf 'usage: up.sh [--sim|--insertion|--local|--solo [--raw]] [--tailscale]\n' >&2
             exit 2
             ;;
     esac
@@ -182,6 +204,19 @@ elif [ "$SIM" = 1 ] || [ "$LOCAL" = 1 ]; then
     if [ "$SIM" = 1 ]; then
         BACKEND_CFG="$SIM_CFG"
         say "starting SIM backend on :$BACKEND_PORT ($BACKEND_CFG — MuJoCo bimanual, no hardware)"
+    elif [ "$SOLO" = 1 ]; then
+        if [ "$RAW" = 1 ]; then
+            BACKEND_CFG="${HALLER_HMI_CONFIG:-config.solo-raw.yaml}"
+            say "starting SOLO RAW backend on :$BACKEND_PORT ($BACKEND_CFG — ONE real arm, tracing config)"
+            say "  reach limits, pose filter, floors, rotation gain: ALL OFF."
+            say "  Only the joint limits and the ${BACKEND_CFG} motion envelope"
+            say "  protect the bench — hand on the E-STOP."
+        else
+            BACKEND_CFG="${HALLER_HMI_CONFIG:-config.solo-real.yaml}"
+            say "starting SOLO backend on :$BACKEND_PORT ($BACKEND_CFG — ONE real arm, no Jetson)"
+            say "  collision guard starts OFF in this config; the workspace floor,"
+            say "  joint limits, rate caps and motion envelope all stay on."
+        fi
     else
         BACKEND_CFG="${HALLER_HMI_CONFIG:-config.desktop-real.yaml}"
         say "starting LOCAL backend on :$BACKEND_PORT ($BACKEND_CFG — real arms, no Jetson)"
@@ -366,6 +401,8 @@ curl -ksm 4 "$ORIGIN/teleop/vr" -o /dev/null || ok=0
 if [ "$ok" = 1 ]; then
     if [ "$SIM" = 1 ]; then
         say "READY (SIM — MuJoCo arms, nothing physical can move)."
+    elif [ "$SOLO" = 1 ]; then
+        say "READY (ONE REAL ARM on this desktop — no Jetson)."
     elif [ "$LOCAL" = 1 ]; then
         say "READY (REAL ARMS on this desktop — no Jetson)."
     else
@@ -373,7 +410,7 @@ if [ "$ok" = 1 ]; then
     fi
     say "In the Quest browser open:"
     say ""
-    say "    $ORIGIN/teleop/vr"
+    say "    $ORIGIN/teleop/vr          (the in-headset page — the only VR client)"
     say ""
     if [ "$TAILSCALE" = 1 ]; then
         say "(over the tailnet, with a real cert — no interstitial). The headset"

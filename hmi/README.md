@@ -24,19 +24,20 @@ hmi/
 ├── backend/      Python service (uvicorn + FastAPI)
 │   ├── config.yaml             arms, ROS topics, telemetry rate, cameras
 │   ├── haller_hmi/             package
-│   └── tests/                  pytest (85 tests)
+│   └── tests/                  pytest (645 tests)
 └── frontend/     Next.js app (standalone-built)
-    ├── app/                    pages: /, /arm/[id], /base, /settings
-    ├── components/             ArmPanel, BasePanel, JointSlider, EStopButton, …
-    ├── lib/                    api client, telemetry WS store, config
-    └── __tests__/              vitest (19 tests)
+    ├── app/                    pages: / (cockpit), /settings, /teleop/vr
+    ├── components/cockpit/     the cockpit shell and its six tabs
+    ├── components/             VRTeleopPanel (the in-headset HUD) + shared widgets
+    ├── lib/                    api client, telemetry WS store, stance, config
+    └── __tests__/              vitest (186 tests)
 ```
 
 ## Prerequisites
 
 - Python venv with ROS 2 Jazzy access and lerobot installed — see [`docs/setup/lerobot-environment.md`](../docs/setup/lerobot-environment.md).
 - At least one SO-101 follower configured and calibrated — see [`docs/setup/so101-arm.md`](../docs/setup/so101-arm.md). The default config expects calibration id `haller_follower` reachable at `/dev/haller_arm_follower`.
-- Node 20+ and pnpm 9.x on whichever host runs the frontend.
+- Node 20+ and pnpm on whichever host runs the frontend (built against Node 20.20 / pnpm 10).
 
 ## Quick start (operator laptop)
 
@@ -56,11 +57,13 @@ pnpm install                     # first time only
 pnpm dev                         # Next dev server on http://localhost:3000
 ```
 
-Open <http://localhost:3000>. You should see:
-- A "live" badge top-right (green) once the WebSocket connects.
-- A Base panel with a joystick on the left.
-- An "Arm: right" panel on the right with six joint sliders.
-- A red E-STOP pinned top-right of every page.
+Open <http://localhost:3000>. You should see the cockpit: one fixed-viewport
+surface that never scrolls.
+- A green `live` lamp in the telemetry rail once the WebSocket connects.
+- Six tabs — Operate, Teleop, Calibrate, Cameras, Dataset, Settings.
+- **Operate** showing the primary camera and drive console beside one card per
+  configured arm.
+- A red E-STOP in the header, on every tab.
 
 ### Pointing the frontend at a remote backend
 
@@ -83,7 +86,9 @@ Each arm card has a header strip (id + mode toggle), a wrist-camera placeholder,
 
 ## Teleop (leader ↔ follower)
 
-The dashboard's **Teleop** card lets you turn the HMI into a leader/follower bridge between the two physical arms:
+The command bar's **Teleop** popover — reachable from every tab — turns the HMI
+into a leader/follower bridge between the two physical arms. This is the
+back-drive-by-hand path; the headset path is the Teleop tab, below.
 
 1. Pick the arm you'll back-drive in the **Leader** dropdown.
 2. Pick the arm that should mirror it in the **Follower** dropdown (or click `⇄` to swap).
@@ -104,32 +109,97 @@ E-STOP also stops teleop before disabling torque — so the follower can't jump 
 
 To fix a leader↔follower midpoint mismatch (`shoulder_lift` looks the most off), re-run the wizard on one arm while it holds the same physical neutral pose as the other.
 
-## Human teleop (vision)
+## Quest teleop (WebXR)
 
-The dashboard's **Human teleop** link opens `/teleop/human`, a new mode that drives both SO-101 arms from your laptop webcam.
+One teleop system, one input path: a Meta Quest drives one or both SO-101 arms
+from the headset browser. There is no webcam mode and no keyboard clutch — the
+MediaPipe pipeline, the mouth clutch and the body-angle modes were deleted in
+the 2026-08-22 unification.
 
-1. Pick the two arms in **assign**.
-2. Click **open · capture**, hold your hand open, then **pinch · capture** with thumb and index touching. Repeat for the other side.
-3. Position yourself in front of the camera (both shoulders + both hands visible). The skeleton overlay will appear on the feed.
-4. **Hold SPACE** to drive. The robots track your joint angles 1:1. Release SPACE to freeze instantly.
-5. **Stop** ends the session and restores both arms to MANUAL.
+Two surfaces, one session:
 
-**Mutual exclusion.** Only one teleop kind runs at a time. Starting human teleop while leader/follower teleop is running returns 409 (and vice versa).
+- **The cockpit's Teleop tab** is mission control. It computes the session
+  presets from the configured arms (dual, plus one solo per arm), carries the
+  stance selector and the rate, shows each side's authority as a live chip,
+  holds the **collision guard** as a first-class toggle with a running
+  clearance readout, and prints the HTTPS URL to open in the headset.
+- **`/teleop/vr`** is that URL — the WebXR page, passthrough AR, with the HUD
+  the operator actually flies: two world-locked quads and a grabbable cluster.
 
-**Tracking loss.** If one hand exits the frame, that arm freezes in place; the other arm continues. The HUD shows `tracking lost (side)`.
+1. **Pick a preset.** Each button prints the mapping it will post — `L hand →
+   right · R hand → left`. Read it before you start. A solo preset drives one
+   arm and ignores the other hand entirely; nothing is ever written to the
+   absent side, and that side reports `no_arm`.
+2. **Pick your stance.** `behind` (the default) is egocentric — you stand
+   behind the arms and they reach the way you do, so the sides cross and the
+   arm named `left` ends up under your **right** hand. `mirror` and `front`
+   are face-to-face and pair directly. The pairing follows the arm *ids*, not
+   the order `config.yaml` declares them, so one stance means one thing on
+   every rig. Stance is frozen at session start.
+3. **Start the session**, then open the printed URL in the Quest browser and
+   enter VR. WebXR needs a secure context, so serve the single HTTPS origin
+   with `scripts/quest-teleop/up.sh` — a plain `http://` page will load and
+   then refuse to enter VR.
+4. **Squeeze a grip to take that arm.** Each grip is that arm's dead-man,
+   independently: the trigger is that arm's gripper, `B`/`Y` is E-STOP, and
+   holding `A`/`X` toggles the dataset recorder. Release a grip and that arm
+   freezes exactly where it is.
+5. **Nothing moves until a side has acquired.** Squeezing starts a countdown
+   and a rate ramp rather than a jump — the mapper re-anchors on your hand
+   where it is, so the handover starts at zero error.
+6. **Stop** from the cockpit's Teleop tab, or E-STOP from either surface.
 
-**E-STOP** stops human teleop just like leader/follower, drops torque, and zeroes `/cmd_vel`.
+**The collision guard.** A runtime switch rather than a config flag, because
+the decision gets made with the arm in front of you. Off still **measures** —
+the clearance readout keeps updating, it just stops holding steps back. The
+workspace floor, joint limits, rate caps and motion envelope stay on either
+way. On a rig with no mount geometry for every arm the guard reports
+`available: false` and enabling it is refused: a guard with no geometry would
+pass every check it made.
 
-### Manual smoke tests
+**Mutual exclusion.** Only one teleop kind runs at a time. Starting a headset
+session while the leader/follower bridge is running returns 409, and vice
+versa.
 
-1. Cold start with no camera → permission prompt → error state → no robot motion.
-2. Calibrate pinch → engage SPACE → wave one arm → the other stays in place.
-3. Mid-drive: hand exits frame → that arm freezes, other continues, chip turns amber.
-4. Mid-drive: release SPACE → both arms freeze within ~16 ms.
-5. Global E-STOP while driving → session stops, torque drops, E-STOP banner.
-6. Try to start leader/follower while human teleop is running → 409, no state change.
+**Tracking loss.** If one controller stops reporting, that arm freezes and the
+other keeps driving; the side's chip says which. A socket that goes quiet
+starts a grace window rather than ending the session on one dropped frame.
 
-See [`docs/superpowers/specs/2026-05-22-human-pose-teleop-design.md`](../docs/superpowers/specs/2026-05-22-human-pose-teleop-design.md) for the full design.
+**E-STOP** stops the session, drops torque on every arm and zeroes `/cmd_vel`
+— from the cockpit header, from `POST /estop`, or from `B`/`Y` in the headset.
+
+Full operator walkthrough, including the complete controller map and the
+in-headset recording flow: [`QUICKSTART-QUEST.md`](./QUICKSTART-QUEST.md). The
+unification's plan of record, including the invariants the refactor had to
+keep: [`PLAN-2026-08-22-hmi-unification.md`](./PLAN-2026-08-22-hmi-unification.md).
+
+### Smoke tests
+
+`scripts/vr_smoke.py` plays a scripted operator against a running backend over
+the real socket — the arming countdown, per-side grips, the collision guard,
+E-STOP, socket drop, single-arm sessions and a recorded take. No headset
+needed. Never point it at real arms unattended:
+
+```bash
+cd hmi/backend && source ~/venvs/haller-hmi/bin/activate
+HALLER_HMI_CONFIG=$PWD/config.bimanual-sim.yaml MUJOCO_GL=egl \
+    python -m uvicorn haller_hmi.server:app --port 8077 &
+python ../../scripts/vr_smoke.py --base http://localhost:8077
+# 49 checks; exit 0 = every one passed
+```
+
+By hand, in the headset:
+
+1. Start a solo preset → only the chosen arm ever moves; the other side's chip
+   reads `NOT IN SESSION`.
+2. Squeeze one grip → that side counts down, then ramps in. The other stays
+   frozen.
+3. Release mid-drive → that arm freezes; the other keeps going.
+4. Guard ON, drive the two tools toward each other → the clamp holds at the
+   margin. Toggle it OFF and confirm the clearance keeps reading.
+5. `B`/`Y` while driving → session stops, torque drops, E-STOP banner.
+6. Start the leader/follower bridge while a headset session runs → 409, no
+   state change.
 
 ## Cameras
 
@@ -140,23 +210,57 @@ Cameras are declared in [`backend/config.yaml`](./backend/config.yaml). Each ent
 | `id`             | Free-form id used in the URL path and as the dataset feature key. |
 | `role`           | `wrist` or `base`. `wrist` cameras tied to an `arm_id` render inside the matching arm card. |
 | `arm_id`         | Optional — binds a wrist camera to one of the arms. |
-| `source`         | `placeholder` (slot reserved, no capture) or `opencv` (real V4L2 device). |
+| `source`         | `placeholder` (slot reserved, no capture), `opencv` (V4L2 device), `csi` (Tegra CSI via nvarguscamerasrc), or `sim_camera` (a MuJoCo view). |
 | `index_or_path`  | Required for `opencv`. Either an integer (`0`) or device path (`/dev/video0`). |
 | `width, height, fps` | OpenCV capture parameters. Default 640×480 @ 30. |
+| `record`         | Whether this camera lands in recorded episodes. Default `true`. The *starting* value only — it is a runtime toggle from the Dataset tab (`POST /cameras/{id}/record`), frozen for the duration of each take. |
+| `dataset_key`    | Feature name in the dataset (`observation.images.<dataset_key>`), falling back to `id`. Lets a rig-specific id like `wrist_left_sim` land under whatever the datasets you co-train with already call that view. |
 
 When source is `opencv`, the HMI captures via `lerobot.cameras.opencv.OpenCVCamera` and exposes:
 
-- `GET /cameras` — runtime list of all configured cameras + the `active` flag.
+- `GET /cameras` — runtime list of all configured cameras + the `active` and `record` flags.
 - `GET /cameras/{id}/snapshot` — a single JPEG (503 if placeholder or capture failed).
 - `GET /cameras/{id}/stream` — `multipart/x-mixed-replace` MJPEG, ~15 Hz to the browser.
 
 The same `(index_or_path, width, height, fps)` tuple is exactly the shape `lerobot-record --robot.cameras=...` wants, so editing `config.yaml` wires a camera for both live view *and* dataset collection.
 
-In the dashboard the **Cameras** strip shows every configured camera as a live thumbnail (or the placeholder "no feed" state); each arm card also embeds its bound wrist camera.
+The cockpit's **Cameras** tab shows every configured camera as a live tile (or
+the "reserved slot" / "no feed" state — a camera declared in `config.yaml` but
+not wired is a fact about the robot, so it is drawn rather than hidden). Each
+arm card embeds its bound wrist camera, and the **Dataset** tab shows the same
+grid with each tile's `rec` toggle on it.
 
 ## Dataset collection
 
-Recording uses `scripts/record_dataset.sh` (wraps `lerobot-record`), which needs exclusive access to the serial ports + cameras — so the HMI must be stopped while it runs. The dashboard's **Recording** panel builds the exact shell command from a task description + episode count for you to copy.
+The recorder runs **inside** the HMI, so a take is collected from the same
+process that is driving the arms — no stopping the service, no second claim on
+the serial ports and cameras.
+
+The cockpit's **Dataset** tab is the workspace:
+
+- **Take composition** — the camera grid, each tile carrying its own `rec`
+  toggle. What is switched on here is exactly what lands in the episode; the
+  set is frozen at `start_episode`, so the toggles disable while a take is
+  open. A camera that cannot yield frames is flagged rather than silently
+  dropped — the recorder skips a whole tick when a required camera has no
+  fresh image.
+- **Recorder** — task text and HF user compose the `repo_id`; start, stop &
+  save, or discard. The take draft is shared with the command bar's Record
+  popover and persists, so a take can be started from inside the headset
+  (`A`/`X` held) with whatever was last typed at the desk.
+- **On disk** — every episode in the dataset (index, task, frames, duration),
+  a repo picker across the lerobot home, the total size, and a two-step
+  delete-last for the take you just realised was bad.
+
+Each frame logs the session's commanded joint targets as `action` and the
+measured joints as `observation.state`. Recording without a teleop session is
+allowed and warned about: the `action` column then holds the arms' last
+commanded targets, not a demonstration.
+
+Deleting the newest episode is an in-place pop. It refuses with 409 — an open
+episode, the only episode, metadata that disagrees with `info.json`, a take
+whose video file is shared with an earlier one — rather than leave a dataset
+lerobot can no longer load and resume.
 
 Full end-to-end guide: [`docs/setup/dataset-collection.md`](../docs/setup/dataset-collection.md).
 
@@ -212,25 +316,37 @@ The legacy `web_teleop.py` is disabled at the launch-arg level (`enable_web_tele
 | GET  | `/teleop` | — | current teleop status |
 | POST | `/teleop/start` | `{leader, follower, hz}` | start the leader→follower loop |
 | POST | `/teleop/stop` | `{}` | stop the teleop loop and restore both arms |
-| GET | `/teleop/human` | — | current human-teleop status |
-| POST | `/teleop/human/start` | `{left_arm, right_arm, swap, hz?}` | start bimanual webcam teleop (409 if leader/follower running) |
-| POST | `/teleop/human/stop` | `{}` | stop the human-teleop loop |
-| POST | `/teleop/human/swap` | `{swap}` | flip the human-side ↔ robot-arm assignment |
-| POST | `/teleop/human/calibrate` | `{left?, right?: {min_m, max_m}}` | set per-side pinch range (gripper aperture mapping) |
-| WS | `/ws/teleop/human/in` | — | keypoint frames from the browser pose pipeline |
+| GET | `/teleop/human` | — | headset-session status: per-side authority, clutch, `goal_deg`, collision |
+| POST | `/teleop/human/start` | `{left_arm, right_arm, hz?}` | start a session. Either side may be `null` for single-arm; at least one is required. 409 if the leader/follower bridge is running |
+| POST | `/teleop/human/stop` | `{}` | stop the session and restore the arms |
+| POST | `/teleop/human/home` | `{}` | park every non-driving side *inside* the session; 409 with no session |
+| POST | `/teleop/human/collision` | `{enabled}` | collision guard on/off, live. 409 with no guard wired, or on `available: false` |
 | GET  | `/calibration/status` | — | per-arm calibration file status; current session if active |
 | POST | `/calibration/{arm_id}/start` | — | begin a calibration session; 409 if any arm isn't manual |
 | POST | `/calibration/{arm_id}/capture_neutral` | — | capture current pose as the new 0°; transitions to sweep |
 | POST | `/calibration/{arm_id}/finish_sweep` | — | end the range-of-motion sweep; 422 if any joint unmoved |
 | POST | `/calibration/{arm_id}/save` | — | write the new calibration (with backup) and reload the arm |
 | POST | `/calibration/{arm_id}/abort` | — | cancel the session (idempotent); restores torque |
-| GET  | `/cameras` | — | configured cameras + runtime `active` flag |
+| GET  | `/cameras` | — | configured cameras + runtime `active` and `record` flags |
+| POST | `/cameras/{id}/record` | `{record}` | move a camera in/out of the recorded set; 409 while an episode is open |
 | GET  | `/cameras/{id}/snapshot` | — | single JPEG (503 if placeholder or disconnected) |
 | GET  | `/cameras/{id}/stream` | — | `multipart/x-mixed-replace` MJPEG live feed (~15 Hz to the browser) |
+| GET  | `/record/status` | — | recorder status: repo, task, frame counts, last error |
+| POST | `/record/start` | `{repo_id, task}` | open an episode — the camera set is frozen here |
+| POST | `/record/stop` | `{save}` | close the episode, keeping or discarding it |
+| GET  | `/record/episodes` | `?repo_id=` | `{repo_id, root, episodes: [{index, frames, task, length_s}], total_frames, size_bytes}`; defaults to the current repo |
+| GET  | `/record/repos` | — | `{root, repos: [{repo_id, episodes, frames, size_bytes}]}` — scan of the lerobot home |
+| DEL  | `/record/episodes/last` | `?repo_id=` | pop the newest episode in place; 409 rather than leave a dataset lerobot cannot resume |
 | POST | `/estop` | `{}` | stop teleop, torque off all arms, zero `/cmd_vel` |
-| WS | `/ws/telemetry` | — | ~20 Hz frames: base + arms state + teleop + alerts |
+| WS | `/ws/telemetry` | — | ~20 Hz frames: base + arms state + teleop + `human_teleop` + alerts |
+| WS | `/ws/teleop/vr/in` | — | the one teleop socket. In: `vr_keypoints` / `xr_frame`, `config_update`, `request_settings`. Out: `ik_state` (20 Hz while frames flow), `config_applied`, `settings` |
 
-See `docs/superpowers/specs/2026-05-22-haller-unified-hmi-design.md` for the design rationale and frame schemas.
+The `/teleop/human/*` prefix is historical — it named the webcam pipeline that
+these routes outlived. They are the headset session's routes now; there is no
+second human-input path.
+
+See `docs/superpowers/specs/2026-05-22-haller-unified-hmi-design.md` for the
+design rationale and frame schemas.
 
 ## Tests
 
@@ -239,16 +355,21 @@ Backend:
 ```bash
 source ~/venvs/haller-hmi/bin/activate-haller-hmi
 cd ~/haller_ws/hmi/backend
-pytest -v
-# 85 passed
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MUJOCO_GL=egl python -m pytest -p asyncio -q
+# 588 passed
 ```
+
+A bare `pytest` does not run here: the ROS 2 environment puts a `launch_testing`
+plugin on the path that pluggy refuses to load against this pytest. So autoload
+is off and the one plugin the suite actually needs, `asyncio`, is named
+explicitly. `MUJOCO_GL=egl` is for the sim tests, which render headless.
 
 Frontend:
 
 ```bash
 cd ~/haller_ws/hmi/frontend
 pnpm test
-# 19 passed
+# 178 passed
 ```
 
 Frontend build:
@@ -256,7 +377,7 @@ Frontend build:
 ```bash
 cd ~/haller_ws/hmi/frontend
 pnpm build
-# Routes: /, /arm/[id], /base, /settings
+# Routes: /, /settings, /teleop/vr
 ```
 
 ## Configuration
@@ -281,6 +402,13 @@ Adding the second arm later is a config edit; see the "Roadmap: leader → secon
 - **Teleop follower position is offset from leader (especially `shoulder_lift`).** The two arms have different calibration midpoints — see "Calibrating an arm" under the Teleop section above. Re-run the calibration wizard on one arm while it holds the same physical neutral pose as the other.
 - **Teleop start returns 400 "leader and follower must be different arms".** Pick different arms in the two dropdowns (click `⇄` to swap).
 - **Teleop start returns 409 "teleop already running".** Stop the current session first, then start a new one.
+- **`/teleop/vr` loads in the headset but will not enter VR.** WebXR needs a secure context. The page is being served over plain `http://` — bring up the single HTTPS origin with `scripts/quest-teleop/up.sh` and open the URL the cockpit's Teleop tab prints, which is the one that works.
+- **The session is running, the grips are squeezed, and nothing moves.** Read the side's chip. `ACQUIRING` means the countdown and rate ramp are still serving — hold the pose. `NOT IN SESSION` means you started a solo preset and this is the side it ignores. A `HOLD — tracking lost` chip means that controller stopped reporting.
+- **The arms move the wrong way, or cross on screen.** Wrong stance. The preset button prints the pairing it will post (`L hand → right · R hand → left`) — read it before starting. Stance is frozen at session start, so fix it and start again.
+- **`/arm/{id}/home` returns 409 "a teleop session owns it".** Working as intended: a discrete move would go around the session's filter, rate caps and collision guard. Park from the Teleop tab instead, or hold the left stick (~0.8 s) in the headset — both ride the session's own commit chain.
+- **The collision-guard toggle is disabled, or enabling it returns 409.** The guard reports `available: false`: this rig has no mount geometry for every arm, so a guard would pass every check it made. One-way — it can still be switched off, never on. The clearance readout keeps working regardless.
+- **`POST /cameras/{id}/record` returns 409.** An episode is open. The camera set is the dataset's schema and is frozen at `start_episode`, so the toggle waits for the take to stop.
+- **`DELETE /record/episodes/last` returns 409.** The pop refuses rather than leave a dataset lerobot cannot resume — an open episode, the only episode, metadata that disagrees with `info.json`, or a take sharing its video file with an earlier one. The detail says which; the cockpit prints it verbatim.
 
 ### Verifying the calibration wizard end-to-end
 
