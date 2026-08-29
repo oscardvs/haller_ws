@@ -41,19 +41,26 @@ so it would need the calibrated range shipped over the wire or re-read from
 disk, and two copies that drift are wrong in the same direction as the bug
 being fixed, with two conversions where the honest path has zero.
 
-**THE SERVER SIDE DOES NOT EXIST YET, BUT THE WIRE IS NO LONGER A GUESS.**
-Track A owns the ingest and is building it now. Every spelling below — inbound
-and outbound — plus the endpoint is FROZEN by the integrator's ruling of
-2026-08-27: Track A adopts what this file already spells. The rate floor was
-settled the same way and earlier: `safety.MIN_RATE_FRACTION` landed 2026-08-27
-and is imported directly.
+**THE SERVER SIDE EXISTS, AND THE WIRE IS DEMONSTRATED — IN TESTS.**
+`policy_ingest` (the wire) and `policy_bridge` (observe, submit, bus_conflict)
+landed 2026-08-29 in `7be71ac`, and every spelling below — inbound and
+outbound — plus the endpoint is the one they read, frozen by the integrator's
+ruling of 2026-08-27. Not a second copy that agrees by inspection:
+`tests/test_policy_bridge.py` drives THIS FILE'S OWN `IngestClient` against the
+real ingest over a real loopback socket, through the server's own lifespan —
+the handshake, the observation stream, a NaN frame refused, a malformed frame
+that no longer wedges the operator paths. The rate floor was settled the same
+way and earlier: `safety.MIN_RATE_FRACTION` landed 2026-08-27 and is imported
+directly.
 
-**Frozen by ruling is not the same as demonstrated connected, and the
-difference is this port's most expensive lesson.** `MIN_RATE_FRACTION` was
-proven by republishing `0.5` and watching the resolver follow, because two
-names agreeing is not evidence that one reads the other. Nothing equivalent has
-happened here: no message this file spells has ever been read by a server.
-Establishing that is item 1's whole job — see the acceptance criteria in
+**What that still is not is a policy.** No checkpoint has been loaded through
+`_load_policy`, no `select_action` has run, and no target this file produced
+has reached a servo: the tests supply the arms and the observations, and
+`_rollout` — the one function here with no test — remains the part standing on
+argument alone. `MIN_RATE_FRACTION` was proven by republishing `0.5` and
+watching the resolver follow, because two names agreeing is not evidence that
+one reads the other; the equivalent proof for the loop below is a rollout
+somebody watched. See the acceptance criteria in
 `docs/port/trackb-lab-contract.md`.
 
 When nothing is listening this child REFUSES, loudly, naming the endpoint. It
