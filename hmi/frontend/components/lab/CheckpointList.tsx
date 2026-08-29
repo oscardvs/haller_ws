@@ -128,7 +128,12 @@ export function CheckpointList({
               : "no checkpoints"}
         </Empty>
       ) : (
-        <div className="max-h-[168px] min-h-0 overflow-y-auto">
+        /* Viewport-relative rather than 168px: on a train run this list is the
+           thing you came for — it is what a rollout is launched from — and a
+           fixed cap showed four of thirteen under an empty log panel that had
+           taken the rest of the column. The log still gets whatever is left,
+           because this panel takes only what its rows need. */
+        <div className="max-h-[34vh] min-h-0 overflow-y-auto">
           <HeadRow
             style={{ gridTemplateColumns: cols }}
             cols={[

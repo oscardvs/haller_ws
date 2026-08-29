@@ -56,6 +56,12 @@ export function TrainPane({
      honoured value is REMEMBERED rather than re-applied on every mount — a
      pick made in the launcher must survive a tab switch. */
   const [picked, setPicked] = useSticky<string | null>("lab.train.repo", repoId);
+  /* The launcher is a form you use occasionally; the run list is what you
+     navigate with. Left permanently open it took 60vh of the rail and left the
+     list showing two rows of four, so it folds away — sticky, because an
+     operator who is rolling out rather than training should not have to fold
+     it again after every glance at Review. */
+  const [launcherOpen, setLauncherOpen] = useSticky<boolean>("lab.train.launcher.open", true);
   const [seededFrom, setSeededFrom] = useSticky<string | null>("lab.train.repo.seed", repoId);
   useEffect(() => {
     if (repoId && repoId !== seededFrom) {
@@ -181,13 +187,27 @@ export function TrainPane({
     <div className="grid min-h-0 grid-cols-[26rem_minmax(0,1fr)] gap-2 overflow-hidden p-2">
       <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2 overflow-hidden">
         {/* The launcher's form is taller than a short viewport, and an auto
-            grid row would let it push the run list to nothing. Capped here so
-            it scrolls inside its own Panel instead — 60vh leaves the runs
-            panel visible on the 720px-high case the cockpit already calls
-            `short`. */}
-        <div className="flex max-h-[60vh] min-h-0 flex-col gap-1.5 overflow-hidden">
+            grid row would let it push the run list to nothing. Capped so it
+            scrolls inside its own Panel instead — and 40vh rather than the
+            original 60, because at 60 the run list below it was two rows on
+            an 800px-high window, which is not a list. */}
+        <div className="flex max-h-[40vh] min-h-0 flex-col gap-1.5 overflow-hidden">
           {dsError && <Refusal>datasets could not be read: {dsError}</Refusal>}
-          <div className="flex shrink-0 items-center justify-end">
+          <div className="flex shrink-0 items-center justify-between gap-2">
+            <Button
+              tone="ghost"
+              onClick={() => setLauncherOpen(!launcherOpen)}
+              aria-expanded={launcherOpen}
+              title={
+                launcherOpen
+                  ? "fold the launcher away and give the rail to the run list"
+                  : "open the training launcher"
+              }
+            >
+              {/* Not "new run" both ways: open, the panel below already wears
+                  that title, and two of them read as two things. */}
+              {launcherOpen ? "▾ hide" : "▸ new run"}
+            </Button>
             <Button
               disabled={!picked}
               onClick={() => { if (picked) onOpenDataset(picked); }}
@@ -200,12 +220,14 @@ export function TrainPane({
               review this dataset →
             </Button>
           </div>
-          <TrainLauncher
-            datasets={datasets}
-            repoId={picked}
-            onRepoId={setPicked}
-            onLaunched={onLaunched}
-          />
+          {launcherOpen && (
+            <TrainLauncher
+              datasets={datasets}
+              repoId={picked}
+              onRepoId={setPicked}
+              onLaunched={onLaunched}
+            />
+          )}
         </div>
 
         {/* Filters and the list are ONE panel: the filters only ever answer

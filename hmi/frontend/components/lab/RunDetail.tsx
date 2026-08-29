@@ -24,7 +24,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
-  lab, isBusy, isForbidden, isMissing, reason, metricX, REMOTE_REFUSED,
+  lab, isBusy, isForbidden, isMissing, reason, metricX, plottableMetricKeys,
+  REMOTE_REFUSED,
   type Checkpoint, type MetricRow, type Run, type RunStatus, type RolloutRecord,
   type TrainSpec,
 } from "@/lib/lab";
@@ -178,6 +179,25 @@ export function RunDetail({
    *  run's spec is whatever the launching route wrote. */
   const spec: Partial<TrainSpec & RolloutRecord> = run?.spec ?? {};
   const isRollout = run?.kind === "rollout";
+  /** Only the trainer writes `metrics.jsonl` and only the trainer writes
+   *  checkpoints. Asked as "can this run answer the question" rather than
+   *  "is it a rollout", because export, prune and a rollout are all runs with
+   *  neither, and each of them got the same two empty panels. */
+  const writesMetrics = run?.kind === "train";
+  const writesCheckpoints = run?.kind === "train";
+  /**
+   * The panel appears when there is something to DRAW, or while a run that
+   * could still log one is going.
+   *
+   * "Rows arrived" was the first rule and it was wrong on the case that
+   * matters: a rollout writes its rate record into `metrics.jsonl`, so
+   * `rows.length > 0` was true and the panel opened on a full-height
+   * "no numeric keys logged yet" above the log that had the actual account.
+   * `plottableMetricKeys` is the predicate `MetricGrid` itself draws by, so
+   * the panel and its contents now agree about whether there is a chart.
+   */
+  const showMetrics =
+    plottableMetricKeys(rows).length > 0 || (writesMetrics && live);
   const argv = run?.argv?.join(" ") ?? null;
   /** `finished_at` where the run has one, otherwise the poll's clock. `now` is
    *  0 until the first tick of a RUNNING run — a run that has neither has no
@@ -366,15 +386,48 @@ export function RunDetail({
         </div>
       </Panel>
 
-      {/* A ROLLOUT'S STDOUT IS THE WHOLE ACCOUNT. It logs no metrics and
-          writes no checkpoints — what it has is the handshake, the measured
-          control rate, the rate alerts, the target count, and the traceback
-          when it refuses. Given the train layout it got a metrics panel
-          promising "waiting for the first logged step…" about a stream that
-          does not exist, an empty checkpoints panel offering to roll out a
-          rollout, and the one thing worth reading squeezed into a 240px strip
-          under both. So the log takes the column. */}
-      {isRollout ? (
+      {/* ONE PANEL PER QUESTION THE RUN CAN ANSWER, and the log takes what is
+          left. Three fixed panels in a column this short crumbled: metrics
+          squeezed to an empty sliver with a scrollbar, the checkpoint list
+          showing four of six inside its own scroll, and the log — the only
+          account a rollout HAS — clipped off the bottom edge behind a third
+          one. A kit-trained run has no metrics.jsonl at all, so its metrics
+          panel was a promise about a file that does not exist.
+
+          So a panel appears when the run can fill it: metrics for a training
+          run that has logged or still might, checkpoints for a run that
+          writes them. Everything else is stdout, and stdout gets the room. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+        {showMetrics && (
+          // `relative` because MetricGrid's maximised chart positions its
+          // overlay against this panel. `flex-[1.4]` against the log's 1: the
+          // charts are the reading while a run trains, and the tail below is
+          // for catching the line that explains a stall.
+          <Panel className="relative min-h-0 flex-[1.4]">
+            <PanelHead
+              title="metrics"
+              right={
+                lastStep !== null
+                  ? `step ${Math.round(lastStep)}${spec.steps ? ` / ${spec.steps}` : ""}`
+                  : undefined
+              }
+            />
+            <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+              <MetricGrid rows={rows} steps={spec.steps ?? null} />
+            </div>
+          </Panel>
+        )}
+
+        {/* Its own list scrolls inside a capped height, so it takes what it
+            needs and never squeezes the log to nothing. */}
+        {run && writesCheckpoints && (
+          <CheckpointList
+            runId={runId}
+            status={run.status}
+            onRollout={setRollout}
+          />
+        )}
+
         <Panel className="min-h-0 flex-1">
           <PanelHead
             title="log"
@@ -384,45 +437,7 @@ export function RunDetail({
             <RunLogTail text={log} fill />
           </div>
         </Panel>
-      ) : (
-      /* Metrics get whatever height the column has; checkpoints and the log
-         take what they need below, capped. Before this split the three shared
-         one long scroll, and reading the log meant scrolling past every
-         chart. The metrics Panel is `relative` because MetricGrid's maximised
-         chart positions its overlay against it. */
-      <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] gap-2 overflow-hidden">
-        <Panel className="relative">
-          <PanelHead
-            title="metrics"
-            right={
-              lastStep !== null
-                ? `step ${Math.round(lastStep)}${spec.steps ? ` / ${spec.steps}` : ""}`
-                : undefined
-            }
-          />
-          <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-            <MetricGrid rows={rows} steps={spec.steps ?? null} live={live} />
-          </div>
-        </Panel>
-
-        <div className="flex max-h-[45%] min-h-0 flex-col gap-2 overflow-y-auto">
-          {run && (
-            <CheckpointList
-              runId={runId}
-              status={run.status}
-              onRollout={setRollout}
-            />
-          )}
-
-          <Panel className="shrink-0">
-            <PanelHead title="log" right={logLines > 0 ? `${logLines} lines` : undefined} />
-            <div className="p-2.5">
-              <RunLogTail text={log} />
-            </div>
-          </Panel>
-        </div>
       </div>
-      )}
 
       {rollout && (
         <RolloutDialog
@@ -485,7 +500,7 @@ function RolloutStats({ spec }: { spec: Partial<RolloutRecord> }) {
         />
       </span>
       <Stat
-        label="for"
+        label="asked for"
         value={typeof spec.duration_s === "number" ? `${spec.duration_s} s` : "—"}
       />
       <Stat label="device" value={spec.device ?? "—"} />

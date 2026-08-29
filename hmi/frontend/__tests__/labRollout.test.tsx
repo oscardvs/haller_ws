@@ -454,6 +454,42 @@ describe("RunDetail reads a rollout's spec, not a training run's", () => {
     expect(screen.queryByText(/batch/i)).toBeNull();
   });
 
+  it("keeps the metrics panel shut on a rollout that logged unplottable rows", async () => {
+    // The rollout child writes its rate record into metrics.jsonl, so
+    // "rows arrived" opened a full-height panel saying "no numeric keys logged
+    // yet" over the log that had the actual account. A row with no axis is not
+    // a chart: the panel now asks the same question the grid draws by.
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/metrics")) {
+          return new Response(JSON.stringify({
+            offset: 434,
+            // What `_stamp_rate` actually writes: a rate record, no step, no
+            // epoch, no wall — nothing to put on an x axis.
+            rows: [{ event: "control_rate", declared: 30.0, measured: 307.42 }],
+          }), { status: 200 });
+        }
+        if (url.includes("/log")) {
+          return new Response(JSON.stringify({
+            offset: 0, text: "done: 1779 targets in 60 s\n",
+          }), { status: 200 });
+        }
+        if (url.includes("/checkpoints")) {
+          return new Response(JSON.stringify({ checkpoints: [] }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          id: "rollout-1", kind: "rollout", name: "so101_pick_cube",
+          status: "done", started_at: null, finished_at: null, spec: stamped,
+        }), { status: 200 });
+      },
+    );
+    render(<RunDetail runId="rollout-1" />);
+    await waitFor(() => expect(screen.getByText(/1779 targets/)).toBeTruthy());
+    expect(screen.queryByText("metrics")).toBeNull();
+    expect(screen.queryByText(/no numeric keys logged yet/i)).toBeNull();
+  });
+
   it("gives the log the column, and offers neither metrics nor checkpoints", async () => {
     // A rollout logs no metrics and writes no checkpoints. Rendered in the
     // train layout it promised "waiting for the first logged step…" about a
@@ -469,10 +505,12 @@ describe("RunDetail reads a rollout's spec, not a training run's", () => {
     expect(screen.queryByRole("button", { name: /roll out/i })).toBeNull();
   });
 
-  it("does not promise a first step to a run that has stopped", async () => {
-    // The train branch, where the panel belongs: a run that died before its
-    // first step will never log one, and "waiting" reads as a page that has
-    // not caught up rather than as a run with nothing to plot.
+  it("opens no metrics panel for a stopped run that logged none", async () => {
+    // The train branch, and the case that made the whole column crumble: the
+    // kit-trained runs have no metrics.jsonl at all, so the panel was a
+    // permanent empty sliver with a scrollbar, promising "waiting for the
+    // first logged step…" about a file that does not exist and squeezing the
+    // checkpoint list and the log into what was left.
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -492,9 +530,13 @@ describe("RunDetail reads a rollout's spec, not a training run's", () => {
       },
     );
     render(<RunDetail runId="train-x" />);
-    await waitFor(() =>
-      expect(screen.getByText(/this run logged no metrics/i)).toBeTruthy());
+    // The run itself arrived — the assertion below is about the panel, not
+    // about a page that has not loaded.
+    await waitFor(() => expect(screen.getByText("died early")).toBeTruthy());
+    expect(screen.queryByText("metrics")).toBeNull();
     expect(screen.queryByText(/waiting for the first logged step/i)).toBeNull();
+    // The log is what a failed run has, so it is what gets the room.
+    expect(screen.getByLabelText("run log tail")).toBeTruthy();
   });
 
   it("says a waived rate floor out loud", async () => {
