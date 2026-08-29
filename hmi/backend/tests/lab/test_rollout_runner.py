@@ -33,6 +33,7 @@ it.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -168,6 +169,61 @@ def test_importing_the_runner_pulls_in_neither_lerobot_nor_torch():
                          text=True, check=True, timeout=120, cwd=str(BACKEND))
 
     assert out.stdout.strip() == "False False True", out.stderr
+
+
+def test_the_rig_resolves_with_no_serving_stack_installed(tmp_path):
+    """The child's venv has lerobot and torch and NO FastAPI. It must still be
+    able to ask the catalog where a dataset lives.
+
+    This is the bug the first cockpit-launched rollout died of (2026-08-29):
+    `resolve_rig` imports `lab.catalog` for `dataset_root`, catalog imports
+    `api.errors` for two exception classes, and `api.errors` imported FastAPI at
+    module scope — so every rollout with a `repo_id` (which is every rollout
+    whose checkpoint names a readable dataset) failed with `ModuleNotFoundError:
+    No module named 'fastapi'` before its first observation.
+
+    Blocked at the finder rather than by uninstalling anything: the serving venv
+    this test runs in HAS FastAPI, so absence has to be simulated to be
+    reproduced here at all. `~/venvs/haller-lab` is the environment being
+    described, and nothing about this test depends on it existing.
+    """
+    root = tmp_path / "lerobot" / "local" / "ds"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text(json.dumps({
+        "fps": 30,
+        "features": {"observation.state": {"names": list(UNPREFIXED_NAMES)}},
+    }))
+    probe = textwrap.dedent("""
+        import sys
+
+        class NoServingStack:
+            BANNED = ("fastapi", "starlette")
+
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] in self.BANNED:
+                    raise ModuleNotFoundError(f"No module named {name!r}")
+                return None
+
+        assert not {m.split(".")[0] for m in sys.modules} & set(NoServingStack.BANNED)
+        sys.meta_path.insert(0, NoServingStack())
+
+        from haller_hmi.runners.rollout_runner import resolve_rig
+        rig = resolve_rig({"repo_id": "local/ds"})
+        print("RIG", rig.rig, rig.dim)
+        print("FASTAPI", "fastapi" in sys.modules)
+    """)
+
+    out = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True,
+        timeout=120, cwd=str(BACKEND),
+        env={**os.environ, "HF_LEROBOT_HOME": str(tmp_path / "lerobot")},
+    )
+
+    assert out.returncode == 0, out.stderr
+    assert "RIG solo 6" in out.stdout, out.stdout
+    # The negative half: it resolved because the import was not needed, not
+    # because something quietly pulled the serving stack in behind the blocker.
+    assert "FASTAPI False" in out.stdout, out.stdout
 
 
 def test_dry_run_prints_the_plan_and_the_handshake_and_opens_no_socket(tmp_path):
