@@ -39,6 +39,9 @@ import {
 } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
 import { HumanTeleopClient } from "@/lib/humanTeleopClient";
+import {
+  driverToken, forgetDriverToken, rememberDriverToken,
+} from "@/lib/teleopSessionToken";
 import { useRecorder } from "@/lib/recorder";
 import { useSoloHand, useStance, type Pairing } from "@/lib/stance";
 import {
@@ -341,6 +344,27 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     }
   }, []);
 
+  // Reload recovery, and it has to be its own call rather than riding the
+  // socket: the pose socket only opens on entering XR, so a page that has
+  // just reloaded has none to say `attach` on — and cannot get one until the
+  // operator clicks Enter VR, which is the exact gap the window buys. Runs on
+  // mount, once, before anything else needs the session.
+  useEffect(() => {
+    const token = driverToken();
+    if (!token) return;
+    api.humanTeleopReattach(token)
+      .then((res) => {
+        if (res.ok) {
+          toast.success("session held — enter VR to pick it back up");
+          return;
+        }
+        // Not an error: the session this token named is over. Drop it so the
+        // next mount does not ask again.
+        forgetDriverToken();
+      })
+      .catch(() => { /* backend down; the landing screen says so already */ });
+  }, []);
+
   // The hand-to-arm pairing is chosen at session START from the stance
   // (see enterVR). Changing stance mid-session re-maps the deltas on the
   // next squeeze but cannot re-pair the arms — say so instead of silently
@@ -461,6 +485,9 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       try { await session.end(); } catch { /* already ended */ }
     }
     if (opts.stopBackend) {
+      // Stopping on purpose. Keeping the token would make the next mount ask
+      // the backend to hold a session the operator just ended.
+      forgetDriverToken();
       // Stop even if the socket already dropped: the backend's WS grace window
       // would eventually catch this, but leaving a session ARMED with no
       // operator attached is exactly the state we do not want to rely on a
@@ -792,6 +819,12 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   const onSocketMessage = useCallback((data: string) => {
     const msg = parseVrSocketMessage(data);
     if (!msg) return;
+    if (msg.kind === "session") {
+      // Our pose frame was taken, so this page IS the driver. Held so a
+      // reload can prove it — see lib/teleopSessionToken.
+      rememberDriverToken(msg.token);
+      return;
+    }
     if (msg.kind === "config_applied") {
       // The clamped echo always wins: whatever the robot took IS the value,
       // and re-asserting the unclamped ask would only fight it.
@@ -933,6 +966,12 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       onOpen: () => {
         reassertPendingRef.current = true;
         client.send({ type: "request_settings" });
+        // A reconnect after the server closed us for going quiet — headset
+        // off the head, wifi blip — lands here. Saying who we are buys the
+        // one-shot window back into XR; the backend refuses a second one, so
+        // this cannot become the tab that never lets go.
+        const token = driverToken();
+        if (token) client.send({ type: "attach", token });
       },
       onMessage: onSocketMessage,
     });

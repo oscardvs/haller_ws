@@ -44,6 +44,7 @@ from __future__ import annotations
 import enum
 import logging
 import math
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -268,6 +269,7 @@ class HumanTeleopSession:
         hz_override: float | None = None,
         frame_age_ms_loss: float = FRAME_AGE_MS_LOSS,
         ws_disconnect_grace_s: float = 5.0,
+        ws_reattach_grace_s: float = 60.0,
         acquire_ms: float = ACQUIRE_MS,
         match_dwell_ms: float = MATCH_DWELL_MS,
         acquire_rate_deg_s: float = ACQUIRE_RATE_DEG_S,
@@ -369,6 +371,24 @@ class HumanTeleopSession:
         self._frame_age_ms_loss = frame_age_ms_loss
         self._ws_disconnect_grace_s = ws_disconnect_grace_s
         self._ws_disconnected_at_perf: float | None = None
+        # How long a client that PROVES it drove this session gets to come
+        # back into XR after the pose stream went quiet. See
+        # `reattach` for why it is one-shot and why the proof is a token
+        # rather than the mere fact of a socket connecting.
+        self._ws_reattach_grace_s = ws_reattach_grace_s
+        self._ws_reattached = False
+        #: The window currently in force — `_ws_disconnect_grace_s` normally,
+        #: `_ws_reattach_grace_s` once the driver has come back. ONE field the
+        #: tick loop reads, rather than arithmetic on the stamp: getting that
+        #: arithmetic backwards stops the session instantly instead of a
+        #: minute later, and it reads the same either way.
+        self._ws_grace_s = ws_disconnect_grace_s
+        #: Why the session stopped itself, for the surface that has to explain
+        #: it. None when the operator stopped it themselves.
+        self._stopped_reason: str | None = None
+        #: Minted per session, handed only to a client that has actually
+        #: streamed a pose frame. Opaque and never reused.
+        self._session_token: str | None = None
         # Per-arm last-frame timestamps (perf_counter), for tracking-loss.
         self._last_left_perf: float = 0.0
         self._last_right_perf: float = 0.0
@@ -564,6 +584,10 @@ class HumanTeleopSession:
                 "right_arm": cfg.right_arm if cfg else None,
                 "started_at": self._started_at,
                 "last_error": self._last_error,
+                # Why the session ended when nobody asked it to. Survives the
+                # stop on purpose: the surface that has to explain it reads
+                # this AFTER `running` has already gone false.
+                "stopped_reason": self._stopped_reason,
                 "tracking": {
                     "left":  {
                         "age_ms": left_age,
@@ -731,6 +755,13 @@ class HumanTeleopSession:
             #     track hands that are no longer there, before a single new
             #     frame has arrived.
             self._ws_disconnected_at_perf = None
+            #   _ws_reattached — the one-shot latch that lets a returning
+            #     driver extend the grace once. Left set, the next session's
+            #     first disconnect would get no re-entry window at all.
+            self._ws_reattached = False
+            self._ws_grace_s = self._ws_disconnect_grace_s
+            self._stopped_reason = None
+            self._session_token = secrets.token_urlsafe(16)
             self._ctrl = {"left": None, "right": None}
             self._head_orientation = None
             self._stance_frame = None
@@ -914,6 +945,12 @@ class HumanTeleopSession:
             # clutch anchors they hold.
             self._seen_frame = False
             self._kit = {}
+            # The token dies with the session it named. `reattach` already
+            # refuses a stopped session, so this is belt and braces — but a
+            # token that outlives its session is the kind of thing a later
+            # reader assumes is still meaningful.
+            self._session_token = None
+            self._ws_disconnected_at_perf = None
             for acq in self._acq.values():
                 acq.release("idle")
         logger.info("human teleop stopped")
@@ -962,8 +999,13 @@ class HumanTeleopSession:
             self._latest_frame_ts_ms = int(frame.get("ts_ms", 0))
             now_perf = time.perf_counter()
             self._latest_arrival_perf = now_perf
-            # WS is healthy: cancel any pending grace window.
+            # WS is healthy: cancel any pending grace window, and re-arm the
+            # one-shot re-entry window for the NEXT silence. The driver having
+            # come all the way back is exactly the evidence that spending it
+            # again is safe.
             self._ws_disconnected_at_perf = None
+            self._ws_reattached = False
+            self._ws_grace_s = self._ws_disconnect_grace_s
 
             # Head + stance ride the frame and are stored per frame, absence
             # included — the kit keeps the previous engage rotation when the
@@ -1218,6 +1260,58 @@ class HumanTeleopSession:
                 return
             if self._ws_disconnected_at_perf is None:
                 self._ws_disconnected_at_perf = time.perf_counter()
+                self._ws_grace_s = self._ws_disconnect_grace_s
+
+    def driver_token(self) -> str | None:
+        """This session's token, for a client that has PROVED it is driving.
+
+        Proof is a pose frame: the socket hands this out only after
+        `ingest_frame` has taken one from that connection. A page parked on the
+        landing screen never sees it, which is what keeps `reattach` from being
+        something any tab can call.
+        """
+        with self._lock:
+            return self._session_token if self.running else None
+
+    def reattach(self, token: str) -> bool:
+        """The driver is back: spend the one-shot re-entry window.
+
+        WHY THIS IS NOT "a socket reconnected". `notify_ws_disconnected` opens
+        a 5 s window that ONLY a pose frame closes, and that rule was measured
+        into place — clearing it on connect let one stray tab reconnecting
+        every three seconds hold a dead session open forever. But it also means
+        a RELOAD costs the session: the page comes back within a second, and
+        then cannot send a pose until the operator clicks Enter VR, which takes
+        longer than five seconds. The operator is standing right there and the
+        session dies anyway.
+
+        A token separates the two. Only the client that actually drove this
+        session has one, so a stray tab still cannot hold the window open, and
+        the returning driver gets long enough to get back into XR.
+
+        ONE SHOT per silence. The returning page is not streaming yet, so it
+        will go idle again, be closed again, and reconnect again — if each of
+        those extended the window we would be back to the tab that never lets
+        go. `_ws_reattached` is re-armed only by a pose frame actually
+        arriving, i.e. by the operator genuinely resuming.
+
+        Returns True when the window was granted.
+        """
+        with self._lock:
+            if not self.running or not self._session_token:
+                return False
+            if not token or not secrets.compare_digest(token, self._session_token):
+                return False
+            if self._ws_disconnected_at_perf is None:
+                return True     # nothing to extend; the stream never stopped
+            if self._ws_reattached:
+                return False
+            self._ws_reattached = True
+            self._ws_disconnected_at_perf = time.perf_counter()
+            self._ws_grace_s = self._ws_reattach_grace_s
+            logger.info("human teleop: driver reattached; %.0fs to re-enter XR",
+                        self._ws_reattach_grace_s)
+            return True
 
     @staticmethod
     def _read_observed(handle) -> dict[str, float] | None:
@@ -1758,8 +1852,19 @@ class HumanTeleopSession:
                 # WS disconnect grace window: if too much time has passed, auto-stop.
                 with self._lock:
                     disc_at = self._ws_disconnected_at_perf
-                if disc_at is not None and (time.perf_counter() - disc_at) > self._ws_disconnect_grace_s:
-                    logger.info("human teleop WS disconnect grace exceeded; stopping")
+                    window = self._ws_grace_s
+                if disc_at is not None and (time.perf_counter() - disc_at) > window:
+                    # WARNING, not INFO: this is the session ending under the
+                    # operator with nobody having asked it to, and it is the
+                    # first thing they go looking for afterwards. At INFO it
+                    # was invisible — the app loggers serve at WARNING — so a
+                    # session that died on a reload left no trace at all, in
+                    # the log or anywhere else.
+                    reason = f"headset sent no pose for {window:.0f}s"
+                    logger.warning("human teleop: %s; stopping the session",
+                                   reason)
+                    with self._lock:
+                        self._stopped_reason = reason
                     threading.Thread(target=self.stop, daemon=True).start()
                     break
                 with self._lock:

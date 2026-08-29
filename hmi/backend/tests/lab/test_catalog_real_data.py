@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -176,13 +177,50 @@ def _kit_prefix(solo: dict, kit_verdicts: list[dict]) -> list[dict]:
     return solo["episodes"][:len(kit_verdicts)]
 
 
+def _live_writer_reason(repo_id: str) -> str | None:
+    """Skip — not fail — while the HMI is recording into this very dataset.
+
+    `local/so101_pick_cube` is no longer only the kit's frozen recording: since
+    the schema migration the HMI can RESUME into it, and a recording backend
+    holds its newest parquet open for the life of the process (a
+    `pq.ParquetWriter` lays the footer down on close). `catalog._load_frames`
+    answers that with `DatasetBusyError`, which is correct — and would paint
+    twelve tests red for the entire duration of every collection session.
+
+    The skip is narrow on purpose, because `_load_frames` maps EVERY read
+    failure to `DatasetBusyError` and this canary exists to catch corruption.
+    The only tolerated shape is the one a live writer makes: the NEWEST data
+    parquet has no footer and every earlier one does. A missing footer anywhere
+    else is a torn dataset and still fails.
+    """
+    files = sorted((LEROBOT_HOME / repo_id / "data").glob("chunk-*/file-*.parquet"))
+    if not files:
+        return None
+    footered = [f.read_bytes()[-4:] == b"PAR1" for f in files]
+    if all(footered) or not all(footered[:-1]) or footered[-1]:
+        return None     # nothing open, or a hole that is not the live writer
+    return (
+        f"{repo_id}: {files[-1].name} has no footer — a recording session is "
+        "holding the dataset open. The equivalence gate compares bytes that "
+        "cannot be read mid-write; stop the session (or the backend) and rerun."
+    )
+
+
+def _skip_if_a_session_is_writing(repo_id: str) -> None:
+    reason = _live_writer_reason(repo_id)
+    if reason:
+        pytest.skip(reason)
+
+
 @pytest.fixture()
 def solo(lerobot_home) -> dict:
+    _skip_if_a_session_is_writing(SOLO)
     return catalog.dataset_detail(SOLO)
 
 
 @pytest.fixture()
 def bimanual(lerobot_home) -> dict:
+    _skip_if_a_session_is_writing(BIMANUAL)
     return catalog.dataset_detail(BIMANUAL)
 
 
@@ -481,6 +519,7 @@ def test_unknown_sort_key_raises(lerobot_home):
     """A ValueError the routes layer turns into a 400. Falling back to the
     default column would answer a different question than the one asked and
     look like it worked."""
+    _skip_if_a_session_is_writing(SOLO)
     with pytest.raises(ValueError, match="unknown sort key"):
         catalog.query_episodes(SOLO, sort="grip_min")
 
@@ -489,5 +528,42 @@ def test_unknown_sort_key_raises(lerobot_home):
 def test_query_filters_the_bimanual_dataset_too(lerobot_home):
     """Both episodes FAIL on this recording, so the filter is only meaningful
     as a pair of complementary answers."""
+    _skip_if_a_session_is_writing(BIMANUAL)
     assert catalog.query_episodes(BIMANUAL, filter_verdict="FAIL")["total"] == 2
     assert catalog.query_episodes(BIMANUAL, filter_verdict="PASS")["total"] == 0
+
+
+# ---- the busy-skip must not become a corruption-skip ----------------------
+#
+# `catalog._load_frames` answers EVERY read failure with `DatasetBusyError`, so
+# a guard that skipped on that exception would skip on a torn dataset too — and
+# catching a torn dataset is the entire job of this file. These pin the shape it
+# is allowed to tolerate.
+
+def _tree(root: Path, footers: list[bool]) -> None:
+    """A data/ directory whose files carry a parquet footer, or don't."""
+    d = root / "data" / "chunk-000"
+    d.mkdir(parents=True)
+    for i, ok in enumerate(footers):
+        (d / f"file-{i:03d}.parquet").write_bytes(b"x" * 16 + (b"PAR1" if ok else b"junk"))
+
+
+def test_only_a_footerless_NEWEST_file_counts_as_a_live_writer(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "LEROBOT_HOME", tmp_path)
+    _tree(tmp_path / "local/ds", [True, True, False])
+    reason = _live_writer_reason("local/ds")
+    assert reason and "file-002.parquet" in reason
+
+
+def test_a_hole_in_an_EARLIER_file_is_not_tolerated(tmp_path, monkeypatch):
+    """A torn middle file is corruption, and this canary exists to fail on it.
+    Tolerating it here would be the bug the whole module guards against."""
+    monkeypatch.setattr(sys.modules[__name__], "LEROBOT_HOME", tmp_path)
+    _tree(tmp_path / "local/ds", [True, False, True])
+    assert _live_writer_reason("local/ds") is None
+
+
+def test_a_fully_written_dataset_is_never_skipped(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "LEROBOT_HOME", tmp_path)
+    _tree(tmp_path / "local/ds", [True, True, True])
+    assert _live_writer_reason("local/ds") is None

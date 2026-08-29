@@ -149,6 +149,12 @@ export const api = {
     postJson<{ ok: true; sides: ("left" | "right")[] }>("/teleop/human/home", {}),
   humanTeleopStop: () =>
     postJson<{ ok: true } & HumanTeleopStatus>("/teleop/human/stop", {}),
+  /** "The driver's page is back" — hold the running session open long enough
+   *  for the operator to get into XR again after a reload. `ok: false` is an
+   *  answer, not an error: the session this token named is gone. */
+  humanTeleopReattach: (token: string) =>
+    postJson<{ ok: boolean } & HumanTeleopStatus>(
+      "/teleop/human/reattach", { token }),
   recordStatus: () => getJson<RecordStatus>("/record/status"),
   recordStart: (repoId: string, task: string) =>
     postJson<{ ok: true } & RecordStatus>("/record/start", { repo_id: repoId, task }),
@@ -261,6 +267,10 @@ export type HumanTeleopStatus = {
   right_arm: string | null;
   started_at: number | null;
   last_error: string | null;
+  /** Why the session ended when nobody asked it to — set by the backend's own
+   *  auto-stop, and readable AFTER `running` has already gone false. Null when
+   *  the operator stopped it themselves. */
+  stopped_reason?: string | null;
   tracking: {
     left:  { age_ms: number | null; lost: boolean };
     right: { age_ms: number | null; lost: boolean };
