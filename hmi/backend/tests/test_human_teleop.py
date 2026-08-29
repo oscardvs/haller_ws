@@ -472,6 +472,38 @@ def test_the_driven_path_carries_no_filter_and_no_rate_cap():
         sess.stop()
 
 
+def test_home_slew_is_duration_shaped_like_the_kit_rest_ramp():
+    """The in-session park is the kit's rest ramp: a fixed-duration
+    (HOME_RAMP_S = 2 s) joint-space lerp, NOT a rate-shaped slew. With the
+    LPF at 0 a rate-shaped slew moves at the full session cap — 240 deg/s,
+    a park maneuver at teleop speed (measured on the bench, 2026-08-29
+    evening). Pin: well inside the ramp window the commanded pose must
+    still be far from home, and by ~HOME_RAMP_S it must arrive — from
+    25 deg away a rate-shaped slew would be home in ~0.1 s."""
+    mgr, arms = _fake_arm_manager()
+    for a in arms.values():
+        a.read_joints_deg.return_value = {j: 25.0 for j in a.joint_limits_deg}
+    sess = _sess(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=False))
+        assert sess.request_home() == ["left", "right"]
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+
+        def pan():
+            return arms["left"].send_goal.call_args_list[-1].args[0]["shoulder_pan"]
+
+        _time.sleep(0.6)                      # ~30% into the 2 s ramp
+        mid = pan()
+        assert 5.0 < mid < 22.0, (
+            f"expected a mid-ramp pose ~17.5 deg, got {mid} — rate-shaped "
+            "would already be home, unramped would not have moved")
+        assert _wait_until(lambda: abs(pan()) < 1.0, timeout=3.0), \
+            "the ramp must arrive at home within ~HOME_RAMP_S"
+    finally:
+        sess.stop()
+
+
 def test_commit_loop_does_not_write_when_not_driving():
     mgr, arms = _fake_arm_manager()
     sess = _sess(mgr, hz_override=200.0)

@@ -157,6 +157,15 @@ ACQUIRE_RAMP_MS = 0.0
 #: constant, converted at the point of use.
 RATE_CAP_DEG_S = 240.0
 
+#: Duration of the in-session home slew, seconds — the kit's rest ramp
+#: (`rest_ramp_duration_s`, so101_quest_teleop.py:184/640-652): a
+#: fixed-DURATION joint-space lerp from wherever the arm stands, every
+#: joint arriving together. Duration-shaped, not rate-shaped, because a
+#: rate-shaped slew moves at whatever the cap is the moment the filter is
+#: off — with lpf_tau_s 0 that was the full 240 deg/s, a park maneuver
+#: moving at teleop speed.
+HOME_RAMP_S = 2.0
+
 #: Bounds on the session tick rate a caller may request.
 #:
 #: The floor is set by the acquisition ramp, not by speed: ACQUIRE_RAMP_MS is
@@ -339,6 +348,10 @@ class HumanTeleopSession:
         # hold-the-left-stick reset). Cleared the moment a side starts
         # driving: the operator's hand always outranks a parked reset.
         self._home_req: dict[str, bool] = {"left": False, "right": False}
+        # The kit-style fixed-duration lerp behind an accepted home request:
+        # {"start": committed-at-request, "t0": perf} per side, None when no
+        # ramp is running. See HOME_RAMP_S.
+        self._home_ramp: dict[str, dict | None] = {"left": None, "right": None}
         self._committed_left: dict[str, float] = {}
         self._committed_right: dict[str, float] = {}
         self._steps_left: dict[str, JointStep] = {}
@@ -722,6 +735,7 @@ class HumanTeleopSession:
             self._head_orientation = None
             self._stance_frame = None
             self._home_req = {"left": False, "right": False}
+            self._home_ramp = {"left": None, "right": None}
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
             # A new session starts with neither arm handed over, whatever the
@@ -843,8 +857,15 @@ class HumanTeleopSession:
                 return []
             sides = [s for s in self._cfg.sides
                      if self._acq[s].authority is not SideAuthority.DRIVING]
+            now = time.perf_counter()
             for s in sides:
                 self._home_req[s] = True
+                # The ramp's fixed frame: where the arm stands NOW, and when
+                # the request landed. Re-requesting home restarts the ramp
+                # from the current pose, never from a stale one.
+                committed = (self._committed_left if s == "left"
+                             else self._committed_right)
+                self._home_ramp[s] = {"start": dict(committed), "t0": now}
         return sides
 
     @staticmethod
@@ -1342,13 +1363,17 @@ class HumanTeleopSession:
             speed_cap_deg_s=speed_cap_deg_s)
 
     def _side_steps(self, handle, kit, ctrl, prev, *, driving, homing,
-                    pending, head, stance, frame_age_s, alpha, cap):
+                    pending, head, stance, frame_age_s, alpha, cap,
+                    home_ramp=None, now=0.0):
         """One side's steps for this tick — the three-way fork the loop takes.
         Returns (steps, engaged): `engaged` mirrors the adapter's clutch when
         `kit.update()` ran this tick, and is None when it did not.
 
-        * HOMING: the in-session park. Not a kit path — it keeps the
-          session's one-pole LPF and per-tick rate cap byte-for-byte.
+        * HOMING: the in-session park, shaped like the kit's rest ramp — a
+          fixed-duration joint-space lerp (HOME_RAMP_S) from where the arm
+          stood at the request, every joint arriving together. The per-tick
+          rate cap stays as the backstop under it (a 2 s ramp never reaches
+          it), and the collision guard downstream still has its say.
         * PENDING a re-seed: frozen. The tracker must neither integrate nor
           drive from state nothing observed; the loop's seed step retries.
         * otherwise: exactly one `kit.update()` on the latest raw frame —
@@ -1360,8 +1385,28 @@ class HumanTeleopSession:
         """
         limits = handle.joint_limits_deg
         if homing:
-            return self._smooth_step(prev, self._home_target(handle), limits,
-                                     alpha, cap=cap), None
+            home = self._home_target(handle)
+            target = home
+            if home_ramp is not None:
+                frac = min(1.0, max(0.0, (now - home_ramp["t0"]) / HOME_RAMP_S))
+                start = home_ramp["start"]
+                target = {}
+                for j, v in home.items():
+                    s0 = start.get(j)
+                    lo, hi = limits.get(j, (0.0, 1.0))
+                    if s0 is None:
+                        # A joint with no committed start has nothing to ramp
+                        # from — ask for the target and let the cap bound it.
+                        target[j] = v
+                        continue
+                    if j == "gripper":
+                        # committed is degrees-on-range; the home target (and
+                        # _smooth_step's input) speak the converter's [0, 1].
+                        s0 = (s0 - lo) / ((hi - lo) or 1.0)
+                    target[j] = s0 + frac * (v - s0)
+            # alpha 1.0: the lerp IS the shaping — filtering it would turn
+            # the kit's straight ramp back into an exponential.
+            return self._smooth_step(prev, target, limits, 1.0, cap=cap), None
         if pending or kit is None:
             return self._held_steps(prev), None
         action, engaged = kit.update(ctrl, head, stance, frame_age_s)
@@ -1492,8 +1537,10 @@ class HumanTeleopSession:
                     # LPF/rate-cap/guard chain — the one path that keeps them.
                     if driving_left:
                         self._home_req["left"] = False
+                        self._home_ramp["left"] = None
                     if driving_right:
                         self._home_req["right"] = False
+                        self._home_ramp["right"] = None
                     # An adapter that integrated while its side was NOT being
                     # written has run ahead of the arm (configured countdown,
                     # or a demote-recover with the grip held). Before such a
@@ -1523,6 +1570,8 @@ class HumanTeleopSession:
                                    else float("inf"))
                     cap_left = self._ramp_cap("left", period, now)
                     cap_right = self._ramp_cap("right", period, now)
+                    home_ramp_left = self._home_ramp["left"]
+                    home_ramp_right = self._home_ramp["right"]
                     prev_left = dict(self._committed_left)
                     prev_right = dict(self._committed_right)
                 # A DRIVING side that still awaits its re-seed is frozen this
@@ -1534,12 +1583,14 @@ class HumanTeleopSession:
                     driving=drive_left, homing=homing_left,
                     pending=pending_left, head=head, stance=stance,
                     frame_age_s=frame_age_s, alpha=alpha, cap=cap_left,
+                    home_ramp=home_ramp_left, now=now,
                 ) if left is not None else ({}, None))
                 steps_right, engaged_right = (self._side_steps(
                     right, self._kit.get("right"), ctrl_right, prev_right,
                     driving=drive_right, homing=homing_right,
                     pending=pending_right, head=head, stance=stance,
                     frame_age_s=frame_age_s, alpha=alpha, cap=cap_right,
+                    home_ramp=home_ramp_right, now=now,
                 ) if right is not None else ({}, None))
                 # Record an engaged-but-unwritten adapter tick (see the
                 # handover re-align above). Conservative on purpose: a frozen
