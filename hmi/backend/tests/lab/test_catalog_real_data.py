@@ -19,9 +19,11 @@ change — and every fixture comparison below runs over
 `episodes[:len(kit_verdicts)]`. Whole-dataset quantities (`total_episodes`,
 `share`'s denominator, filter/paging counts) are derived from the live detail
 instead of pinned to the 2026-08-26 snapshot; per-episode measurements stay
-pinned to the kit byte for byte. The one snapshot-shaped test left is the
-review canary (`test_the_real_v1_review_still_reads_35_keep_11_reject`),
-which is EXPECTED red while newly appended episodes sit unreviewed.
+pinned to the kit byte for byte. The review canary was the last
+snapshot-shaped test — red on every recording session by construction — and
+is prefix-pinned like everything else since 2026-08-29, when the operator
+confirmed the then-live 67 keep / 19 reject as his own verdicts (see
+`test_the_kit_prefix_of_the_review_still_reads_35_keep_11_reject`).
 
 **These tests are STRICTLY READ-ONLY, and that is not a style preference.**
 `~/robot-data/lerobot/local/so101_pick_cube` is the only recording of its
@@ -297,14 +299,41 @@ def test_labels_are_one_based_against_the_stored_index(solo, kit_verdicts):
 
 
 @needs_solo
-def test_the_real_v1_review_still_reads_35_keep_11_reject(solo, kit_verdicts):
-    """`local/so101_pick_cube/review.json` is a VERSION 1 file with no `tags`,
-    no `batches` and no per-mark `frames`. It loads unchanged and is never
-    rewritten until something is marked, so the counts and the per-episode
-    marks must come back exactly as the kit read them."""
-    assert solo["review"] == {"keep": 35, "reject": 11, "unset": 0, "train": 35}
-    assert [e["status"] for e in solo["episodes"]] == [k["status"] for k in kit_verdicts]
-    assert len(solo["keep_list"]) == 35
+def test_the_kit_prefix_of_the_review_still_reads_35_keep_11_reject(solo, kit_verdicts):
+    """The kit's 46 marks, byte for byte, and the live review consistent
+    around them.
+
+    Until 2026-08-29 this pinned the WHOLE review at 35/11 — which made it
+    red on every recording session by construction, and a canary that is red
+    on the ordinary path is a canary nobody reads. Prefix-pinned since, on
+    the operator's word: he confirmed the then-live 67 keep / 19 reject / 0
+    unset over 86 episodes as his own verdicts (cohort sessions of
+    2026-08-29, marked kit-side), so the appended tail is HIS to move and
+    only the kit's prefix is history. The totals are deliberately NOT
+    asserted — pinning them would re-arm the false alarm; what the tail gets
+    instead is the consistency contract below, which is what corruption
+    would actually break.
+
+    The marks may since have left the v1 file: the first Haller-side mark
+    rewrites `review.json` at the current schema. What must survive any such
+    rewrite is the kit's 46 verdicts, unchanged."""
+    prefix = [e["status"] for e in _kit_prefix(solo, kit_verdicts)]
+    assert prefix == [k["status"] for k in kit_verdicts]
+    assert prefix.count("keep") == 35
+    assert prefix.count("reject") == 11
+
+    # The live whole: counts derived from the same episodes they summarise,
+    # `train` = everything not rejected (review.counts), and `keep_list` the
+    # index form of the same answer. A review that disagrees with its own
+    # episode list is the corruption this test now watches for.
+    statuses = [e["status"] for e in solo["episodes"]]
+    assert set(statuses) <= {"keep", "reject", "unset"}
+    assert solo["review"] == {
+        "keep": statuses.count("keep"),
+        "reject": statuses.count("reject"),
+        "unset": statuses.count("unset"),
+        "train": statuses.count("keep") + statuses.count("unset"),
+    }
     assert solo["keep_list"] == [
         e["episode_index"] for e in solo["episodes"] if e["status"] != "reject"
     ]
