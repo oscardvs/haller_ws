@@ -18,23 +18,27 @@ import pytest
 from haller_hmi.human_teleop import HumanTeleopSession, SideAuthority
 
 from .test_human_teleop import (
+    _StubSideTeleop,
     _fake_arm_manager,
     _fast_acquire,
     _kp_frame,
+    _sess,
     _wait_until,
 )
 
 
 def _session(left, right, **kw):
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(**kw))
+    sess = _sess(mgr, **_fast_acquire(**kw))
     sess.start(left_arm=left, right_arm=right)
     return sess, arms
 
 
 def _sided_frame(*, left: bool, right: bool):
+    """Raw frame with the split on each side's own `squeeze` boolean."""
     frame = _kp_frame(dead_man=left or right)
-    frame["dead_man_sides"] = {"left": left, "right": right}
+    frame["left"]["squeeze"] = left
+    frame["right"]["squeeze"] = right
     return frame
 
 
@@ -60,14 +64,14 @@ def test_starts_with_only_a_left_arm():
 
 def test_refuses_a_session_with_no_arms_at_all():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire())
+    sess = _sess(mgr, **_fast_acquire())
     with pytest.raises(ValueError, match="at least one"):
         sess.start(left_arm=None, right_arm=None)
 
 
 def test_still_refuses_the_same_arm_twice():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire())
+    sess = _sess(mgr, **_fast_acquire())
     with pytest.raises(ValueError, match="must be different"):
         sess.start(left_arm="right", right_arm="right")
 
@@ -152,6 +156,7 @@ def test_collision_guard_sees_only_the_driven_arm():
 
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, collision_guard=RecordingGuard(),
+                              side_teleop_factory=_StubSideTeleop,
                               **_fast_acquire())
     sess.start(left_arm=None, right_arm="right")
     try:

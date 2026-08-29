@@ -11,20 +11,33 @@ existed, so a rewritten message string, a mis-derived threshold or a per-arm
 regression shows up here as a diff rather than as a policy trained on the
 wrong 35 episodes.
 
+The dataset the fixture was taken from GROWS: cohort sessions record into the
+SAME tree, and `--resume` appends without renumbering (the port's decision of
+record — see the mark-validation comment in `catalog.dataset_detail`). So the
+fixture pins a PREFIX — the 46 episodes the kit graded, whose bytes never
+change — and every fixture comparison below runs over
+`episodes[:len(kit_verdicts)]`. Whole-dataset quantities (`total_episodes`,
+`share`'s denominator, filter/paging counts) are derived from the live detail
+instead of pinned to the 2026-08-26 snapshot; per-episode measurements stay
+pinned to the kit byte for byte. The one snapshot-shaped test left is the
+review canary (`test_the_real_v1_review_still_reads_35_keep_11_reject`),
+which is EXPECTED red while newly appended episodes sit unreviewed.
+
 **These tests are STRICTLY READ-ONLY, and that is not a style preference.**
-`~/robot-data/lerobot/local/so101_pick_cube` is the only 46-episode recording
-on this box and there is NO BACKUP OF ANY KIND — one NVMe, no external media,
-no sync (verified 2026-08-26). Nothing here may mark, rename, prune, delete or
-otherwise write under `LEROBOT_HOME`; anything that needs a write copies into
-`tmp_path` first. `_untouched` below stats every file under both roots before
-and after each test and fails on any change, so a future edit that reaches for
-`review.set_status` to "just check the round-trip" trips a test instead of
-losing the recording.
+`~/robot-data/lerobot/local/so101_pick_cube` is the only recording of its
+kind on this box and there is NO BACKUP OF ANY KIND — one NVMe, no external
+media, no sync (verified 2026-08-26). Nothing here may mark, rename, prune,
+delete or otherwise write under `LEROBOT_HOME`; anything that needs a write
+copies into `tmp_path` first. `_untouched` below stats every file under both
+roots before and after each test and fails on any change, so a future edit
+that reaches for `review.set_status` to "just check the round-trip" trips a
+test instead of losing the recording.
 
 The two datasets cover the two rigs that exist on disk:
 
-  local/so101_pick_cube    46 episodes, solo, `.pos`-suffixed 6-dim state,
-                           uncalibrated gripper -> the kit's 40/70 thresholds.
+  local/so101_pick_cube    solo, `.pos`-suffixed 6-dim state, uncalibrated
+                           gripper -> the kit's 40/70 thresholds. Episodes
+                           0..45 are the kit's; cohort sessions append after.
   local/haller_..._box      2 episodes, bimanual, 12-dim state, gripper
                            calibrated in DEGREES -> 34.13/67.20. Index 5 is
                            the LEFT gripper here, which is the whole reason
@@ -154,6 +167,13 @@ def kit_verdicts() -> list[dict]:
     return json.loads(FIXTURE.read_text())
 
 
+def _kit_prefix(solo: dict, kit_verdicts: list[dict]) -> list[dict]:
+    """The live episodes the fixture describes: the first len(kit_verdicts).
+    Appended cohort episodes come after them (stored order is by index and
+    indices are never renumbered), so this is a plain slice."""
+    return solo["episodes"][:len(kit_verdicts)]
+
+
 @pytest.fixture()
 def solo(lerobot_home) -> dict:
     return catalog.dataset_detail(SOLO)
@@ -173,19 +193,30 @@ def _approx(field: str, expected: float):
 @needs_solo
 def test_solo_shape_is_the_dataset_the_fixture_was_taken_from(solo, kit_verdicts):
     """If any of these moved, the fixture describes different bytes and every
-    assertion below is comparing two unrelated datasets."""
+    assertion below is comparing two unrelated datasets. The dataset itself
+    may be LONGER than the fixture (cohort sessions append — see the module
+    docstring); what must not move is the prefix the kit graded: indices
+    0..45 in stored order, their frame counts summing to the 29500 the kit's
+    shares were computed over."""
     assert solo["rig"] == "solo"
     assert solo["fps"] == 30
-    assert solo["total_episodes"] == 46
-    assert solo["total_frames"] == 29500
-    assert len(solo["episodes"]) == 46
     assert len(kit_verdicts) == 46
+    assert solo["total_episodes"] >= 46
+    assert len(solo["episodes"]) == solo["total_episodes"]
+    # The share denominator below is info.json's total_frames; if the graded
+    # parquet disagrees with it the dataset is torn mid-append and every
+    # share comparison would be against a denominator describing other bytes.
+    assert solo["total_frames"] == sum(e["frames"] for e in solo["episodes"])
+    prefix = _kit_prefix(solo, kit_verdicts)
+    assert [e["episode_index"] for e in prefix] == list(range(46))
+    assert sum(e["frames"] for e in prefix) == sum(k["frames"] for k in kit_verdicts)
+    assert sum(k["frames"] for k in kit_verdicts) == 29500
 
 
 @needs_solo
 def test_every_verdict_matches_the_kit(solo, kit_verdicts):
-    """46/46. The headline claim of the whole port."""
-    got = [e["verdict"] for e in solo["episodes"]]
+    """46/46 on the kit's own episodes. The headline claim of the whole port."""
+    got = [e["verdict"] for e in _kit_prefix(solo, kit_verdicts)]
     want = [k["verdict"] for k in kit_verdicts]
     assert got == want
     # The contract's counts, restated so a wholesale shift that happened to
@@ -207,18 +238,29 @@ def test_every_reason_matches_the_kit_byte_for_byte(solo, kit_verdicts):
     A solo rig gets NO `"<side>: "` prefix and no second entry, which is why
     the comparison is against `reasons[0]` and against `len(reasons) == 1`.
     """
-    for ep, kit in zip(solo["episodes"], kit_verdicts, strict=True):
+    for ep, kit in zip(_kit_prefix(solo, kit_verdicts), kit_verdicts, strict=True):
         assert len(ep["reasons"]) == 1, ep["reasons"]
         assert ep["reasons"][0] == kit["why"]
 
 
 @needs_solo
 def test_every_measurement_matches_the_kit(solo, kit_verdicts):
-    """The numbers behind the verdicts, per the tolerances at the top."""
-    for ep, kit in zip(solo["episodes"], kit_verdicts, strict=True):
+    """The numbers behind the verdicts, per the tolerances at the top.
+
+    `share` is the one measurement whose DENOMINATOR is the whole dataset
+    (frames / total_frames), so appended episodes legitimately shrink the
+    prefix's shares. The kit's FORMULA still has to have survived the port:
+    the fixture's own share is checked against frames/29500 (what the kit
+    computed it from), and the live share against the same integer frame
+    count over TODAY's total.
+    """
+    fixture_total = sum(k["frames"] for k in kit_verdicts)
+    for ep, kit in zip(_kit_prefix(solo, kit_verdicts), kit_verdicts, strict=True):
         assert ep["episode_index"] == kit["i"]
         assert ep["frames"] == kit["frames"]
-        assert ep["share"] == _approx("share", kit["share"])
+        assert kit["share"] == _approx("share", kit["frames"] / fixture_total)
+        assert ep["share"] == _approx(
+            "share", kit["frames"] / solo["total_frames"])
 
         assert len(ep["arms"]) == 1
         arm = ep["arms"][0]
@@ -245,10 +287,13 @@ def test_solo_thresholds_are_still_the_kits_forty_and_seventy(solo):
 @needs_solo
 def test_labels_are_one_based_against_the_stored_index(solo, kit_verdicts):
     """`Ep 4 (idx 3)`. That off-by-one is how the wrong demonstration gets
-    deleted, so both numbers ship and the fixture pins both."""
-    for ep, kit in zip(solo["episodes"], kit_verdicts, strict=True):
+    deleted, so both numbers ship — pinned against the fixture on the kit's
+    prefix and derived from the stored index on everything appended since."""
+    for ep, kit in zip(_kit_prefix(solo, kit_verdicts), kit_verdicts, strict=True):
         assert ep["label"] == ep["episode_index"] + 1
         assert ep["label"] == kit["label"]
+    for ep in solo["episodes"][len(kit_verdicts):]:
+        assert ep["label"] == ep["episode_index"] + 1
 
 
 @needs_solo
@@ -356,38 +401,49 @@ def test_the_calibrated_thresholds_actually_change_a_reading(bimanual):
 # ---- query_episodes: filtering and sorting happen HERE, not in the browser ----
 
 @needs_solo
-def test_filter_verdict_returns_only_that_verdict(lerobot_home):
+def test_filter_verdict_returns_only_that_verdict(solo, kit_verdicts):
+    """The filter runs over the LIVE set, so the expected rows are derived
+    from the same detail the query serves — with the fixture's 9 SUSPECT
+    episodes as the floor the unmovable prefix contributes."""
+    want = [e["episode_index"] for e in solo["episodes"]
+            if e["verdict"] == "SUSPECT"]
     page = catalog.query_episodes(SOLO, filter_verdict="SUSPECT")
-    assert page["total"] == 9
+    assert page["total"] == len(want)
     assert {e["verdict"] for e in page["episodes"]} == {"SUSPECT"}
+    assert [e["episode_index"] for e in page["episodes"]] == want
+    assert sum(1 for k in kit_verdicts if k["verdict"] == "SUSPECT") == 9
+    assert len(want) >= 9
 
 
 @needs_solo
-def test_total_counts_after_filtering_and_before_paging(lerobot_home):
+def test_total_counts_after_filtering_and_before_paging(solo):
     """`total` is what a pager needs: how many rows the filter matched, not how
     many this page carries. Returning the page length instead is a pager that
     stops after one page."""
+    n_pass = sum(1 for e in solo["episodes"] if e["verdict"] == "PASS")
+    assert n_pass >= 28          # the fixture's 28 PASS episodes never move
     page = catalog.query_episodes(SOLO, filter_verdict="PASS", offset=2, limit=5)
-    assert page["total"] == 28
-    assert len(page["episodes"]) == 5
+    assert page["total"] == n_pass
+    assert len(page["episodes"]) == min(5, n_pass - 2)
     unpaged = catalog.query_episodes(SOLO, filter_verdict="PASS")
-    assert len(unpaged["episodes"]) == 28
+    assert len(unpaged["episodes"]) == n_pass
     assert page["episodes"] == unpaged["episodes"][2:7]
 
 
 @needs_solo
-def test_sorting_happens_server_side(lerobot_home):
+def test_sorting_happens_server_side(solo):
     """Sorted over the whole filtered set, not over the page — a client that
     sorted the 5 rows it was handed would get a different answer."""
+    n = solo["total_episodes"]
     desc = catalog.query_episodes(SOLO, sort="frames", order="desc", limit=3)
     frames = [e["frames"] for e in desc["episodes"]]
     assert frames == sorted(frames, reverse=True)
-    assert desc["total"] == 46
+    assert desc["total"] == n
     every = catalog.query_episodes(SOLO, sort="frames", order="desc")
     assert frames == [e["frames"] for e in every["episodes"]][:3]
     # No sort key is the stored order, which `order` still applies to.
     assert [e["episode_index"] for e in catalog.query_episodes(SOLO)["episodes"]] == list(
-        range(46)
+        range(n)
     )
 
 

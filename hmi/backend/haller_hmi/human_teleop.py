@@ -1,14 +1,25 @@
 """Bimanual teleop session — the safety core the headset drives through.
 
 This is the sibling of `teleop.TeleopSession` (leader/follower). Where that
-session reads positions off a physical leader arm at 60 Hz, this one reads
-frames off a WebSocket carrying a per-side `joint_goal` that
-`vr_teleop.QuestTeleoperator` has already solved in ROBOT joint space —
-degrees, gripper in [0, 1]. Everything a bench session needs lives here and
-not in the converter: per-side authority, the acquisition countdown and rate
-ramp, the command filter, the collision guard, the mode guard, E-STOP, and
-the recorder's `action` column. Otherwise the lifecycle and safety semantics
-match `TeleopSession` exactly.
+session reads positions off a physical leader arm at 60 Hz, this one stores
+RAW WebXR frames off a WebSocket — per-side controller pose + buttons,
+latest-wins — and solves them ITSELF, once per tick, through one
+`vr_teleop.kit_teleop.KitSideTeleop` per driven side (the vendored
+vr-teleop-kit mapper + solver). That is the kit's own loop shape: the
+consumer solves at its cadence on the latest frame and integrates its own
+open-loop qpos, so no downstream limiter's withheld degrees ever feed back
+into the mapper's reach accounting as operator over-drive.
+
+Everything a bench session needs still lives here: per-side authority, the
+collision guard, the mode guard, E-STOP, and the recorder's `action` column.
+What deliberately does NOT exist on the driven path any more: the one-pole
+LPF and the per-tick rate cap. The kit ships neither; its governors are the
+solver's per-joint per-solve dq caps, the joint limits, and servo physics —
+and while a side is DRIVING, this session writes the adapter's action in
+full, with an unbounded speed budget. Both filters remain, byte-for-byte, on
+the `request_home` slew path, which is not a kit path.
+
+Otherwise the lifecycle and safety semantics match `TeleopSession` exactly.
 
 Session state machine:
     IDLE → (start)        → ARMED
@@ -40,8 +51,18 @@ from dataclasses import dataclass
 from .arm import ArmManager
 from .safety import Mode
 from .tick import ProducerConflict, TickBus
+from .vr_teleop.config import QuestTeleopConfig
+from .vr_teleop.core.frames import STANCES
 
 logger = logging.getLogger(__name__)
+
+
+def _default_side_teleop_factory(joint_limits_deg, config, *, urdf_path=None):
+    """One side's kit-faithful tracker. Imported lazily: the vendored kit
+    carries a mujoco model, which a session that never starts (and every
+    consumer of this module's constants) should not pay for."""
+    from .vr_teleop.kit_teleop import KitSideTeleop
+    return KitSideTeleop(joint_limits_deg, config, urdf_path=urdf_path)
 
 # ---- acquisition ------------------------------------------------------
 #
@@ -246,8 +267,22 @@ class HumanTeleopSession:
         collision_guard=None,
         tick_bus: TickBus | None = None,
         sample_hz: float | None = None,
+        vr_config: QuestTeleopConfig | None = None,
+        side_teleop_factory=None,
     ):
         self._arms = arms
+        # The live-tunable VR mapping config, SHARED with the teleop socket:
+        # the socket writes `config_update`s onto this instance and the
+        # per-side adapters below read it on every tick, so a slider moved in
+        # the headset reaches the running session without a restart.
+        self._vr_cfg = vr_config if vr_config is not None else QuestTeleopConfig()
+        # (joint_limits_deg, config, *, urdf_path=None) -> KitSideTeleop-like.
+        # Injectable so session tests can pin the SESSION contract with a
+        # deterministic tracker; production uses the vendored kit adapter.
+        self._side_factory = (side_teleop_factory if side_teleop_factory
+                              is not None else _default_side_teleop_factory)
+        # One kit-faithful tracker per driven side, built at start().
+        self._kit: dict[str, object] = {}
         # THE tick bus. Constructed here rather than handed in from the
         # lifespan because this object is built at module scope in server.py
         # while telemetry and the recorder are lifespan locals — so the bus
@@ -293,8 +328,13 @@ class HumanTeleopSession:
         # hand happens to be waving around. A frame carrying only the global
         # boolean mirrors it onto both sides.
         self._dead_man_sides: dict[str, bool] = {"left": False, "right": False}
-        self._target_left: dict | None = None
-        self._target_right: dict | None = None
+        # The latest RAW controller frame per side (latest-wins, the kit's
+        # storage discipline) plus the head pose and stance it arrived with.
+        # These are STORED, not solved: solving happens once per tick in the
+        # loop, on whatever is newest then.
+        self._ctrl: dict[str, dict | None] = {"left": None, "right": None}
+        self._head_orientation = None
+        self._stance_frame: str | None = None
         # Sides asked to slew HOME while their clutch is open (the headset's
         # hold-the-left-stick reset). Cleared the moment a side starts
         # driving: the operator's hand always outranks a parked reset.
@@ -308,9 +348,9 @@ class HumanTeleopSession:
         # Set from cfg.hz when the loop starts. The default matters only
         # for `_smooth_step` called outside a running session.
         self._period = 1.0 / 60.0
-        # Smoothing time constant for the commit loop's one-pole filter,
-        # config motion.lpf_tau_s. It compounds with the IK's per-solve step
-        # cap — see MotionConfig.lpf_tau_s for the arithmetic.
+        # Smoothing time constant for the one-pole filter, config
+        # motion.lpf_tau_s. HOME-SLEW ONLY: the driven path is the kit's and
+        # carries no output filter at all — see the module docstring.
         self._lpf_tau_s = lpf_tau_s
         # T8: tracking-loss + WS disconnect grace
         self._frame_age_ms_loss = frame_age_ms_loss
@@ -329,10 +369,25 @@ class HumanTeleopSession:
         self._acq: dict[str, _SideAcquire] = {
             "left": _SideAcquire(), "right": _SideAcquire(),
         }
-        # Set on every authority change: the smoothing state has to be re-read
-        # from the arm before it is used to command a first step, or the step
-        # is measured from a number nothing observed.
+        # Set exactly when the side's adapter and the arm may disagree about
+        # where the arm is — today: the side just entered the session, a
+        # request_home slew wrote the arm behind the adapter's back, or the
+        # adapter itself ran AHEAD of the arm (see _kit_ran_ahead). The
+        # pending side's adapter is re-seeded from a real read
+        # (`seed_from_observed`) before it may drive again; everywhere else
+        # the adapter's qpos is OPEN LOOP and never re-read mid-teleop, which
+        # is the kit's discipline and the point of the port.
         self._reseed_pending: dict[str, bool] = {"left": True, "right": True}
+        # The one divergence the kit structurally cannot have and this
+        # session can: an ENGAGED adapter integrating on ticks where nothing
+        # is written — a configured acquisition countdown, or a
+        # demote-and-recover with the grip still squeezed. The kit's rising
+        # edge IS the write gate, so its integrator is never unwritten; here
+        # the flag records that it happened, and the side re-seeds (and so
+        # re-anchors, zero delta by construction) before its next driven
+        # tick. At the shipped acquire_ms=0 this never fires and no extra
+        # read is ever taken.
+        self._kit_ran_ahead: dict[str, bool] = {"left": False, "right": False}
         self._seen_frame: bool = False
 
     # ---- public API ------------------------------------------------------
@@ -658,13 +713,14 @@ class HumanTeleopSession:
             #   _ws_disconnected_at_perf — set when the operator's tab closes,
             #     which happens *before* stop(); leaving it set makes the next
             #     session's first tick see an expired grace window and auto-stop.
-            #   _target_left/_target_right — the last joint goal of the
-            #     previous session; leaving them set makes a freshly-ARMED
-            #     session drift toward where the operator's hands used to be,
-            #     before a single new frame has arrived.
+            #   _ctrl — the last raw controller frames of the previous
+            #     session; leaving them set makes a freshly-ARMED session
+            #     track hands that are no longer there, before a single new
+            #     frame has arrived.
             self._ws_disconnected_at_perf = None
-            self._target_left = None
-            self._target_right = None
+            self._ctrl = {"left": None, "right": None}
+            self._head_orientation = None
+            self._stance_frame = None
             self._home_req = {"left": False, "right": False}
             self._last_left_perf = 0.0
             self._last_right_perf = 0.0
@@ -674,6 +730,7 @@ class HumanTeleopSession:
             for acq in self._acq.values():
                 acq.release("clutch_open")
             self._reseed_pending = {"left": True, "right": True}
+            self._kit_ran_ahead = {"left": False, "right": False}
             self._reset_clutch_state()
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
@@ -711,22 +768,49 @@ class HumanTeleopSession:
                 self._cfg = None
                 self._started_at = None
             raise
-        # Seed the smoothing state from where the arms are — AFTER claiming
-        # the producer, never before. The idle sampler checks the bus's owner
+        # Build one kit tracker per driven side and seed it — plus the
+        # committed pose — from where the arm actually is. AFTER claiming the
+        # producer, never before: the idle sampler checks the bus's owner
         # before it reads, so from the attach onward the serial line belongs
         # to this session alone; seeded inside the lock block above, these
         # reads raced the idle sampler's 20 Hz sampling by construction, and
         # a read that lost the race fell back to 0° on every joint — an
-        # anchor to a pose the arm is not in, handed to the operator with no
-        # countdown left to absorb it. The loop's own reseed (pending above)
-        # re-reads on the first tick regardless; this pre-seed just means
-        # status() never shows an empty pose to a cockpit that asks early.
+        # anchor to a pose the arm is not in.
+        #
+        # A read that FAILS leaves that side's reseed pending: the loop
+        # retries, and until it succeeds the side is frozen — an unseeded
+        # tracker anchors the operator's hand to a pose nothing observed,
+        # which is the zero-seed fiction this machinery exists to prevent.
+        # The committed pose still falls back to zeros for status() only.
         # Thread-safety: the loop thread does not exist yet, so these fields
         # have exactly one writer here.
-        self._committed_left = (self._observed_or_zero(handles["left"])
-                                if "left" in handles else {})
-        self._committed_right = (self._observed_or_zero(handles["right"])
-                                 if "right" in handles else {})
+        try:
+            self._kit = {side: self._side_factory(handle.joint_limits_deg,
+                                                  self._vr_cfg)
+                         for side, handle in handles.items()}
+        except Exception:
+            # Same reasoning as the ProducerConflict handler above: a session
+            # marked running with a claimed bus and no loop is worse than a
+            # failed start.
+            self._tick_token.detach()
+            self._tick_token = None
+            with self._lock:
+                self._state = HumanState.IDLE
+                self._cfg = None
+                self._started_at = None
+            raise
+        committed_seed: dict[str, dict[str, float]] = {"left": {}, "right": {}}
+        for side, handle in handles.items():
+            observed = self._read_observed(handle)
+            if observed is None:
+                committed_seed[side] = {j: 0.0 for j in handle.joint_limits_deg}
+                continue                # reseed stays pending; the loop retries
+            committed_seed[side] = observed
+            self._kit[side].seed_from_observed(dict(observed))
+            with self._lock:
+                self._reseed_pending[side] = False
+        self._committed_left = committed_seed["left"]
+        self._committed_right = committed_seed["right"]
         self._steps_left = self._held_steps(self._committed_left)
         self._steps_right = self._held_steps(self._committed_right)
         self._thread = threading.Thread(
@@ -804,37 +888,55 @@ class HumanTeleopSession:
             self._steps_right = self._held_steps(self._committed_right)
             self._reset_clutch_state()
             # Same reasoning as the clutch block: a stopped session must not
-            # still advertise an arm as DRIVING or mid-countdown.
+            # still advertise an arm as DRIVING or mid-countdown — nor a
+            # tracker as engaged. The adapters are session-lived, like the
+            # clutch anchors they hold.
             self._seen_frame = False
+            self._kit = {}
             for acq in self._acq.values():
                 acq.release("idle")
         logger.info("human teleop stopped")
 
     def ingest_frame(self, frame: dict) -> None:
-        """Apply one converter frame — per-side `joint_goal` plus the clutch.
-        Thread-safe."""
+        """Store one RAW wire frame — per-side controller state, latest-wins —
+        plus the clutch booleans derived from the per-side squeeze.
+        Thread-safe.
+
+        NOTHING is solved here. The kit's loop shape solves at the CONSUMER's
+        cadence on the latest frame; solving per arriving frame, seeded from
+        the throttled committed pose, is exactly the structure the audit
+        found bleeding hand-to-tool correspondence away, so this method's
+        whole job is storage plus the authority bookkeeping a release must
+        never wait a tick for.
+        """
         with self._lock:
             if not self.running:
                 return
-            # A plain held boolean: the Quest's squeeze button, carried on the
-            # frame. The backend applies no threshold and no hold timer of its
-            # own — the acquisition countdown is the only filter, and it lives
-            # in `_update_authority`.
-            engaged = bool(frame.get("dead_man", False))
+            left_raw = self._usable_side(frame.get("left"))
+            right_raw = self._usable_side(frame.get("right"))
+            # A plain held boolean per hand: the Quest's squeeze button,
+            # carried on the side. Read off the UNFILTERED side dict — a hand
+            # whose pose arrived as junk can still be squeezing, and opening
+            # the clutch on a pose glitch would restart acquisition on a
+            # fault the staleness budget exists to absorb. The backend
+            # applies no threshold and no hold timer of its own. `dead_man`
+            # remains as two compat rails: an explicit False overrules any
+            # squeeze the same frame claims (an inconsistent frame reads
+            # disengaged — the safe reading), and a harness side that
+            # carries no `squeeze` key at all mirrors the global boolean
+            # rather than silently engaging neither.
+            dm = frame.get("dead_man")
+            sq = {}
+            for side in ("left", "right"):
+                raw = frame.get(side)
+                sq[side] = (bool(raw.get("squeeze", bool(dm)))
+                            if isinstance(raw, dict) else False)
+            if dm is False:
+                sq = {"left": False, "right": False}
+            engaged = sq["left"] or sq["right"] or bool(dm)
             self._dead_man = engaged
             self._clutch_reason = "engaged" if engaged else CLUTCH_RESTING
-            # Per-side split, gated on the global decision: a frame that is
-            # disengaged must read disengaged on both sides no matter what the
-            # split claims. Only frames that carry a split get one; everything
-            # else mirrors.
-            sides_raw = frame.get("dead_man_sides")
-            if engaged and isinstance(sides_raw, dict):
-                self._dead_man_sides = {
-                    side: bool(sides_raw.get(side, False))
-                    for side in ("left", "right")
-                }
-            else:
-                self._dead_man_sides = {"left": engaged, "right": engaged}
+            self._dead_man_sides = dict(sq)
 
             self._latest_frame_ts_ms = int(frame.get("ts_ms", 0))
             now_perf = time.perf_counter()
@@ -842,34 +944,35 @@ class HumanTeleopSession:
             # WS is healthy: cancel any pending grace window.
             self._ws_disconnected_at_perf = None
 
-            left_side = frame.get("left")
-            right_side = frame.get("right")
-            # A side counts as tracked only when it produced a USABLE goal.
-            #
-            # The converter refuses to emit one for a hand that is not tracked,
-            # and this used to store that refusal while still stamping the side
-            # as freshly seen. The effect was invisible and nasty: one bad
-            # frame — routine at the edge of the tracking volume — made the
-            # side momentarily not-live, which released its acquisition and
-            # restarted the countdown, while `tracking.age_ms` went on
-            # reporting a healthy few milliseconds because a frame HAD
-            # arrived. The operator saw a countdown that would not count down
-            # and nothing anywhere saying why.
-            #
-            # Treating an unusable frame exactly like an absent one fixes both
-            # halves: the staleness budget now absorbs a flicker instead of
-            # resetting on it, and a side that really has stopped producing
-            # goals ages out and reads as lost, which is the truth.
-            if left_side is not None:
-                goal = self._side_goal(left_side)
-                if goal is not None:
-                    self._target_left = goal
-                    self._last_left_perf = now_perf
-            if right_side is not None:
-                goal = self._side_goal(right_side)
-                if goal is not None:
-                    self._target_right = goal
-                    self._last_right_perf = now_perf
+            # Head + stance ride the frame and are stored per frame, absence
+            # included — the kit keeps the previous engage rotation when the
+            # latest frame carries no head pose, and that decision belongs to
+            # the adapter, not to a cache here inventing one. A head pose
+            # that is malformed or non-finite is stored as ABSENT for the
+            # same reason `_usable_side` refuses one: a NaN quaternion rides
+            # `atan2` into a poisoned engage rotation without ever raising.
+            head = frame.get("head")
+            head_orient = (head.get("orientation")
+                           if isinstance(head, dict) else None)
+            self._head_orientation = (head_orient
+                                      if self._finite_quat(head_orient)
+                                      else None)
+            stance = frame.get("stance")
+            self._stance_frame = stance if stance in STANCES else None
+
+            # Latest-wins per side, absent-or-junk included: the loop solves
+            # whatever is newest, and the adapter freezes on an untracked or
+            # missing hand (the kit's own rule). The AGE stamp moves only for
+            # a side that is present and tracked — an untracked flicker ages
+            # out through the staleness budget instead of resetting it, and a
+            # side that really has stopped producing usable poses reads as
+            # lost, which is the truth.
+            self._ctrl["left"] = left_raw
+            self._ctrl["right"] = right_raw
+            if isinstance(left_raw, dict) and left_raw.get("tracked", False):
+                self._last_left_perf = now_perf
+            if isinstance(right_raw, dict) and right_raw.get("tracked", False):
+                self._last_right_perf = now_perf
 
             self._seen_frame = True
             # Evaluated here as well as in the commit loop, and for different
@@ -879,20 +982,53 @@ class HumanTeleopSession:
             # must never wait for the loop.
             self._update_authority(now_perf)
 
-    def _side_goal(self, side_frame: dict) -> dict | None:
-        """One side's joint target, or None if the frame carried no usable one.
+    @staticmethod
+    def _usable_side(raw) -> dict | None:
+        """One side's raw controller dict, or None for anything the adapter
+        could not safely consume. The wire (`vr_teleop.wire`) is the schema;
+        this refuses shapes that would throw inside the 60 Hz loop AND any
+        non-finite pose/trigger number — a junk frame must cost one side one
+        tick, never the session, and NEVER a motion.
 
-        The converter (`vr_teleop.QuestTeleoperator`) has already solved this
-        in ROBOT joint space — degrees, gripper in [0, 1] — and has already
-        applied handedness, so nothing here reinterprets it. A side dict with
-        no `joint_goal` is an UNUSABLE side, not a zeroed one: the caller
-        treats it exactly like an absent side, so it ages out through the
-        staleness budget instead of parking the arm at the origin.
-        """
-        joint_goal = side_frame.get("joint_goal")
-        if joint_goal is None:
+        Finiteness is load-bearing, not tidiness: stdlib `json.loads`
+        accepts NaN/Infinity literals, the adapter's EMA and the solver's
+        `np.clip` dq caps propagate NaN instead of raising, one NaN then
+        sticks in the OPEN-LOOP qpos integrator until a reseed, and
+        `_kit_step`'s `max(lo, min(hi, nan))` resolves to the UPPER joint
+        limit — which the DRIVING write budget (`float("inf")`, by the kit
+        contract) would send at servo speed, every tick. Refused here, the
+        side takes the adapter's untracked exit: integrator holds, anchor
+        and filters survive, and trackability ages out through the normal
+        staleness budget. The clutch bookkeeping stays on the UNFILTERED
+        dict by design (see `ingest_frame`) — a hand whose pose arrived as
+        junk can still be squeezing."""
+        if not isinstance(raw, dict):
             return None
-        return {k: float(v) for k, v in joint_goal.items()}
+        pos, orient = raw.get("position"), raw.get("orientation")
+        if not (isinstance(pos, (list, tuple)) and len(pos) >= 3
+                and isinstance(orient, (list, tuple)) and len(orient) >= 4):
+            return None
+        try:
+            values = [*pos, *orient, raw.get("trigger", 0.0)]
+            if not all(math.isfinite(float(v)) for v in values):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return raw
+
+    @staticmethod
+    def _finite_quat(orient) -> bool:
+        """True only for a 4+-element sequence of finite numbers. The yaw
+        correction consumes the head pose through `atan2`, which propagates
+        NaN rather than raising, and a poisoned R sticks to the mapper at
+        the next anchor. A junk head pose must read as ABSENT — the kit
+        keeps the previous engage rotation — never as facing anywhere."""
+        if not isinstance(orient, (list, tuple)) or len(orient) < 4:
+            return False
+        try:
+            return all(math.isfinite(float(v)) for v in orient)
+        except (TypeError, ValueError):
+            return False
 
     # ---- authority transfer ---------------------------------------------
 
@@ -918,17 +1054,20 @@ class HumanTeleopSession:
             if self._cfg is not None and self._cfg.arm_for(side) is None:
                 acq.release("no_arm")
                 continue
-            target = self._target_left if side == "left" else self._target_right
-            # `target is None` also covers a hand the converter refused to
-            # solve for — an untracked controller — so the tracking gate is an
-            # acquisition gate for free.
-            tracked = self._side_trackable(side, now) and target is not None
+            # The age stamp only ever moves for a present, tracked hand
+            # (`ingest_frame`), so trackability alone is the acquisition gate:
+            # a hand the headset reports untracked ages out exactly like an
+            # absent one.
+            tracked = self._side_trackable(side, now)
             engaged = self._dead_man_sides.get(side, self._dead_man)
             if not engaged or not tracked:
-                if acq.authority is not SideAuthority.HELD:
-                    # Coming back from a handover: re-read the arm before its
-                    # position is trusted again.
-                    self._reseed_pending[side] = True
+                # No reseed on a demote: nothing wrote the arm during the
+                # loss (the goals froze), so the adapter's open-loop qpos is
+                # still the last thing commanded — and the kit's discipline
+                # is exactly that it is never re-read mid-teleop. The reseed
+                # rule lives with the two events that actually move the arm
+                # under the adapter: session entry and the home slew.
+                #
                 # Tracking outranks the clutch: an operator holding the
                 # dead-man over a side the robot cannot see needs to be told
                 # about the side, not about the clutch they are already
@@ -937,7 +1076,6 @@ class HumanTeleopSession:
                 continue
 
             if acq.authority is SideAuthority.HELD:
-                self._reseed_pending[side] = True
                 acq.since_perf = now
                 if self._handover_ms() <= 0.0:
                     # The default, and the kit's clutch: engage on the rising
@@ -1004,9 +1142,36 @@ class HumanTeleopSession:
         start = self._acquire_rate_deg_s * period
         return min(full, start + max(0.0, frac) * (full - start))
 
-    def target_goals(self) -> dict:
+    def latest_ctrl(self) -> dict:
+        """The raw controller frame each side would be solved from next tick
+        (None for a side the latest frame did not carry). Diagnostic."""
         with self._lock:
-            return {"left": self._target_left, "right": self._target_right}
+            return {"left": self._ctrl["left"], "right": self._ctrl["right"]}
+
+    def ik_sides(self) -> dict:
+        """Per-side solver diagnostics for the `ik_state` broadcast.
+
+        Assembled from each side's `KitSideTeleop.diag()` with the one fact
+        the adapter cannot know — whether the session is actually WRITING its
+        output — overlaid as `driving`. Field names are the frontend's
+        `IkSideDiag` contract (VRTeleopPanel reads them off `msg.sides`).
+        Both side keys are always present; a side with no tracker (no arm, or
+        no session) is an empty dict, which the panel renders as idle.
+        """
+        with self._lock:
+            kits = dict(self._kit) if self.running else {}
+            driving = {side: self._acq[side].authority is SideAuthority.DRIVING
+                       for side in ("left", "right")}
+        out: dict[str, dict] = {"left": {}, "right": {}}
+        for side, kit in kits.items():
+            try:
+                diag = dict(kit.diag())
+            except Exception:       # diagnostics must never take a route down
+                logger.warning("kit diag() failed for %s", side, exc_info=True)
+                diag = {}
+            diag["driving"] = bool(driving[side])
+            out[side] = diag
+        return out
 
     def notify_ws_disconnected(self) -> None:
         """Start the grace window after which a session with no operator on
@@ -1034,21 +1199,20 @@ class HumanTeleopSession:
                 self._ws_disconnected_at_perf = time.perf_counter()
 
     @staticmethod
-    def _observed_or_zero(handle) -> dict[str, float]:
-        """Seed the smoothing state from where the arm currently is.
-
-        Goes through `read_joints_deg()` (the ArmHandle interface) rather than
-        the underlying lerobot robot, so sim arms seed correctly too. Falls back
-        to zero per joint if the read fails or omits a joint.
-        """
+    def _read_observed(handle) -> dict[str, float] | None:
+        """Where the arm is, through `read_joints_deg()` (the ArmHandle
+        interface, so sim arms read correctly too) — or None if the read
+        failed. It must never quietly become 0° per joint: a zero-seeded
+        tracker anchors the operator's hand to a pose the arm is not in, and
+        the first squeeze slews the arm toward the fiction."""
         try:
             observed = handle.read_joints_deg()
-            return {joint: float(observed.get(joint, 0.0))
-                    for joint in handle.joint_limits_deg}
         except Exception:
-            logger.warning("could not read start pose for arm %s; seeding at zero",
+            logger.warning("could not read pose for arm %s; reseed pending",
                            getattr(handle.config, "id", "?"), exc_info=True)
-            return {joint: 0.0 for joint in handle.joint_limits_deg}
+            return None
+        return {joint: float(observed.get(joint, 0.0))
+                for joint in handle.joint_limits_deg}
 
     @staticmethod
     def _held_steps(committed: dict[str, float]) -> dict[str, JointStep]:
@@ -1115,31 +1279,95 @@ class HumanTeleopSession:
             out[joint] = JointStep(target=desired, committed=final, reason=reason)
         return out
 
+    def _kit_step(
+        self,
+        committed: dict[str, float],
+        action: dict[str, float],
+        limits: dict[str, tuple[float, float]],
+    ) -> dict[str, JointStep]:
+        """One DRIVING tick's steps: the adapter's action, IN FULL.
+
+        No LPF, no per-tick rate cap — the kit ships neither, and with the
+        solver integrating its own open-loop qpos any attenuation here would
+        be measured by the mapper's reach limits as operator over-drive and
+        absorbed. The only shaping is the joint-limit clamp (recorded here so
+        the diagnostic tells the truth; `send_goal` re-applies it as the
+        enforcement point) and the gripper's [0,1] → calibrated-degrees
+        scaling, which is the session's contract with the recorder.
+        """
+        out: dict[str, JointStep] = {}
+        for joint, lo_hi in limits.items():
+            lo, hi = lo_hi
+            if joint not in action:
+                # The adapter maps every joint in joint_limits_deg; a hole
+                # would be a contract break upstream. Hold rather than invent.
+                out[joint] = JointStep(target=None,
+                                       committed=committed.get(joint, 0.0),
+                                       reason="held")
+                continue
+            desired = self._to_degrees(joint, float(action[joint]), lo, hi)
+            final = max(lo, min(hi, desired))
+            reason = "clamped" if final != desired else "ok"
+            out[joint] = JointStep(target=desired, committed=final, reason=reason)
+        return out
+
     @staticmethod
-    def _commit(handle, goal: dict[str, float]) -> dict[str, float]:
+    def _commit(handle, goal: dict[str, float],
+                *, speed_cap_deg_s: float) -> dict[str, float]:
         """Write one tick's goal through the ArmHandle interface and report
         what was actually sent.
 
         `send_goal` does the joint-limit clamp and the mode-guard check itself,
         and works against both `ArmHandle` and `SimArmHandle` — so the same loop
-        drives real arms and MuJoCo arms. Since Task 4, `send_goal` can
-        legitimately command LESS than it was asked, because it caps each call
-        against real elapsed time rather than this loop's nominal tick — so its
-        return, not `goal`, is what the arm actually received. The caller folds
-        this back into the committed pose, which is what status()["goal_deg"]
-        — and recorder.py's `action` column downstream of it — reports.
+        drives real arms and MuJoCo arms. `send_goal` can legitimately command
+        LESS than it was asked when a finite cap is passed, because it caps
+        each call against real elapsed time rather than this loop's nominal
+        tick — so its return, not `goal`, is what the arm actually received.
+        The caller folds this back into the committed pose, which is what
+        status()["goal_deg"] — and recorder.py's `action` column downstream of
+        it — reports.
 
-        The cap passed is the SESSION's ceiling, not the discrete-move
-        `motion.max_speed_deg_s`: every step arriving here has already been
-        rate-capped at RATE_CAP_DEG_S by `_smooth_step`, and capping again at
-        the (much lower) discrete-move speed made that number the arm's
-        teleop ceiling — 90 deg/s on a rig whose kit reference carries no
-        write-path cap at all. The write stays elapsed-time bounded; the
-        bound is just the same one the session already enforces.
+        The cap is the CALLER's statement about the path the goal rode in on:
+
+          * a DRIVING side passes float("inf") — the kit writes raw, and its
+            governors already had their say (the vendored solver's per-joint
+            per-solve dq caps and the joint-limit clamp inside send_goal;
+            the mode guard and E-STOP stand regardless). Any finite number
+            here re-imposes the downstream limiter the audit tore out.
+          * a home slew passes RATE_CAP_DEG_S — that path keeps the session's
+            LPF + rate cap, and the write-side bound matches it.
         """
         return handle.send_goal(
             {joint: float(value) for joint, value in goal.items()},
-            speed_cap_deg_s=RATE_CAP_DEG_S)
+            speed_cap_deg_s=speed_cap_deg_s)
+
+    def _side_steps(self, handle, kit, ctrl, prev, *, driving, homing,
+                    pending, head, stance, frame_age_s, alpha, cap):
+        """One side's steps for this tick — the three-way fork the loop takes.
+        Returns (steps, engaged): `engaged` mirrors the adapter's clutch when
+        `kit.update()` ran this tick, and is None when it did not.
+
+        * HOMING: the in-session park. Not a kit path — it keeps the
+          session's one-pole LPF and per-tick rate cap byte-for-byte.
+        * PENDING a re-seed: frozen. The tracker must neither integrate nor
+          drive from state nothing observed; the loop's seed step retries.
+        * otherwise: exactly one `kit.update()` on the latest raw frame —
+          clutch edges, the EMA pose filter, the 0.2 s staleness gate and the
+          open-loop IK integration all live in the adapter. While DRIVING the
+          returned action is this side's target IN FULL; while held the
+          adapter still ran (so its state machine stays true to the hand) but
+          nothing is asked of the arm.
+        """
+        limits = handle.joint_limits_deg
+        if homing:
+            return self._smooth_step(prev, self._home_target(handle), limits,
+                                     alpha, cap=cap), None
+        if pending or kit is None:
+            return self._held_steps(prev), None
+        action, engaged = kit.update(ctrl, head, stance, frame_age_s)
+        if driving:
+            return self._kit_step(prev, action, limits), engaged
+        return self._held_steps(prev), engaged
 
     def _loop(self) -> None:
         with self._lock:
@@ -1154,10 +1382,9 @@ class HumanTeleopSession:
         # `_smooth_step`'s default cap converts against this; the loop
         # always passes an explicit cap, so this is for callers outside it.
         self._period = period
-        # Smoothing time constant (frequency-independent). Zero means the
-        # filter is OFF (alpha 1, pure passthrough) — the kit ships no output
-        # filter, and with the IK seeded from the committed pose any
-        # attenuation here feeds back into the next solve's step budget.
+        # Smoothing time constant (frequency-independent), HOME-SLEW ONLY —
+        # the driven path writes the adapter's action in full. Zero means the
+        # filter is OFF (alpha 1, pure passthrough).
         tau_s = self._lpf_tau_s
         if tau_s <= 0.0 or period <= 0:
             alpha = 1.0
@@ -1178,37 +1405,49 @@ class HumanTeleopSession:
             tick_index += 1
             sampling = token is not None and (tick_index % sample_every) == 0
             try:
-                # Re-read any side that is not being driven, BEFORE authority
-                # is judged against its position. Outside the lock: this is bus
-                # traffic on real hardware, and status() must not block on it.
-                # Edge-triggered, so a steady session pays nothing.
+                # Re-seed any side whose arm was moved by something other
+                # than its own adapter — session entry, or the home slew —
+                # BEFORE that adapter is asked for a step. Outside the lock:
+                # this is bus traffic on real hardware, and status() must not
+                # block on it. Edge-triggered, so a steady session pays
+                # nothing. A side still mid-home-slew is skipped (the arm is
+                # still being moved; a seed now is stale by the next write) —
+                # unless it has just gone DRIVING, which is the handover
+                # tick: the home request is dead (cancelled below), and the
+                # adapter must anchor to the arm's real pose before its
+                # first driven step.
                 for side, handle in (("left", left), ("right", right)):
                     if handle is None:
                         continue
                     with self._lock:
                         pending = self._reseed_pending[side]
-                    if not pending:
+                        homing_now = self._home_req[side]
+                        driving_now = (self._acq[side].authority
+                                       is SideAuthority.DRIVING)
+                    if not pending or (homing_now and not driving_now):
                         continue
-                    try:
-                        raw = handle.read_joints_deg()
-                    except Exception:
+                    observed = self._read_observed(handle)
+                    if observed is None:
                         # Keep the request pending and the previous committed
                         # pose in place, and try again next tick. A failed
                         # read must never quietly become 0° per joint here:
                         # with the acquisition countdown at zero, a
                         # zero-seeded side anchors the operator's hand to a
                         # pose the arm is not in, and the first squeeze slews
-                        # the arm toward the fiction at the full rate cap.
-                        logger.warning(
-                            "human teleop: %s reseed read failed, retrying"
-                            " next tick", side, exc_info=True)
+                        # the arm toward the fiction.
                         continue
-                    observed = {joint: float(raw.get(joint, 0.0))
-                                for joint in handle.joint_limits_deg}
+                    kit = self._kit.get(side)
+                    if kit is not None:
+                        # Resets the tracker's qpos AND its clutch state, so
+                        # a squeeze already held re-anchors on this tick's
+                        # rising edge — the engage starts from zero delta by
+                        # construction.
+                        kit.seed_from_observed(dict(observed))
                     with self._lock:
                         self._reseed_pending[side] = False
+                        self._kit_ran_ahead[side] = False
                         if self._acq[side].authority is SideAuthority.DRIVING:
-                            continue    # handed over while we were reading
+                            continue    # this tick's own write refreshes it
                         if side == "left":
                             self._committed_left = observed
                             self._steps_left = self._held_steps(observed)
@@ -1244,44 +1483,75 @@ class HumanTeleopSession:
                 now = time.perf_counter()
                 with self._lock:
                     self._update_authority(now)
-                    # A side that is not DRIVING gets NO target, so its
-                    # smoothing state stays where the arm is instead of slewing
-                    # toward the operator. This is the bug that made engaging a
-                    # lurch: `committed` used to track the operator's pose the
-                    # whole time the clutch was open, so the first commit after
-                    # engaging was a single step to wherever they were standing
-                    # — the rate cap had been spent on an arm that never moved.
                     driving_left = (self._acq["left"].authority
                                     is SideAuthority.DRIVING)
                     driving_right = (self._acq["right"].authority
                                      is SideAuthority.DRIVING)
                     # A driving hand cancels a pending home request; a held
-                    # side with one keeps slewing home through the same
-                    # LPF/rate-cap/guard chain as any teleop step.
+                    # side with one keeps slewing home through the session's
+                    # LPF/rate-cap/guard chain — the one path that keeps them.
                     if driving_left:
                         self._home_req["left"] = False
                     if driving_right:
                         self._home_req["right"] = False
-                    target_left = (self._target_left if driving_left
-                                   else self._home_target(left)
-                                   if self._home_req["left"] and left else None)
-                    target_right = (self._target_right if driving_right
-                                    else self._home_target(right)
-                                    if self._home_req["right"] and right else None)
+                    # An adapter that integrated while its side was NOT being
+                    # written has run ahead of the arm (configured countdown,
+                    # or a demote-recover with the grip held). Before such a
+                    # side drives, re-align it from a real read — the reseed
+                    # also resets the adapter's clutch edge, so the engage
+                    # re-anchors at the hand's current position and the first
+                    # driven write is the arm's own pose, zero delta by
+                    # construction. Never fires at the shipped acquire_ms=0.
+                    for side, driving_now in (("left", driving_left),
+                                              ("right", driving_right)):
+                        if driving_now and self._kit_ran_ahead[side]:
+                            self._reseed_pending[side] = True
+                            self._kit_ran_ahead[side] = False
+                    homing_left = self._home_req["left"] and left is not None
+                    homing_right = self._home_req["right"] and right is not None
+                    pending_left = self._reseed_pending["left"]
+                    pending_right = self._reseed_pending["right"]
+                    # The latest raw frames, and the operator context they
+                    # arrived with. Snapshotted so the adapter steps below run
+                    # outside the lock against one consistent moment.
+                    ctrl_left = self._ctrl["left"]
+                    ctrl_right = self._ctrl["right"]
+                    head = self._head_orientation
+                    stance = self._stance_frame or self._vr_cfg.stance
+                    frame_age_s = (now - self._latest_arrival_perf
+                                   if self._latest_arrival_perf
+                                   else float("inf"))
                     cap_left = self._ramp_cap("left", period, now)
                     cap_right = self._ramp_cap("right", period, now)
                     prev_left = dict(self._committed_left)
                     prev_right = dict(self._committed_right)
-                steps_left = self._smooth_step(
-                    prev_left, target_left,
-                    left.joint_limits_deg if left else {}, alpha,
-                    cap=cap_left,
-                )
-                steps_right = self._smooth_step(
-                    prev_right, target_right,
-                    right.joint_limits_deg if right else {}, alpha,
-                    cap=cap_right,
-                )
+                # A DRIVING side that still awaits its re-seed is frozen this
+                # tick — never driven from state nothing observed.
+                drive_left = driving_left and not pending_left
+                drive_right = driving_right and not pending_right
+                steps_left, engaged_left = (self._side_steps(
+                    left, self._kit.get("left"), ctrl_left, prev_left,
+                    driving=drive_left, homing=homing_left,
+                    pending=pending_left, head=head, stance=stance,
+                    frame_age_s=frame_age_s, alpha=alpha, cap=cap_left,
+                ) if left is not None else ({}, None))
+                steps_right, engaged_right = (self._side_steps(
+                    right, self._kit.get("right"), ctrl_right, prev_right,
+                    driving=drive_right, homing=homing_right,
+                    pending=pending_right, head=head, stance=stance,
+                    frame_age_s=frame_age_s, alpha=alpha, cap=cap_right,
+                ) if right is not None else ({}, None))
+                # Record an engaged-but-unwritten adapter tick (see the
+                # handover re-align above). Conservative on purpose: a frozen
+                # engaged adapter (untracked hand, stale frames) sets it too —
+                # the reseed it buys is one read and a fresh anchor, and the
+                # miss it prevents is a handover lurch.
+                if engaged_left and not drive_left:
+                    with self._lock:
+                        self._kit_ran_ahead["left"] = True
+                if engaged_right and not drive_right:
+                    with self._lock:
+                        self._kit_ran_ahead["right"] = True
                 committed_left = {j: s.committed for j, s in steps_left.items()}
                 committed_right = {j: s.committed for j, s in steps_right.items()}
                 # Bimanual guard, applied to the pair that would actually be
@@ -1355,18 +1625,29 @@ class HumanTeleopSession:
                 #
                 # A pending home request is the one sanctioned exception: the
                 # side is HELD (no operator authority), but the target was set
-                # by request_home, not by tracking — and it has already been
-                # through the same smoothing, caps and guard as any driven
-                # step by the time it reaches here.
-                with self._lock:
-                    homing_left = self._home_req["left"]
-                    homing_right = self._home_req["right"]
-                write_left = left is not None and (driving_left or homing_left)
-                write_right = right is not None and (driving_right or homing_right)
+                # by request_home, not by tracking — and it has been through
+                # the session's smoothing, caps and guard by here.
+                #
+                # The speed budget names the path. A DRIVING write is the
+                # kit's: unbounded here, because its governors already ran
+                # (the vendored solver's per-solve dq caps; the joint-limit
+                # clamp inside send_goal; the mode guard and E-STOP) — any
+                # finite number at this seam is a downstream limiter whose
+                # withheld degrees the mapper would misread as over-drive.
+                # The home slew keeps the session's ceiling, matching the
+                # rate cap it rode in on.
+                write_left = left is not None and (drive_left or homing_left)
+                write_right = right is not None and (drive_right or homing_right)
                 if write_left:
-                    sent_left = self._commit(left, self._committed_left)
+                    sent_left = self._commit(
+                        left, self._committed_left,
+                        speed_cap_deg_s=(float("inf") if drive_left
+                                         else RATE_CAP_DEG_S))
                 if write_right:
-                    sent_right = self._commit(right, self._committed_right)
+                    sent_right = self._commit(
+                        right, self._committed_right,
+                        speed_cap_deg_s=(float("inf") if drive_right
+                                         else RATE_CAP_DEG_S))
                 # `_commit` reports what send_goal ACTUALLY sent, which can be
                 # less than `_committed_left`/`_right` asked for (see
                 # `_commit`'s docstring). Fold it back in — merged, not
@@ -1381,8 +1662,16 @@ class HumanTeleopSession:
                 with self._lock:
                     if write_left:
                         self._committed_left = {**self._committed_left, **sent_left}
+                        if homing_left:
+                            # The slew moved the arm behind the adapter's
+                            # back: its open-loop qpos is stale until the
+                            # next re-seed, which the loop's seed step takes
+                            # once the slew no longer owns the arm.
+                            self._reseed_pending["left"] = True
                     if write_right:
                         self._committed_right = {**self._committed_right, **sent_right}
+                        if homing_right:
+                            self._reseed_pending["right"] = True
                 # Publish LAST, once this tick's commit is final — including
                 # the fold-back of what send_goal actually sent. Publishing
                 # the intended goal instead of the committed one would put an

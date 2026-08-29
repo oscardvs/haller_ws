@@ -1,6 +1,15 @@
-"""Tests for HumanTeleopSession — session lifecycle + state machine."""
+"""Tests for HumanTeleopSession — session lifecycle + state machine.
+
+The sessions here inject `_StubSideTeleop`, a deterministic stand-in for the
+pinned `KitSideTeleop` API, so what this file pins is the SESSION contract —
+authority gating, the raw-frame ingest, the uncapped driven write, the home
+slew, the reseed rule — with no solver math in the loop. The vendored
+adapter's own semantics are pinned in tests/test_kit_teleop.py, and the two
+compose end-to-end against MuJoCo arms in tests/sim/test_human_teleop_sim.py.
+"""
 from __future__ import annotations
 
+import math
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,14 +20,80 @@ from haller_hmi.human_teleop import (
 from haller_hmi.safety import Mode
 
 
+class _StubSideTeleop:
+    """Deterministic stand-in coded exactly against the pinned adapter API.
+
+    Engages on squeeze edges, freezes on a None/untracked hand or a stale
+    frame, and — while engaged — asks for whatever the test scripted into
+    `ctrl["goal"]` (an extra key the session stores and forwards verbatim,
+    exactly because frames are stored RAW). Like the real adapter it holds
+    its own open-loop pose and jumps to the goal in ONE step: any shaping a
+    session test observes on the wire is therefore the SESSION's doing.
+    """
+
+    STALE_S = 0.2
+
+    def __init__(self, joint_limits_deg, config, *, urdf_path=None):
+        self.limits = dict(joint_limits_deg)
+        self.config = config
+        self.seeded: list[dict] = []    # every seed pose, in call order
+        self.engaged = False
+        self._last_grip = False
+        self._held = {j: 0.0 for j in self.limits}
+        if "gripper" in self._held:
+            self._held["gripper"] = 0.5     # [0,1] per the adapter contract
+
+    def seed_from_observed(self, joints_deg):
+        self.seeded.append(dict(joints_deg))
+        held = {}
+        for j, (lo, hi) in self.limits.items():
+            v = float(joints_deg.get(j, 0.0))
+            if j == "gripper":              # degrees in, [0,1] out
+                v = (v - lo) / ((hi - lo) or 1.0)
+            held[j] = v
+        self._held = held
+        self.engaged = False
+        self._last_grip = False
+
+    def update(self, ctrl, head_orientation_xyzw, stance, frame_age_s):
+        if ctrl is None or not ctrl.get("tracked", False):
+            return dict(self._held), self.engaged   # freeze, never disengage
+        if frame_age_s > self.STALE_S:
+            return dict(self._held), self.engaged   # staleness gate
+        grip = bool(ctrl.get("squeeze", False))
+        if grip and not self._last_grip:
+            self.engaged = True
+        elif not grip and self._last_grip:
+            self.engaged = False
+        self._last_grip = grip
+        if self.engaged and isinstance(ctrl.get("goal"), dict):
+            action = dict(self._held)
+            action.update({k: float(v) for k, v in ctrl["goal"].items()})
+            self._held = dict(action)
+            return dict(action), True
+        return dict(self._held), self.engaged
+
+    def diag(self):
+        return {"tracked": True, "engaged": self.engaged, "haptic": 0.0,
+                "limit_pressure_deg": 0.0, "pos_err_m": 0.0,
+                "singularity": 0.0, "orient_residual": 0.0,
+                "pos_absorbed": 0.0, "rot_absorbed": 0.0}
+
+
+def _sess(mgr, **kw) -> HumanTeleopSession:
+    """A session wired to the stub adapter unless a test brings its own."""
+    kw.setdefault("side_teleop_factory", _StubSideTeleop)
+    return HumanTeleopSession(mgr, **kw)
+
+
 def _fast_acquire(**kw) -> dict:
     """Session kwargs that make authority transfer immediate.
 
     Acquisition has its own section at the bottom of this file, where the
-    countdown and the ramp are tested at their real defaults. Tests about the
-    commit loop, the clutch or the session lifecycle use this instead, so they
-    reach the code they are actually about without every one of them having to
-    sit out a countdown.
+    countdown is tested at real timings. Tests about the commit loop, the
+    clutch or the session lifecycle use this instead, so they reach the code
+    they are actually about without every one of them having to sit out a
+    countdown.
     """
     return {"acquire_ms": 0.0, "match_dwell_ms": 0.0, **kw}
 
@@ -67,14 +142,14 @@ def _fake_arm_manager():
 
 def test_initial_state_is_idle():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     assert sess.state is HumanState.IDLE
     assert sess.status()["running"] is False
 
 
 def test_start_transitions_to_armed_and_prepares_arms():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     try:
         assert sess.state is HumanState.ARMED
@@ -88,7 +163,7 @@ def test_start_transitions_to_armed_and_prepares_arms():
 
 def test_stop_restores_arms_to_manual_and_torque_on():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     sess.stop()
     assert sess.state is HumanState.IDLE
@@ -109,7 +184,7 @@ def test_session_reads_arms_only_while_owning_the_tick_producer():
     """
     import time
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     owners: list[str | None] = []
 
     def _read():
@@ -141,7 +216,7 @@ def test_a_failed_reseed_read_retries_instead_of_seeding_zero():
         [RuntimeError("no status packet"), RuntimeError("no status packet")]
         + [pose] * 10_000
     )
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm=None)
     try:
         deadline = time.monotonic() + 2.0
@@ -162,7 +237,7 @@ def test_a_failed_reseed_read_retries_instead_of_seeding_zero():
 
 def test_start_twice_raises_runtime_error():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     try:
         with pytest.raises(RuntimeError):
@@ -173,14 +248,14 @@ def test_start_twice_raises_runtime_error():
 
 def test_start_requires_distinct_arms():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     with pytest.raises(ValueError):
         sess.start(left_arm="left", right_arm="left")
 
 
-#: What a side's `joint_goal` looks like when it asks for exactly where a mock
-#: arm from `_fake_arm_manager` is sitting: every joint at 0°, and the gripper
-#: mid-range (the converter emits [0, 1], which the session scales onto the
+#: What the stub adapter asks for when a test wants exactly where a mock arm
+#: from `_fake_arm_manager` is sitting: every joint at 0°, and the gripper
+#: mid-range (the adapter emits [0, 1], which the session scales onto the
 #: joint's degree range — 0.5 of (-30, 30) is 0°).
 NEUTRAL_GOAL = {"shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": 0.0,
                 "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": 0.5}
@@ -188,28 +263,39 @@ NEUTRAL_GOAL = {"shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": 0.0,
 
 def _kp_frame(
     *, ts_ms: int = 100, dead_man: bool = False, both_arms: bool = True,
-    goal: dict | None = None,
+    goal: dict | None = None, tracked: bool = True,
 ) -> dict:
-    """One converter frame: per-side `joint_goal`, in robot joint space.
+    """One RAW wire frame — the only shape the session ingests now.
 
-    This is what `vr_teleop.QuestTeleoperator.convert` emits and the only
-    shape the session ingests. `goal=None` asks for the arm's own resting
-    pose, which is what an anchored clutch does on every frame until the side
-    is handed over.
+    Per-side controller dicts exactly as `vr_teleop.wire` admits them
+    (position/orientation/trigger/squeeze/tracked), plus a test-only `goal`
+    key the stub adapter reads — frames are stored raw, so it rides through
+    untouched. `dead_man` doubles as both sides' squeeze, matching what the
+    old converter derived.
     """
-    side = {"joint_goal": dict(NEUTRAL_GOAL if goal is None else goal)}
+    def side() -> dict:
+        return {
+            "tracked": tracked,
+            "position": [0.1, 1.2, -0.4],
+            "orientation": [0.0, 0.0, 0.0, 1.0],
+            "trigger": 0.0,
+            "squeeze": dead_man,
+            "goal": dict(NEUTRAL_GOAL if goal is None else goal),
+        }
     return {
-        "type": "keypoints",
+        "type": "vr_keypoints",
         "ts_ms": ts_ms,
         "dead_man": dead_man,
-        "left":  side if both_arms else None,
-        "right": side if both_arms else None,
+        "head": {"position": [0.0, 1.6, 0.0],
+                 "orientation": [0.0, 0.0, 0.0, 1.0]},
+        "left":  side() if both_arms else None,
+        "right": side() if both_arms else None,
     }
 
 
 def test_first_ingest_transitions_armed_to_tracking():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     try:
         assert sess.state is HumanState.ARMED
@@ -234,7 +320,7 @@ def test_the_clutch_hands_over_on_the_rising_edge():
     zero.
     """
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=False))
@@ -251,7 +337,7 @@ def test_releasing_the_dead_man_drops_authority_on_the_same_frame():
     """Release must never wait for the commit loop, whatever acquisition adds
     in the other direction."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire())
+    sess = _sess(mgr, **_fast_acquire())
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -266,34 +352,36 @@ def test_releasing_the_dead_man_drops_authority_on_the_same_frame():
         sess.stop()
 
 
-def test_ingest_records_latest_target_goal():
+def test_ingest_stores_the_latest_raw_frame_per_side():
+    """Frames are STORED, not solved: the loop solves the newest one at its
+    own cadence (the kit's shape). The stored dict is the wire's, verbatim —
+    which is also what lets the stub adapter see its test-only `goal` key."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     try:
-        sess.ingest_frame(_kp_frame(dead_man=True))
-        targets = sess.target_goals()
-        assert "left" in targets and "right" in targets
-        # Arm straight forward → angles all near zero.
-        for joint in ("shoulder_pan", "shoulder_lift", "elbow_flex"):
-            assert abs(targets["left"][joint]) < 2.0
+        frame = _kp_frame(dead_man=True)
+        sess.ingest_frame(frame)
+        ctrl = sess.latest_ctrl()
+        assert "left" in ctrl and "right" in ctrl
+        assert ctrl["left"]["position"] == frame["left"]["position"]
+        assert ctrl["left"]["squeeze"] is True
     finally:
         sess.stop()
 
 
 def test_ingest_handles_missing_side_gracefully():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right")
     try:
-        # Only left detected, right is None.
+        # Only left detected, right is None — latest-wins, absence included.
         frame = _kp_frame(dead_man=False)
         frame["right"] = None
         sess.ingest_frame(frame)
-        targets = sess.target_goals()
-        # Left should be set, right held at last (initialized to None).
-        assert "left" in targets
-        assert targets.get("right") is None
+        ctrl = sess.latest_ctrl()
+        assert ctrl["left"] is not None
+        assert ctrl.get("right") is None
     finally:
         sess.stop()
 
@@ -312,7 +400,7 @@ def _wait_until(predicate, timeout: float = 1.0, interval: float = 0.01) -> bool
 
 def test_commit_loop_writes_to_arms_when_driving():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))  # fast loop for tests
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))  # fast loop for tests
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -323,18 +411,38 @@ def test_commit_loop_writes_to_arms_when_driving():
         sess.stop()
 
 
-def test_commit_passes_the_session_ceiling_to_send_goal():
-    """The session's write carries its OWN speed cap (RATE_CAP_DEG_S), not
-    the discrete-move motion.max_speed_deg_s. Every step reaching send_goal
-    is already rate-capped by _smooth_step; re-capping it at the (lower)
-    discrete-move number silently made that the arm's teleop ceiling —
-    90 deg/s on a rig whose kit reference carries no write-path cap at all.
-    The write stays elapsed-time bounded; the bound is the session's."""
+def test_a_driving_write_carries_an_unbounded_speed_budget():
+    """The kit writes raw. A DRIVING side's send_goal gets
+    speed_cap_deg_s=inf: its governors already ran (the vendored solver's
+    per-solve dq caps, send_goal's joint-limit clamp, the mode guard,
+    E-STOP), and any finite number at this seam is a downstream limiter
+    whose withheld degrees the mapper would misread as operator over-drive
+    — tier-1 in the audit this rewire answers."""
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+        kwargs = arms["left"].send_goal.call_args_list[-1].kwargs
+        assert kwargs.get("speed_cap_deg_s") == float("inf")
+    finally:
+        sess.stop()
+
+
+def test_the_home_slew_write_keeps_the_session_ceiling():
+    """The home slew is NOT a kit path: it keeps the session's LPF and rate
+    cap, and its write-side bound must match the cap it rode in on —
+    RATE_CAP_DEG_S, never the discrete-move motion.max_speed_deg_s and never
+    the driven path's unbounded budget."""
+    mgr, arms = _fake_arm_manager()
+    for a in arms.values():
+        a.read_joints_deg.return_value = {j: 25.0 for j in a.joint_limits_deg}
+    sess = _sess(mgr, hz_override=200.0)
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=False))
+        assert sess.request_home() == ["left", "right"]
         assert _wait_until(lambda: arms["left"].send_goal.called)
         kwargs = arms["left"].send_goal.call_args_list[-1].kwargs
         assert kwargs.get("speed_cap_deg_s") == RATE_CAP_DEG_S
@@ -342,33 +450,31 @@ def test_commit_passes_the_session_ceiling_to_send_goal():
         sess.stop()
 
 
-def test_lpf_tau_zero_is_pure_passthrough():
-    """lpf_tau_s=0 disables the one-pole filter — the kit ships no output
-    filter at all. A target inside the per-tick rate cap must be committed
-    EXACTLY on the first driving tick, not eased toward: with the IK seeded
-    from the committed pose, any easing here feeds back into the next
-    solve's step budget and compounds into a speed ceiling nothing
-    configured."""
+def test_the_driven_path_carries_no_filter_and_no_rate_cap():
+    """The kit ships no output shaping, so neither does the driven path —
+    at the DEFAULT lpf_tau_s, not just at zero. A goal 30 deg from the seed
+    must be committed EXACTLY on the first driving tick: the old path's LPF
+    would have eased it (~1.4 deg at tau 0.1 s / 200 Hz) and the old
+    per-tick rate cap would have clipped it to 1.2 deg. Whatever bounds the
+    step now is the ADAPTER's business (per-solve dq caps), which the stub
+    deliberately does not imitate — so an exact match here proves the
+    session added nothing."""
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(
-        mgr, lpf_tau_s=0.0, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
-        # 1.0 deg from the 0-deg seed: inside the 240 deg/s * 5 ms = 1.2 deg
-        # per-tick cap, so only the filter could shrink it (at the 0.100
-        # default the first commit would be ~0.05 deg).
         sess.ingest_frame(_kp_frame(dead_man=True,
-                                    goal={"shoulder_pan": 1.0}))
+                                    goal={"shoulder_pan": 30.0}))
         assert _wait_until(lambda: arms["left"].send_goal.called)
         first = arms["left"].send_goal.call_args_list[0].args[0]
-        assert first["shoulder_pan"] == pytest.approx(1.0)
+        assert first["shoulder_pan"] == pytest.approx(30.0)
     finally:
         sess.stop()
 
 
 def test_commit_loop_does_not_write_when_not_driving():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=False))
@@ -387,7 +493,7 @@ def test_request_home_slews_held_sides_through_the_commit_loop():
     mgr, arms = _fake_arm_manager()
     for a in arms.values():
         a.read_joints_deg.return_value = {j: 25.0 for j in a.joint_limits_deg}
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=False))  # TRACKING, both held
@@ -410,7 +516,7 @@ def test_request_home_skips_driving_sides():
     """The operator's hand outranks a parked reset: a DRIVING side is not
     accepted, and nothing interrupts the live stream."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -423,7 +529,7 @@ def test_request_home_skips_driving_sides():
 
 def test_request_home_refused_when_no_session_runs():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     assert sess.request_home() == []
 
 
@@ -431,7 +537,7 @@ def test_commit_loop_clamps_to_arm_joint_limits():
     mgr, arms = _fake_arm_manager()
     # Squeeze the left arm's pan limit so retarget output gets clamped.
     arms["left"].joint_limits_deg["shoulder_pan"] = (-5.0, 5.0)
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         # A goal asking for +90 deg of pan, far above the 5 deg limit.
@@ -456,7 +562,7 @@ def test_restart_after_ws_disconnect_does_not_immediately_auto_stop():
     exactly once per backend process.
     """
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0, ws_disconnect_grace_s=0.05)
+    sess = _sess(mgr, hz_override=200.0, ws_disconnect_grace_s=0.05)
     sess.start(left_arm="left", right_arm="right")
     sess.ingest_frame(_kp_frame(dead_man=True))
     sess.notify_ws_disconnected()   # browser tab closed, session still running
@@ -479,7 +585,7 @@ def test_restart_does_not_inherit_previous_session_targets():
     hands were when they last stopped, before a single new frame has arrived.
     """
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     # A goal well away from neutral, so a leaked target would be obvious.
     sess.ingest_frame(_kp_frame(dead_man=True,
@@ -490,8 +596,8 @@ def test_restart_does_not_inherit_previous_session_targets():
     arms["left"].send_goal.reset_mock()
     sess.start(left_arm="left", right_arm="right")
     try:
-        assert sess.target_goals()["left"] is None
-        assert sess.target_goals()["right"] is None
+        assert sess.latest_ctrl()["left"] is None
+        assert sess.latest_ctrl()["right"] is None
         assert sess.status()["tracking"]["left"]["age_ms"] is None
         # ARMED with no frames yet: nothing may be commanded.
         _time.sleep(0.05)
@@ -502,7 +608,7 @@ def test_restart_does_not_inherit_previous_session_targets():
 
 def test_per_arm_tracking_loss_freezes_only_that_side():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0,
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
                               frame_age_ms_loss=80.0))
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -526,7 +632,7 @@ def test_per_arm_tracking_loss_freezes_only_that_side():
 
 def test_session_demotes_to_armed_on_ws_disconnect_window():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0,
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
                               ws_disconnect_grace_s=0.1))
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -541,7 +647,7 @@ def test_session_demotes_to_armed_on_ws_disconnect_window():
 
 def test_smooth_step_reports_ok_when_nothing_intervenes():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     limits = {"shoulder_pan": (-90.0, 90.0)}
     # alpha=1.0 -> the filter passes `desired` straight through; small step so
     # the 4 deg/tick cap does not bite and the value is far from the limits.
@@ -553,7 +659,7 @@ def test_smooth_step_reports_ok_when_nothing_intervenes():
 
 def test_smooth_step_reports_rate_capped():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     limits = {"shoulder_pan": (-90.0, 90.0)}
     # Ask for a 50 deg jump with alpha=1.0; the 4 deg/tick cap must bite.
     steps = sess._smooth_step({"shoulder_pan": 0.0}, {"shoulder_pan": 50.0}, limits, 1.0)
@@ -565,7 +671,7 @@ def test_smooth_step_reports_rate_capped():
 
 def test_smooth_step_reports_clamped_and_clamped_beats_rate_capped():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     limits = {"shoulder_pan": (-90.0, 5.0)}
     # Sitting at 4 deg, asked for 50: the cap would allow 8, the limit allows 5.
     # Both conditions fire; `clamped` must win.
@@ -576,7 +682,7 @@ def test_smooth_step_reports_clamped_and_clamped_beats_rate_capped():
 
 def test_smooth_step_reports_held_when_side_has_no_target():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     limits = {"shoulder_pan": (-90.0, 90.0), "elbow_flex": (-90.0, 90.0)}
     steps = sess._smooth_step({"shoulder_pan": 12.0, "elbow_flex": 3.0}, None, limits, 1.0)
     for joint in limits:
@@ -587,7 +693,7 @@ def test_smooth_step_reports_held_when_side_has_no_target():
 
 def test_smooth_step_reports_held_for_a_joint_missing_from_the_target():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     limits = {"shoulder_pan": (-90.0, 90.0), "elbow_flex": (-90.0, 90.0)}
     steps = sess._smooth_step(
         {"shoulder_pan": 0.0, "elbow_flex": 7.0}, {"shoulder_pan": 2.0}, limits, 1.0,
@@ -603,7 +709,7 @@ def test_smooth_step_reports_gripper_target_in_degrees_not_unit_interval():
     degree range. `target` must be reported post-scaling so it is comparable
     with `committed`, which is always degrees."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     limits = {"gripper": (-30.0, 30.0)}
     # 1.0 == fully open == the joint's max, 30 deg.
     steps = sess._smooth_step({"gripper": 0.0}, {"gripper": 1.0}, limits, 1.0)
@@ -622,7 +728,7 @@ def test_cannot_start_human_teleop_while_leader_follower_is_running(monkeypatch)
                                                          last_error=None,
                                                          started_at=_time.time()))
 
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.attach_peer(lf)  # share the "is anyone teleoping?" check
     with pytest.raises(RuntimeError):
         sess.start(left_arm="left", right_arm="right")
@@ -630,7 +736,7 @@ def test_cannot_start_human_teleop_while_leader_follower_is_running(monkeypatch)
 
 def test_status_joints_block_mirrors_goal_deg_keys():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         st = sess.status()
@@ -643,7 +749,7 @@ def test_status_joints_block_mirrors_goal_deg_keys():
 
 def test_status_joints_are_held_before_any_frame_arrives():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         st = sess.status()
@@ -660,7 +766,7 @@ def test_status_joints_revert_to_held_after_stop():
     a live reason. A retained CLAMPED badge from an ended session would tell the
     operator the arm is at a limit it is no longer being driven into."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     sess.ingest_frame(_kp_frame(dead_man=True))
     _time.sleep(0.05)
@@ -679,7 +785,7 @@ def test_status_goal_deg_shape_is_unchanged_by_the_joints_block():
     """goal_deg is DatasetRecorder's `action` column. It must stay a plain
     joint -> float mapping."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -698,7 +804,7 @@ def test_status_publishes_exactly_the_shape_the_uis_type_against():
     every frame. Adding a key is free; dropping or renaming one is a silent
     break in a headset nobody can see the console of."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         st = sess.status()
@@ -720,7 +826,7 @@ def test_the_clutch_reason_vocabulary_is_the_one_the_uis_render():
     as nothing at all. Resting is named for the control that is armed, not for
     the absence — the operator needs to read it as "ready", not as a fault."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=False))
@@ -750,8 +856,10 @@ def _pump(sess, frame, seconds: float, interval: float = 0.02) -> None:
 
 
 def _off_pose_frame(dead_man: bool = True) -> dict:
-    """A goal 90 deg of pan away from a mock arm sitting at zero — the worst
-    case the handover ramp has to survive now that no gate refuses it."""
+    """A scripted adapter goal 90 deg of pan away from a mock arm sitting at
+    zero — the shape the session must forward IN FULL, since bounding it is
+    the adapter's job (dq caps) and send_goal's (joint limits), not the
+    session's."""
     return _kp_frame(dead_man=dead_man,
                      goal={**NEUTRAL_GOAL, "shoulder_pan": 90.0})
 
@@ -772,7 +880,7 @@ def test_defaults_are_the_ones_the_operator_was_promised():
 
 def test_acquisition_holds_off_until_the_countdown_expires():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0,
+    sess = _sess(mgr, hz_override=200.0,
                               acquire_ms=400.0, match_dwell_ms=50.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -788,17 +896,17 @@ def test_acquisition_holds_off_until_the_countdown_expires():
 
 
 def test_the_countdown_is_the_only_gate_left():
-    """With the pose-match gate gone, an operator standing somewhere the robot
-    is not still gets the arm — after the countdown, and only through the ramp.
+    """With the pose-match gate gone, an operator asking for a pose the arm
+    is nowhere near still gets the arm — after the countdown, and with
+    nothing but the adapter's own per-solve caps bounding what follows.
 
-    That is the deliberate trade the headset path makes: the anchor puts the
-    commanded pose ON the arm every frame until handover, so a gate on the
-    error can only ever be satisfied, and the RAMP is what makes being wrong
-    about that survivable. `test_the_first_commanded_step_is_not_a_jump` is
-    the other half of this pair.
+    That is the deliberate trade the kit path makes: the adapter anchors the
+    target to the arm on the engage edge, so a gate on the error can only
+    ever be satisfied. What bounds a wrong anchor is the vendored solver's
+    dq caps and the joint limits — the session adds no gate and no ramp.
     """
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0,
+    sess = _sess(mgr, hz_override=200.0,
                               acquire_ms=200.0, match_dwell_ms=50.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -817,7 +925,7 @@ def test_the_dwell_is_a_floor_under_the_countdown():
     A session configured to hand over instantly must still not do so on a grip
     that was closed for one frame."""
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0,
+    sess = _sess(mgr, hz_override=200.0,
                               acquire_ms=0.0, match_dwell_ms=300.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -839,7 +947,7 @@ def test_committed_state_does_not_slew_while_the_clutch_is_open():
     step to it. The rate cap had been spent against an arm that never moved.
     """
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0)
+    sess = _sess(mgr, hz_override=200.0)
     sess.start(left_arm="left", right_arm="right")
     try:
         _pump(sess, _off_pose_frame(dead_man=False), 0.3)   # clutch OPEN
@@ -851,48 +959,34 @@ def test_committed_state_does_not_slew_while_the_clutch_is_open():
         sess.stop()
 
 
-def test_the_first_commanded_step_is_not_a_jump():
-    """The behavioural bar, as a unit test.
+def test_the_driven_write_is_the_adapter_action_in_full():
+    """What replaced the old "first step is rate-capped" pin, deliberately.
 
-    The arm sits at zero, the operator holds a pose 90 deg away, and the gate
-    is disabled so the handover happens anyway — the worst case the ramp has to
-    survive. The first thing written to the arm must be where the arm already
-    is, and every step after it must stay inside the ramping rate cap.
+    The session used to bound a bad handover itself (LPF + per-tick rate cap
+    + acquisition ramp). The audit found those very limiters were what broke
+    hand-to-tool correspondence: every degree they withheld was measured by
+    the mapper's reach limits as operator over-drive and absorbed. The NEW
+    contract splits the job — no-jump-at-engage belongs to the ADAPTER's
+    anchor (pinned in tests/test_kit_teleop.py and proven against MuJoCo
+    arms in tests/sim/test_human_teleop_sim.py), and the SESSION's half is
+    exactly this: what the adapter returns is what the arm is asked, in
+    full, on the tick it was returned — no easing, no per-tick clipping, no
+    ramp. The stub jumps 90 deg in one action precisely so any shaping the
+    session still applied would show up here.
     """
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
-        _pump(sess, _off_pose_frame(), 0.4)
+        _pump(sess, _off_pose_frame(), 0.2)
         sent = [c.args[0]["shoulder_pan"]
                 for c in arms["left"].send_goal.call_args_list]
-        # A wall-clock THROUGHPUT precondition, not a property: it guards the
-        # early-window assertion below. `_ramp_cap` is driven by elapsed time
-        # rather than tick count, so a starved run samples the same ramp with
-        # fewer points and every assertion after this stays valid. Tolerant
-        # because four sessions share this box and a loaded 200 Hz loop can
-        # miss its rate — a starved run must not read as a ramp regression.
-        assert len(sent) > 10, "not enough commits to judge the trajectory"
-        steps = [abs(b - a) for a, b in zip(sent, sent[1:])]
-        # What this layer actually guarantees, and all it ever did
-        # unconditionally: every commit is one bounded STEP toward the
-        # operator, never a jump TO them. The operator holds a pose 90 deg
-        # away and the first thing written is a single rate-cap tick.
-        #
-        # Note what this test does NOT show, because the ramp used to hide it:
-        # HumanTeleopSession does not anchor. The anchor is upstream, in the
-        # clutch mapper, which binds the target to wherever the arm already is
-        # — so on the headset path an off-pose goal like this fixture's cannot
-        # arise. It could on the retired camera path, which GUESSED joint
-        # angles from webcam landmarks, and that is the path the 20 deg/s
-        # acquisition ramp was sized for. With that path gone, the ramp was
-        # buying defence against an input the session no longer has, at the
-        # cost of 1.5 s on every clutch.
-        assert sent[0] <= 4.0 + 1e-6, (
-            f"first commit of {sent[0]} deg is a jump, not a capped step"
+        assert sent, "nothing was written while driving"
+        assert sent[0] == pytest.approx(90.0), (
+            f"first driven commit was {sent[0]} deg — the session re-shaped "
+            "the adapter's action"
         )
-        assert max(steps) <= 4.0 + 1e-6, "exceeded the session rate cap"
-        assert sent[-1] > sent[0], "the arm never actually started moving"
+        assert all(v == pytest.approx(90.0) for v in sent)
     finally:
         sess.stop()
 
@@ -909,23 +1003,16 @@ def test_commit_records_the_commanded_pose_not_the_requested_one():
     """
     mgr, arms = _fake_arm_manager()
     arms["left"].send_goal.side_effect = lambda goal, **kw: {j: 0.0 for j in goal}
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         _pump(sess, _off_pose_frame(), 0.4)
         requested = [c.args[0]["shoulder_pan"]
                      for c in arms["left"].send_goal.call_args_list]
-        # The ramp must have opened BEYOND its starting rate, or the test is
-        # not exercising anything. Stated against the ramp floor rather than a
-        # magic number: the old `> 1.0` was silently calibrated against a
-        # rate cap of 4 deg/TICK, which at this test's hz_override=200 meant
-        # 800 deg/s. With the cap expressed as 240 deg/s the same ramp asks
-        # for proportionally less per tick, and a fixed threshold would read
-        # the correction as a failure.
-        from haller_hmi import human_teleop as ht
-        floor_deg_per_tick = ht.ACQUIRE_RATE_DEG_S / 200.0
-        assert max(abs(v) for v in requested) > floor_deg_per_tick, (
-            "test is meaningless unless the ramp actually asked for motion"
+        # The adapter must actually have asked for motion, or the test is
+        # not exercising anything — the stub asks for the scripted 90 deg.
+        assert max(abs(v) for v in requested) == pytest.approx(90.0), (
+            "test is meaningless unless the driven path asked for motion"
         )
         reported = sess.status()["goal_deg"]["left"]["shoulder_pan"]
         assert reported == pytest.approx(0.0), (
@@ -945,7 +1032,7 @@ def test_losing_a_side_demotes_only_that_side_and_re_acquires():
     without warning mid-task.
     """
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+    sess = _sess(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
                               acquire_ms=100.0, match_dwell_ms=50.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -979,7 +1066,7 @@ def test_losing_a_side_demotes_only_that_side_and_re_acquires():
 def test_a_recovering_side_serves_out_a_fresh_countdown():
     """Re-acquisition is a cold start, not a resume."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+    sess = _sess(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
                               acquire_ms=400.0, match_dwell_ms=50.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -1000,7 +1087,7 @@ def test_a_recovering_side_serves_out_a_fresh_countdown():
 
 def test_stop_clears_authority_and_the_countdown():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     sess.ingest_frame(_kp_frame(dead_man=True))
     assert _wait_until(lambda: sess.state is HumanState.DRIVING)
@@ -1012,8 +1099,9 @@ def test_stop_clears_authority_and_the_countdown():
 
 
 def _unusable_frame() -> dict:
-    """A frame whose sides carry no `joint_goal` — what the converter emits
-    for a hand it could not solve for (an untracked controller)."""
+    """A frame whose sides carry no pose at all — junk the wire let through.
+    The session refuses to store it (`_usable_side`), so it must behave
+    exactly like an absent side: age out, never throw in the loop."""
     frame = _kp_frame(dead_man=True)
     frame["left"] = {}
     frame["right"] = {}
@@ -1033,7 +1121,7 @@ def test_one_unusable_frame_does_not_restart_the_countdown():
     saying why.
     """
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0,
+    sess = _sess(mgr, hz_override=200.0,
                               acquire_ms=3000.0, match_dwell_ms=50.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -1062,7 +1150,7 @@ def test_a_side_with_no_solvable_goal_reads_as_lost_rather_than_fresh():
     arm is being tracked while nothing can be done with it.
     """
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+    sess = _sess(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
                               acquire_ms=100.0, match_dwell_ms=50.0)
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -1079,9 +1167,95 @@ def test_a_side_with_no_solvable_goal_reads_as_lost_rather_than_fresh():
         sess.stop()
 
 
+def _nan_frame(field: str, value: list) -> dict:
+    """A well-SHAPED frame carrying a non-finite pose number on both sides.
+    stdlib `json.loads` accepts `NaN`/`Infinity` literals, so this arrives
+    through the real WS path — and NaN rides EMA filters, `np.clip` and
+    joint-limit `max(lo, min(hi, ...))` without ever raising, which is why
+    shape checks alone don't cover it."""
+    frame = _kp_frame(dead_man=True)
+    for side in ("left", "right"):
+        frame[side][field] = value
+    return frame
+
+
+def test_a_non_finite_pose_is_refused_not_stored():
+    """NaN/Infinity anywhere in position, orientation or trigger makes the
+    side unusable — the adapter must take its untracked exit, never fold the
+    number into the open-loop integrator (where only a reseed removes it,
+    and the joint-limit clamp resolves NaN to the UPPER limit on the
+    uncapped driven write)."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr)
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        poisoned = [
+            _nan_frame("position", [0.1, float("nan"), -0.4]),
+            _nan_frame("position", [float("inf"), 1.2, -0.4]),
+            _nan_frame("orientation", [0.0, float("nan"), 0.0, 1.0]),
+        ]
+        trig = _kp_frame(dead_man=True)
+        trig["left"]["trigger"] = float("nan")
+        trig["right"]["trigger"] = float("nan")
+        poisoned.append(trig)
+        for frame in poisoned:
+            sess.ingest_frame(frame)
+            ctrl = sess.latest_ctrl()
+            assert ctrl["left"] is None and ctrl["right"] is None
+    finally:
+        sess.stop()
+
+
+def test_a_non_finite_frame_while_driving_ages_out_like_a_lost_side():
+    """The reachable consequence: a DRIVING side fed a NaN frame must freeze
+    and then demote through the normal staleness budget — not slew to a
+    joint limit at the uncapped driven budget."""
+    mgr, arms = _fake_arm_manager()
+    sess = _sess(mgr, hz_override=200.0, frame_age_ms_loss=80.0,
+                 acquire_ms=100.0, match_dwell_ms=50.0)
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        _pump(sess, _kp_frame(dead_man=True), 0.3)
+        assert sess.state is HumanState.DRIVING
+        _pump(sess, _nan_frame("position", [float("nan")] * 3), 0.3)
+        st = sess.status()
+        assert st["tracking"]["left"]["lost"] is True
+        assert st["acquire"]["left"]["authority"] == "held"
+        # Nothing non-finite may ever have reached the wire.
+        for call in arms["left"].send_goal.call_args_list:
+            for value in call.args[0].values():
+                assert math.isfinite(value), "a NaN reached send_goal"
+    finally:
+        sess.stop()
+
+
+def test_a_non_finite_head_pose_reads_as_absent():
+    """A poisoned head quaternion must be stored as NO head pose (the kit
+    keeps the previous engage rotation) — `atan2` propagates NaN into the
+    engage R without raising, and the mapper keeps that R until the next
+    anchor."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr)
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        good = _kp_frame(dead_man=False)
+        sess.ingest_frame(good)
+        assert sess._head_orientation == good["head"]["orientation"]
+        bad = _kp_frame(dead_man=False)
+        bad["head"]["orientation"] = [0.0, float("nan"), 0.0, 1.0]
+        sess.ingest_frame(bad)
+        assert sess._head_orientation is None
+        short = _kp_frame(dead_man=False)
+        short["head"]["orientation"] = [0.0, 0.0, 1.0]
+        sess.ingest_frame(short)
+        assert sess._head_orientation is None
+    finally:
+        sess.stop()
+
+
 def test_the_acquire_block_says_why_a_side_is_not_driving():
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=False))
@@ -1104,7 +1278,7 @@ def test_persistent_tick_fault_stops_the_session(monkeypatch):
     monkeypatch.setattr(ht, "MAX_CONSECUTIVE_TICK_ERRORS", 5)
     mgr, arms = _fake_arm_manager()
     arms["left"].send_goal.side_effect = RuntimeError("bus melted")
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -1130,7 +1304,7 @@ def test_intermittent_tick_faults_do_not_stop_the_session(monkeypatch):
 
     arms["left"].send_goal.side_effect = _flaky
     arms["right"].send_goal.side_effect = lambda goal, **kw: goal
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         sess.ingest_frame(_kp_frame(dead_man=True))
@@ -1182,7 +1356,7 @@ def test_start_refuses_an_hz_that_would_reshape_the_ramp(hz):
     unbounded field that reconfigures a safety envelope is the same class of
     problem as a constant counted in ticks."""
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     with pytest.raises(ValueError, match="hz must be between"):
         sess.start(left_arm="left", right_arm="right", hz=hz)
     assert sess.state is HumanState.IDLE
@@ -1191,7 +1365,7 @@ def test_start_refuses_an_hz_that_would_reshape_the_ramp(hz):
 @pytest.mark.parametrize("hz", [10.0, 60.0, 120.0])
 def test_start_accepts_the_cadences_inside_the_bound(hz):
     mgr, _ = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr)
+    sess = _sess(mgr)
     sess.start(left_arm="left", right_arm="right", hz=hz)
     try:
         assert sess.status()["running"] is True

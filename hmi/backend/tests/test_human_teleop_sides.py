@@ -1,20 +1,23 @@
 """Per-side dead-man: each Quest grip speaks only for its own arm."""
 from __future__ import annotations
 
-from haller_hmi.human_teleop import HumanTeleopSession, SideAuthority
+from haller_hmi.human_teleop import SideAuthority
 
-from .test_human_teleop import _fake_arm_manager, _fast_acquire, _kp_frame
+from .test_human_teleop import _fake_arm_manager, _fast_acquire, _kp_frame, _sess
 
 
 def _sided_frame(*, left: bool, right: bool, dead_man: bool | None = None):
+    """A raw frame with the split where the wire actually carries it: each
+    side's own `squeeze` boolean."""
     frame = _kp_frame(dead_man=(left or right) if dead_man is None else dead_man)
-    frame["dead_man_sides"] = {"left": left, "right": right}
+    frame["left"]["squeeze"] = left
+    frame["right"]["squeeze"] = right
     return frame
 
 
 def _session():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire())
+    sess = _sess(mgr, **_fast_acquire())
     sess.start(left_arm="left", right_arm="right")
     return sess, arms
 
@@ -49,7 +52,10 @@ def test_frames_without_a_split_mirror_the_global_boolean():
     rather than silently engaging neither."""
     sess, _ = _session()
     try:
-        sess.ingest_frame(_kp_frame(dead_man=True))
+        frame = _kp_frame(dead_man=True)
+        frame["left"].pop("squeeze")
+        frame["right"].pop("squeeze")
+        sess.ingest_frame(frame)
         acq = sess.status()["acquire"]
         assert acq["left"]["authority"] == SideAuthority.DRIVING.value
         assert acq["right"]["authority"] == SideAuthority.DRIVING.value

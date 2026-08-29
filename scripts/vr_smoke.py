@@ -6,8 +6,9 @@ session, streams synthetic WebXR frames over /ws/teleop/vr/in (the exact wire
 shape the Quest browser sends), and asserts the full safety chain behaves:
 
   1. arm            session reaches TRACKING on the first frame
-  2. engage         squeeze both grips -> both sides DRIVING (the countdown
-                    served, no lurch)
+  2. engage         squeeze both grips -> both sides DRIVING on the rising
+                    edge (the kit's clutch: no countdown, no lurch — the
+                    adapter anchors to the arm's own pose)
   3. per-side grip  releasing ONE grip releases only that side
   4. collision      driving both tools into each other trips the guard: the
                     INTER-ARM capsule pair binds (not a bench floor), slack
@@ -20,11 +21,10 @@ shape the Quest browser sends), and asserts the full safety chain behaves:
                     mode re-arms
   7. ws-drop        killing the socket mid-session auto-stops the backend
                     after its grace window
-  8. ik             the clutch + decoupled IK doing their job: locking in
-                    from an arbitrary hand position, the egocentric direction
-                    mapping, the absorbing reach limit, the guard switch, the
-                    workspace floor holding with the guard OFF, the trigger
-                    on the gripper, and single-arm sessions
+  8. ik             the clutch + vendored kit IK doing their job: locking in
+                    from an arbitrary hand position, hand motion reaching
+                    the tool, the absorbing reach limit, the guard switch,
+                    the trigger on the gripper, and single-arm sessions
   9. recording      a scripted take lands on disk with BOTH sim camera
                     channels and every frame the recorder counted, and the
                     dataset routes see it
@@ -35,8 +35,10 @@ shape the Quest browser sends), and asserts the full safety chain behaves:
  12. tracking blip  one controller reporting tracked:false releases only
                     that side; the other keeps driving; re-track re-acquires
 
-There is one input path now: every frame feeds `QuestTeleoperator`. The
-`vr_mode` dispatch and the two modes behind it are gone.
+There is one input path now: every frame is stored RAW on the session and
+solved at its 60 Hz tick by the vendored kit adapter
+(`vr_teleop.kit_teleop.KitSideTeleop`). The `vr_mode` dispatch, the two
+modes behind it, and the per-frame converter are gone.
 
 Run it against a sim backend (never against real arms unattended):
 
@@ -264,13 +266,19 @@ async def ik_section(base: str, ws_url: str) -> None:
                 await asyncio.sleep(1 / 30)
             return list(to)
 
-        # Egocentric default: operator right is robot −x.
+        # Hand motion reaches the tool. MAGNITUDE only, on purpose: the
+        # vendored kit solver models so101_new_calib.urdf while the sim arms
+        # run the vendored so_arm100.xml — two joint-zero conventions (the
+        # equivalence gate measured the remap) — so on a SIM backend the
+        # apparent direction through Haller's own FK is not meaningful,
+        # only the correspondence is.
         hand = await drag(L0, [L0[0] + 0.12, L0[1], L0[2]])
         tip1 = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
         if tip0 is not None and tip1 is not None:
-            check("hand right 12 cm drives the tip to robot -x",
-                  float(tip1[0] - tip0[0]) < -0.06,
-                  f"tip dx={float(tip1[0] - tip0[0]) * 1000:.0f} mm")
+            moved_m = max(abs(float(tip1[i] - tip0[i])) for i in range(3))
+            check("hand right 12 cm moves the tool",
+                  moved_m > 0.05,
+                  f"largest tip axis delta={moved_m * 1000:.0f} mm")
 
         # The absorbing reach limit. Push half a metre forward — far past
         # what a 35 cm arm can reach — then reverse by 10 cm.
@@ -290,38 +298,39 @@ async def ik_section(base: str, ws_url: str) -> None:
         hand = await drag(hand, [hand[0], hand[1], hand[2] - 0.5],
                           n=60, hold_s=1.0)
         far = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
-        # 30 cm back — comfortably more than the 0.12 m reach limit, and that
+        # 30 cm back — comfortably more than the 0.15 m reach limit, and that
         # bound is the point. The target sits at most `pos_reach_limit` ahead
         # of the arm, so the reversal has to cover at most that before it
         # starts pulling the arm back, NO MATTER how far past the wall the
         # hand went. Unbounded, the operator would have had to retrace the
-        # whole 0.4 m of wind-up first, and on a longer push, more.
+        # whole 0.35 m of wind-up first, and on a longer push, more.
+        # Magnitude across axes, not a signed y, for the model-convention
+        # reason spelled out at the drag above.
         hand = await drag(hand, [hand[0], hand[1], hand[2] + 0.30],
                           n=45, hold_s=1.2)
         back = _fk_tip(req(base, "/teleop/human")["goal_deg"]["left"])
         if far is not None and back is not None:
-            moved = float(back[1] - far[1])
+            moved = max(abs(float(back[i] - far[i])) for i in range(3))
             check("reach limit bounds the overshoot the reversal has to pay off",
                   moved > 0.04,
-                  f"30 cm of hand (limit 12 cm) retracted the tip {moved * 1000:.0f} mm "
-                  f"(y {far[1] * 1000:.0f} -> {back[1] * 1000:.0f})")
+                  f"30 cm of hand (limit 15 cm) moved the tip {moved * 1000:.0f} mm "
+                  f"on the return stroke")
 
-        # The workspace floor is the teleop's own, not the guard's — pin that
-        # it holds with the guard switched OFF, which is how the first bench
-        # run is configured.
+        # The guard's runtime switch. NOTE what is deliberately no longer
+        # here: the old converter's demand floor (min_tip_z/min_wrist_z
+        # applied to the target before the solve) went with the converter —
+        # the kit path carries no demand shaping, so with the guard OFF the
+        # bench has no software backstop, exactly like the kit. The guard,
+        # when on, is the backstop.
         guard_before = req(base, "/teleop/human")["collision"]
         req(base, "/teleop/human/collision", {"enabled": False})
         check("the collision guard can be switched off at runtime",
               req(base, "/teleop/human")["collision"]["enabled"] is False)
-        hand = await drag(hand, [hand[0], hand[1] - 0.60, hand[2]],
-                          n=60, hold_s=1.0, ltrig=0.8)
+        # A short, shallow drag with the trigger held: the gripper must track
+        # it while engaged.
+        hand = await drag(hand, [hand[0], hand[1] - 0.10, hand[2]],
+                          n=30, hold_s=0.8, ltrig=0.8)
         g = req(base, "/teleop/human")["goal_deg"]["left"]
-        tip_low = _fk_tip(g)
-        if tip_low is not None:
-            check("workspace floor still holds the tip above the bench with "
-                  "the guard off",
-                  float(tip_low[2]) > -0.01,
-                  f"tip z={float(tip_low[2]) * 1000:.0f} mm")
         lo, hi = -10.0, 100.0  # sim gripper range, deg
         check("the trigger closes the gripper",
               g.get("gripper", hi) < lo + 0.45 * (hi - lo),
@@ -583,10 +592,11 @@ async def robustness_section(base: str, ws_url: str) -> None:
         while time.monotonic() - t0 < 1.4:
             st = req(base, "/teleop/human")
             if g_mid is None and time.monotonic() - t0 > 0.95:
-                # Well past the staleness gate: the HELD transition has done
-                # its one-time committed-pose reseed (the arms re-read
-                # themselves, which in sim includes a little gravity droop),
-                # so anything after this is motion that must not happen.
+                # Well past the staleness gate: both sides are HELD and the
+                # goals are frozen at the last thing sent — a demote takes no
+                # reseed any more (the arm was not moved by anyone, and the
+                # adapter's qpos is open loop, kit-style) — so anything after
+                # this is motion that must not happen.
                 g_mid = st["goal_deg"]
             await asyncio.sleep(0.1)
         check("silence holds both sides",
@@ -662,7 +672,7 @@ async def main() -> int:
               col.get("enabled") is True and col.get("slack_m") is not None,
               f"slack={col.get('slack_m')}")
 
-        print("\n-- 2: engage both grips (the countdown) --")
+        print("\n-- 2: engage both grips (the rising edge) --")
         t0 = time.monotonic()
         s = await wait_for(
             base, lambda st: authorities(st) == ("driving", "driving"),
@@ -670,11 +680,13 @@ async def main() -> int:
         took = time.monotonic() - t0
         check("both sides reach DRIVING", s is not None,
               f"authorities={s and authorities(s)}")
-        # The countdown is 1 s (ACQUIRE_MS): the handover is zero-error by
-        # construction, so all it filters is an accidental grip. Still assert
-        # a REAL wait was served — instant handover is the bug this exists for.
-        check("handover served a real countdown", s is None or took > 0.7,
-              f"{took:.1f}s")
+        # ACQUIRE_MS is ZERO: the clutch engages on the rising edge, the way
+        # the kit's teleoperator does — the adapter anchors the target to
+        # wherever the arm already is, so there is nothing for a countdown to
+        # protect. A handover that takes most of a second again means the
+        # countdown grew back.
+        check("handover engages on the rising edge (no countdown)",
+              s is None or took < 0.7, f"{took:.2f}s")
 
         print("\n-- 3: per-side grip --")
         s = await wait_for(
@@ -688,13 +700,16 @@ async def main() -> int:
         check("right side re-acquires after re-squeeze", s is not None)
 
         print("\n-- 4: collision guard --")
-        # Both hands sweep OUTWARD, which under the egocentric mapping
-        # (operator right = robot -x) drives both tools INWARD, toward each
-        # other across the bench. Measured on the sim bench 2026-08-22: the
-        # binding constraint switches from a bench floor to the inter-arm
-        # capsule pair at ~11 cm of hand travel, the guard starts clamping at
-        # ~12 cm, and the commanded pans then sit still while the hands travel
-        # another 23 cm.
+        # Both hands sweep INWARD (crossing), which drives both sim tools
+        # toward each other across the bench. Inward, not outward as this
+        # section read before the kit port: the vendored kit solver models
+        # so101_new_calib.urdf while the sim arms run so_arm100.xml, and the
+        # two models' shoulder_pan conventions are sign-reversed (the
+        # equivalence gate measured the remap) — so the hand direction that
+        # crossed the tools under the old converter now spreads them, and
+        # vice versa. On calibrated hardware (new-calib degrees) the
+        # egocentric direction is the kit's own; this flip is a SIM-model
+        # fact, not an operator-facing one.
         #
         # `worst` naming the PAIR is what makes this a bimanual-guard check
         # rather than a bench-floor one: a sweep that only ever tripped
@@ -708,7 +723,7 @@ async def main() -> int:
         n = 150
         for i in range(n):
             dx = 0.35 * (i + 1) / n
-            await ws.send(frame(left_dx=-dx, right_dx=dx))
+            await ws.send(frame(left_dx=dx, right_dx=-dx))
             if i % 5 == 0:
                 st = req(base, "/teleop/human")
                 col = st.get("collision", {})
@@ -724,7 +739,7 @@ async def main() -> int:
                 if col.get("slack_m") is not None:
                     min_slack = min(min_slack, col["slack_m"])
             await asyncio.sleep(0.033)
-        await stream(ws, 1.0, left_dx=-0.35, right_dx=0.35)
+        await stream(ws, 1.0, left_dx=0.35, right_dx=-0.35)
 
         st = req(base, "/teleop/human")
         col = st.get("collision", {})
@@ -768,7 +783,7 @@ async def main() -> int:
         n = 90
         for i in range(n):
             dx = 0.35 * (1 - (i + 1) / n)
-            await ws.send(frame(left_dx=-dx, right_dx=dx))
+            await ws.send(frame(left_dx=dx, right_dx=-dx))
             await asyncio.sleep(0.033)
         # Release FIRST: request_home deliberately skips a DRIVING side, so
         # posting it with the grips still squeezed parks nothing at all.

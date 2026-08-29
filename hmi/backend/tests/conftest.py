@@ -120,6 +120,11 @@ def app_with_mocks(monkeypatch, tmp_path):
     teleop_mock.status.return_value = {"running": False, "leader": None, "follower": None}
     srv_mod.teleop = teleop_mock
     human_teleop_mock = MagicMock()
+    # The teleop socket assembles `ik_state` from the session's per-side
+    # KitSideTeleop diagnostics; a bare Mock's return is not JSON-serialisable
+    # and the send would fail silently (caught), so the socket tests would
+    # hang waiting for a push that never comes.
+    human_teleop_mock.ik_sides.return_value = {"left": {}, "right": {}}
     human_teleop_mock.status.return_value = {
         "running": False, "state": "idle",
         "left_arm": None, "right_arm": None,
@@ -130,9 +135,9 @@ def app_with_mocks(monkeypatch, tmp_path):
         "clutch": {"engaged": False,
                    "sides": {"left": False, "right": False},
                    "reason": "clutch_open"},
-        # `authority` and `remaining_ms` are the two keys
-        # QuestTeleoperator.convert reads back off the session — the stub
-        # carries them so a route test drives the same shape the socket does.
+        # `authority` and `remaining_ms` are keys the frontend HUD types
+        # against — the stub carries them so a route test drives the same
+        # shape the real session publishes.
         "acquire": {
             "acquire_ms": 1000.0,
             "left":  {"authority": "held", "reason": "clutch_open",

@@ -1,10 +1,23 @@
 """Teleop must drive *sim* arms, not just real ones.
 
-`tests/test_human_teleop.py` covers the session against MagicMock arms, which
-answer every attribute — including `.robot` — so they can't catch the session
-reaching past the ArmHandle interface. These tests wire the real
-`HumanTeleopSession` to real `SimArmHandle`s over a real `MuJoCoWorld`, which is
-the configuration `config.bimanual-sim.yaml` produces.
+`tests/test_human_teleop.py` covers the session against MagicMock arms and a
+stub adapter, which answer every attribute — including `.robot` — so they
+can't catch the session reaching past the ArmHandle interface, and they
+can't catch the session and the REAL kit adapter disagreeing about the
+pinned API. These tests wire the real `HumanTeleopSession` + the real
+`vr_teleop.kit_teleop.KitSideTeleop` to real `SimArmHandle`s over a real
+`MuJoCoWorld` — raw WebXR frames in, MuJoCo joints out, the whole driven
+path.
+
+One caveat, stated so nobody tightens these assertions into a trap: the
+vendored kit solver models `so101_new_calib.urdf`, while the sim arms run
+the vendored `so_arm100.xml` — two zero conventions (the equivalence gate
+measured the remap; see tests/equivalence/test_frame_alignment.py). The
+composed sim path is self-consistent (the adapter seeds from the sim arm
+and integrates open-loop) but a degree here does not mean the same POSE it
+means on the calibrated hardware, so these tests assert plumbing — motion
+happens, limits hold, handovers do not step — never direction or absolute
+pose.
 """
 from __future__ import annotations
 
@@ -59,34 +72,28 @@ def sim_arms():
         world.stop()
 
 
-#: A `joint_goal` that asks for the sim arms' rest pose — every joint at 0,
-#: gripper open. `_kp_frame(goal=...)` moves one joint off it.
-REST_GOAL = {"shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": 0.0,
-             "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": 1.0}
+#: Resting hand positions, metres in WebXR local-floor — roughly a standing
+#: operator's hands. The clutch is relative, so the values only matter in
+#: that the two hands are apart and the sweeps below have room.
+L0 = [-0.25, 1.15, -0.30]
+R0 = [0.25, 1.15, -0.30]
+IDENT = [0.0, 0.0, 0.0, 1.0]
 
 
-def _kp_frame(*, dead_man: bool, goal: dict | None = None,
-              left: dict | None = None, right: dict | None = None,
-              ts_ms: int = 100) -> dict:
-    """One converter frame: a per-side `joint_goal` in robot joint space.
-
-    `goal` sets both sides; `left`/`right` override one of them (pass `{}` for
-    a side the converter could not solve, which is how an untracked hand
-    arrives here).
-    """
-    side = {"joint_goal": dict(REST_GOAL if goal is None else goal)}
+def _frame(*, lpos=None, rpos=None, lsq=True, rsq=True,
+           ltrk=True, rtrk=True) -> dict:
+    """One RAW wire frame, the shape `/ws/teleop/vr/in` stores."""
+    def hand(pos, sq, trk):
+        return {"tracked": trk, "position": list(pos),
+                "orientation": list(IDENT), "trigger": 0.0, "squeeze": sq}
     return {
-        "type": "keypoints",
-        "ts_ms": ts_ms,
-        "dead_man": dead_man,
-        "left":  side if left is None else left,
-        "right": side if right is None else right,
+        "type": "vr_keypoints",
+        "ts_ms": int(time.monotonic() * 1000),
+        "dead_man": lsq or rsq,
+        "head": {"position": [0.0, 1.6, 0.0], "orientation": list(IDENT)},
+        "left": hand(lpos or L0, lsq, ltrk),
+        "right": hand(rpos or R0, rsq, rtrk),
     }
-
-
-def _pan(deg: float) -> dict:
-    """The rest goal with shoulder_pan swung to `deg`."""
-    return {**REST_GOAL, "shoulder_pan": deg}
 
 
 def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.02) -> bool:
@@ -103,13 +110,60 @@ def _fast_acquire(**kw) -> dict:
 
     Used by the tests below whose subject is the commit path reaching a sim
     arm at all. `test_acquisition_and_recovery_against_real_sim_arms` runs the
-    countdown and the ramp for real."""
+    countdown for real."""
     return {"acquire_ms": 0.0, "match_dwell_ms": 0.0, **kw}
 
 
+def _pump(sess, frame_kw: dict, seconds: float, samples: list | None = None,
+          interval: float = 0.01) -> None:
+    """Keep a frame fresh, optionally recording the commanded goal as it goes.
+
+    Sampling from the test thread is enough to catch a lurch: the failure
+    guarded against moves the goal by tens of degrees in a single tick.
+
+    Each sample is {side: (authority, commanded shoulder_pan)}. Both halves
+    are needed — only the authority says whether a number was commanded or
+    merely held — and both sides, because they hand over at different
+    moments and the recovery only happens on one of them.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        sess.ingest_frame(_frame(**frame_kw))
+        if samples is not None:
+            st = sess.status()
+            samples.append({
+                side: (st["acquire"][side]["authority"],
+                       st["goal_deg"][side].get("shoulder_pan"))
+                for side in ("left", "right")
+            })
+        time.sleep(interval)
+
+
+def _sweep(sess, seconds: float, *, axis: int = 0, delta: float = 0.15,
+           samples: list | None = None, interval: float = 0.01) -> None:
+    """Drag both hands smoothly (mirrored on x) over `seconds`."""
+    t0 = time.monotonic()
+    while True:
+        frac = (time.monotonic() - t0) / seconds
+        if frac >= 1.0:
+            break
+        lp, rp = list(L0), list(R0)
+        lp[axis] -= delta * frac if axis == 0 else -delta * frac
+        rp[axis] += delta * frac
+        sess.ingest_frame(_frame(lpos=lp, rpos=rp))
+        if samples is not None:
+            st = sess.status()
+            samples.append({
+                side: (st["acquire"][side]["authority"],
+                       st["goal_deg"][side].get("shoulder_pan"))
+                for side in ("left", "right")
+            })
+        time.sleep(interval)
+
+
 def test_driving_moves_the_sim_arms(sim_arms):
-    """The whole point: hold the dead-man with a non-neutral pose and both sim
-    arms must actually travel in MuJoCo."""
+    """The whole point: hold the dead-man, MOVE the hands, and both sim arms
+    must actually travel in MuJoCo — raw frames through the real adapter."""
     mgr, handles, _world = sim_arms
     start_left = handles["left"].read_joints_deg()
     start_right = handles["right"].read_joints_deg()
@@ -117,18 +171,19 @@ def test_driving_moves_the_sim_arms(sim_arms):
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
-        # A goal well away from rest, so any travel at all is unambiguous.
-        frame = _kp_frame(dead_man=True, goal=_pan(20.0))
+        _pump(sess, {}, 0.3)                    # engage, anchored in place
+        _sweep(sess, 1.5, delta=0.18)           # then actually move the hands
 
         def _moved() -> bool:
-            sess.ingest_frame(frame)  # keep the frame fresh (300 ms loss window)
+            sess.ingest_frame(_frame(
+                lpos=[L0[0] - 0.18, L0[1], L0[2]],
+                rpos=[R0[0] + 0.18, R0[1], R0[2]]))
             now_left = handles["left"].read_joints_deg()
             now_right = handles["right"].read_joints_deg()
             left_delta = max(abs(now_left[j] - start_left[j]) for j in now_left)
             right_delta = max(abs(now_right[j] - start_right[j]) for j in now_right)
             return left_delta > 5.0 and right_delta > 5.0
 
-        assert sess.state is HumanState.IDLE or True
         assert _moved() or _wait_until(_moved), (
             f"sim arms never moved; session last_error={sess.status()['last_error']!r}"
         )
@@ -138,24 +193,23 @@ def test_driving_moves_the_sim_arms(sim_arms):
 
 def test_no_last_error_while_driving_sim_arms(sim_arms):
     """A commit path that throws is swallowed into `last_error` and the arms sit
-    still — assert the loop stays clean."""
+    still — assert the loop stays clean, adapter included."""
     mgr, _handles, _world = sim_arms
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
-        frame = _kp_frame(dead_man=True, goal=_pan(20.0))
-        for _ in range(10):
-            sess.ingest_frame(frame)
-            time.sleep(0.02)
+        _pump(sess, {}, 0.3)
+        _sweep(sess, 0.8)
         assert sess.status()["last_error"] is None
     finally:
         sess.stop()
 
 
 def test_start_seeds_committed_goals_from_observed_sim_pose(sim_arms):
-    """On start the session seeds its smoothing state from where the arm *is*.
-    Against sim arms that read must go through `read_joints_deg()`; falling back
-    to all-zeros would make the first driving tick a jump from a false origin."""
+    """On start the session seeds its committed pose — and the adapter's
+    open-loop qpos — from where the arm *is*. Against sim arms that read must
+    go through `read_joints_deg()`; falling back to all-zeros would make the
+    first driving tick a jump from a false origin."""
     mgr, handles, world = sim_arms
     # Park the left arm somewhere clearly non-zero and let physics settle.
     # A large max_speed_deg_s makes this single send_goal call effectively
@@ -163,9 +217,15 @@ def test_start_seeds_committed_goals_from_observed_sim_pose(sim_arms):
     # is exercised elsewhere (test_arm.py) and is not this test's subject.
     handles["left"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
     handles["left"].send_goal({"shoulder_pan": 45.0})
-    assert _wait_until(
-        lambda: abs(handles["left"].read_joints_deg()["shoulder_pan"] - 45.0) < 5.0
-    ), "sim arm never reached the parked pose"
+
+    def _settled() -> bool:
+        a = handles["left"].read_joints_deg()["shoulder_pan"]
+        time.sleep(0.05)
+        b = handles["left"].read_joints_deg()["shoulder_pan"]
+        return abs(a - 45.0) < 5.0 and abs(a - b) < 0.3
+
+    assert _wait_until(_settled, timeout=5.0), (
+        "sim arm never settled at the parked pose")
     observed = handles["left"].read_joints_deg()
 
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
@@ -179,35 +239,44 @@ def test_start_seeds_committed_goals_from_observed_sim_pose(sim_arms):
         sess.stop()
 
 
-def test_reason_reports_clamped_against_a_real_sim_joint_limit(sim_arms):
-    """Drive a real MuJoCo arm past a real calibrated limit and check the
-    reason. Mock-arm tests cannot catch a wrong limit source; this can."""
+def test_commands_never_leave_the_real_sim_joint_limits(sim_arms):
+    """Drive the hands hard and far; every value the session commits must sit
+    inside the arm's own calibrated limits the whole way.
+
+    What this replaces, and why: the old test injected a `joint_goal` 14 deg
+    past the pan limit and asserted the reason read `clamped`. There is no
+    joint-goal injection any more — the vendored solver clamps at ITS model's
+    limits before the session ever sees a number — so the per-joint clamp is
+    now exercised where the two models' limits disagree (`shoulder_lift`:
+    solver ±100 deg, sim MJCF −190..+10 deg) and the assertion that matters
+    is the enforcement itself: nothing outside `joint_limits_deg` is ever
+    committed, whatever the adapter asks."""
     mgr, handles, _world = sim_arms
-    lo, hi = handles["left"].joint_limits_deg["shoulder_pan"]
+    limits = handles["left"].joint_limits_deg
 
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
+    worst: dict[str, float] = {}
     try:
-        # The goal must be PAST the real limit, which for the vendored SO-101
-        # MJCF is shoulder_pan = +/-110.008 deg (`range="-1.92 1.92"` radians,
-        # so_arm100.xml:35).
-        frame = _kp_frame(dead_man=True, goal=_pan(124.0))
-
-        def _clamped() -> bool:
-            sess.ingest_frame(frame)
-            entry = sess.status()["joints"]["left"].get("shoulder_pan", {})
-            return entry.get("reason") == "clamped"
-
-        assert _wait_until(_clamped), (
-            f"shoulder_pan never reported clamped; limits were ({lo}, {hi}), "
-            f"status={sess.status()['joints']['left'].get('shoulder_pan')}"
-        )
-        entry = sess.status()["joints"]["left"]["shoulder_pan"]
-        # The pose drives shoulder_pan positive, past the upper limit — assert
-        # it clamped to that specific limit, not merely "somewhere in range"
-        # (which would also pass if clamped to the wrong limit entirely).
-        assert entry["committed"] == pytest.approx(hi)
-        assert entry["target"] is not None
+        _pump(sess, {}, 0.3)
+        # Up half a metre, then down a metre: one of the two crosses the sim
+        # lift range wherever the model conventions land.
+        for dz in (0.5, -1.0):
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 1.2:
+                frac = min(1.0, (time.monotonic() - t0) / 1.2)
+                lp = [L0[0], L0[1] + dz * frac, L0[2]]
+                rp = [R0[0], R0[1] + dz * frac, R0[2]]
+                sess.ingest_frame(_frame(lpos=lp, rpos=rp))
+                goal = sess.status()["goal_deg"]["left"]
+                for j, v in goal.items():
+                    lo, hi = limits[j]
+                    assert lo - 1e-6 <= v <= hi + 1e-6, (
+                        f"{j} committed {v} outside ({lo}, {hi})"
+                    )
+                    worst[j] = max(worst.get(j, -1e9), abs(v))
+                time.sleep(0.01)
+        assert worst, "no goals were ever committed"
     finally:
         sess.stop()
 
@@ -217,11 +286,10 @@ def test_reason_is_ok_for_a_joint_tracking_freely(sim_arms):
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
-        # Rest pose: nothing should clamp.
-        frame = _kp_frame(dead_man=True)
-
+        # A still hand: the adapter anchors to the arm's own pose, so nothing
+        # should clamp.
         def _settled() -> bool:
-            sess.ingest_frame(frame)
+            sess.ingest_frame(_frame())
             reasons = {j: e["reason"] for j, e in sess.status()["joints"]["left"].items()}
             return reasons.get("shoulder_pan") == "ok"
 
@@ -235,140 +303,98 @@ def test_reason_is_ok_for_a_joint_tracking_freely(sim_arms):
 
 # ---- authority transfer against real MuJoCo arms ----------------------
 
-def _pump(sess, frame, seconds: float, samples: list | None = None,
-          interval: float = 0.01) -> None:
-    """Keep a frame fresh, optionally recording the commanded goal as it goes.
-
-    Sampling from the test thread is enough to catch a lurch: the ramp moves
-    the goal by ~0.2 deg per 10 ms, and the failure being guarded against moves
-    it by tens of degrees in a single tick.
-
-    Each sample is {side: (authority, commanded shoulder_pan)}. Both halves are
-    needed: `goal_deg` mirrors the arm's measured position while HELD —
-    deliberately, since the session re-seeds from the arm on every release —
-    so it moves for reasons that are not commands, and only the authority says
-    which is which. Both sides, because they hand over at different moments
-    and the recovery only happens on one of them.
-    """
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        sess.ingest_frame(frame)
-        if samples is not None:
-            st = sess.status()
-            samples.append({
-                side: (st["acquire"][side]["authority"],
-                       st["goal_deg"][side].get("shoulder_pan"))
-                for side in ("left", "right")
-            })
-        time.sleep(interval)
-
-
 def test_acquisition_and_recovery_against_real_sim_arms(sim_arms):
-    """The behavioural bar, on MuJoCo arms: engage from a goal the arm is
-    nowhere near, drive, lose a hand, recover, re-engage — with the commanded
-    goal never stepping.
+    """The behavioural bar, on MuJoCo arms: engage, drive, lose a hand,
+    recover, re-engage — with the commanded goal never stepping.
 
     Mock arms cannot catch this. The countdown is judged against a real
-    measured pose, the ramp composes with `SimArmHandle.send_goal`'s own
-    per-call speed cap, and the recovery path depends on the arm actually
-    having stayed where it was left.
-
-    The pose-match gate that used to guard the handover here is gone with the
-    input path that needed it (see `human_teleop`'s acquisition block), which
-    makes the RAMP the only thing standing between a 60 deg mismatch and a
-    lurch. So this drives exactly that case rather than pre-positioning onto
-    the arm first: step 1 hands over an error the anchor never zeroed.
+    measured pose, the adapter's anchor is judged against a real seeded
+    qpos, and the recovery path depends on the arm actually having stayed
+    where it was left. The no-jump property at each handover is the KIT's
+    anchor at work — the session no longer carries a ramp to hide a bad one.
     """
     mgr, handles, _world = sim_arms
+    samples: list[dict] = []
+    # 0. Park the arms somewhere non-zero BEFORE the session exists: the
+    #    adapter seeds its open-loop qpos exactly once per entry into the
+    #    session, so an arm moved around a live session by a foreign writer
+    #    would (correctly) not be re-read. Modest angles on purpose: the two
+    #    SO-101s in this scene reach each other at about 26 deg of
+    #    shoulder_pan and simply stop, so a bigger pose would have the test
+    #    measuring a collision rather than a handover.
+    handles["left"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
+    handles["right"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
+    handles["left"].send_goal({"shoulder_pan": 20.0})
+    handles["right"].send_goal({"shoulder_pan": -20.0})
+    assert _wait_until(
+        lambda: abs(handles["left"].read_joints_deg()["shoulder_pan"] - 20.0) < 2.0,
+        timeout=5.0,
+    ), "sim arm never reached the parked pose"
+    handles["left"].motion = MotionConfig()
+    handles["right"].motion = MotionConfig()
+
     sess = HumanTeleopSession(mgr, hz_override=200.0,
                               acquire_ms=400.0, match_dwell_ms=100.0)
     sess.start(left_arm="left", right_arm="right")
-    samples: list[dict] = []
     try:
-        # 0. Park the arms somewhere the goal is not. Modest angles on
-        #    purpose: the two SO-101s in this scene reach each other at about
-        #    26 deg of shoulder_pan and simply stop, so a bigger pose would
-        #    have the test measuring a collision rather than a handover.
-        #    Each handle gets its own large-max_speed_deg_s MotionConfig
-        #    instance (not a shared one) so this single send_goal call parks
-        #    in one shot.
-        handles["left"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
-        handles["right"].motion = MotionConfig(max_speed_deg_s=100000.0, ramp_hz=50.0)
-        handles["left"].send_goal({"shoulder_pan": 20.0})
-        handles["right"].send_goal({"shoulder_pan": -20.0})
-        assert _wait_until(
-            lambda: abs(handles["left"].read_joints_deg()["shoulder_pan"] - 20.0) < 2.0,
-            timeout=5.0,
-        ), "sim arm never reached the parked pose"
-        # The park is done — restore the real motion-safety cap so the steps
-        # below exercise the actual streaming-goal cap composing with the
-        # session's own ramp/rate-cap, which is the point of running this
-        # against real SimArmHandles rather than mocks.
-        handles["left"].motion = MotionConfig()
-        handles["right"].motion = MotionConfig()
-
-        # 1. Engage on a goal 20 deg from where the left arm is parked. The
-        #    countdown must run before anything moves.
+        # 1. Engage with STILL hands. The countdown must run before anything
+        #    moves, and nothing at all may be written while merely acquiring.
         rest = handles["left"].read_joints_deg()
-        driving = _kp_frame(dead_man=True, goal=_pan(0.0))
-        _pump(sess, driving, 0.25, samples)
+        _pump(sess, {}, 0.25, samples)
         assert sess.state is HumanState.ACQUIRING, (
             "handed over before the countdown expired"
         )
         moved = max(abs(handles["left"].read_joints_deg()[j] - rest[j]) for j in rest)
         assert moved < 2.0, f"arm moved {moved:.1f} deg while merely acquiring"
 
-        # 2. The countdown runs out and both sides take the goal.
-        _pump(sess, driving, 1.2, samples)
+        # 2. The countdown runs out and both sides take over.
+        _pump(sess, {}, 1.2, samples)
         acq = sess.status()["acquire"]
         assert acq["left"]["authority"] == "driving", acq["left"]
         assert acq["right"]["authority"] == "driving", acq["right"]
 
-        # 3. Drive: the goal sweeps 15 deg and the arm follows.
+        # 3. Drive: the hands sweep and the commanded goal follows. Direction
+        #    is deliberately not asserted (see the module docstring).
         before = sess.status()["goal_deg"]["left"]["shoulder_pan"]
-        swept = _kp_frame(dead_man=True, goal=_pan(before - 15.0))
-        _pump(sess, swept, 1.5, samples)
+        _sweep(sess, 1.5, delta=0.15, samples=samples)
         after = sess.status()["goal_deg"]["left"]["shoulder_pan"]
-        assert after < before - 8.0, f"arm did not follow the sweep ({before}->{after})"
+        assert abs(after - before) > 5.0, (
+            f"goal did not follow the sweep ({before}->{after})"
+        )
 
-        # 4. The right hand leaves the tracking volume — the converter emits
-        #    no goal for it. The left must keep driving.
-        left_only = _kp_frame(dead_man=True, goal=_pan(before - 15.0), right={})
-        _pump(sess, left_only, 0.9, samples)
+        # 4. The right controller drops tracking while both grips stay
+        #    squeezed. The right side must release WITHOUT touching the side
+        #    still tracked — and without the adapter dropping its clutch.
+        _pump(sess, {"rtrk": False}, 0.9, samples)
         acq = sess.status()["acquire"]
         assert acq["right"]["authority"] == "held"
         assert acq["left"]["authority"] == "driving", (
-            "one hand leaving frame froze the arm the other was using"
+            "one hand losing tracking froze the arm the other was using"
         )
 
         # 5. It comes back and re-acquires through the same path as a cold
-        #    start — a fresh countdown, then the ramp again.
-        _pump(sess, swept, 1.5, samples)
+        #    start — a fresh countdown.
+        _pump(sess, {}, 1.5, samples)
         assert sess.status()["acquire"]["right"]["authority"] == "driving", (
             f"never recovered: {sess.status()['acquire']['right']}"
         )
 
-        # 6. No step at either handover.
-        #
-        # Only the handover itself, not the whole driving trace: once the ramp
-        # has run out the cap returns to the session's normal rate limit, and
-        # an operator sweeping their hand is then entitled to move the goal
-        # fast — folding that in would have this measuring the rate cap rather
-        # than the lurch. The lurch is one comparison: the last thing
-        # commanded before authority transferred, against the first thing
-        # commanded after.
+        # 6. No step at either handover: the last thing commanded before
+        #    authority transferred against the first thing commanded after.
+        #    The tolerance is wider than the old ramp-era 1.0 deg on purpose:
+        #    the first driven command is now the adapter's freshly SEEDED
+        #    pose — a real read of the arm — so it differs from the last
+        #    committed value by the sim actuators' steady-state error, not by
+        #    zero. The lurch this pins was tens of degrees.
         def handovers(side):
             return [(a[side][1], b[side][1]) for a, b in zip(samples, samples[1:])
                     if a[side][0] != "driving" and b[side][0] == "driving"]
 
-        # The left hand never left frame, so it acquires once. The right hand
-        # did, so it acquires twice — and the second one is the recovery this
-        # test exists for.
         assert len(handovers("left")) == 1, handovers("left")
         assert len(handovers("right")) == 2, handovers("right")
         for side in ("left", "right"):
             for before_h, after_h in handovers(side):
-                assert abs(after_h - before_h) < 1.0, (
+                assert abs(after_h - before_h) < 3.0, (
                     f"the {side} arm jumped {abs(after_h - before_h):.1f} deg the "
                     f"instant authority transferred — that is the lurch"
                 )

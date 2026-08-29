@@ -13,7 +13,9 @@ from types import SimpleNamespace
 from haller_hmi.collision import Clearance, GuardResult
 from haller_hmi.human_teleop import HumanTeleopSession
 
-from .test_human_teleop import _fake_arm_manager, _fast_acquire, _kp_frame
+from .test_human_teleop import (
+    _StubSideTeleop, _fake_arm_manager, _fast_acquire, _kp_frame,
+)
 
 
 def _wait_until(predicate, timeout: float = 1.0, interval: float = 0.01) -> bool:
@@ -56,6 +58,7 @@ def test_driving_commits_go_through_the_guard():
     mgr, arms = _fake_arm_manager()
     guard = _StubGuard()
     sess = HumanTeleopSession(mgr, collision_guard=guard,
+                              side_teleop_factory=_StubSideTeleop,
                               **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -81,6 +84,7 @@ def test_idle_session_still_publishes_live_clearance():
     not wait for the first handover to exist."""
     mgr, _arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, collision_guard=_StubGuard(),
+                              side_teleop_factory=_StubSideTeleop,
                               **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -93,7 +97,8 @@ def test_idle_session_still_publishes_live_clearance():
 
 def test_no_guard_reports_disabled_and_writes_unfiltered():
     mgr, arms = _fake_arm_manager()
-    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess = HumanTeleopSession(mgr, side_teleop_factory=_StubSideTeleop,
+                              **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
         # `available` joined `enabled` when the guard gained a runtime
@@ -114,6 +119,7 @@ def test_a_crashing_guard_fails_safe_not_silent():
     existing catch) and surface in last_error — never crash the thread."""
     mgr, arms = _fake_arm_manager()
     sess = HumanTeleopSession(mgr, collision_guard=_StubGuard(explode=True),
+                              side_teleop_factory=_StubSideTeleop,
                               **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:

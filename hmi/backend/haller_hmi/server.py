@@ -77,8 +77,53 @@ if not _collision_guard.enabled:
     logger.warning("collision guard starts DISABLED (config collision.enabled="
                    "%s, available=%s)", cfg.collision.enabled,
                    _collision_guard.available)
+
+
+def _wrist_floor_m() -> float:
+    """Lowest wrist height the old demand-shaping floor used, mount frame.
+
+    Derived from the collision config's bench geometry. The kit-faithful
+    driven path carries no demand floor (the kit has none; the collision
+    guard, when on, is the backstop) — these still seed the config so the
+    settings panel keeps echoing the fields it always carried.
+    """
+    if cfg.collision.table_z_m is None:
+        return 0.02
+    return cfg.collision.table_z_m + cfg.collision.wrist_min_m + 0.005
+
+
+def _tip_floor_m() -> float:
+    """Lowest fingertip height, same story as `_wrist_floor_m`."""
+    if cfg.collision.table_z_m is None:
+        return 0.005
+    return cfg.collision.table_z_m + cfg.collision.tip_min_m + 0.005
+
+
+def _make_vr_teleop_config():
+    """THE VR mapping config — one instance, session-and-socket shared.
+
+    The clutch anchors moved into the session (`KitSideTeleop` per driven
+    side), so the knobs that steer them live beside the session too: every
+    teleop socket writes `config_update`s onto this same instance, and the
+    running session's adapters read it on their next tick. A per-connection
+    copy — the old converter's model — would leave a reconnecting headset
+    tuning a config nothing was driving with.
+    """
+    from .vr_teleop.config import QuestTeleopConfig, apply_update
+    qcfg = QuestTeleopConfig(min_tip_z=_tip_floor_m(),
+                             min_wrist_z=_wrist_floor_m())
+    if cfg.teleop:
+        # The YAML `teleop:` section, through the same clamps a headset
+        # write gets.
+        applied = apply_update(qcfg, cfg.teleop)
+        logger.info("teleop config seeded from YAML: %s", applied)
+    return qcfg
+
+
+vr_cfg = _make_vr_teleop_config()
 human_teleop = HumanTeleopSession(arms, collision_guard=_collision_guard,
-                                  lpf_tau_s=cfg.motion.lpf_tau_s)
+                                  lpf_tau_s=cfg.motion.lpf_tau_s,
+                                  vr_config=vr_cfg)
 sim_teleop = SimLeaderTeleop(arms)
 # Bilateral session lock between every pair — any one running blocks the others.
 teleop.attach_peer(human_teleop)
@@ -1050,11 +1095,13 @@ async def _receive_or_idle_timeout(ws: WebSocket):
 async def ws_vr_teleop_in(ws: WebSocket):
     """The one teleop socket: WebXR frames in, IK state and settings back.
 
-    Every frame feeds `QuestTeleoperator` — the clutch-relative mapper into
-    the 3+2 decoupled solver (`vr_teleop/`) — whose output is a per-side
-    `joint_goal` that `HumanTeleopSession` treats exactly as it treats any
-    other commanded pose. One converter per CONNECTION, because the clutch
-    anchors live exactly as long as the operator's socket does.
+    Frames are stored RAW on the session, latest-wins per side, and SOLVED
+    there — once per 60 Hz tick, by the vendored kit adapter
+    (`vr_teleop.kit_teleop.KitSideTeleop`). This socket converts nothing: a
+    per-frame solve seeded from the session's throttled committed pose is
+    the structure that bled hand-to-tool correspondence away, so the door's
+    whole job is normalising the two wire spellings
+    (`vr_teleop.wire.normalize_frame`) and handing the result over.
 
     Message types, client → server:
       `vr_keypoints` / `xr_frame`  a pose frame (both shapes normalised at the
@@ -1062,11 +1109,13 @@ async def ws_vr_teleop_in(ws: WebSocket):
       `config_update`              live tuning, clamped by QuestTeleopConfig
       `request_settings`           ask for the current config
 
-    and server → client: `ik_state` (at IK_STATE_HZ while frames flow),
-    `config_applied`, `settings`.
+    and server → client: `ik_state` (at IK_STATE_HZ while frames flow,
+    assembled from the session's per-side `KitSideTeleop.diag()`),
+    `config_applied`, `settings`. The config is ONE shared instance
+    (`vr_cfg`): the anchors it steers live on the session, not on this
+    connection.
     """
     await ws.accept()
-    quest = _make_quest_teleoperator()
     last_state = 0.0
     state_period = 1.0 / IK_STATE_HZ
     # Whether this client has ever streamed a pose. The idle timeout exists to
@@ -1080,7 +1129,7 @@ async def ws_vr_teleop_in(ws: WebSocket):
     # robot's actual values rather than on their own defaults — one message,
     # and it removes a window where the two disagree.
     try:
-        await ws.send_json(_settings_message(quest))
+        await ws.send_json(_settings_message())
     except Exception:
         pass
     try:
@@ -1101,16 +1150,18 @@ async def ws_vr_teleop_in(ws: WebSocket):
                 # Echo the CLAMPED values back, so a slider that asked for
                 # something out of range snaps to what the robot actually took
                 # instead of silently disagreeing with it.
-                applied = quest.apply_config_update(msg.get("config") or {})
+                from .vr_teleop.config import apply_update
+                applied = apply_update(vr_cfg, msg.get("config") or {})
+                if applied:
+                    logger.info("vr teleop config_update: %s", applied)
                 await ws.send_json({"type": "config_applied", "config": applied})
                 continue
             if mtype == "request_settings":
-                await ws.send_json(_settings_message(quest))
+                await ws.send_json(_settings_message())
                 continue
             streamed = True
             try:
-                human_teleop.ingest_frame(
-                    quest.convert(vr_wire.normalize_frame(msg)))
+                human_teleop.ingest_frame(vr_wire.normalize_frame(msg))
             except Exception:
                 # One malformed frame must never drop the operator's
                 # connection mid-session.
@@ -1119,7 +1170,9 @@ async def ws_vr_teleop_in(ws: WebSocket):
             if now - last_state >= state_period:
                 last_state = now
                 try:
-                    await ws.send_json(quest.state())
+                    await ws.send_json({"type": "ik_state",
+                                        "config": vr_cfg.to_dict(),
+                                        "sides": human_teleop.ik_sides()})
                 except Exception:
                     pass
     except WebSocketDisconnect:
@@ -1132,53 +1185,12 @@ async def ws_vr_teleop_in(ws: WebSocket):
         return
 
 
-def _settings_message(quest) -> dict:
+def _settings_message() -> dict:
     """The full live-tunable config, as its own message type — the reply to
     `request_settings` and the greeting on connect. `ik_state` carries the same
     config block, but only starts flowing once frames do, and a client parked
     on the tuning panel needs the values before it drives anything."""
-    return {"type": "settings", "config": quest.config.to_dict()}
-
-
-# ---- the ported VR teleop stack -----------------------------------------
-
-def _wrist_floor_m() -> float:
-    """Lowest wrist height the teleop may COMMAND, in the mount frame.
-
-    Derived from the collision config's bench geometry but deliberately not
-    gated on `collision.enabled`: this bounds the demand, and it has to keep
-    working when the guard is off, which is precisely when nothing else is
-    watching the bench. The slack keeps teleop demands inside the region the
-    guard passes without clamping.
-    """
-    if cfg.collision.table_z_m is None:
-        return 0.02
-    return cfg.collision.table_z_m + cfg.collision.wrist_min_m + 0.005
-
-
-def _tip_floor_m() -> float:
-    """Lowest fingertip height the teleop may command. See `_wrist_floor_m`."""
-    if cfg.collision.table_z_m is None:
-        return 0.005
-    return cfg.collision.table_z_m + cfg.collision.tip_min_m + 0.005
-
-
-def _make_quest_teleoperator():
-    """One `QuestTeleoperator` per connection — the clutch anchors are
-    connection state, exactly as long-lived as the operator's socket."""
-    from .vr_teleop import QuestTeleopConfig, QuestTeleoperator
-    from .vr_teleop.config import apply_update
-    qcfg = QuestTeleopConfig(min_tip_z=_tip_floor_m(),
-                             min_wrist_z=_wrist_floor_m())
-    if cfg.teleop:
-        # The YAML `teleop:` section, through the same clamps a headset
-        # write gets. After the floor seeding above, on purpose: a config
-        # explicit enough to carry `teleop:` keys outranks the derived
-        # floors (note min_tip_z/min_wrist_z clamp at BOUNDS' -0.20 here;
-        # a rig that needs floors OFF says `floor_enabled: false` instead).
-        applied = apply_update(qcfg, cfg.teleop)
-        logger.info("teleop config seeded from YAML: %s", applied)
-    return QuestTeleoperator(human_teleop, arms, qcfg)
+    return {"type": "settings", "config": vr_cfg.to_dict()}
 
 
 def run() -> None:

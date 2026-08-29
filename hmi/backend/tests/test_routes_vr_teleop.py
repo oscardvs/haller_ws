@@ -86,7 +86,9 @@ def _xr_ctrl(squeeze=True):
 
 
 def _kp_frame(**kw):
-    return {"type": "vr_keypoints", "ts_ms": 1234,
+    # `dead_man` included because the native page sends it (derived from the
+    # squeezes) — and the pin below is that the frame passes the door RAW.
+    return {"type": "vr_keypoints", "ts_ms": 1234, "dead_man": True,
             "head": {"position": [0, 1.5, 0], "orientation": [0, 0, 0, 1]},
             "left": None, "right": _xr_ctrl(), **kw}
 
@@ -100,21 +102,28 @@ def test_settings_arrive_unprompted_on_connect(app_with_mocks):
     assert msg["config"]["scale_translation"] == pytest.approx(1.0)
 
 
-def test_a_frame_reaches_the_session_as_converter_output(app_with_mocks):
+def test_a_frame_reaches_the_session_raw(app_with_mocks):
+    """The socket converts NOTHING: the session stores the raw frame and
+    solves it at its own 60 Hz tick (the kit's loop shape). A per-frame
+    solve here — seeded from the session's throttled committed pose — is the
+    structure the audit found bleeding hand-to-tool correspondence away."""
     with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
         ws.receive_json()
         ws.send_json(_kp_frame())
         ws.receive_json()               # the ik_state that follows the frame
     frame = srv.human_teleop.ingest_frame.call_args.args[0]
-    assert frame["type"] == "keypoints"
+    assert frame["type"] == "vr_keypoints"
     assert frame["dead_man"] is True
-    assert frame["dead_man_sides"] == {"left": False, "right": True}
+    assert frame["left"] is None
+    assert frame["right"]["squeeze"] is True
+    assert frame["right"]["position"] == [0.1, 1.2, -0.3]
+    assert "joint_goal" not in (frame["right"] or {})
 
 
 def test_the_xr_standard_frame_shape_is_accepted_too(app_with_mocks):
-    """Normalised at the door, so the converter, the session and the recorder
-    only ever see one shape — and a client written against the WebXR gamepad
-    mapping still drives the rig."""
+    """Normalised at the door, so the session and the recorder only ever see
+    one shape — and a client written against the WebXR gamepad mapping still
+    drives the rig."""
     with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
         ws.receive_json()
         ws.send_json({
@@ -127,8 +136,10 @@ def test_the_xr_standard_frame_shape_is_accepted_too(app_with_mocks):
         })
         ws.receive_json()
     frame = srv.human_teleop.ingest_frame.call_args.args[0]
+    assert frame["type"] == "vr_keypoints"
     assert frame["ts_ms"] == 7
-    assert frame["dead_man_sides"]["right"] is True
+    assert frame["right"]["squeeze"] is True
+    assert frame["left"] is None
 
 
 def test_ik_state_is_pushed_while_frames_flow(app_with_mocks):
@@ -167,22 +178,25 @@ def test_request_settings_answers_with_the_whole_config(app_with_mocks):
     assert msg["config"]["scale_translation"] == pytest.approx(2.5)
 
 
-def test_each_connection_gets_its_own_converter(app_with_mocks, monkeypatch):
-    """The clutch anchors are connection state — two headsets must not share
-    them, and a reconnect must start clean."""
-    made = []
-    real = srv._make_quest_teleoperator
+def test_the_config_is_one_shared_instance_across_connections(app_with_mocks):
+    """What replaced the per-connection converter, deliberately.
 
-    def _spy():
-        made.append(real())
-        return made[-1]
-
-    monkeypatch.setattr(srv, "_make_quest_teleoperator", _spy)
+    The clutch anchors moved INTO the session (`KitSideTeleop` per driven
+    side) — they live exactly as long as the session, not the socket — so
+    the config that steers them must be the session's one shared instance.
+    A per-connection copy (the old model this test used to pin) would leave
+    a reconnecting headset tuning a config nothing was driving with: a
+    slider written on one socket must be the value every other socket reads
+    back."""
     with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as a:
         a.receive_json()
+        a.send_json({"type": "config_update",
+                     "config": {"scale_translation": 2.5}})
+        assert a.receive_json()["type"] == "config_applied"
         with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as b:
-            b.receive_json()
-    assert len(made) == 2 and made[0] is not made[1]
+            greeting = b.receive_json()
+    assert greeting["type"] == "settings"
+    assert greeting["config"]["scale_translation"] == pytest.approx(2.5)
 
 
 def test_a_bad_frame_does_not_drop_the_socket(app_with_mocks):

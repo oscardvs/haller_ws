@@ -26,6 +26,30 @@ JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex",
           "wrist_flex", "wrist_roll", "gripper")
 
 
+class _InertSideTeleop:
+    """Minimal pinned-API stand-in. No test here ever ingests a frame, so
+    all this must do is exist, seed, and hold — keeping the file standalone
+    (its fakes are spec'd from the real ArmManager on purpose) and keeping
+    the vendored solver's mujoco model out of a tick-bus test."""
+
+    def __init__(self, joint_limits_deg, config, *, urdf_path=None):
+        self._held = {j: 0.0 for j in joint_limits_deg}
+
+    def seed_from_observed(self, joints_deg):
+        self._held = {j: float(joints_deg.get(j, 0.0)) for j in self._held}
+
+    def update(self, ctrl, head_orientation_xyzw, stance, frame_age_s):
+        return dict(self._held), False
+
+    def diag(self):
+        return {"tracked": False, "engaged": False}
+
+
+def _sess(mgr, **kw) -> HumanTeleopSession:
+    kw.setdefault("side_teleop_factory", _InertSideTeleop)
+    return HumanTeleopSession(mgr, **kw)
+
+
 def _arm(arm_id: str, *, pos: float = 0.0, fail: bool = False):
     a = MagicMock(spec_set=[
         "config", "joint_limits_deg", "guard", "torque_enabled",
@@ -84,7 +108,7 @@ def test_the_manager_this_session_samples_is_not_iterable():
 
 def test_a_running_session_publishes_the_tick():
     arms = {"left": _arm("left", pos=5.0), "right": _arm("right", pos=-5.0)}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     sub = sess.tick_bus.subscribe(name="test")
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -97,7 +121,7 @@ def test_a_running_session_publishes_the_tick():
 def test_every_published_sample_carries_every_arm_the_manager_reports():
     """The empty-sample failure is silent, so assert the CONTENT, not the count."""
     arms = {"left": _arm("left", pos=5.0), "right": _arm("right", pos=-5.0)}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     sub = sess.tick_bus.subscribe(name="test")
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -125,7 +149,7 @@ def test_a_sample_pairs_state_and_goal_from_one_tick():
     to pair with — which is the structural fix, not a timing improvement.
     """
     arms = {"left": _arm("left", pos=5.0)}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     sub = sess.tick_bus.subscribe(name="test")
     sess.start(left_arm="left", right_arm=None)
     try:
@@ -146,7 +170,7 @@ def test_an_arm_whose_read_fails_is_a_hole_not_a_number():
     plausible value for a read that did not happen is not a small error.
     """
     arms = {"left": _arm("left", pos=5.0), "right": _arm("right", fail=True)}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     sub = sess.tick_bus.subscribe(name="test")
     sess.start(left_arm="left", right_arm=None)
     try:
@@ -163,7 +187,7 @@ def test_an_arm_whose_read_fails_is_a_hole_not_a_number():
 
 def test_the_session_owns_the_bus_only_while_it_runs():
     arms = {"left": _arm("left")}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     assert sess.tick_bus.producer_name is None
 
     sess.start(left_arm="left", right_arm=None)
@@ -180,7 +204,7 @@ def test_the_session_owns_the_bus_only_while_it_runs():
 def test_a_session_that_cannot_claim_the_bus_does_not_come_up_half_started():
     """A session marked running with no thread is worse than a failed start."""
     arms = {"left": _arm("left")}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     sess.tick_bus.attach_producer("someone-else")
 
     with pytest.raises(ProducerConflict):
@@ -214,7 +238,7 @@ def test_the_divisor_is_derived_so_the_sample_rate_survives_a_cadence_change(
 def test_a_decimating_session_publishes_slower_than_it_commits():
     """The divisor arithmetic, observed on a running loop rather than asserted."""
     arms = {"left": _arm("left")}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0, sample_hz=30.0)
+    sess = _sess(_manager(**arms), hz_override=120.0, sample_hz=30.0)
     sub = sess.tick_bus.subscribe(name="test")
     sess.start(left_arm="left", right_arm=None)
     try:
@@ -236,7 +260,7 @@ def test_a_decimating_session_publishes_slower_than_it_commits():
 
 def test_the_idle_sample_reads_the_arms_while_nothing_is_driving():
     arms = {"left": _arm("left", pos=7.0), "right": _arm("right", pos=-7.0)}
-    sess = HumanTeleopSession(_manager(**arms))
+    sess = _sess(_manager(**arms))
     fields = sess.idle_sample()
 
     assert fields is not None
@@ -249,7 +273,7 @@ def test_the_idle_sample_reads_the_arms_while_nothing_is_driving():
 def test_the_idle_sample_declines_while_a_session_owns_the_tick():
     """The handover is a fact about this method, not a race the bus arbitrates."""
     arms = {"left": _arm("left")}
-    sess = HumanTeleopSession(_manager(**arms), hz_override=120.0)
+    sess = _sess(_manager(**arms), hz_override=120.0)
     sess.start(left_arm="left", right_arm=None)
     try:
         assert sess.idle_sample() is None
@@ -260,7 +284,7 @@ def test_the_idle_sample_declines_while_a_session_owns_the_tick():
 
 def test_an_idle_sample_reports_a_failed_arm_as_a_hole():
     arms = {"left": _arm("left", pos=1.0), "right": _arm("right", fail=True)}
-    fields = HumanTeleopSession(_manager(**arms)).idle_sample()
+    fields = _sess(_manager(**arms)).idle_sample()
     assert "right" not in fields["arms"]
     assert "right" in fields["arm_errors"]
     assert fields["degraded"] is True
@@ -271,7 +295,7 @@ def test_the_idle_sampler_drives_the_bus_end_to_end():
     from haller_hmi.tick import IdleSampler
 
     arms = {"left": _arm("left", pos=4.0)}
-    sess = HumanTeleopSession(_manager(**arms))
+    sess = _sess(_manager(**arms))
     sampler = IdleSampler(sess.tick_bus, sample=sess.idle_sample, hz=1000.0)
 
     sampler.tick_once()
@@ -287,7 +311,7 @@ def test_the_idle_sampler_can_measure_a_rate_before_any_session_starts():
     from haller_hmi.tick import RATE_MIN_SAMPLES, IdleSampler
 
     arms = {"left": _arm("left")}
-    sess = HumanTeleopSession(_manager(**arms))
+    sess = _sess(_manager(**arms))
     sampler = IdleSampler(sess.tick_bus, sample=sess.idle_sample, hz=1000.0)
     for _ in range(RATE_MIN_SAMPLES + 5):
         sampler.tick_once()

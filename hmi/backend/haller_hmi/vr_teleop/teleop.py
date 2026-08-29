@@ -1,6 +1,15 @@
-"""QuestTeleoperator — the adapter that turns WebXR frames into joint goals.
+"""QuestTeleoperator — the RETIRED per-frame converter. OFF the driven path.
 
-This is the layer the reference stack calls `lerobot/bi_quest_teleop.py`: it
+As of the kit rewire, `/ws/teleop/vr/in` stores frames RAW on the session and
+`HumanTeleopSession` solves them at its own 60 Hz tick through
+`vr_teleop.kit_teleop.KitSideTeleop` (the vendored kit mapper + solver).
+Nothing in the server constructs this class any more. It remains because its
+mapper/IK layers are still exercised by `tests/vr_teleop/` and it documents
+the pre-kit architecture; the audit's findings against it (solve-per-frame
+seeded from the throttled committed pose, the wrist_roll TCP, the hand-rolled
+FK) are why it is no longer driven.
+
+This was the layer the reference stack calls `lerobot/bi_quest_teleop.py`: it
 owns per-arm clutch state, runs the pose mapper and the IK, and hands the
 result to whatever drives the robot. The difference is what it hands it to.
 The reference emits a LeRobot action dict and a follower writes it; here the
