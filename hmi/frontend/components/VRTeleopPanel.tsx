@@ -1016,7 +1016,9 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
         tsMs: Date.now(),
         forceDisengaged: blurred,
         stance: stanceRef.current,
-        precision: precisionRef.current,
+        // Precision is stamped per hand inside sampleVRFrame from that
+        // hand's own A/X (kit semantics); precisionRef stays for the HUD
+        // chip and the haptic tick only.
         wristPivotM: tuneValuesRef.current[WRIST_PIVOT_KEY],
       });
       client.queueFrame(vrFrame);

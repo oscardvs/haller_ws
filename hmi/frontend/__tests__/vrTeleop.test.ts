@@ -253,43 +253,63 @@ describe("mat4Multiply", () => {
   });
 });
 
-describe("sampleVRFrame orientation source", () => {
-  it("takes orientation from the target ray, position from the grip", () => {
-    // Quest grip frames tilt ~50-60° from where the hand points; the backend
-    // synthesizes the whole hand from this orientation, so shipping the grip
-    // frame made a naturally held controller read as a pitched-down wrist.
+describe("sampleVRFrame pose source", () => {
+  const mixedFrame: XRFrameLike = {
+    getViewerPose: frame.getViewerPose,
+    getPose: (space: unknown) => ({
+      transform: {
+        position: { x: 1, y: 2, z: 3, w: 1 },
+        orientation: (space as { tag: string }).tag === "ray"
+          ? { x: 0.5, y: 0, z: 0, w: 0.866 }
+          : { x: 0, y: 0, z: 0, w: 1 },
+      },
+      emulatedPosition: false,
+    }),
+  };
+
+  it("takes position AND orientation from one space — grip preferred", () => {
+    // The kit samples gripSpace || targetRaySpace for the WHOLE pose, and
+    // the constant grip-vs-ray tilt cancels in the mapper's clutch-relative
+    // delta. The old grip-position + ray-orientation mix injected a phantom
+    // ~50-60° rotation increment whenever one frame's ray pose came back
+    // null — the source swap read as real hand rotation to the incremental
+    // mapper, twice per dropout.
     const src: XRInputSourceLike = {
       handedness: "right",
       gripSpace: { tag: "grip" },
       targetRaySpace: { tag: "ray" },
       gamepad: { buttons: [] },
     };
-    const s = session([src]);
-    const f: XRFrameLike = {
-      getViewerPose: frame.getViewerPose,
-      getPose: (space: unknown) => ({
-        transform: {
-          position: { x: 1, y: 2, z: 3, w: 1 },
-          orientation: (space as { tag: string }).tag === "ray"
-            ? { x: 0.5, y: 0, z: 0, w: 0.866 }
-            : { x: 0, y: 0, z: 0, w: 1 },
-        },
-        emulatedPosition: false,
-      }),
-    };
-    const out = sampleVRFrame(s, f, {}, { tsMs: 1 });
+    const out = sampleVRFrame(session([src]), mixedFrame, {}, { tsMs: 1 });
     expect(out.right?.position).toEqual([1, 2, 3]);
-    expect(out.right?.orientation[0]).toBeCloseTo(0.5);
+    // Grip orientation, NOT the ray's 0.5-x quat.
+    expect(out.right?.orientation[0]).toBe(0);
+    expect(out.right?.orientation[3]).toBe(1);
   });
 
-  it("falls back to the grip orientation when no ray space exists", () => {
+  it("falls back to the target ray only when no grip space exists", () => {
     const src: XRInputSourceLike = {
       handedness: "left",
-      gripSpace: { tag: "grip" },
+      targetRaySpace: { tag: "ray" },
       gamepad: { buttons: [] },
     };
-    const out = sampleVRFrame(session([src]), frame, {}, { tsMs: 1 });
-    expect(out.left?.orientation).toEqual([0, 0, 0, 1]);
+    const out = sampleVRFrame(session([src]), mixedFrame, {}, { tsMs: 1 });
+    expect(out.left?.position).toEqual([1, 2, 3]);
+    expect(out.left?.orientation[0]).toBeCloseTo(0.5);
+  });
+});
+
+describe("sampleVRFrame precision", () => {
+  it("stamps precision per hand from that hand's own A/X", () => {
+    // Kit semantics: the driving hand's own modifier. A global flag
+    // re-anchored and re-scaled the arm the OTHER hand was mid-reach with.
+    const s = session([
+      controller("left", { ax: true }),
+      controller("right"),
+    ]);
+    const out = sampleVRFrame(s, frame, {}, { tsMs: 1 });
+    expect(out.left?.precision).toBe(true);
+    expect(out.right?.precision).toBeUndefined();
   });
 });
 

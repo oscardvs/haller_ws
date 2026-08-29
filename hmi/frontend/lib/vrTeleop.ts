@@ -563,7 +563,7 @@ export function sampleVRFrame(
   refSpace: unknown,
   opts: { tsMs: number; forceDisengaged?: boolean;
           stance?: "behind" | "mirror" | "front";
-          precision?: boolean; wristPivotM?: number },
+          wristPivotM?: number },
 ): VRFrame {
   const head = poseToPair(frame.getViewerPose(refSpace));
 
@@ -578,8 +578,18 @@ export function sampleVRFrame(
       && Boolean(buttons[BUTTON_SQUEEZE]?.pressed);
     if (squeeze) deadMan = true;
 
-    const pose = src.gripSpace ? poseToPair(frame.getPose(src.gripSpace, refSpace)) : null;
-    // Read-out point: the grip position shifted back along the controller's
+    // ONE pose space for position AND orientation — the kit's form (its page
+    // samples gripSpace || targetRaySpace for the whole pose). The constant
+    // grip-vs-ray tilt cancels exactly in the mapper's clutch-relative delta
+    // q_now · q_prev⁻¹, so a single space loses nothing; what the old
+    // grip-position + ray-orientation mix bought was two phantom ~50-60°
+    // rotation increments per ray dropout — one frame where getPose(ray)
+    // returned null silently swapped the orientation source to the grip
+    // frame and back, and the incremental mapper read each swap as real
+    // hand rotation. The kit's 46 episodes were driven single-space.
+    const space = src.gripSpace ?? src.targetRaySpace;
+    const pose = space ? poseToPair(frame.getPose(space, refSpace)) : null;
+    // Read-out point: the pose position shifted back along the controller's
     // own +Z (which points toward the operator in WebXR grip space) onto
     // roughly the operator's wrist pivot. See DEFAULT_WRIST_PIVOT_M — a pure
     // twist about a palm-centred point is an ARC, and the mapper has no way
@@ -587,28 +597,21 @@ export function sampleVRFrame(
     const pivotM = opts.wristPivotM ?? 0;
     const back = pose && pivotM !== 0
       ? _rotateByQuat(pose.orientation, [0, 0, pivotM]) : null;
-    // Orientation comes from the TARGET RAY, not the grip. On Quest Touch
-    // controllers the grip frame is tilted ~50-60° from where a relaxed hand
-    // actually points (it follows the handle, not the knuckles), and the
-    // backend synthesizes the whole hand from this orientation — with the
-    // grip frame, holding a controller naturally reads as a steeply
-    // pitched-down wrist, which both drives wrist_flex oddly and makes the
-    // acquisition gate nearly unmatchable. The ray frame is each vendor's
-    // own answer to "where is this hand pointing"; position stays on the
-    // grip (the ray origin sits forward of the palm).
-    const ray = src.targetRaySpace
-      ? poseToPair(frame.getPose(src.targetRaySpace, refSpace)) : null;
+    // Precision is PER HAND — the kit reads the driving hand's own A/X. A
+    // single global flag re-anchored and re-scaled the arm the OTHER hand
+    // was mid-reach with.
+    const precision = Boolean(buttons[BUTTON_AX]?.pressed);
     const sample: ControllerSample = pose
       ? {
           position: back
             ? [pose.position[0] + back[0], pose.position[1] + back[1],
                pose.position[2] + back[2]]
             : pose.position,
-          orientation: (ray ?? pose).orientation,
+          orientation: pose.orientation,
           trigger: buttons[BUTTON_TRIGGER]?.value ?? 0,
           squeeze,
           tracked: true,
-          ...(opts.precision ? { precision: true } : {}),
+          ...(precision ? { precision: true } : {}),
         }
       : {
           position: [0, 0, 0],
@@ -1112,9 +1115,11 @@ export type TuningKnob = {
  *  roughly where the operator's wrist turns. The reference stack solves for
  *  this with a five-second in-VR ritual; this is the same idea as one
  *  adjustable number. Client-side, because only the client has the grip pose
- *  to apply it to. */
+ *  to apply it to. 0.05 is the kit's shipped default — the old 0.09
+ *  overshot an uncalibrated axis by 80%, and an overshot pivot REVERSES the
+ *  ghost translation it exists to cancel: the tool wanders on every twist. */
 export const WRIST_PIVOT_KEY = "wrist_pivot_m";
-export const DEFAULT_WRIST_PIVOT_M = 0.09;
+export const DEFAULT_WRIST_PIVOT_M = 0.05;
 
 /**
  * The knobs the in-headset list exposes, in order.

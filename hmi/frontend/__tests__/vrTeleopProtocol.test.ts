@@ -6,7 +6,7 @@ import {
   formatKnob, HAPTIC_FLOOR, ikHapticCues, ORIENT_DEFICIT, parseVrSocketMessage,
   precisionHeld, reconcileConfig, sampleVRFrame, stepTuning,
   stickAxes, TUNING_KNOBS, TUNING_REPEAT_MS, WRIST_PIVOT_KEY,
-  BUTTON_SQUEEZE, BUTTON_TRIGGER,
+  BUTTON_AX, BUTTON_SQUEEZE, BUTTON_TRIGGER,
   type IkSides, type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
 } from "../lib/vrTeleop";
 
@@ -95,13 +95,16 @@ describe("wrist pivot", () => {
 });
 
 describe("precision on the wire", () => {
-  it("rides on every tracked hand, and is absent when not held", () => {
-    const s = session([controller("left"), controller("right")]);
-    const on = sampleVRFrame(s, frameAtOrigin, {}, { tsMs: 1, precision: true });
-    expect(on.left?.precision).toBe(true);
-    expect(on.right?.precision).toBe(true);
-    const off = sampleVRFrame(s, frameAtOrigin, {}, { tsMs: 1 });
-    expect(off.left?.precision).toBeUndefined();
+  it("rides per hand from that hand's own A/X, absent when not held", () => {
+    // Kit semantics: the driving hand's own modifier. A single global flag
+    // re-anchored and re-scaled the arm the OTHER hand was mid-reach with.
+    const left = controller("left");
+    (left.gamepad!.buttons as { pressed: boolean; value: number }[])[
+      BUTTON_AX] = { pressed: true, value: 0 };
+    const s = session([left, controller("right")]);
+    const out = sampleVRFrame(s, frameAtOrigin, {}, { tsMs: 1 });
+    expect(out.left?.precision).toBe(true);
+    expect(out.right?.precision).toBeUndefined();
   });
 
   it("never appears on a legacy field the backend no longer reads", () => {
