@@ -1428,8 +1428,12 @@ class DatasetRecorder:
                     "record); every frame of this take would be rejected. "
                     "Record into a NEW repo_id — that is the safe move and "
                     "costs nothing but a name — or, if the two really must "
-                    "become one dataset, migrate the older one to the current "
-                    "schema offline and merge afterwards. Common causes: the "
+                    "become one dataset and the difference is only columns the "
+                    "older one LACKS, migrate it offline:\n"
+                    f"    python -m haller_hmi.dataset_migrate {repo_id} "
+                    f"--root {root} --dry-run\n"
+                    "(drop --dry-run to run it; it keeps a copy first, and "
+                    "refuses anything it cannot fill honestly). Common causes: the "
                     "recorded camera set or a `dataset_key` changed, or the "
                     "dataset was recorded on a rig with a different task "
                     f"scorer ({REWARD_FEATURE}/{DONE_FEATURE} exist only on a "
@@ -1602,6 +1606,19 @@ class DatasetRecorder:
         caller cannot edit the log.
         """
         return [dict(e) for e in self._session_episodes if e["repo_id"] == repo_id]
+
+    def features(self) -> dict:
+        """The schema a take started RIGHT NOW would write.
+
+        Live, not frozen: the recorded camera set is runtime state the operator
+        flips between takes, so this is a question only the running rig can
+        answer. `dataset_migrate` asks it over `/record/schema` for exactly that
+        reason — a migration computed from config alone would target a schema
+        `_open_dataset` then refuses.
+        """
+        cams = self._active_camera_specs()
+        self._reject_colliding_keys(cams)
+        return self._build_features(cams)
 
     def _build_features(self, cam_specs: list[dict]) -> dict:
         names = self._state_names()

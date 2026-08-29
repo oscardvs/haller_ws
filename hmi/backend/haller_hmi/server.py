@@ -1029,6 +1029,23 @@ def get_record_status():
     return recorder.status()
 
 
+@app.get("/record/schema")
+def get_record_schema():
+    """The feature set a take started right now would write.
+
+    Exists for `haller_hmi.dataset_migrate`, which has to migrate an older
+    dataset to the schema `_open_dataset` will actually compare against. The
+    recorded camera set is runtime state, so the running rig is the only thing
+    that knows it — a migration computed from config.yaml would target a schema
+    the recorder still refuses. Shapes go out as lists; JSON has no tuple.
+    """
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    features = {k: {**v, "shape": list(v["shape"])}
+                for k, v in recorder.features().items()}
+    return {"features": features}
+
+
 @app.post("/record/start")
 async def post_record_start(body: RecordStartBody):
     if recorder is None:
