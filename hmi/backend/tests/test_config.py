@@ -246,14 +246,14 @@ def test_load_config_reads_motion_block(tmp_path):
     assert cfg.motion.ramp_hz == 50.0
 
 
-def test_lpf_tau_defaults_and_rejects_non_positive():
+def test_lpf_tau_defaults_zero_disables_and_negative_rejects():
     """The session smoothing time constant: 0.100 s unless a config says
-    otherwise (config.solo-raw.yaml says 0.02 — see the compounding note on
-    MotionConfig.lpf_tau_s)."""
+    otherwise. ZERO is valid and means the filter is off — the kit ships no
+    output filter, and config.solo-real.yaml takes exactly that (see the
+    compounding note on MotionConfig.lpf_tau_s). Negative stays refused."""
     assert MotionConfig().lpf_tau_s == 0.100
     assert MotionConfig(lpf_tau_s=0.02).lpf_tau_s == 0.02
-    with pytest.raises(ValueError, match="lpf_tau_s"):
-        MotionConfig(lpf_tau_s=0.0)
+    assert MotionConfig(lpf_tau_s=0.0).lpf_tau_s == 0.0
     with pytest.raises(ValueError, match="lpf_tau_s"):
         MotionConfig(lpf_tau_s=-0.1)
 
@@ -306,7 +306,9 @@ def test_shipped_solo_raw_config_loads_and_is_actually_raw():
     cfg = load_config(
         Path(__file__).resolve().parents[1] / "config.solo-raw.yaml")
     assert cfg.motion.max_speed_deg_s == 90.0
-    assert cfg.motion.lpf_tau_s == 0.02
+    # 0.0 = the filter actually OFF. The 0.02 this pinned before was only
+    # ever "as close to off as validation allowed" — raw means raw.
+    assert cfg.motion.lpf_tau_s == 0.0
     assert cfg.collision.enabled is False
     # Both derived floors land below the arm's reachable minima (tip
     # -0.297 m, wrist -0.132 m): geometrically inert even if floor_enabled

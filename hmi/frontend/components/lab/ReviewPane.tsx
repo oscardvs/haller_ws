@@ -172,6 +172,11 @@ export function ReviewPane({
   const [overlay, setOverlay] = useSticky<boolean>("lab.review.overlay", true);
   const playerRef = useRef<EpisodePlayerHandle>(null);
 
+  /** Which chart fills the analysis column, if one does. The tiled charts
+   *  stay mounted underneath and the overlay just covers them: a chart that
+   *  re-measures and re-draws on restore reads as a flicker. */
+  const [zoom, setZoom] = useState<"gripper" | "traces" | null>(null);
+
   const [dialog, setDialog] = useState<"autoclass" | "prune" | "delete" | null>(null);
 
   /* ---- the held-out plan -------------------------------------------------
@@ -547,6 +552,19 @@ export function ReviewPane({
 
   /* ── keyboard ──────────────────────────────────────────────────────────── */
 
+  // Escape restores a zoomed chart; the header toggle does the same, so the
+  // two ways in are the two ways out. Not part of BINDINGS: it is an overlay
+  // dismissal, not a triage action, and the hint row would only lie about it
+  // when nothing is zoomed.
+  useEffect(() => {
+    if (zoom === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoom(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoom]);
+
   const step = useCallback(
     (delta: number) => {
       if (rows.length === 0) return;
@@ -723,7 +741,7 @@ export function ReviewPane({
       {/* ---- the instrument, and the queue -------------------------------- */}
       <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_27rem] gap-2 overflow-hidden p-2">
         {/* LEFT: one episode, three views of it, sharing a playhead. */}
-        <div className="grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto] gap-2 overflow-hidden">
+        <div className="relative grid min-h-0 grid-rows-[minmax(0,1fr)_auto_auto] gap-2 overflow-hidden">
           <PaneBoundary what="the player">
           <EpisodePlayer
             ref={playerRef}
@@ -745,7 +763,11 @@ export function ReviewPane({
             <PaneBoundary what="the gripper chart">
               {/* The thresholds ride on the trace's own gripper channels, so
                   the line and the guides under it come from one response. */}
-              <GripperChart trace={trace} playheadT={playheadT} />
+              <GripperChart
+                trace={trace}
+                playheadT={playheadT}
+                onZoom={() => setZoom("gripper")}
+              />
             </PaneBoundary>
           </div>
 
@@ -756,6 +778,7 @@ export function ReviewPane({
                 playheadT={playheadT}
                 overlay={overlay}
                 onOverlay={setOverlay}
+                onZoom={() => setZoom("traces")}
               />
             </PaneBoundary>
             <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 px-0.5">
@@ -780,6 +803,35 @@ export function ReviewPane({
               ))}
             </div>
           </div>
+          {/* The zoomed chart covers the whole analysis column, player
+              included — the keyboard still reaches the player, so the episode
+              keeps playing under a fullscreen trace. */}
+          {zoom !== null && (
+            <div
+              data-chart-zoom={zoom}
+              className="absolute inset-0 z-10 flex flex-col bg-background"
+            >
+              <PaneBoundary what={zoom === "gripper" ? "the gripper chart" : "the joint traces"}>
+                {zoom === "gripper" ? (
+                  <GripperChart
+                    trace={trace}
+                    playheadT={playheadT}
+                    zoomed
+                    onZoom={() => setZoom(null)}
+                  />
+                ) : (
+                  <TraceChart
+                    trace={trace}
+                    playheadT={playheadT}
+                    overlay={overlay}
+                    onOverlay={setOverlay}
+                    zoomed
+                    onZoom={() => setZoom(null)}
+                  />
+                )}
+              </PaneBoundary>
+            </div>
+          )}
         </div>
 
         {/* RIGHT: what the server matched, in the order the server matched it. */}

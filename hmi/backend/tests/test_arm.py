@@ -340,6 +340,25 @@ def test_send_goal_caps_a_garbage_jump_to_one_step(monkeypatch):
     assert sent["shoulder_pan"] == pytest.approx(1.2)
 
 
+def test_send_goal_honors_a_caller_speed_cap(monkeypatch):
+    """A caller that already rate-caps every step (the teleop session, at
+    RATE_CAP_DEG_S) brings its own ceiling instead of being re-capped at the
+    slower discrete-move speed — that shadow cap was the arm's real teleop
+    ceiling. The write stays elapsed-time bounded; only the number is the
+    caller's. Callers passing nothing keep motion.max_speed_deg_s (pinned by
+    test_send_goal_caps_a_garbage_jump_to_one_step above)."""
+    handle = _make_handle(monkeypatch)
+    handle.guard.set(Mode.MANUAL)
+    handle.motion = MotionConfig(max_speed_deg_s=60.0, ramp_hz=50.0)
+    handle._last_commanded = {"shoulder_pan": 0.0}
+
+    sent = handle.send_goal({"shoulder_pan": 100.0}, speed_cap_deg_s=240.0)
+
+    # One first-call ramp period (1/50 s) at the caller's 240 deg/s, not the
+    # discrete-move 60: 240 / 50 = 4.8 deg.
+    assert sent["shoulder_pan"] == pytest.approx(4.8)
+
+
 def test_send_goal_tracks_last_commanded_across_calls(monkeypatch):
     handle = _make_handle(monkeypatch)
     handle.guard.set(Mode.MANUAL)
@@ -898,6 +917,34 @@ def _fake_robot_with_bus(present: dict[str, int]):
     robot.id = "haller_leader"
     robot.bus.sync_read.return_value = dict(present)
     return robot
+
+
+def test_configure_restores_factory_p_gain_after_lerobot_softens_it(monkeypatch):
+    """lerobot's configure() writes P_Coefficient=16 — a leader-follower
+    streaming tune. At 16 the position loop cannot carry this arm through
+    gravity-heavy poses: it trails the command, draws near-stall current, and
+    can trip the servo overload latch. The kit restores the STS3215 factory
+    32 explicitly; so does the wrapper, and it must do so AFTER lerobot has
+    had its say — a restore that runs first is a restore that lerobot then
+    overwrites."""
+    from haller_hmi.arm import _configure_holding_position
+
+    robot = _fake_robot_with_bus({"shoulder_pan": 100, "gripper": 200})
+    robot.bus.motors = {"shoulder_pan": object(), "gripper": object()}
+
+    def _lerobot_configure(r):
+        for motor in r.bus.motors:
+            r.bus.write("P_Coefficient", motor, 16)
+
+    monkeypatch.setattr("haller_hmi.arm.SO101Follower.configure",
+                        _lerobot_configure)
+
+    _configure_holding_position(robot)
+
+    for motor in robot.bus.motors:
+        p_writes = [c.args for c in robot.bus.write.call_args_list
+                    if c.args[:2] == ("P_Coefficient", motor)]
+        assert p_writes and p_writes[-1] == ("P_Coefficient", motor, 32)
 
 
 def test_park_goal_on_present_writes_raw_present_into_goal():

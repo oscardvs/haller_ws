@@ -76,14 +76,25 @@ type NavigatorXR = {
 /** `xr-standard` gamepad mapping. Index, not name, is what the spec guarantees. */
 export const BUTTON_TRIGGER = 0;
 export const BUTTON_SQUEEZE = 1;
-/** A on the right controller, X on the left. */
+/** A on the right controller, X on the left — the precision modifier, HELD.
+ *  The kit's `PRECISION_BUTTON_INDEX = 4`, restored. A modifier belongs on
+ *  the button the thumb already rests on while gripping; it is the take
+ *  boundary that must be hard to hit by accident, and that now lives on B. */
 export const BUTTON_AX = 4;
-/** xr-standard thumbstick click. Free on both controllers — see
- *  `thumbstickPressed` for why the menu had to land here. */
+/** xr-standard thumbstick click — "go home". The kit's
+ *  `REST_RAMP_BUTTON_INDEX = 3`: one click, one velocity-limited ramp to the
+ *  rest pose. */
 export const BUTTON_THUMBSTICK = 3;
-/** B on the right controller, Y on the left — the E-STOP. Chosen over A/X
- *  because the thumb rests ON A/X while gripping; B/Y takes a deliberate
- *  reach, and an E-STOP that fires by accident teaches people to disable it. */
+/** B on the right controller, Y on the left — episode control, per hand.
+ *  B ends the take and banks it; Y discards it and re-records. This is the
+ *  kit's mapping, documented in `examples/record_so101.py`:
+ *
+ *      B (right controller)  end the current episode / end the reset phase
+ *      Y (left controller)   discard + re-record the current episode
+ *
+ *  There is NO controller E-STOP. It lives on the desktop HMI and the bench
+ *  cutoff — the kit never had one on the sticks, and binding a take boundary
+ *  and a safety stop to the same thumb is what forced the old A/X juggle. */
 export const BUTTON_BY = 5;
 
 // ---- wire shape ------------------------------------------------------------
@@ -304,43 +315,36 @@ export function controllerRays(
   return out;
 }
 
-type XRViewLike = {
-  projectionMatrix: Float32Array;
-  transform: { inverse: { matrix: Float32Array } };
-};
-
-export type SceneDrawOpts = {
-  /** Status/menu canvas — text only, repainted at ~10 Hz. */
-  panel: HTMLCanvasElement | null;
-  panelDirty: boolean;
-  /** Workspace camera <img> (MJPEG). Textured EVERY frame — this is what
-   *  makes the tile track at display rate instead of the panel's 10 Hz. */
-  cam: HTMLImageElement | null;
-  /** Mirror the tile horizontally (display only) — for cameras that face
-   *  the operator. */
-  camMirrored?: boolean;
-  camWidthM?: number;
-  anchor?: HudAnchor;
-};
-
 export type XRScene = {
-  /** Clear both eyes; draw the camera tile and the status panel as two
-   *  separate world quads at `anchor` — the panel BELOW the tile, never on
-   *  top of the view it annotates. */
-  render(frame: XRFrameLike, refSpace: unknown, opts: SceneDrawOpts): void;
+  /** Clear both eyes and draw nothing. The scene has no content: the
+   *  operator is looking at their own bench through passthrough, which is the
+   *  whole point of an AR session. */
+  render(frame: XRFrameLike, refSpace: unknown): void;
 };
 
 const _NOOP_SCENE: XRScene = { render: () => {} };
 
+/** Bare passthrough. Sets up the XR GL layer an immersive session requires,
+ *  clears both eyes to transparent, and draws NOTHING.
+ *
+ *  This used to composite a status panel, a workspace-camera tile, a tuning
+ *  list, a view menu and an end-of-take prompt onto quads in front of the
+ *  operator. All of it is gone. The kit's in-headset client draws nothing at
+ *  all — `examples/record_so101.py` puts it plainly, "in passthrough you see
+ *  the real scene anyway" — and a panel hanging in front of a bench is
+ *  something to look past while doing fine work with a real arm.
+ *
+ *  What replaced it as the feedback channel is what the kit already used:
+ *  haptics. `recorderHapticCue` fires on every take transition and
+ *  `ikHapticCues` on every limit, and both reach the operator without asking
+ *  them to look away from their hands. Everything the panel used to say is on
+ *  the desktop page, where reading it costs nothing.
+ */
 export function attachRenderScene(
   session: XRSessionLike,
   mode: TeleopXRSession["mode"],
 ): XRScene {
-  type LayerLike = {
-    framebuffer: unknown;
-    getViewport?: (v: unknown) =>
-      { x: number; y: number; width: number; height: number } | null;
-  };
+  type LayerLike = { framebuffer: unknown };
   type LayerCtor = new (s: XRSessionLike, gl: unknown) => LayerLike;
   const XRWebGLLayerCtor = (globalThis as { XRWebGLLayer?: LayerCtor }).XRWebGLLayer;
   if (!XRWebGLLayerCtor || !session.updateRenderState) return _NOOP_SCENE;
@@ -351,166 +355,20 @@ export function attachRenderScene(
   if (!gl) return _NOOP_SCENE;
   const layer = new XRWebGLLayerCtor(session, gl);
   session.updateRenderState({ baseLayer: layer });
+  // Transparent in AR so passthrough shows through untouched. The VR fallback
+  // still needs SOMETHING behind the scene or the compositor shows a void.
   const [r, g, b, a] = mode === "immersive-ar"
-    ? [0, 0, 0, 0]           // transparent: passthrough shows through
-    : [0.05, 0.05, 0.07, 1]; // VR fallback: deliberate near-black, not a void
-
-  // Minimal textured-quad pipeline. Compiled lazily on the first HUD frame so
-  // the overlay-capable path never pays for it.
-  let prog: WebGLProgram | null = null;
-  let uMVP: WebGLUniformLocation | null = null;
-  let panelTex: WebGLTexture | null = null;
-  let camTex: WebGLTexture | null = null;
-  let camTexValid = false;
-  let lastCamUploadMs = 0;
-
-  /** Column-major T(pos+yOff) · RotY(yaw) · S(w, h, 1). `mirrorX` flips the
-   *  quad for operator-facing cameras — display only, the source pixels are
-   *  never touched. */
-  function quadModel(
-    anchor: HudAnchor, w: number, h: number, yOffset: number, mirrorX: boolean,
-  ): Float32Array {
-    const c = Math.cos(_rad(anchor.yawDeg)), s = Math.sin(_rad(anchor.yawDeg));
-    const sx = mirrorX ? -w : w;
-    return new Float32Array([
-      c * sx, 0, -s * sx, 0,
-      0, h, 0, 0,
-      s, 0, c, 0,
-      anchor.pos[0], anchor.pos[1] + yOffset, anchor.pos[2], 1,
-    ]);
-  }
-
-  function ensurePipeline(): boolean {
-    if (prog) return true;
-    if (!gl) return false;
-    const compile = (type: number, src: string) => {
-      const s = gl.createShader(type);
-      if (!s) return null;
-      gl.shaderSource(s, src);
-      gl.compileShader(s);
-      return gl.getShaderParameter(s, gl.COMPILE_STATUS) ? s : null;
-    };
-    const vs = compile(gl.VERTEX_SHADER,
-      "attribute vec3 aPos; attribute vec2 aUV; uniform mat4 uMVP;" +
-      "varying vec2 vUV;" +
-      "void main(){ gl_Position = uMVP * vec4(aPos, 1.0); vUV = aUV; }");
-    const fs = compile(gl.FRAGMENT_SHADER,
-      "precision mediump float; varying vec2 vUV; uniform sampler2D uTex;" +
-      "void main(){ gl_FragColor = texture2D(uTex, vUV); }");
-    if (!vs || !fs) return false;
-    const p = gl.createProgram();
-    if (!p) return false;
-    gl.attachShader(p, vs);
-    gl.attachShader(p, fs);
-    gl.linkProgram(p);
-    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) return false;
-    // Interleaved x,y,z,u,v — unit quad centred on the origin, v flipped so
-    // canvas row 0 lands at the TOP of the quad.
-    const verts = new Float32Array([
-      -0.5, -0.5, 0, 0, 1,
-       0.5, -0.5, 0, 1, 1,
-      -0.5,  0.5, 0, 0, 0,
-       0.5,  0.5, 0, 1, 0,
-    ]);
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-    const aPos = gl.getAttribLocation(p, "aPos");
-    const aUV = gl.getAttribLocation(p, "aUV");
-    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 20, 12);
-    gl.enableVertexAttribArray(aUV);
-    uMVP = gl.getUniformLocation(p, "uMVP");
-    const mkTex = () => {
-      const t = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      return t;
-    };
-    panelTex = mkTex();
-    camTex = mkTex();
-    prog = p;
-    return true;
-  }
+    ? [0, 0, 0, 0]
+    : [0.05, 0.05, 0.07, 1];
 
   return {
-    render(frame, refSpace, opts) {
-      const fb = (session.renderState?.baseLayer ?? layer).framebuffer;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb as WebGLFramebuffer | null);
+    render(frame: XRFrameLike, refSpace: unknown): void {
+      const pose = frame.getViewerPose(refSpace);
+      if (!pose) return;
+      const active = (session.renderState?.baseLayer ?? layer) as LayerLike;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, active.framebuffer as WebGLFramebuffer | null);
       gl.clearColor(r, g, b, a);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-      const panel = opts.panel;
-      if (!panel || !ensurePipeline()) return;
-      const pose = frame.getViewerPose(refSpace) as unknown as
-        { views?: XRViewLike[] } | null | undefined;
-      const views = pose?.views;
-      if (!views?.length) return;
-      gl.useProgram(prog);
-      gl.disable(gl.DEPTH_TEST);
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
-      // Panel text: repainted at ~10 Hz, uploaded only when it changed.
-      gl.bindTexture(gl.TEXTURE_2D, panelTex);
-      if (opts.panelDirty) {
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, panel);
-      }
-      // Camera tile: textured straight from the MJPEG <img> — one
-      // native-resolution sampling step, no canvas composite in between.
-      // Uploads are THROTTLED to the stream's own 30 fps rather than done
-      // per display frame: a 960x720 RGBA upload at 72-90 Hz measurably
-      // stalls the Quest browser's main thread, and a stalled main thread
-      // starves the 30 Hz publish loop — which the backend correctly reads
-      // as tracking loss and answers with a re-acquire. The stream carries
-      // no new pixels between its own frames anyway.
-      const cam = opts.cam;
-      const camReady = Boolean(cam && cam.complete && cam.naturalWidth > 0);
-      const nowMs = performance.now();
-      if (cam && camReady && nowMs - lastCamUploadMs >= 33) {
-        gl.bindTexture(gl.TEXTURE_2D, camTex);
-        try {
-          gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cam);
-          camTexValid = true;
-          lastCamUploadMs = nowMs;
-        } catch {
-          /* a mid-frame MJPEG boundary can throw; keep the previous texture */
-        }
-      }
-
-      const anchor = opts.anchor ?? DEFAULT_HUD_ANCHOR;
-      const camW = opts.camWidthM && opts.camWidthM > 0 ? opts.camWidthM : 1.1;
-      const camAspect = camReady && cam
-        ? cam.naturalHeight / cam.naturalWidth : 0.75;
-      const drawCam = camTexValid && cam !== null;
-      const layout = clusterLayout(
-        camW, camAspect, panel.height / panel.width, drawCam);
-
-      const active = (session.renderState?.baseLayer ?? layer) as LayerLike;
-      const camModel = quadModel(anchor, camW, layout.camH, 0,
-                                 Boolean(opts.camMirrored));
-      const panelModel = quadModel(anchor, layout.panelW, layout.panelH,
-                                   layout.panelYOff, false);
-      for (const view of views) {
-        const vp = active.getViewport?.(view);
-        if (!vp) continue;
-        gl.viewport(vp.x, vp.y, vp.width, vp.height);
-        const pv = mat4Multiply(view.projectionMatrix,
-                                view.transform.inverse.matrix);
-        if (drawCam) {
-          gl.bindTexture(gl.TEXTURE_2D, camTex);
-          gl.uniformMatrix4fv(uMVP, false, mat4Multiply(pv, camModel));
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        }
-        gl.bindTexture(gl.TEXTURE_2D, panelTex);
-        gl.uniformMatrix4fv(uMVP, false, mat4Multiply(pv, panelModel));
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      }
     },
   };
 }
@@ -590,73 +448,7 @@ export type RecorderHudLike = {
   datasetCount?: number | null;
 } | null;
 
-/** How a take is named. The dataset-wide index when there is one — "ep 34" is
- *  what an operator reconciles against the dataset browser afterwards, where
- *  "take 3" is only ever true of this page-load. */
-function takeNaming(rec: RecorderHudLike): string {
-  const ep = rec?.episodeIndex;
-  return typeof ep === "number" ? `ep ${ep}` : `take ${(rec?.takes ?? 0) + 1}`;
-}
 
-/** The one thing wrong with the recorder that the operator most needs, or
- *  null. Worst first and never more than one line: a health strip that lists
- *  everything is a strip nobody reads while driving. The gate line is last
- *  but shows while IDLE too — a gate that dropped is exactly what an operator
- *  standing there wondering why nothing is armed has to be told. */
-function recHealthLine(
-  rec: RecorderHudLike,
-): { text: string; color: string } | null {
-  if (!rec) return null;
-  const measured = typeof rec.fpsMeasured === "number" ? rec.fpsMeasured : null;
-  const declared = typeof rec.fpsDeclared === "number" ? rec.fpsDeclared : null;
-  // TWO decimals, and it is arithmetic rather than taste. The recorder refuses
-  // at |measured - fps| / fps > tol, so at d decimals the two numbers can print
-  // IDENTICALLY while this line is red whenever `fps < 10^(2-d)`: below 100 Hz
-  // at d=0 — which is how `RATE 30/30 fps` shipped against a 30 fps take — and
-  // below 10 Hz at d=1. d=2 is the first that is not calibrated for one
-  // cadence, and `fps` is round(measured) off a settable float `hz`, so no
-  // cadence here is pinned by anything but habit.
-  if (measured !== null && declared !== null && rec.rateFaithful === false) {
-    return {
-      text: `RATE ${measured.toFixed(2)}/${declared.toFixed(2)} fps`,
-      color: "#f28b82",
-    };
-  }
-  if (rec.worstDrop) return { text: `dropping: ${rec.worstDrop}`, color: "#fdd663" };
-  const skipped = rec.skipped_frames ?? 0;
-  if (skipped > 0 && (rec.state === "rolling" || rec.recording)) {
-    return { text: `${skipped} frames dropped`, color: "#fdd663" };
-  }
-  if (rec.invalidatedReason) {
-    return {
-      text: `GATE DROPPED — ${rec.invalidatedReason}`.slice(0, STATUS_MAX_CHARS),
-      color: "#fdd663",
-    };
-  }
-  // Last, because anything above it is a problem and this is not — but it is
-  // the whole claim the gate makes, and an operator who cannot see it has
-  // been given the gate's extra button press without its reassurance.
-  if (rec.state === "armed") {
-    return {
-      text: rec.localGate
-        ? "armed locally — nothing written yet"
-        : "armed — nothing written yet",
-      color: "#fdd663",
-    };
-  }
-  // Last, below every real problem and below the gate's own reassurance: the
-  // backend publishes no tolerance, so this page has no band. Naming that beats
-  // inventing one — a fallback fraction read as a tolerance is a threshold the
-  // HUD made up wearing the recorder's authority, and 0.9 read as a tolerance
-  // means +/-90%, which cannot fire in either direction.
-  if (measured !== null && declared !== null && rec.rateFaithful == null) {
-    return {
-      text: `RATE ${measured.toFixed(2)} fps — no band published`,
-      color: "#fdd663",
-    };
-  }
-  return null;
-}
 
 /** Which hand drives which arm this session. Null on a hand with no arm: an
  *  absent side is a fact about the rig, not a fault, and the operator must be
@@ -664,16 +456,6 @@ function recHealthLine(
  *  wrong preset is otherwise only discovered 60 s into a take. */
 export type ArmSetLike = { left: string | null; right: string | null } | null;
 
-/** The arm set in the operator's terms, from the very pairing the session was
- *  started with — never recomputed, because a HUD that describes one mapping
- *  while the session runs another is invisible until an arm moves. */
-export function describeArmSet(set: ArmSetLike): string {
-  if (!set) return "none";
-  const sides: string[] = [];
-  if (set.left) sides.push(`L→${set.left}`);
-  if (set.right) sides.push(`R→${set.right}`);
-  return sides.length ? sides.join(" · ") : "none";
-}
 
 /**
  * Repaint the in-scene HUD. Layout: workspace camera on top (when a frame is
@@ -744,388 +526,11 @@ export const STATUS_MAX_CHARS = 39;
 export const MENU_MAX_CHARS = 36;
 export const MENU_TITLE_MAX_CHARS = 32;
 
-/** Trim a row that carries caller data — a camera label, an arm id — to the
- *  menu's budget. The box is clipped as a backstop, but a clip lands
- *  mid-glyph and reads as a rendering fault; an ellipsis reads as what it is. */
-function fitMenu(text: string): string {
-  return text.length <= MENU_MAX_CHARS
-    ? text : `${text.slice(0, MENU_MAX_CHARS - 1)}…`;
-}
 
-/** Repaint the status/menu PANEL — text only. The workspace camera is not
- *  composited here any more: it renders as its own quad, textured at native
- *  resolution every display frame (see `attachRenderScene`), while this
- *  canvas repaints at ~10 Hz. Splitting them is what stopped the
- *  instructions from hovering on top of the view, and what let the tile
- *  track at display rate instead of the panel's cadence. */
-export function paintHud(
-  ctx: CanvasRenderingContext2D,
-  status: HudStatusLike,
-  rec: RecorderHudLike = null,
-  menu: VrMenuLike = null,
-  ik: IkSides = {},
-): void {
-  const W = ctx.canvas.width;
-  const H = ctx.canvas.height;
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = "rgba(8, 10, 14, 0.82)";
-  ctx.fillRect(0, 0, W, H);
 
-  // Two hard columns: status text on the left, the menu box on the right,
-  // and a CLIP on the status column — an error string or a long side line is
-  // arbitrarily wide, and letting one run under the menu is exactly the
-  // overlapping-menus mess this layout replaces.
-  const leftW = Math.round(W * 0.55) - 24;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, leftW + 24, H);
-  ctx.clip();
 
-  ctx.textAlign = "left";
-  ctx.font = "bold 30px monospace";
-  let y = 46;
-  const state = (status?.state ?? "—").toUpperCase();
-  const col = status?.collision;
-  ctx.fillStyle = "#e8eaed";
-  ctx.fillText(state, 24, y);
-  if (rec && (rec.state === "armed" || rec.state === "rolling" || rec.recording)) {
-    // Right-aligned to the column's edge so it cannot collide with the
-    // state: the one line that must be readable at a glance while driving.
-    ctx.textAlign = "right";
-    if (rec.state === "armed") {
-      // ARMED must never read like REC: it is loaded and writing nothing, and
-      // an operator who cannot tell the two apart at a glance has been given
-      // the gate's cost without its benefit. Its own colour, its own glyph.
-      ctx.fillStyle = "#fdd663";
-      ctx.fillText(
-        `◆ ARMED ${takeNaming(rec)}${rec.localGate ? " (local gate)" : ""}`,
-        leftW, y);
-    } else {
-      ctx.fillStyle = "#f28b82";
-      const ep = rec.episodeIndex;
-      ctx.fillText(
-        typeof ep === "number"
-          ? `● REC ep ${ep} · ${rec.episode_frames}`
-          : `● REC ${rec.episode_frames}`,
-        leftW, y);
-    }
-    ctx.textAlign = "left";
-  }
-  if (col?.enabled) {
-    y += 38;
-    const slack = col.slack_m;
-    ctx.fillStyle = col.limited ? "#f28b82"
-      : (slack ?? 1) < 0 ? "#fdd663" : "#9aa0a6";
-    ctx.font = "28px monospace";
-    ctx.fillText(
-      col.limited
-        ? `COLLISION HOLD ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`
-        : `clearance ${slack !== undefined ? (slack * 1000).toFixed(0) : "—"} mm`,
-      24, y);
-  }
-  // 22px like the hint row below, not the column's 28px: the longest thing
-  // this line says is "armed locally — nothing written yet", and at 28px that
-  // ran past the clip.
-  const health = recHealthLine(rec);
-  if (health) {
-    y += 38;
-    ctx.font = "22px monospace";
-    ctx.fillStyle = health.color;
-    ctx.fillText(health.text, 24, y);
-  }
-  ctx.font = "28px monospace";
-  // Per side: authority, then the solver's own reading of how the arm is
-  // coping. There is no pose to match any more — the mapper re-anchors until
-  // the side is driving, so acquisition is a countdown and nothing else —
-  // and the space that list used to take is worth more spent on conditioning.
-  for (const side of ["left", "right"] as const) {
-    y += 38;
-    const acq = status?.acquire?.[side];
-    const grip = status?.clutch?.sides?.[side] ?? status?.clutch?.engaged;
-    ctx.fillStyle = "#9aa0a6";
-    ctx.fillText(`${side === "left" ? "L" : "R"} ${grip ? "●" : "○"}`, 24, y);
-    if (!acq) continue;
-    const d = ik[side];
-    ctx.fillStyle = acq.authority === "driving" ? "#81c995"
-      : acq.authority === "acquiring" ? "#fdd663" : "#9aa0a6";
-    let line = acq.authority;
-    if (acq.authority === "acquiring" && acq.remaining_ms !== null) {
-      line += ` ${(acq.remaining_ms / 1000).toFixed(1)}s`;
-    }
-    // "(no arm)" rather than "(no arm this side)": the L/R glyph at x=24 has
-    // already said which side, and the long form pushed the row past the clip.
-    if (acq.reason === "no_tracking") line += " (no tracking)";
-    if (acq.reason === "no_arm") line += " (no arm)";
-    // σ_min is in m/rad: how far the tool moves, in its worst direction, per
-    // radian of joint travel. Falling toward zero IS the singular set.
-    if (acq.authority === "driving" && typeof d?.sigma_min === "number") {
-      line += `  σ ${d.sigma_min.toFixed(3)}`;
-    }
-    // 24px, not the column's 28px: the widest this row gets is
-    // "acquiring 1.2s (no tracking)", which needs 487 px at 28 px against the
-    // 419 px the indent leaves. At 28 px the operator was being told a hand
-    // had stopped tracking in a sentence that ran off the panel.
-    ctx.font = "24px monospace";
-    ctx.fillText(line, 120, y);
-    ctx.font = "28px monospace";
-    // The 5-DoF wrist has one axis fewer than an arbitrary orientation asks
-    // for. Say what to do about it — twisting harder at a deficit is exactly
-    // the wrong response, and the controller is buzzing at the same moment.
-    if (acq.authority === "driving"
-        && (d?.orient_residual ?? 0) > ORIENT_DEFICIT) {
-      y += 32;
-      ctx.fillStyle = "#fdd663";
-      // At x=24, not indented under the side: the indent left 419 px, and
-      // this line needs 502 px at the column's own 28 px. It is a callout,
-      // and a callout the clip eats says nothing.
-      ctx.font = "22px monospace";
-      ctx.fillText("wrist is out of twist — MOVE your hand", 24, y);
-      ctx.font = "28px monospace";
-    }
-  }
-  y += 38;
-  // 22px, not the column's 28px, and E-STOP FIRST. The status column is
-  // clipped at leftW, and at 28px this row ran to 790 px against 515 px of
-  // room — so the tail was being cut off, and the tail was `B/Y = E-STOP`.
-  // A binding that is only legible when nothing has gone wrong is not a
-  // binding the operator has.
-  ctx.font = "22px monospace";
-  if (status?.last_error) {
-    ctx.fillStyle = "#f28b82";
-    ctx.fillText(status.last_error.slice(0, STATUS_MAX_CHARS), 24, y);
-  } else if (menu?.precision) {
-    ctx.fillStyle = "#8ab4f8";
-    ctx.fillText("◆ PRECISION — gains scaled down", 24, y);
-  } else {
-    ctx.fillStyle = "#9aa0a6";
-    ctx.fillText("B/Y = E-STOP · grip = drive · trigger", 24, y);
-  }
-  ctx.restore();
 
-  if (menu) paintMenu(ctx, menu, rec);
-}
 
-/** The menu box, bottom-right of the HUD.
- *
- *  It states the bindings rather than only reflecting state, because in a
- *  headset there is nowhere else to look them up: the record command in
- *  particular was previously documented only in a markdown file, which is no
- *  use with a headset on and both hands clutched.
- *
- *  Three faces, one box. The end-of-take decision is modal and takes it over
- *  entirely; the tuning list replaces the view list while it is open;
- *  otherwise it is the view menu it has always been.
- */
-function paintMenu(
-  ctx: CanvasRenderingContext2D,
-  menu: NonNullable<VrMenuLike>,
-  rec: RecorderHudLike,
-): void {
-  const W = ctx.canvas.width;
-  const pad = 18;
-  const lineH = 30;
-  const tuningOpen = Boolean(menu.tuning?.open);
-  const rows = menu.endPrompt ? 6
-    // title + the window of knobs + the one-row ownership footer.
-    : tuningOpen ? TUNING_WINDOW + 2
-    // views (or the "no cameras" line), SIZE, REC, reset, grab, tune hint,
-    // plus a row each for the stance and the arm set when they are known.
-    : Math.max(1, menu.views.length) + 6 + (menu.stance ? 1 : 0)
-      + (menu.armSet ? 1 : 0);
-  const boxW = Math.round(W * 0.42);
-  const boxH = rows * lineH + pad * 2;
-  const x = W - boxW - 24;
-  const yTop = 16;
-
-  // Fully opaque: the status column is clipped away from this box, and
-  // nothing may ghost through from behind either.
-  ctx.fillStyle = "rgb(10, 12, 16)";
-  ctx.fillRect(x, yTop, boxW, boxH);
-  ctx.strokeStyle = menu.endPrompt
-    ? "rgba(242, 139, 130, 0.9)" : "rgba(154, 160, 166, 0.45)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x, yTop, boxW, boxH);
-
-  ctx.textAlign = "left";
-  const y0 = yTop + pad + 22;
-  // The box gets the same clip the status column has. The copy is written to
-  // MENU_MAX_CHARS and should never need it — but an arm id, a repo name or a
-  // camera label is arbitrarily long, and a row that escapes the box lands on
-  // top of the workspace view this panel deliberately hangs BELOW.
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x, yTop, boxW, boxH);
-  ctx.clip();
-  if (menu.endPrompt) paintEndPrompt(ctx, rec, menu, x + pad, y0, lineH);
-  else if (tuningOpen) paintTuning(ctx, menu, x, x + pad, y0, boxW, lineH);
-  else paintViewMenu(ctx, menu, rec, x + pad, y0, lineH);
-  ctx.restore();
-}
-
-/** How many knob rows the in-headset list shows at once. More than this and
- *  the box starts covering the view it hangs beside. */
-const TUNING_WINDOW = 8;
-
-/** Two gestures, both back to ARMED — and they are the two the sticks already
- *  carry. `redo` is a first-class outcome, not a failure: 11 of the kit's 46
- *  episodes were rejected, a rate only visible because both outcomes exist. */
-function paintEndPrompt(
-  ctx: CanvasRenderingContext2D, rec: RecorderHudLike,
-  menu: NonNullable<VrMenuLike>, x: number, yStart: number, lineH: number,
-): void {
-  let y = yStart;
-  ctx.font = "bold 20px monospace";
-  ctx.fillStyle = "#f28b82";
-  ctx.fillText(`TAKE ENDED · ${rec?.episode_frames ?? 0} frames`, x, y);
-  y += lineH;
-  ctx.font = "18px monospace";
-  ctx.fillStyle = "#81c995";
-  ctx.fillText("L click = KEEP  (save, arm next)", x, y);
-  y += lineH;
-  ctx.fillStyle = "#fdd663";
-  ctx.fillText("R click = REDO  (bin, same ep)", x, y);
-  y += lineH;
-  ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("hold A/X = keep rolling", x, y);
-  y += lineH;
-  // The refusal takes the mnemonic's row rather than adding one: a box that
-  // changes height under the operator reads as a fault of its own.
-  if (menu.homeRefused) {
-    ctx.fillStyle = "#fdd663";
-    ctx.fillText("home refused mid-take — pick first", x, y);
-    ctx.fillStyle = "#9aa0a6";
-  } else {
-    ctx.fillText("L = keep · R = redo", x, y);
-  }
-  y += lineH;
-  // Said out loud because it is the one surprising part: `/record/stop`
-  // takes the save decision AT stop time, so there is no way to end the
-  // episode first and choose afterwards. The tail is a second of stillness.
-  ctx.fillText("still rolling until you pick", x, y);
-}
-
-function paintTuning(
-  ctx: CanvasRenderingContext2D, menu: NonNullable<VrMenuLike>,
-  boxX: number, x: number, yStart: number, boxW: number, lineH: number,
-): void {
-  const tuning = menu.tuning!;
-  const dirty = new Set(tuning.dirty ?? []);
-  const index = Math.min(Math.max(tuning.index, 0), TUNING_KNOBS.length - 1);
-  let y = yStart;
-  ctx.font = "bold 20px monospace";
-  ctx.fillStyle = "#e8eaed";
-  ctx.fillText("TUNE  (R stick walks / adjusts)", x, y);
-  y += lineH;
-  ctx.font = "18px monospace";
-  const first = Math.max(
-    0, Math.min(index - Math.floor(TUNING_WINDOW / 2),
-                TUNING_KNOBS.length - TUNING_WINDOW));
-  for (let i = 0; i < Math.min(TUNING_WINDOW, TUNING_KNOBS.length); i++) {
-    const k = first + i;
-    const knob = TUNING_KNOBS[k];
-    const on = k === index;
-    if (on) {
-      ctx.fillStyle = "rgba(138, 180, 248, 0.22)";
-      ctx.fillRect(boxX + 6, y - 20, boxW - 12, lineH - 2);
-    }
-    ctx.fillStyle = on ? "#e8eaed" : "#9aa0a6";
-    ctx.fillText(`${on ? "▸" : " "} ${knob.label}`, x, y);
-    ctx.textAlign = "right";
-    // ◆ = the operator moved this one, so the page re-asserts it over the
-    // server's per-connection default on every reconnect. A value that
-    // survives a blip while its neighbours revert is otherwise witchcraft.
-    const mine = dirty.has(knob.key);
-    if (mine) ctx.fillStyle = "#8ab4f8";
-    ctx.fillText(
-      `${mine ? "◆ " : ""}${formatKnob(tuning.values[knob.key])}`,
-      boxX + boxW - 20, y);
-    ctx.textAlign = "left";
-    y += lineH;
-  }
-  ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("◆ = yours · hold R stick = close", x, y);
-}
-
-function paintViewMenu(
-  ctx: CanvasRenderingContext2D, menu: NonNullable<VrMenuLike>,
-  rec: RecorderHudLike, x: number, yStart: number, lineH: number,
-): void {
-  let y = yStart;
-  ctx.font = "bold 20px monospace";
-  ctx.fillStyle = "#e8eaed";
-  ctx.fillText(`VIEW  (L stick click = next)`, x, y);
-  y += lineH;
-
-  ctx.font = "18px monospace";
-  for (const v of menu.views) {
-    const on = v.id === menu.activeViewId;
-    ctx.fillStyle = on ? "#8ab4f8" : "#9aa0a6";
-    ctx.fillText(fitMenu(`${on ? "▸" : " "} ${v.label}`), x, y);
-    y += lineH;
-  }
-  if (!menu.views.length) {
-    ctx.fillStyle = "#9aa0a6";
-    ctx.fillText("  (no cameras)", x, y);
-    y += lineH;
-  }
-
-  ctx.fillStyle = "#9aa0a6";
-  ctx.fillText(`SIZE  ${menu.tileSize}  (R stick = next)`, x, y);
-  y += lineH;
-
-  if (menu.stance) {
-    const words = { behind: "egocentric", mirror: "mirror", front: "camera-true" };
-    ctx.fillText(`STANCE  ${words[menu.stance]}  (set on panel)`, x, y);
-    y += lineH;
-  }
-
-  if (menu.armSet) {
-    ctx.fillText(fitMenu(`ARMS  ${describeArmSet(menu.armSet)}`), x, y);
-    y += lineH;
-  }
-
-  const takes = rec?.takes ?? 0;
-  // The COUNT, not the index — this row is the one reader that wants the size
-  // of the dataset, and it is the row that paints while idle, which is exactly
-  // when the gate's index is null.
-  const count = rec?.datasetCount;
-  const naming = takeNaming(rec);
-  // Three-way, because ARM and ROLL are two different commands on the same
-  // button and the operator has to know which one the next hold fires. A
-  // backend that predates the gate reports only `recording`.
-  const takeState: TakeState = rec?.state ?? (rec?.recording ? "rolling" : "idle");
-  const rolling = takeState === "rolling" || takeState === "prompt";
-  const idle = typeof count === "number"
-    ? `hold A/X to ARM  (${count} in dataset)`
-    : takes
-      ? `hold A/X to ARM a take  (${takes} saved)`
-      : "hold A/X to ARM a take";
-  ctx.fillStyle = rolling ? "#f28b82"
-    : takeState === "armed" ? "#fdd663" : "#9aa0a6";
-  ctx.fillText(
-    rolling
-      ? `● REC ${naming} · ${rec?.episode_frames ?? 0} fr — A/X to END`
-      // The menu says which button, the status column says which state — see
-      // `recHealthLine`, which carries "nothing written yet". Splitting them
-      // is what keeps both rows inside their own box.
-      : takeState === "armed"
-        ? `◆ ARMED ${naming} — A/X to ROLL`
-        : idle,
-    x, y);
-  y += lineH;
-
-  ctx.fillStyle = menu.precision ? "#8ab4f8" : "#9aa0a6";
-  ctx.fillText(
-    menu.precision ? "◆ PRECISION (L stick pushed away)"
-                   : "push L stick away = precision",
-    x, y);
-  y += lineH;
-
-  ctx.fillStyle = "#9aa0a6";
-  ctx.fillText("hold L stick = home · hold R = tune", x, y);
-  y += lineH;
-  ctx.fillText("point + trigger = move HUD", x, y);
-}
 
 function poseToPair(pose: XRPose | null | undefined) {
   if (!pose) return null;
@@ -1243,21 +648,16 @@ export function disengagedFrame(tsMs: number): VRFrame {
 
 /** True while B (right) or Y (left) is down on any controller. The panel
  *  edge-detects this into exactly one POST /estop per press. */
-export function estopPressed(session: XRSessionLike): boolean {
+/** True while ONE named controller's episode button (B right / Y left) is
+ *  down. Per-hand, because the two hands mean OPPOSITE things: B banks the
+ *  take, Y throws it away. Raw — the panel edge-detects, so a held button
+ *  fires once rather than once per frame. */
+export function episodePressed(
+  session: XRSessionLike, hand: "left" | "right",
+): boolean {
   for (const src of session.inputSources) {
-    if (src.handedness !== "left" && src.handedness !== "right") continue;
+    if (src.handedness !== hand) continue;
     if (src.gamepad?.buttons[BUTTON_BY]?.pressed) return true;
-  }
-  return false;
-}
-
-/** True while A (right) or X (left) is down on any controller — the record
- *  toggle. Deliberately NOT edge-detected here: the panel runs it through
- *  `holdToggle` so a brush of the thumb cannot start or end a take. */
-export function axPressed(session: XRSessionLike): boolean {
-  for (const src of session.inputSources) {
-    if (src.handedness !== "left" && src.handedness !== "right") continue;
-    if (src.gamepad?.buttons[BUTTON_AX]?.pressed) return true;
   }
   return false;
 }
@@ -1304,21 +704,19 @@ export function stickAxes(
   return [0, 0];
 }
 
-/** How far the LEFT stick must be pushed away from the operator before the
- *  precision modifier engages. Deliberately past the halfway point: the thumb
- *  rests on the stick while gripping, and gains that silently halve feel
- *  exactly like an arm that has started lagging. */
-export const PRECISION_STICK_Y = -0.7;
-
-/** The kit's fine-work modifier, moved off A/X.
+/** The kit's fine-work modifier, back on A/X where the kit put it.
  *
- *  A/X hold is the record toggle and stays that way — an accidental take
- *  boundary is corrupted data — so the modifier went to the one free input a
- *  driving hand can still reach: the left stick, pushed away and held. The
- *  HUD says PRECISION the whole time it is engaged, because a modifier you
- *  cannot see is a modifier you leave on by accident. */
+ *  It moved to the left stick only because A/X had been taken by the record
+ *  toggle. With the take boundary on B — a deliberate reach, which is what a
+ *  take boundary wants — A/X is free again, and a modifier is exactly the
+ *  binding that suits a button the thumb already rests on: hold it, it
+ *  applies; let go, it stops. Either hand, so a one-handed driver keeps it. */
 export function precisionHeld(session: XRSessionLike): boolean {
-  return stickAxes(session, "left")[1] <= PRECISION_STICK_Y;
+  for (const src of session.inputSources) {
+    if (src.handedness !== "left" && src.handedness !== "right") continue;
+    if (src.gamepad?.buttons[BUTTON_AX]?.pressed) return true;
+  }
+  return false;
 }
 
 /** Step an index around a ring, guarding against an empty list (which would
@@ -1453,7 +851,14 @@ export type TakeState = "idle" | "armed" | "rolling" | "prompt";
 export type EndChoice = "keep" | "keep_stop" | "redo" | "drop";
 
 export type TakeEvent =
-  | { kind: "ax_hold" }
+  /** B, right hand — the kit's "end the current episode / end the reset
+   *  phase". One button walks the whole ladder: ARM, ROLL, then bank the
+   *  take and re-arm for the next one. */
+  | { kind: "end_episode" }
+  /** Y, left hand — the kit's "discard + re-record the current episode".
+   *  Only ever throws away a take that is still in progress; see `stepTake`
+   *  for why it will not reach back for one already written. */
+  | { kind: "rerecord" }
   | { kind: "choose"; choice: EndChoice }
   /** The recorder's own state, from the status poll. Truth outranks the
    *  client's guess — a take that ended some other way takes the prompt with
@@ -1499,13 +904,26 @@ export function stepTake(state: TakeState, ev: TakeEvent): TakeTransition {
     const rearm = ev.choice === "keep" || ev.choice === "redo";
     return { state: rearm ? "armed" : "idle", act: { do: "stop", save, rearm } };
   }
-  // ax_hold — the one gesture the headset spends on the recorder, and it
-  // keeps the binding it has today.
+  if (ev.kind === "rerecord") {
+    // Y — bin the take in progress and line the next one up. The kit's
+    // re-record, with one deliberate limit: it reaches only for a take that
+    // is still OPEN. In lerobot-record, Y during the reset phase re-records
+    // the episode just written; here that episode is already on disk, and a
+    // single button press in a headset is the wrong gesture for deleting
+    // written data. Binning a live take costs nothing; the desk keeps
+    // DELETE LAST EPISODE for the other case.
+    if (state === "rolling" || state === "prompt") {
+      return { state: "armed", act: { do: "stop", save: false, rearm: true } };
+    }
+    return { state, act: null };
+  }
+  // end_episode — B. The kit's ladder, and the prompt is deliberately not on
+  // it: B banks the take and re-arms, because in a session whose point is
+  // banking takes the next one is always the expected next thing. The prompt
+  // stays for the desk, which has room for a question the controller does not.
   if (state === "idle") return { state: "armed", act: { do: "arm" } };
   if (state === "armed") return { state: "rolling", act: { do: "roll" } };
-  if (state === "rolling") return { state: "prompt", act: null };
-  // Withdraw: a hold that was a mistake costs nothing, and no REST call.
-  return { state: "rolling", act: null };
+  return { state: "armed", act: { do: "stop", save: true, rearm: true } };
 }
 
 // ---- recorder haptics -------------------------------------------------------

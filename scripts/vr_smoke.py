@@ -84,8 +84,14 @@ def req(base: str, path: str, body: dict | None = None) -> dict:
         method="POST" if body is not None else "GET",
     )
     kw = {"context": _SSL} if base.startswith("https") else {}
-    with urllib.request.urlopen(r, timeout=5.0, **kw) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(r, timeout=5.0, **kw) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        # The detail body IS the diagnosis (e.g. the recorder's rate refusals
+        # spell out measured vs frozen fps) — a bare "409 Conflict" throws it
+        # away and leaves the next person re-running under a debugger.
+        raise SystemExit(f"{path} -> {e.code}: {e.read().decode()[:400]}")
 
 
 def ws_connect(ws_url: str):
@@ -464,10 +470,14 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
                   f"{frames} frames, {st.get('skipped_frames')} skipped")
 
             out = req(base, "/record/stop", {"save": True})
+            # The recorder keeps rolling between the status read above and
+            # this stop, so the stop response's count is the authoritative
+            # final one: >= the earlier read, never <. Everything downstream
+            # compares against `final`, not the stale pre-stop `frames`.
+            final = int(out.get("episode_frames", -1))
             check("stop-and-save ends the take with its frames",
-                  out.get("recording") is False
-                  and int(out.get("episode_frames", -1)) == frames,
-                  f"frames={out.get('episode_frames')}")
+                  out.get("recording") is False and final >= frames,
+                  f"frames={final}")
         req(base, "/teleop/human/stop", {})
 
         facts = _dataset_disk_facts(root)
@@ -482,10 +492,10 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
                   str({k.split(".")[-1]: v["mp4s"] for k, v in vids.items()}))
             if all(v["frames"] is not None for v in vids.values()):
                 check("every camera video holds every recorded frame",
-                      all(v["frames"] == frames for v in vids.values()),
+                      all(v["frames"] == final for v in vids.values()),
                       str({k.split(".")[-1]: v["frames"]
                            for k, v in vids.items()})
-                      + f" recorder={frames}")
+                      + f" recorder={final}")
             check("episode parquet is on disk",
                   facts["parquet_bytes"] > 1024,
                   f"{facts['parquet_bytes']} bytes")
@@ -497,9 +507,9 @@ async def recording_section(base: str, ws_url: str, arm_ids: list[str]) -> None:
         listing = req(base, f"/record/episodes?repo_id={SMOKE_REPO}")
         eps = listing.get("episodes") or []
         check("the dataset routes report the take that was just written",
-              len(eps) == 1 and int(eps[0].get("frames", -1)) == frames,
+              len(eps) == 1 and int(eps[0].get("frames", -1)) == final,
               f"{len(eps)} episode(s), frames={eps and eps[0].get('frames')} "
-              f"recorder={frames}")
+              f"recorder={final}")
         repos = req(base, "/record/repos").get("repos", [])
         mine = next((r for r in repos if r.get("repo_id") == SMOKE_REPO), None)
         check("the repo listing carries it too",

@@ -23,15 +23,23 @@
  * The grid is one instrument, not a wall of pictures: every chart shares one
  * x domain and one crosshair, so reading `loss` against `grad_norm` at the
  * same step is a glance rather than an arithmetic exercise.
+ *
+ * Any cell can be maximised to fill the metrics panel — the same overlay the
+ * Review pane's charts use (`data-chart-zoom`, Escape or the header toggle to
+ * restore). The tiled charts stay mounted underneath, and the zoomed chart
+ * gets its own hover probe: at 130px a curve is a shape, and reading VALUES
+ * off it is what the big chart is for.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 
 import {
   metricX, plottableMetricKeys, type MetricAxis, type MetricRow,
 } from "@/lib/lab";
 import { Empty, Note, Segmented } from "@/components/lab/ui";
 import {
-  ChartLegend, LineChart, type HoverPoint, type Series,
+  ChartLegend, LineChart, useElementHeight,
+  type HoverPoint, type LineChartProps, type Series,
 } from "@/components/lab/charts/LineChart";
 import {
   EVAL_COLOR, TRAIN_COLOR, ema, fmtDuration, fmtNum, fmtTick, lttb, seriesColor,
@@ -103,6 +111,20 @@ export function MetricGrid({
   const [axis, setAxis] = useSticky<MetricAxis>("lab.metrics.axis", "step");
   const [alpha, setAlpha] = useSticky<number>("lab.metrics.ema", 0);
   const [hover, setHover] = useState<HoverPoint | null>(null);
+  /** The maximised cell's id, or null. Cell ids are the metric keys, which are
+   *  stable as rows append, so a live run keeps drawing into the big chart. */
+  const [zoom, setZoom] = useState<string | null>(null);
+
+  // Escape restores the grid; the overlay's header toggle does the same, so
+  // the two ways in are the two ways out. Same rule as the Review pane.
+  useEffect(() => {
+    if (zoom === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoom(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoom]);
 
   /** One pass over the rows per key. Rows arrive append-only in axis order,
    *  which every consumer downstream assumes — `nearestIndex` binary-searches
@@ -210,6 +232,12 @@ export function MetricGrid({
   }, [cells, axis, steps]);
 
   const plotted = cells.some((c) => c.series.some((s) => s.xs.length > 0));
+
+  /** The maximised cell, and its index into `drawn`. Found by id on every
+   *  render: rows append as the run trains, and an index captured at click
+   *  time would slide onto a different metric. */
+  const zi = zoom === null ? -1 : cells.findIndex((c) => c.id === zoom);
+  const zoomed = zi >= 0 ? cells[zi] : null;
 
   if (rows.length === 0) {
     return (
@@ -339,6 +367,15 @@ export function MetricGrid({
                       {fmtNum(s.ys[s.ys.length - 1])}
                     </span>
                   ))}
+                  <button
+                    type="button"
+                    onClick={() => setZoom(cell.id)}
+                    aria-label={`maximize ${cell.id} chart`}
+                    title="fill the metrics panel (esc to restore)"
+                    className="inline-flex h-4.5 w-4.5 items-center justify-center rounded-[3px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    <Maximize2 size={10} aria-hidden />
+                  </button>
                 </span>
               </div>
 
@@ -357,6 +394,87 @@ export function MetricGrid({
             </div>
           );
         })}
+      </div>
+
+      {/* The maximised cell covers the whole metrics panel — positioned
+          against the Panel, which is the nearest relative ancestor, same as
+          the Review pane's zoom. The tiled grid stays mounted underneath so
+          restoring is a reveal, not a re-measure. */}
+      {zoomed && (
+        <div
+          data-chart-zoom={zoomed.id}
+          className="absolute inset-0 z-10 flex flex-col bg-background"
+        >
+          <div className="flex h-8.5 shrink-0 items-center gap-2 border-b border-border px-3">
+            {zoomed.pair ? (
+              <ChartLegend
+                className="min-w-0 shrink"
+                items={zoomed.series.map((s) => ({ label: s.key, color: s.color }))}
+              />
+            ) : (
+              <span className="label-tracked shrink-0 text-muted-foreground">
+                {zoomed.id}
+              </span>
+            )}
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              {zoomed.series.map((s) => (
+                <span
+                  key={s.key}
+                  data-num
+                  title={`last ${s.key}`}
+                  className="font-mono text-[10px] tabular-nums"
+                  style={{ color: zoomed.pair ? s.color : "var(--foreground)" }}
+                >
+                  {fmtNum(s.ys[s.ys.length - 1])}
+                </span>
+              ))}
+            </span>
+            <button
+              type="button"
+              onClick={() => setZoom(null)}
+              aria-label={`restore ${zoomed.id} chart`}
+              title="back to the grid (esc)"
+              className="ml-auto inline-flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-[3px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Minimize2 size={11} aria-hidden />
+            </button>
+          </div>
+          <ZoomedCell
+            label={`${zoomed.keys.join(" and ")} against ${axis}`}
+            series={drawn[zi]}
+            log={scale === "log" && zoomed.positive}
+            xDomain={xDomain}
+            xTickFormat={axis === "wall" ? fmtDuration : fmtTick}
+            empty="no samples on this axis"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The maximised cell's plot. Owns its own probe — the grid's shared
+ *  crosshair stays with the tiled charts underneath — and filters the EMA's
+ *  raw underlay out of the readout: it is drawn for honesty, but two entries
+ *  per key is noise, and the grid's shared readout already drops it. */
+function ZoomedCell(props: Omit<LineChartProps, "height" | "onHover" | "probe" | "playhead">) {
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
+  const h = useElementHeight(box);
+  const [probe, setProbe] = useState<HoverPoint | null>(null);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col p-2.5">
+      {/* Measured, not fixed: the overlay is whatever height the metrics
+          panel happens to be, and jsdom still gets a real box. */}
+      <div ref={setBox} className="min-h-0 flex-1">
+        <LineChart
+          {...props}
+          height={h}
+          xTicks={5}
+          onHover={(p) =>
+            setProbe(p && { ...p, values: p.values.filter((v) => !v.id.endsWith("~raw")) })
+          }
+          probe={probe}
+        />
       </div>
     </div>
   );

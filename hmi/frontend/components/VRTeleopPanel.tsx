@@ -34,7 +34,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
 import {
-  api, ApiError, cameraStreamUrl, recordRateFaithful, type CameraInfo,
+  api, ApiError, cameraStreamUrl, type CameraInfo,
   type HumanTeleopStatus, type RecordDrops, type RecordStatus,
 } from "@/lib/api";
 import { BACKEND_URL } from "@/lib/config";
@@ -42,53 +42,43 @@ import { HumanTeleopClient } from "@/lib/humanTeleopClient";
 import { useRecorder } from "@/lib/recorder";
 import { useSoloHand, useStance, type Pairing } from "@/lib/stance";
 import {
-  ALL_KNOBS, applyServerConfig, attachRenderScene, axPressed, CAM_TILE_SIZES,
-  clampKnob, clusterLayout, controllerRays, cycleIndex, DEFAULT_HUD_ANCHOR,
-  DEFAULT_WRIST_PIVOT_M, disengagedFrame, episodesTotal, estopPressed,
-  formatKnob, hapticCues, holdToggle, holdToggleInit, ikHapticCues,
-  ORIENT_DEFICIT, paintHud,
-  parseVrSocketMessage, precisionHeld, pulse, RECORD_HOLD_MS, rayQuadHit,
+  ALL_KNOBS, applyServerConfig, attachRenderScene, 
+  clampKnob, 
+  DEFAULT_WRIST_PIVOT_M, disengagedFrame, episodePressed, episodesTotal,
+  formatKnob, hapticCues, ikHapticCues,
+  ORIENT_DEFICIT,
+  parseVrSocketMessage, precisionHeld, pulse, 
   reconcileConfig, recorderHapticCue,
-  requestTeleopSession, RESET_HOLD_MS, sampleVRFrame, stepTake,
-  stepTuning, stickAxes, thumbstickPressed, WRIST_PIVOT_KEY,
-  xrAvailableAtAll, xrSupported, yawTowardHead,
-  type ArmSetLike, type DatasetTally, type HoldToggleState, type HudAnchor,
+  requestTeleopSession, sampleVRFrame, stepTake,
+  thumbstickPressed, WRIST_PIVOT_KEY,
+  xrAvailableAtAll, xrSupported, type DatasetTally, 
   type IkSides,
   type SideAuthorityLike, type TakeEvent, type TakeState,
-  type TeleopXRSession, type TuningNav, type VRFrame,
-  type VrMenuLike, type XRFrameLike, type XRSessionLike,
+  type TeleopXRSession, type VRFrame,
+  type XRFrameLike, type XRSessionLike,
 } from "@/lib/vrTeleop";
 import { isSimArm, presetsFor, type ConfigArm } from "./cockpit/teleopPresets";
-import { repoIdFor } from "./cockpit/CommandBar";
+import { effectiveRepoId } from "@/lib/recorder";
 import { DeadManIndicator } from "./DeadManIndicator";
 
 const WS_URL = `${BACKEND_URL.replace(/^http/, "ws")}/ws/teleop/vr/in`;
 
-/** ~30 Hz, matching the MediaPipe panel. The Quest renders at 72–90 Hz, but the
- *  backend commit loop and the staleness budget are tuned around this rate, and
- *  publishing every display frame would trade real headroom for nothing. */
-const PUBLISH_MS = 33;
-
 /** How long the RIGHT stick must stay clicked before the tuning list opens
  *  or closes. Same short/hold split the left stick already uses, so a short
  *  click still means what it always did (next tile size). */
-const TUNE_HOLD_MS = 500;
 
 /** How long the HUD keeps saying that home was refused. Long enough to read
  *  with a headset on, short enough that it is gone before the next decision.
  *  A timestamp, not a timer: nothing in the XR loop may own a setTimeout. */
-const HOME_REFUSED_MS = 1500;
 
 const SOLO_LS_KEY = "haller.vrTeleop.soloArm.v1";
 const WRIST_PIVOT_LS_KEY = "haller.vrTeleop.wristPivot.v1";
 
-const TILE_LS_KEY = "haller.vrTeleop.tile.v1";
 // v2, deliberately: v1 headsets remember a view from before the
 // over-the-shoulder camera existed, and the natural default is that view
 // paired with the "behind" stance. One forced re-default; the choice
 // persists again from there.
 const VIEW_LS_KEY = "haller.vrTeleop.view.v2";
-const HUD_ANCHOR_LS_KEY = "haller.vrTeleop.hudAnchor.v1";
 
 function fmtMm(m: number | undefined): string {
   return m === undefined ? "—" : `${(m * 1000).toFixed(0)} mm`;
@@ -212,7 +202,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // STARTED with — the stance select stays live in-session and re-picking it
   // there cannot re-pair arms the backend already owns, so a HUD that
   // recomputed would describe a mapping nothing is running.
-  const [armSet, setArmSet] = useState<ArmSetLike>(null);
   // What the dataset on disk holds, so a rolling take can be named by the
   // index it will actually land at rather than by a page-local ordinal.
   const [tally, setTally] = useState<DatasetTally | null>(null);
@@ -229,34 +218,29 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // views; the real rig serves the mast and the egocentric gripper cams. The
   // menu is deliberately generic over whatever comes back.
   const [views, setViews] = useState<CameraInfo[]>([]);
-  const [tileIdx, setTileIdx] = useState(0);
 
   const sessionRef = useRef<XRSessionLike | null>(null);
   const refSpaceRef = useRef<unknown>(null);
   const clientRef = useRef<HumanTeleopClient<VRFrame> | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const stanceRef = useRef(stance);
-  const lastPubRef = useRef(0);
-  const estopDownRef = useRef(false);
+  // One edge per episode button. B and Y are tracked apart because they mean
+  // opposite things — banking a take and binning it must never share a latch.
+  const bDownRef = useRef(false);
+  const yDownRef = useRef(false);
   const estopInFlightRef = useRef(false);
   const prevAuthRef = useRef<Partial<Record<"left" | "right", SideAuthorityLike>>>({});
   const statusRef = useRef<HumanTeleopStatus | null>(null);
   const baseCamRef = useRef<CameraInfo | null>(null);
   const showCamRef = useRef(false);
   const camImgRef = useRef<HTMLImageElement | null>(null);
-  const hudPaintRef = useRef(0);
   const recStatusRef = useRef<RecordStatus | null>(null);
-  const axToggleRef = useRef<HoldToggleState>(holdToggleInit());
   const viewsRef = useRef<CameraInfo[]>([]);
-  const tileIdxRef = useRef(0);
-  const menuRef = useRef<VrMenuLike>(null);
   const ikSidesRef = useRef<IkSides>({});
   const prevIkRef = useRef<IkSides>({});
   const ikPushedAtRef = useRef(0);
   const tuneValuesRef = useRef<Record<string, number>>(
     { [WRIST_PIVOT_KEY]: DEFAULT_WRIST_PIVOT_M });
-  const tuneOpenRef = useRef(false);
-  const tuneNavRef = useRef<TuningNav>({ index: 0, lastStepMs: 0 });
   const precisionRef = useRef(false);
   const takesRef = useRef(0);
   const takeRef = useRef<TakeState>("idle");
@@ -278,7 +262,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // What ARM settled on, so ROLL writes to the same dataset the gate opened.
   const gatePairRef = useRef<{ repoId: string; task: string } | null>(null);
   // When the operator last asked for home during the prompt and was told no.
-  const homeRefusedAtRef = useRef(-Infinity);
   const runTakeRef = useRef<((ev: TakeEvent) => void) | null>(null);
   const dirtyTuneRef = useRef<Set<string>>(new Set());
   // Set on every socket OPEN, cleared by the first config-bearing message:
@@ -290,23 +273,11 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // recomputed at click time: a preset that shows one mapping and starts
   // another is invisible until an arm moves the wrong way.
   const pairingRef = useRef<Pairing | null>(null);
-  // The right stick mirrors the left's short/hold split: short click cycles
-  // the tile size, a hold opens the tuning list. So its action also fires on
-  // RELEASE, and a hold cannot resize the tile on its way to the menu.
-  const rStickDownAtRef = useRef<number | null>(null);
-  const rStickFiredRef = useRef(false);
-  // Where the HUD cluster hangs, and the in-flight grab if the operator is
-  // currently dragging it. Refs, not state: both change inside the XR loop.
-  const anchorRef = useRef<HudAnchor>({
-    pos: [...DEFAULT_HUD_ANCHOR.pos], yawDeg: DEFAULT_HUD_ANCHOR.yawDeg });
-  const grabRef = useRef<null | {
-    hand: "left" | "right"; dist: number; offset: [number, number, number];
-  }>(null);
-  // Left-stick click doubles up: short click cycles the view, a long hold
-  // resets the arms — so the click action fires on RELEASE, gated by how
-  // long the stick was down.
-  const lStickDownAtRef = useRef<number | null>(null);
-  const lStickFiredRef = useRef(false);
+  // One click-edge per hand, and that is the whole of the stick's state now:
+  // click = home. The short/hold split, the HUD anchor and the in-flight grab
+  // all went with the panel they existed to drive.
+  const stickDownRef = useRef<{ left: boolean; right: boolean }>(
+    { left: false, right: false });
 
   stanceRef.current = stance;
   // The launcher, from the cockpit's own helper — one list of sessions and one
@@ -330,14 +301,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   showCamRef.current = showCam;
   recStatusRef.current = recStatus;
   viewsRef.current = views;
-  tileIdxRef.current = tileIdx;
-  menuRef.current = {
-    views: views.map((c) => ({ id: c.id, label: viewLabel(c) })),
-    activeViewId: baseCam?.id ?? null,
-    tileSize: CAM_TILE_SIZES[tileIdx]?.name ?? "S",
-    stance,
-    armSet,
-  };
 
   useEffect(() => {
     void xrSupported().then(setSupported);
@@ -369,15 +332,10 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       }
       const solo = localStorage.getItem(SOLO_LS_KEY);
       if (solo) setSoloArm(solo);
-      try {
-        const a = JSON.parse(localStorage.getItem(HUD_ANCHOR_LS_KEY) ?? "");
-        if (Array.isArray(a?.pos) && a.pos.length === 3
-            && typeof a?.yawDeg === "number") {
-          anchorRef.current = { pos: a.pos, yawDeg: a.yawDeg };
-        }
-      } catch { /* no saved placement: spawn at the default */ }
-      const t = Number(localStorage.getItem(TILE_LS_KEY));
-      if (Number.isInteger(t) && t >= 0 && t < CAM_TILE_SIZES.length) setTileIdx(t);
+      // The saved HUD placement and tile size are not read any more: there is
+      // no panel to place and no tile to size. The keys are left in
+      // localStorage rather than cleared — they cost nothing and they are the
+      // only record of where an operator had put the thing.
     } catch {
       /* a corrupt override must not block entering VR; defaults are fine */
     }
@@ -468,33 +426,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     return () => { alive = false; clearInterval(t); };
   }, []);
 
-  /** Next camera into the tile. Repoints the live MJPEG <img> in place — the
-   *  in-scene HUD paints whatever that element currently holds, so swapping
-   *  `src` is the whole switch. */
-  const cycleView = useCallback(() => {
-    const list = viewsRef.current;
-    if (list.length < 2) return;
-    const here = list.findIndex((c) => c.id === baseCamRef.current?.id);
-    const next = list[cycleIndex(list.length, here < 0 ? -1 : here, 1)];
-    if (!next) return;
-    setBaseCam(next);
-    baseCamRef.current = next;
-    try { localStorage.setItem(VIEW_LS_KEY, next.id); } catch { /* fine */ }
-    if (camImgRef.current) camImgRef.current.src = cameraStreamUrl(next.id);
-    const s = sessionRef.current;
-    if (s) pulse(s, "left", 0.15, 40);
-  }, []);
-
-  /** Next tile size. The quad rescales on the following rendered frame. */
-  const cycleTile = useCallback(() => {
-    const next = cycleIndex(CAM_TILE_SIZES.length, tileIdxRef.current, 1);
-    setTileIdx(next);
-    tileIdxRef.current = next;
-    try { localStorage.setItem(TILE_LS_KEY, String(next)); } catch { /* fine */ }
-    const s = sessionRef.current;
-    if (s) pulse(s, "right", 0.15, 40);
-  }, []);
-
   const teardown = useCallback(async (opts: { stopBackend: boolean }) => {
     const session = sessionRef.current;
     sessionRef.current = null;
@@ -518,7 +449,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     setXrMode(null);
     // Whatever was on the HUD dies with the session: an open tuning list or
     // an unanswered save/discard has no controller left to answer it.
-    tuneOpenRef.current = false;
     precisionRef.current = false;
     setPrecision(false);
     // The take machine's `abort`, written out: teardown must not fire REST.
@@ -527,7 +457,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     takeRef.current = "idle";
     takeEpochRef.current += 1;
     setTake("idle");
-    setArmSet(null);
     if (session) {
       try { await session.end(); } catch { /* already ended */ }
     }
@@ -631,8 +560,11 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   /** ARM: open the dataset, freeze its schema, camera set, arm set and
    *  measured fps, resolve the episode index — and write NOT ONE FRAME.
    *
-   *  The task/HF-user draft comes from the cockpit's Dataset tab (persisted),
-   *  so a solo operator never has to leave the headset between takes. */
+   *  The draft comes from the cockpit (persisted), so a solo operator never
+   *  has to leave the headset between takes — and it goes through
+   *  `effectiveRepoId`, so a dataset the desk RESUMED is the repo this take
+   *  lands in too. Recomposing here would split the dataset between desk and
+   *  headset. */
   const armAct = useCallback(async () => {
     const rec = useRecorder.getState();
     const task = rec.task.trim();
@@ -642,7 +574,9 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       settleTake("idle");
       return;
     }
-    const repoId = repoIdFor(rec.hfUser, task);
+    const repoId = effectiveRepoId({
+      repoIdOverride: rec.repoIdOverride, hfUser: rec.hfUser, task,
+    });
     gatePairRef.current = { repoId, task };
     try {
       const st = await api.recordArm(repoId, task);
@@ -798,7 +732,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     // The prompt is modal — both sticks are its own — so an open tuning list
     // has to go, or the right stick walks a knob list and answers the prompt
     // with the same click.
-    if (tr.state === "prompt") tuneOpenRef.current = false;
     const act = tr.act;
     if (!act) return;
     actInFlightRef.current = true;
@@ -815,11 +748,16 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // 250 ms interval down and rebuilds it.
   useEffect(() => { runTakeRef.current = (ev) => { void runTake(ev); }; }, [runTake]);
 
-  /** The A/X hold, from inside the XR loop. One gesture, the whole ladder:
-   *  ARM, ROLL, raise the decision — or withdraw it, so a hold that was a
-   *  mistake costs nothing. */
-  const onRecordHold = useCallback(() => {
-    void runTake({ kind: "ax_hold" });
+  /** B, from inside the XR loop — the kit's episode button. One press walks
+   *  the whole ladder: ARM, ROLL, then bank the take and re-arm. */
+  const onEndEpisode = useCallback(() => {
+    void runTake({ kind: "end_episode" });
+  }, [runTake]);
+
+  /** Y, from inside the XR loop — bin the take in progress and line the next
+   *  one up. A no-op unless a take is actually open. */
+  const onRerecord = useCallback(() => {
+    void runTake({ kind: "rerecord" });
   }, [runTake]);
 
   /** Write one tuning knob.
@@ -955,22 +893,35 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     }
 
     // Backend session first, socket second. If start() is going to be refused
-    // — another teleop already running, an unknown arm — we want to find out
-    // before frames are in flight, not while the operator is already immersed
-    // and squeezing a grip that does nothing.
-    const pairing = pairingRef.current;
-    if (!pairing || (!pairing.left_arm && !pairing.right_arm)) {
-      toast.error("no arm resolved for this preset — pick another");
-      await teardown({ stopBackend: false });
-      return;
-    }
+    // — an unknown arm, a leader/follower teleop holding the bus — we want to
+    // find out before frames are in flight, not while the operator is already
+    // immersed and squeezing a grip that does nothing.
+    //
+    // A session that is ALREADY RUNNING is not a refusal — it is the cockpit
+    // flow: position the arm, pick the rate, click start on the desktop, then
+    // put the headset on. This page joins that session rather than demanding
+    // to own it; the running session's arm set and rate are the truth, and
+    // the preset below only matters when this page is the one starting it.
+    let adopt = false;
     try {
-      await api.humanTeleopStart(pairing);
-      setArmSet({ left: pairing.left_arm, right: pairing.right_arm });
-    } catch (e) {
-      toast.error(`teleop start refused: ${(e as Error).message}`);
-      await teardown({ stopBackend: false });
-      return;
+      adopt = Boolean((await api.humanTeleopStatus()).running);
+    } catch { /* status unreachable — let start() speak for the backend */ }
+    if (adopt) {
+      toast.info("joining the running teleop session");
+    } else {
+      const pairing = pairingRef.current;
+      if (!pairing || (!pairing.left_arm && !pairing.right_arm)) {
+        toast.error("no arm resolved for this preset — pick another");
+        await teardown({ stopBackend: false });
+        return;
+      }
+      try {
+        await api.humanTeleopStart(pairing);
+      } catch (e) {
+        toast.error(`teleop start refused: ${(e as Error).message}`);
+        await teardown({ stopBackend: false });
+        return;
+      }
     }
 
     const client = new HumanTeleopClient<VRFrame>(WS_URL, {
@@ -994,108 +945,46 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
     session.addEventListener("end", onEnd);
     prevIkRef.current = {};
     ikSidesRef.current = {};
-    tuneOpenRef.current = false;
     precisionRef.current = false;
 
     const scene = attachRenderScene(session, xrs.mode);
-    estopDownRef.current = false;
+    bDownRef.current = false;
+    yDownRef.current = false;
 
-    // The Meta Quest Browser refuses `dom-overlay` on-device (it only works
-    // in Meta's desktop emulator), and the feature is optional by design —
-    // so when the session comes back without it, the HUD moves INTO the
-    // scene: a world-locked quad repainted from a canvas at ~10 Hz.
-    const overlayActive = Boolean(
-      (session as unknown as { domOverlayState?: unknown }).domOverlayState);
-    let hudCanvas: HTMLCanvasElement | null = null;
-    let hudCtx: CanvasRenderingContext2D | null = null;
-    if (!overlayActive) {
-      hudCanvas = document.createElement("canvas");
-      hudCanvas.width = 1024;
-      hudCanvas.height = 440;
-      hudCtx = hudCanvas.getContext("2d");
-      toast.info("browser has no dom-overlay — HUD is drawn inside the scene");
-    }
-    if (showCamRef.current && baseCamRef.current && !overlayActive) {
-      const img = new Image();
-      img.src = cameraStreamUrl(baseCamRef.current.id);
-      camImgRef.current = img;
-    }
+    // Nothing is composited into the scene any more: no HUD canvas, no
+    // camera tile, and so no dom-overlay fallback to care about. The
+    // passthrough view IS the view. What the operator needs mid-take reaches
+    // them as haptics; everything else is on the desktop page, where reading
+    // it costs nothing.
 
     const onXRFrame = (t: number, frame: XRFrameLike) => {
       const live = sessionRef.current;
       if (!live) return;
       live.requestAnimationFrame(onXRFrame);
-      // Both sticks share one idiom: the short click acts on RELEASE, so a
-      // hold cannot first do the short thing on its way to the long one.
-      // Left: click = next view, ~0.8 s hold = reset arms. Right: click =
-      // next tile size, 0.5 s hold = the tuning list. While the end-of-take
-      // decision is open it takes both clicks instead — keep left, redo right
-      // — because nothing else may be one click away from banking or binning
-      // an episode.
-      const prompt = takeRef.current === "prompt";
-      const lStick = thumbstickPressed(live, "left");
-      if (lStick) {
-        if (lStickDownAtRef.current === null) {
-          lStickDownAtRef.current = t;
-          lStickFiredRef.current = false;
-        } else if (!lStickFiredRef.current
-                   && t - lStickDownAtRef.current >= RESET_HOLD_MS) {
-          lStickFiredRef.current = true;
-          if (prompt) {
-            // Home is refused through the tail of a take the operator may be
-            // about to keep — homing would corrupt it. Answered rather than
-            // silently dropped: the weak tick `resetArms` already uses for a
-            // refusal, plus a line on the HUD. The fired flag is what stops
-            // the release falling through to KEEP.
-            homeRefusedAtRef.current = t;
-            pulse(live, "left", 0.2, 60);
-          } else {
-            void resetArms();
-          }
+      // One stick action, on either hand: CLICK = go home. The kit's
+      // `REST_RAMP_BUTTON_INDEX = 3`, and now the only thing a stick does.
+      //
+      // It used to carry four: left click cycled the camera view, left hold
+      // homed, right click resized the camera tile, right hold opened a
+      // tuning list — and while the end-of-take prompt was up the two clicks
+      // became keep and redo instead. Three of those four existed to drive
+      // the HUD, and the HUD is gone; the fourth is the prompt, which B and Y
+      // answer directly. Homing no longer needs a hold to keep it clear of a
+      // short click, because there is no short click left to be clear of.
+      for (const hand of ["left", "right"] as const) {
+        const down = thumbstickPressed(live, hand);
+        const wasDown = stickDownRef.current[hand];
+        stickDownRef.current[hand] = down;
+        if (down && !wasDown) {
+          pulse(live, hand, 0.3, 60);
+          void resetArms();
         }
-      } else {
-        if (lStickDownAtRef.current !== null && !lStickFiredRef.current
-            && t - lStickDownAtRef.current < 350) {
-          if (prompt) void runTake({ kind: "choose", choice: "keep" });
-          else cycleView();
-        }
-        lStickDownAtRef.current = null;
-      }
-      const rStick = thumbstickPressed(live, "right");
-      if (rStick) {
-        if (rStickDownAtRef.current === null) {
-          rStickDownAtRef.current = t;
-          rStickFiredRef.current = false;
-        } else if (!rStickFiredRef.current && !prompt
-                   && t - rStickDownAtRef.current >= TUNE_HOLD_MS) {
-          rStickFiredRef.current = true;
-          tuneOpenRef.current = !tuneOpenRef.current;
-          tuneNavRef.current = { ...tuneNavRef.current, lastStepMs: t };
-          pulse(live, "right", 0.3, 60);
-        }
-      } else {
-        if (rStickDownAtRef.current !== null && !rStickFiredRef.current
-            && t - rStickDownAtRef.current < 350) {
-          if (prompt) void runTake({ kind: "choose", choice: "redo" });
-          else cycleTile();
-        }
-        rStickDownAtRef.current = null;
       }
 
-      // The tuning list walks and adjusts on the RIGHT stick's axes, and only
-      // while it is open and the prompt is not: an accidental nudge mid-take
-      // must not move a gain, and a stick that both walks a knob list and
-      // answers the decision answers it by accident.
-      if (tuneOpenRef.current && !prompt) {
-        const step = stepTuning(tuneNavRef.current, stickAxes(live, "right"),
-                                t, tuneValuesRef.current);
-        tuneNavRef.current = step.nav;
-        if (step.patch) setTuning(step.patch.key, step.patch.value);
-      }
-
-      // Precision: the LEFT stick pushed away and held — see `precisionHeld`
-      // for why it could not stay on A/X. Edge-buzzed, because gains that
-      // silently halve feel exactly like an arm that has started lagging.
+      // Precision: A/X held, either hand — the kit's binding. Edge-buzzed,
+      // because gains that silently halve feel exactly like an arm that has
+      // started lagging, and with no HUD the buzz is the only thing that says
+      // the modifier is on.
       const fine = precisionHeld(live);
       if (fine !== precisionRef.current) {
         precisionRef.current = fine;
@@ -1103,124 +992,24 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
         pulse(live, "left", fine ? 0.3 : 0.15, 50);
       }
 
-      // Grab-to-move: point at the HUD cluster and hold the trigger while
-      // that hand's arm is NOT driving (while driving, the trigger is the
-      // gripper and the HUD refuses to move). Quest-window semantics: the
-      // cluster follows the ray at its grab distance and keeps facing you.
-      const anchor = anchorRef.current;
-      if (hudCanvas) {
-        const rays = controllerRays(live, frame, refSpaceRef.current);
-        const camW = CAM_TILE_SIZES[tileIdxRef.current]?.widthM ?? 1.1;
-        const layout = clusterLayout(camW, 0.75, hudCanvas.height / hudCanvas.width,
-                                     Boolean(camImgRef.current));
-        const grab = grabRef.current;
-        if (grab) {
-          const ray = rays[grab.hand];
-          if (!ray || !ray.trigger) {
-            grabRef.current = null;
-            try {
-              localStorage.setItem(HUD_ANCHOR_LS_KEY, JSON.stringify(anchor));
-            } catch { /* private mode: placement just won't persist */ }
-          } else {
-            for (let i = 0; i < 3; i++) {
-              anchor.pos[i] = ray.origin[i] + ray.dir[i] * grab.dist
-                - grab.offset[i];
-            }
-            const head = frame.getViewerPose(refSpaceRef.current)
-              ?.transform?.position;
-            if (head) {
-              anchor.yawDeg = yawTowardHead(anchor.pos, [head.x, head.y, head.z]);
-            }
-          }
-        } else {
-          for (const hand of ["left", "right"] as const) {
-            const ray = rays[hand];
-            if (!ray?.trigger) continue;
-            const authority = statusRef.current?.acquire?.[hand]?.authority;
-            if (authority === "driving") continue;
-            const tCam = rayQuadHit(ray.origin, ray.dir, anchor, 0,
-                                    camW, layout.camH || 0.2);
-            const tPanel = rayQuadHit(ray.origin, ray.dir, anchor,
-                                      layout.panelYOff, layout.panelW,
-                                      layout.panelH);
-            const tHit = tCam ?? tPanel;
-            if (tHit === null) continue;
-            const offset: [number, number, number] = [
-              ray.origin[0] + ray.dir[0] * tHit - anchor.pos[0],
-              ray.origin[1] + ray.dir[1] * tHit - anchor.pos[1],
-              ray.origin[2] + ray.dir[2] * tHit - anchor.pos[2],
-            ];
-            grabRef.current = { hand, dist: tHit, offset };
-            pulse(live, hand, 0.3, 40);
-            break;
-          }
-        }
-      }
+      scene.render(frame, refSpaceRef.current);
 
-      let hudDirty = false;
-      if (hudCanvas && hudCtx && t - hudPaintRef.current > 100) {
-        hudPaintRef.current = t;
-        const rs = recStatusRef.current;
-        paintHud(
-          hudCtx, statusRef.current,
-          { state: takeRef.current,
-            recording: Boolean(rs?.recording),
-            episode_frames: rs?.episode_frames ?? 0,
-            skipped_frames: rs?.skipped_frames,
-            worstDrop: worstDropSource(rs?.drops),
-            fpsMeasured: rs?.fps_measured ?? null,
-            fpsDeclared: rs?.fps_declared ?? null,
-            // The recorder publishes the gate it is actually refusing at, so the
-            // HUD reads it instead of holding a second copy that can drift.
-            rateFaithful: recordRateFaithful(rs),
-            invalidatedReason: rs?.invalidated_reason ?? null,
-            localGate: gateServerRef.current === false,
-            takes: takesRef.current,
-            // Two fields because they are two facts. The gate's index names
-            // the take in hand and is null unless one is armed; the count is
-            // the idle menu's, and is still a guess past lerobot's RAM buffer.
-            // The fallback that used to sit between them is GONE: a backend
-            // with no gate now reads `take N`, which is true, instead of
-            // `ep N` off a count that was right only by coincidence.
-            episodeIndex: rs?.episode_index ?? null,
-            datasetCount: episodesTotal(tallyRef.current, takesRef.current) },
-          menuRef.current && {
-            ...menuRef.current,
-            tuning: { open: tuneOpenRef.current,
-                      index: tuneNavRef.current.index,
-                      values: tuneValuesRef.current,
-                      dirty: [...dirtyTuneRef.current] },
-            precision: precisionRef.current,
-            endPrompt: takeRef.current === "prompt",
-            homeRefused: t - homeRefusedAtRef.current < HOME_REFUSED_MS,
-          },
-          ikSidesRef.current);
-        hudDirty = true;
-      }
-      scene.render(frame, refSpaceRef.current, {
-        panel: hudCanvas,
-        panelDirty: hudDirty,
-        cam: camImgRef.current,
-        camMirrored: baseCamRef.current?.facing === "operator",
-        camWidthM: CAM_TILE_SIZES[tileIdxRef.current]?.widthM,
-        anchor,
-      });
+      // Episode control scans at display rate, not publish rate: a take
+      // boundary the operator just asked for should not wait on the next
+      // publish tick. Edge-detected per hand, so a held button steps the
+      // ladder once rather than once per frame.
+      const bDown = episodePressed(live, "right");
+      if (bDown && !bDownRef.current) onEndEpisode();
+      bDownRef.current = bDown;
+      const yDown = episodePressed(live, "left");
+      if (yDown && !yDownRef.current) onRerecord();
+      yDownRef.current = yDown;
 
-      // E-STOP scan runs at display rate, not publish rate: 33 ms of extra
-      // latency on a stop button is 33 ms too many. Edge-detected so one
-      // press is one POST.
-      const down = estopPressed(live);
-      if (down && !estopDownRef.current) void fireEstop();
-      estopDownRef.current = down;
-
-      // Record toggle: same display-rate scan, but hold-gated — a brush of
-      // the thumb near A/X must not start or end a take.
-      const ax = holdToggle(axToggleRef.current, axPressed(live), t, RECORD_HOLD_MS);
-      axToggleRef.current = ax;
-      if (ax.toggled) onRecordHold();
-
-      if (t - lastPubRef.current < PUBLISH_MS) return;
-      lastPubRef.current = t;
+      // Publish every XR frame, the way the kit's page does. The converter
+      // solves once per ARRIVING frame, so a publish throttle here silently
+      // becomes the command-generation rate: at the old ~30 Hz the IK's
+      // per-solve caps meant half the kit's command ceiling in deg/s, plus
+      // up to a display frame of added latency.
       const blurred =
         live.visibilityState !== undefined && live.visibilityState !== "visible";
       const vrFrame = sampleVRFrame(live, frame, refSpaceRef.current, {
@@ -1234,8 +1023,8 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       client.tick();
     };
     session.requestAnimationFrame(onXRFrame);
-  }, [armIds, teardown, fireEstop, onRecordHold, runTake, setTuning,
-      onSocketMessage, resetArms, cycleView, cycleTile]);
+  }, [armIds, teardown, onEndEpisode, onRerecord, runTake, setTuning,
+      onSocketMessage, resetArms]);
 
   // Unmount must release the arms. Unlike the MediaPipe panel this one cannot
   // be left mounted-but-hidden: an immersive session already owns the display,
@@ -1386,7 +1175,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
           <div className="text-red-400 truncate">{status.last_error}</div>
         )}
         <div className="text-neutral-400">
-          grip = drive · trigger = gripper · <b>B / Y = E-STOP</b> ·{" "}
+          grip = drive · trigger = gripper · <b>B = end take</b> ·{" "}
           <b>A / X hold = arm · roll · end</b>
         </div>
         {take === "prompt" && (
@@ -1517,40 +1306,9 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       {hud}
 
       <div className="text-muted-foreground">
-        <div>
-          Hold a <b>grip</b> to drive that side&apos;s arm — each grip is its own
-          dead-man. Release to freeze that arm where it is.
-        </div>
-        <div><b>Trigger</b> is the gripper — analog, 0 open to 1 closed.</div>
-        <div>
-          <b>B or Y</b> (either controller) is the E-STOP: torque drops on both
-          arms instantly.
-        </div>
-        <div>
-          <b>Hold A or X</b> (either controller, ~0.5 s) <b>ARMS</b> a take: the
-          dataset opens and its schema freezes, and{" "}
-          <b>nothing is written until you roll</b>. A second hold <b>ROLLS</b>{" "}
-          it — that is when frames start landing — and a third opens the
-          decision: <b>keep</b> (left stick click) or <b>redo</b> (right stick
-          click), both of which leave you armed for the next take. The take is
-          still rolling while you pick, because{" "}
-          <code>/record/stop</code> takes the save decision at stop time. Draft
-          the task in the cockpit&apos;s Dataset tab first; the HUD shows{" "}
-          <span className="font-bold">◆ ARMED</span>, then{" "}
-          <span className="font-bold">● REC</span> while it rolls.
-        </div>
-        <div>
-          Squeezing a grip <b>anchors your hand to the arm where it is</b> —
-          hold still through the countdown, feel the buzz, then your hand&apos;s
-          movement drives the gripper. Release, reposition your hand, squeeze
-          again to ratchet across the workspace.
-        </div>
-        <div>
-          <b>Push the left stick away and hold</b> for precision: both mapping
-          gains scale by the precision factor for fine work. The HUD says
-          PRECISION the whole time. <b>Hold the right stick</b> (~0.5 s) opens
-          the tuning list; its stick then walks and adjusts it.
-        </div>
+        <b>grip</b> = drive (dead-man, per hand) · <b>trigger</b> = gripper ·{" "}
+        <b>A/X</b> hold = precision · <b>B</b> = arm / roll / end take ·{" "}
+        <b>Y</b> = bin take · <b>stick click</b> = home
       </div>
 
       <div className="space-y-1">
@@ -1608,12 +1366,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
           </div>
         )}
         <div className="text-muted-foreground">
-          — {selected
-              ? selected.detail
-              : "no arms enabled in the backend config"}. A solo session ignores
-          the other hand entirely: nothing is ever written to the arm it has
-          none for. Half as much that can go wrong, which is what a first
-          hardware run wants.
+          — {selected ? selected.detail : "no arms enabled in the backend config"}
         </div>
       </div>
 
@@ -1637,8 +1390,8 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
         </select>
         <span>
           {status?.collision?.available === false
-            ? "— unavailable: no mounts configured for every arm, so the guard has no geometry to reason about."
-            : `— off still MEASURES (slack ${fmtMm(status?.collision?.slack_m)}), it just stops holding steps back. The workspace floor, joint limits, rate caps and motion envelope stay on either way.`}
+            ? "— unavailable (no mount geometry configured)"
+            : `— off still measures (slack ${fmtMm(status?.collision?.slack_m)})`}
         </span>
       </label>
 
@@ -1657,13 +1410,6 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
           <option value="mirror">facing the arms — mirror</option>
           <option value="front">facing the arms — match the camera tile</option>
         </select>
-        <span>
-          — how your hand maps to the gripper. Egocentric (pairs with the
-          over-shoulder view, the default): the replica arm moves exactly
-          like your own — push forward and it goes deeper into the scene.
-          Mirror: face-to-face, the arm is your reflection. Camera tile:
-          motion matches the front view&apos;s screen axes.
-        </span>
       </label>
 
       <details className="text-muted-foreground" open={inSession}>
@@ -1671,18 +1417,9 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
           live tuning{inSession ? "" : " (needs a running session)"}
         </summary>
         <p className="mt-2">
-          The same knobs the in-headset list walks, with the ones you set once
-          against a bench measurement rather than mid-take. Every value is
-          <b> clamped by the backend</b> and echoed back, so a box that snaps
-          to a different number is the robot telling you what it took. They
-          live on the socket, not in the config file: this section is live only
-          while a session is running, and the values reset with it.
-          {" "}The wrist pivot is the exception — it moves the read-out point on
-          your controller, which only this client can do, and it persists here.
-          {" "}A knob you move is <b>yours</b> until the page reloads and is
-          marked <b>◆</b>: the teleoperator&apos;s config lives per connection
-          and the client reconnects after 50 ms, so without the page re-asserting
-          it a socket blip would silently revert it mid-take.
+          Backend-clamped and echoed back — a box that snaps to a different
+          number is the robot telling you what it took. Values live per
+          session; <b>◆</b> marks a knob that is yours until the page reloads.
         </p>
         <Button
           variant="outline"

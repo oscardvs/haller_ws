@@ -25,21 +25,30 @@
 # shaping stage off.
 
 motion:
-  # The binding speed limit for teleop, and worth knowing about before you
-  # decide the tracking feels sluggish: the IK, the session's rate cap and
-  # this are three limiters in series, and at 60 deg/s THIS is the one that
-  # bites. Raise it here if the arm feels like it is wading; it is set low
-  # because of the 2026-08-01 incident (a Home straight after a recalibration
-  # slewed an arm into the bench and burnt the 7.4 V DC-DC), so raise it
-  # deliberately and with a hand near the E-STOP.
-  # 90, up from the first-run 60 (2026-08-24): the cap was the binding
-  # limiter and read as latency — the arm trailing the hand. Raised only
-  # after enable_torque gained the park-on-present guard and the rig moved
-  # to a 7.4 V / 5 A bench supply; the 2026-08-01 incident that set it low
-  # was a lunge this pair of changes now prevents at the mechanism level.
+  # DISCRETE moves only (Home, presets, plan_ramp) since 2026-08-29: the
+  # teleop session now passes its own ceiling (RATE_CAP_DEG_S, 240 deg/s ≈
+  # the servo's physical ~260 deg/s at 7.4 V) to send_goal, so this number
+  # no longer shadows teleop tracking. It used to be the binding teleop
+  # limiter — 90 here meant 90 deg/s on every joint against a kit that
+  # carries NO write-path cap (its --max-relative-target defaults to None)
+  # and lets the IK's per-solve caps + servo physics govern. Home stays
+  # gentle at 90; history: 60 after the 2026-08-01 bench incident, 90 from
+  # 2026-08-24 once park-on-present landed.
   max_speed_deg_s: 90.0
   large_move_deg: 30.0
   ramp_hz: 50.0
+  # 0.0 = NO output filter — the kit's configuration, taken exactly
+  # (2026-08-29; was 0.02, before that the 0.100 default). The kit's only
+  # shaping between mapper and bus is its solver's per-solve caps. Here the
+  # filter sat after an IK that re-seeds from the COMMITTED pose every
+  # solve, so any attenuation compounds: at 0.100 the effective ceiling
+  # landed near 29 deg/s (the 2026-08-24 crawl); even at 0.02 the session
+  # committed only ~57% of each solve step per 60 Hz tick and added ~20 ms
+  # of lag. The cost of 0: controller jitter reaches the servos unshaped —
+  # the kit's bargain, and this rig is meant to feel like that rig. The
+  # pose_filter_alpha EMA on the CONTROLLER pose (converter side, kit
+  # parity 0.8) still stands; that one the kit ships too.
+  lpf_tau_s: 0.0
 
 collision:
   # OFF for the first single-arm run, on purpose and against the config
@@ -79,6 +88,42 @@ collision:
   mounts:
     left:  {pos: [-0.20, 0.0, 0.0], yaw_deg: 0.0}
     right: {pos: [ 0.20, 0.0, 0.0], yaw_deg: 0.0}
+
+# Matched to the kit's `SO101QuestTeleoperatorConfig`, joint for joint.
+#
+# The kit recorded 46 usable episodes with these numbers and this rig is meant
+# to feel like that rig. Everything below is a value Haller had drifted from;
+# the ones that already agreed (scale_translation 1.0, pose_filter_alpha 0.8,
+# pos_reach_limit 0.15, rot_reach_limit 0.6, mu, lam_rot, rot_err_hold) are
+# left to the defaults rather than restated here, so this list stays readable
+# as exactly the set of disagreements.
+teleop:
+  # 1.6 amplified the operator's twist by 60%. The kit maps 1:1, and a wrist
+  # that rotates further than your hand did is the single most obvious way
+  # teleop stops feeling like your own arm.
+  scale_rotation: 1.0
+  # The kit's fine-work multiplier, held on A/X.
+  precision_factor: 0.5
+  # The kit's per-joint per-tick caps, converted from radians: 0.06 rad and
+  # 0.24 rad. Haller's 8.0 was 40% under the kit's wrist cap, which reads as
+  # a wrist that lags the hand and then catches up.
+  max_dq_deg_pos: 3.44    # 0.06 rad
+  max_dq_deg_rot: 13.75   # 0.24 rad
+  # NO workspace floor — the kit has none, and this rig is meant to match it.
+  #
+  # Read this before turning it back on or leaving it off: with the floor on,
+  # `QuestTeleoperator._clamp_floor` LIFTS a commanded pose so the fingertip
+  # stays 5 mm and the wrist 35 mm above `collision.table_z_m`. Pushing your
+  # hand below the bench then slides the tool along it instead of descending,
+  # which is a real difference in feel and is what this rig was doing.
+  #
+  # What it costs: `collision.enabled` is false in this config too, so with
+  # both off NOTHING bounds the commanded height except the per-joint limits
+  # and the motion envelope. An operator who drives the tool into the bench
+  # gets a servo fighting the table. That is the kit's bargain, taken
+  # deliberately, and it is why `config.solo-raw.yaml` documents the same
+  # switch under a header warning.
+  floor_enabled: false
 
 arms:
   - id: left

@@ -32,7 +32,7 @@ import { CalibrateTab } from "./CalibrateTab";
 import { CamerasTab } from "./CamerasTab";
 import { SettingsTab } from "./SettingsTab";
 import { DataTab } from "@/components/lab/DataTab";
-import { useViewport, type PopId, type TabId } from "./lib";
+import { primeSticky, useViewport, type PopId, type TabId } from "./lib";
 
 type ConfigBody = Awaited<ReturnType<typeof api.config>>;
 
@@ -110,6 +110,14 @@ export function Cockpit() {
     );
   }, []);
 
+  // The Teleop tab's "record a dataset with this session" hand-off. The lab
+  // sub-view is primed before the switch because DataTab is unmounted right
+  // now — primeSticky is read fresh at its mount.
+  const openCollect = useCallback(() => {
+    primeSticky("lab.subview", "collect");
+    goTab("data");
+  }, [goTab]);
+
   const armIds = cfg?.arms.map((a) => a.id) ?? [];
   const cams = cameras ?? [];
   const booting = cfg === null && bootError === null;
@@ -150,12 +158,17 @@ export function Cockpit() {
               />
             )}
             {tab === "teleop" && (
-              <TeleopTab arms={cfg.arms} cameras={cams} viewport={viewport} />
+              <TeleopTab
+                arms={cfg.arms}
+                cameras={cams}
+                viewport={viewport}
+                onOpenCollect={openCollect}
+              />
             )}
             {tab === "calibrate" && <CalibrateTab armIds={armIds} />}
             {tab === "cameras" && <CamerasTab cameras={cams} />}
             {tab === "data" && (
-              <DataTab cameras={cams} onCameraRecord={onCameraRecord} />
+              <DataTab cameras={cams} arms={cfg.arms} onCameraRecord={onCameraRecord} />
             )}
             {tab === "settings" && <SettingsTab cfg={cfg} cameras={cams} />}
           </div>

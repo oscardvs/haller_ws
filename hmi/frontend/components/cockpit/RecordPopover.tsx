@@ -5,10 +5,9 @@
  *  reach without leaving the tab you are working on. */
 import type { RefObject } from "react";
 
-import { useRecorder } from "@/lib/recorder";
+import { effectiveRepoId, useRecorder } from "@/lib/recorder";
 import { useTelemetry } from "@/lib/telemetry";
 import { Popover, PopoverHeader } from "./Popover";
-import { repoIdFor } from "./CommandBar";
 import { startTake, stopTake, NO_TELEOP_WARNING } from "./recorderActions";
 import type { TabId } from "./lib";
 
@@ -23,13 +22,17 @@ export function RecordPopover({
 }) {
   const task = useRecorder((s) => s.task);
   const hfUser = useRecorder((s) => s.hfUser);
+  const repoIdOverride = useRecorder((s) => s.repoIdOverride);
   const setTask = useRecorder((s) => s.setTask);
   const recording = useRecorder((s) => s.status?.recording ?? false);
   const frames = useRecorder((s) => s.status?.episode_frames ?? 0);
   const busy = useRecorder((s) => s.busy);
   const teleopRunning = useTelemetry((s) => s.lastFrame?.human_teleop?.running ?? false);
 
-  const repoId = repoIdFor(hfUser, task);
+  // The shared draft's one answer — a pinned resume target when set. Editing
+  // the task above clears the pin (setTask's rule), so this popover cannot
+  // quietly keep recording into a dataset the operator just renamed away.
+  const repoId = effectiveRepoId({ repoIdOverride, hfUser, task });
 
   return (
     <Popover

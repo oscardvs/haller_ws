@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyServerConfig, describeArmSet, holdToggle, holdToggleInit, paintHud,
-  MENU_MAX_CHARS, reconcileConfig, recorderHapticCue, RECORD_HOLD_MS,
-  RESET_HOLD_MS, STATUS_MAX_CHARS, stepTake,
+  applyServerConfig, BUTTON_AX, BUTTON_BY,
+  reconcileConfig, recorderHapticCue, stepTake,
   TUNING_KNOBS, WRIST_PIVOT_KEY,
-  type EndChoice, type RecorderHudLike, type TakeState,
+  type EndChoice, type TakeState,
 } from "../lib/vrTeleop";
 import { worstDropSource } from "../components/VRTeleopPanel";
 
@@ -68,17 +67,6 @@ const driving = {
   },
 };
 
-/** Loaded and writing nothing — the resting state of a recording session. */
-const armedRec: NonNullable<RecorderHudLike> = {
-  state: "armed", recording: false, episode_frames: 0, episodeIndex: 12,
-};
-
-/** Mid-take, and the same object the prompt paints from: the recorder is
- *  still rolling while the operator decides. */
-const rollingRec: NonNullable<RecorderHudLike> = {
-  state: "rolling", recording: true, episode_frames: 412, episodeIndex: 12,
-};
-
 /** Every cue the §1b table names, as the transition that produces it. Kept as
  *  data so a new cue cannot be added without the ordering pins seeing it. */
 const CUES: readonly (readonly [TakeState, TakeState, EndChoice | null])[] = [
@@ -99,18 +87,32 @@ const STATES: readonly TakeState[] = ["idle", "armed", "rolling", "prompt"];
 // ---- the take machine -------------------------------------------------------
 
 describe("stepTake", () => {
-  it("climbs the ladder, and asks for exactly one REST call per rung", () => {
-    const arm = stepTake("idle", { kind: "ax_hold" });
+  it("climbs the ladder on B, and banks the take at the top", () => {
+    // The kit's episode button: one press per rung, and the last one ENDS the
+    // episode rather than asking about it. `examples/record_so101.py` binds B
+    // to "end the current episode / end the reset phase" and there is no
+    // question in between.
+    const arm = stepTake("idle", { kind: "end_episode" });
     expect(arm).toEqual({ state: "armed", act: { do: "arm" } });
-    const roll = stepTake(arm.state, { kind: "ax_hold" });
+    const roll = stepTake(arm.state, { kind: "end_episode" });
     expect(roll).toEqual({ state: "rolling", act: { do: "roll" } });
-    // Ending a take calls nothing: /record/stop carries the save decision, so
-    // it cannot be sent until the operator has taken one.
-    const prompt = stepTake(roll.state, { kind: "ax_hold" });
-    expect(prompt).toEqual({ state: "prompt", act: null });
-    // Withdrawing costs nothing either — the recorder never stopped.
-    expect(stepTake(prompt.state, { kind: "ax_hold" }))
-      .toEqual({ state: "rolling", act: null });
+    const banked = stepTake(roll.state, { kind: "end_episode" });
+    expect(banked).toEqual({
+      state: "armed", act: { do: "stop", save: true, rearm: true } });
+  });
+
+  it("bins a live take on Y, and reaches for nothing already written", () => {
+    // Y is the kit's "discard + re-record". It throws away the take in
+    // progress and lines the next one up.
+    expect(stepTake("rolling", { kind: "rerecord" }))
+      .toEqual({ state: "armed", act: { do: "stop", save: false, rearm: true } });
+    // A take that is already on disk is NOT its business: one press of a
+    // thumb button in a headset must not delete written data. IDLE and ARMED
+    // hold nothing open, so Y is a no-op there rather than a deletion.
+    expect(stepTake("idle", { kind: "rerecord" }))
+      .toEqual({ state: "idle", act: null });
+    expect(stepTake("armed", { kind: "rerecord" }))
+      .toEqual({ state: "armed", act: null });
   });
 
   it("gives each decision its exact {save, rearm} pair", () => {
@@ -182,16 +184,16 @@ describe("stepTake", () => {
     // reason the gate returns to ARMED is gone.
     const seen: TakeState[] = [];
     const stops: { save: boolean; rearm: boolean }[] = [];
-    let state = stepTake("idle", { kind: "ax_hold" }).state;   // the one climb
+    let state = stepTake("idle", { kind: "end_episode" }).state;   // the one climb
     for (let take = 0; take < 10; take++) {
-      const roll = stepTake(state, { kind: "ax_hold" });
+      const roll = stepTake(state, { kind: "end_episode" });
       expect(roll).toEqual({ state: "rolling", act: { do: "roll" } });
-      const prompt = stepTake(roll.state, { kind: "ax_hold" });
-      const done = stepTake(prompt.state, { kind: "choose", choice: "keep" });
+      // Two presses per take, not three and a decision: B rolls, B ends.
+      const done = stepTake(roll.state, { kind: "end_episode" });
       expect(done.act).toEqual({ do: "stop", save: true, rearm: true });
       stops.push({ save: true, rearm: true });
       state = done.state;
-      seen.push(roll.state, prompt.state, state);
+      seen.push(roll.state, state);
       // The 250 ms poll runs throughout; a reconcile mid-cycle must not move
       // the operator anywhere they did not ask to go.
       state = stepTake(state, { kind: "recorder", state: "armed" }).state;
@@ -228,33 +230,18 @@ describe("stepTake", () => {
 });
 
 describe("the gestures the take machine rides on", () => {
-  it("keeps the whole ladder on the record hold the operator already has", () => {
-    // A/X hold is the record command and stays it (port invariant 6). The gate
-    // added a rung to that ladder rather than a second button, because there
-    // is no spare one: every control on the pair is already spoken for.
-    let hold = holdToggleInit();
-    hold = holdToggle(hold, true, 0, RECORD_HOLD_MS);
-    expect(holdToggle(hold, true, RECORD_HOLD_MS - 1, RECORD_HOLD_MS).toggled)
-      .toBe(false);
-    hold = holdToggle(hold, true, RECORD_HOLD_MS, RECORD_HOLD_MS);
-    expect(hold.toggled).toBe(true);
-    expect(stepTake("idle", { kind: "ax_hold" }).act).toEqual({ do: "arm" });
+  it("puts the take boundary on a reach, and the modifier under the thumb", () => {
+    // The kit's split, restored. B is a deliberate reach and carries the take
+    // boundary; A/X is where the thumb already rests while gripping and
+    // carries precision, which is harmless to trigger by accident and
+    // self-cancelling on release. The old arrangement was the other way
+    // round, which is why precision had to be exiled to the left stick.
+    expect(stepTake("idle", { kind: "end_episode" }).act).toEqual({ do: "arm" });
+    // No hold gate on B: it takes a reach, so it does not need one.
+    expect(BUTTON_BY).toBe(5);
+    expect(BUTTON_AX).toBe(4);
   });
 
-  it("refuses home at the dwell it already means, rather than teaching a second", () => {
-    // The left-stick hold during the prompt is the SAME physical action as
-    // in-session home, at the same dwell — refused, because homing through the
-    // tail of a take would corrupt one the operator may be about to keep. It
-    // is answered rather than silently dropped, and it is not a decision.
-    let hold = holdToggleInit();
-    hold = holdToggle(hold, true, 0, RESET_HOLD_MS);
-    expect(holdToggle(hold, true, RESET_HOLD_MS - 1, RESET_HOLD_MS).toggled)
-      .toBe(false);
-    expect(holdToggle(hold, true, RESET_HOLD_MS, RESET_HOLD_MS).toggled).toBe(true);
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, rollingRec, { ...menu, endPrompt: true, homeRefused: true });
-    expect(text()).toContain("home refused mid-take");
-  });
 });
 
 // ---- recorder haptics -------------------------------------------------------
@@ -397,398 +384,7 @@ describe("applyServerConfig", () => {
 
 // ---- the arm set ------------------------------------------------------------
 
-describe("describeArmSet", () => {
-  it("names both arms in the operator's terms", () => {
-    // Behind the bench the hands cross: the left hand drives the arm named
-    // "right". Reading that back is how a wrong stance becomes visible before
-    // an arm moves rather than after.
-    expect(describeArmSet({ left: "right", right: "left" }))
-      .toBe("L→right · R→left");
-  });
-
-  it("omits a side that has no arm", () => {
-    expect(describeArmSet({ left: "left", right: null })).toBe("L→left");
-    expect(describeArmSet({ left: null, right: "right" })).toBe("R→right");
-  });
-
-  it("says none rather than an empty string when there is nothing paired", () => {
-    expect(describeArmSet({ left: null, right: null })).toBe("none");
-    expect(describeArmSet(null)).toBe("none");
-  });
-});
-
 // ---- the HUD, through a recording context ------------------------------------
-
-describe("paintHud and the start gate", () => {
-  it("paints ARMED as its own thing, never as REC", () => {
-    // The gate's whole benefit is knowing that nothing is being written; an
-    // operator who cannot tell the two apart at a glance has its cost only.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, armedRec, menu);
-    expect(text()).toContain("◆ ARMED ep 12");
-    expect(text()).not.toContain("● REC");
-    expect(text()).toContain("nothing written yet");
-  });
-
-  it("says when the page is holding the gate itself", () => {
-    // Against a backend with no /record/arm nothing is written before ROLL,
-    // but the schema is not frozen, the 409s arrive late and the episode index
-    // is a guess. Which of the two gates is in force has to be visible.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { ...armedRec, localGate: true }, menu);
-    expect(text()).toContain("(local gate)");
-  });
-
-  it("paints the frame count once frames are landing", () => {
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, rollingRec, menu);
-    expect(text()).toContain("● REC ep 12 · 412");
-    expect(text()).toContain("A/X to END");
-  });
-
-  it("names the take off the gate's index, and never off the dataset count", () => {
-    // The two fields exist because they are two facts. `episodeIndex` names
-    // the take in hand; `datasetCount` is how big the dataset is. They agree
-    // on the happy path — 0-based sequential indices into a dataset nothing
-    // has pruned — and that agreement is exactly what made one field look
-    // like enough. Pin them DISAGREEING, which is the state a prune produces
-    // and the state no single field can represent.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { ...armedRec, episodeIndex: 12, datasetCount: 99 }, menu);
-    expect(text()).toContain("◆ ARMED ep 12");
-    expect(text()).not.toContain("ep 99");
-  });
-
-  it("names the take off this page when the backend has no gate index", () => {
-    // The retirement, and the whole of it. `episode_index` is absent on a
-    // backend with no start gate, and null on a gated one whenever nothing is
-    // armed — the recorder sets it at ARM and clears it at STOP. What used to
-    // fill that hole was the dataset count, which is right only by
-    // coincidence. `take 3` is true of this page-load; `ep 34` off a count
-    // would be a claim about a dataset this page cannot make.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { state: "armed", recording: false, episode_frames: 0,
-                        takes: 2, datasetCount: 34 }, menu);
-    expect(text()).toContain("◆ ARMED take 3");
-    expect(text()).not.toContain("ep 34");
-    expect(text()).not.toContain("ep ");
-  });
-
-  it("counts the dataset on the idle row, where the gate has no index to give", () => {
-    // The one reader that wants the COUNT, and the row that paints in exactly
-    // the state where `episodeIndex` is null by construction. It was painted
-    // and unpinned: the width tests measured the row, so a wrong number would
-    // have fitted the box perfectly and said nothing.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { recording: false, episode_frames: 0, datasetCount: 34 },
-             menu);
-    expect(text()).toContain("hold A/X to ARM  (34 in dataset)");
-  });
-
-  it("takes the whole box for the decision, and names both gestures", () => {
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, rollingRec, { ...menu, endPrompt: true });
-    expect(text()).toContain("TAKE ENDED · 412 frames");
-    expect(text()).toContain("L click = KEEP");
-    expect(text()).toContain("R click = REDO");
-    expect(text()).toContain("L = keep · R = redo");
-    // The surprising part, said out loud: the recorder has not stopped, and
-    // the tail of the episode is the operator holding still while they pick.
-    expect(text()).toContain("still rolling until you pick");
-    expect(text()).not.toContain("SIZE");
-  });
-
-  it("swaps the mnemonic for the refusal without moving a row", () => {
-    // The refusal takes the mnemonic's row rather than adding one: a box that
-    // changes height under the operator reads as a fault of its own.
-    const plain = stubCtx();
-    paintHud(plain.ctx, {}, rollingRec, { ...menu, endPrompt: true });
-    const refused = stubCtx();
-    paintHud(refused.ctx, {}, rollingRec,
-             { ...menu, endPrompt: true, homeRefused: true });
-    expect(refused.text()).toContain("home refused mid-take — pick first");
-    expect(refused.text()).not.toContain("L = keep · R = redo");
-    expect(refused.calls.map((c) => [c.x, c.y]))
-      .toEqual(plain.calls.map((c) => [c.x, c.y]));
-  });
-
-  it("puts an unfaithful rate above every other complaint", () => {
-    // One line, worst first: a health strip that lists everything is a strip
-    // nobody reads while driving. WHETHER the rate is unfaithful is the
-    // recorder's verdict; what this pins is the ORDER, which is the HUD's own
-    // decision and the only half of it this file owns.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { ...rollingRec, fpsMeasured: 21, fpsDeclared: 30,
-                        rateFaithful: false,
-                        worstDrop: "left_wrist", skipped_frames: 40 }, menu);
-    expect(text()).toContain("RATE 21.00/30.00 fps");
-    expect(text()).not.toContain("dropping: left_wrist");
-    expect(text()).not.toContain("40 frames dropped");
-  });
-
-  it("names the one cable to go and check when the rate is fine", () => {
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { ...rollingRec, fpsMeasured: 29, fpsDeclared: 30,
-                        rateFaithful: true,
-                        worstDrop: "left_wrist", skipped_frames: 40 }, menu);
-    expect(text()).toContain("dropping: left_wrist");
-    expect(text()).not.toContain("RATE");
-  });
-
-  it("counts shed rows while the take is still being driven", () => {
-    // A degraded read is a dropped frame, not a recorded one (port invariant
-    // 9), so a take shedding rows says so now — not in review.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { ...rollingRec, skipped_frames: 40 }, menu);
-    expect(text()).toContain("40 frames dropped");
-  });
-
-  it("says why the gate dropped, and says it while idle", () => {
-    // Not an error: it is the gate telling the operator why it un-armed. Idle
-    // is exactly when they are standing there wondering why nothing is armed.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, { state: "idle", recording: false, episode_frames: 0,
-                        invalidatedReason: "arm set changed" }, menu);
-    expect(text()).toContain("GATE DROPPED — arm set changed");
-  });
-
-  it("shows the arm set, and nothing at all when there is none to show", () => {
-    // A session started on the wrong preset is otherwise discovered 60 s into
-    // a take, when the arm that moves is not the one the hand meant.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, armedRec, { ...menu, armSet: { left: "right", right: "left" } });
-    expect(text()).toContain("ARMS  L→right · R→left");
-
-    const unknown = stubCtx();
-    paintHud(unknown.ctx, {}, armedRec, menu);
-    expect(unknown.text()).not.toContain("ARMS");
-  });
-
-  it("marks the knobs the operator owns in the tuning list", () => {
-    // A value that survives a reconnect while its neighbours revert is
-    // otherwise witchcraft, and the marker is the only place it is explained.
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, {}, null, { ...menu, tuning: {
-      open: true, index: 0,
-      values: { scale_translation: 2, scale_rotation: 1.6 },
-      dirty: ["scale_translation"],
-    } });
-    expect(text()).toContain("◆ 2.000");
-    expect(text()).toContain("1.600");
-    expect(text()).not.toContain("◆ 1.600");
-    expect(text()).toContain("◆ = yours");
-  });
-
-  it("never throws on a status the poll has not answered yet", () => {
-    // This runs inside the XR loop, where a throw looks like the page dying
-    // with a headset on and there is no console to read it from.
-    const { ctx } = stubCtx();
-    expect(() => paintHud(ctx, null, null, null)).not.toThrow();
-    expect(() => paintHud(ctx, null, null, { ...menu, endPrompt: true }))
-      .not.toThrow();
-    expect(() => paintHud(ctx, {}, { recording: false, episode_frames: 0 }, menu))
-      .not.toThrow();
-    expect(() => paintHud(ctx, {}, {
-      ...rollingRec, episodeIndex: null, datasetCount: null,
-      worstDrop: null, fpsMeasured: null,
-      fpsDeclared: null, invalidatedReason: null,
-    }, { ...menu, armSet: null, tuning: null })).not.toThrow();
-  });
-});
-
-describe("every painted row fits the box it is painted in", () => {
-  // The panel canvas is a fixed 1024 px wide, the status column is clipped at
-  // 563 px and the menu box has 392 px of usable width. A row that exceeds its
-  // column is not a layout wobble — the canvas clips it, so the END of the row
-  // silently disappears, and it is the end of a row that carries the payload:
-  // `... · B/Y = E-STOP` was being cut off the HUD entirely before this test
-  // existed. Monospace advances at 0.6 em, so the width is computable and this
-  // is checkable here rather than on someone's face in a headset.
-  const ADVANCE = 0.6;
-  const W = 1024;
-  const leftW = Math.round(W * 0.55) - 24;
-  const boxW = Math.round(W * 0.42);
-  const boxX = W - boxW - 24;
-
-  /** Every row paintHud drew, with the room it actually had. */
-  function overflows(calls: ReturnType<typeof stubCtx>["calls"]) {
-    const bad: string[] = [];
-    for (const c of calls) {
-      const px = Number(/(\d+)px/.exec(c.font)?.[1] ?? 22);
-      const inMenu = c.x >= boxX;
-      const left = inMenu ? boxX + 18 : 24;
-      const right = inMenu ? boxX + boxW - 18 : leftW;
-      const room = c.align === "right" ? c.x - left : right - c.x;
-      if (c.text.length * px * ADVANCE > room) {
-        bad.push(`${c.text}  (${c.text.length} chars @ ${px}px, ${room}px room)`);
-      }
-    }
-    return bad;
-  }
-
-  const paints: [string, () => ReturnType<typeof stubCtx>][] = [
-    ["idle", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving,
-               { recording: false, episode_frames: 0, datasetCount: 12 },
-               { ...menu, stance: "behind", armSet: { left: "left_arm", right: "right_arm" } });
-      return s;
-    }],
-    ["armed", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, armedRec,
-               { ...menu, stance: "behind", armSet: { left: "left_arm", right: "right_arm" } });
-      return s;
-    }],
-    ["armed, local gate", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, { ...armedRec, localGate: true }, menu);
-      return s;
-    }],
-    ["rolling", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, rollingRec, { ...menu, stance: "front" });
-      return s;
-    }],
-    ["prompt", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, { ...rollingRec, state: "prompt" },
-               { ...menu, endPrompt: true });
-      return s;
-    }],
-    ["prompt, home refused", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, { ...rollingRec, state: "prompt" },
-               { ...menu, endPrompt: true, homeRefused: true });
-      return s;
-    }],
-    ["tuning", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, null, {
-        ...menu,
-        tuning: { open: true, index: 2, values: { scale_translation: 1.6 },
-                  dirty: ["scale_translation"] },
-      });
-      return s;
-    }],
-    ["precision", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, null, { ...menu, precision: true });
-      return s;
-    }],
-    ["a wrist out of twist", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, null, menu, { left: { driving: true, orient_residual: 0.9 } });
-      return s;
-    }],
-    ["a collision hold", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, { ...driving, collision: { enabled: true, slack_m: -0.004, limited: true } },
-               rollingRec, menu);
-      return s;
-    }],
-    ["a sagging rate", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving,
-               { ...rollingRec, fpsMeasured: 21.7, fpsDeclared: 30 }, menu);
-      return s;
-    }],
-    ["a drop source", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving,
-               { ...rollingRec, worstDrop: "left_wrist", skipped_frames: 128 }, menu);
-      return s;
-    }],
-    ["skipped frames", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, { ...rollingRec, skipped_frames: 1284 }, menu);
-      return s;
-    }],
-    ["a hand that stopped tracking mid-countdown", () => {
-      // The widest this row ever gets. At the column's 28px it needed 487px
-      // against 419px of room, so the operator was being told a hand had
-      // stopped tracking in a sentence that ran off the panel.
-      const s = stubCtx();
-      paintHud(s.ctx, {
-        state: "acquiring",
-        acquire: {
-          left: { authority: "acquiring", remaining_ms: 1200, reason: "no_tracking" },
-          right: { authority: "acquiring", remaining_ms: 1200, reason: "no_tracking" },
-        },
-      }, null, menu);
-      return s;
-    }],
-    ["a solo session's absent side", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, {
-        state: "driving",
-        acquire: {
-          left: { authority: "held", remaining_ms: null, reason: "no_arm" },
-          right: { authority: "driving", remaining_ms: null, reason: "" },
-        },
-      }, null, { ...menu, armSet: { left: null, right: "so101_right" } },
-      { right: { driving: true, sigma_min: 0.0312 } });
-      return s;
-    }],
-    ["a long error the backend handed up", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, {
-        state: "fault",
-        last_error: "shoulder_pan overloaded and dropped torque mid-sweep; "
-          + "four joints left energised, see /estop",
-      }, null, menu);
-      return s;
-    }],
-    ["no cameras at all", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, null, { ...menu, views: [], activeViewId: null });
-      return s;
-    }],
-    ["camera labels and arm ids longer than the box", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, null, {
-        ...menu,
-        views: [{ id: "a", label: "over the shoulder threequarter (right_arm)" },
-                { id: "b", label: "left wrist gripper close-up (left_arm)" }],
-        activeViewId: "a",
-        armSet: { left: "so101_left_arm_lower_bench",
-                  right: "so101_right_arm_upper_bench" },
-      });
-      return s;
-    }],
-    ["a gate that dropped", () => {
-      const s = stubCtx();
-      paintHud(s.ctx, driving, {
-        recording: false, episode_frames: 0,
-        invalidatedReason: "arm set changed",
-      }, menu);
-      return s;
-    }],
-  ];
-
-  for (const [name, paint] of paints) {
-    it(`fits: ${name}`, () => {
-      expect(overflows(paint().calls)).toEqual([]);
-    });
-  }
-
-  it("keeps the E-STOP binding inside the status column", () => {
-    // The specific regression: this row is the only place in the headset the
-    // operator can read what B/Y does, and E-STOP leads it so that even a
-    // clip cannot eat the part that matters.
-    const { ctx, calls } = stubCtx();
-    paintHud(ctx, {}, null, menu);
-    const hint = calls.find((c) => c.text.includes("E-STOP"));
-    expect(hint).toBeDefined();
-    expect(hint!.text.startsWith("B/Y = E-STOP")).toBe(true);
-    expect(hint!.text.length).toBeLessThanOrEqual(STATUS_MAX_CHARS);
-  });
-
-  it("states the budgets it is checking, so a change to one is deliberate", () => {
-    expect(MENU_MAX_CHARS).toBe(36);
-    expect(STATUS_MAX_CHARS).toBe(39);
-  });
-});
 
 describe("worstDropSource", () => {
   // Invariant 9 makes a degraded read a dropped frame, so a take that is
@@ -828,49 +424,5 @@ describe("worstDropSource", () => {
   it("reads a half-filled report rather than needing both maps", () => {
     expect(worstDropSource({ arms: { right_arm: 5 } })).toBe("arm right_arm");
     expect(worstDropSource({ cameras: { top: 5 } })).toBe("cam top");
-  });
-});
-
-describe("the rate line the HUD warns on", () => {
-  const at = (
-    measured: number, declared: number, rateFaithful?: boolean | null,
-  ) => {
-    const { ctx, text } = stubCtx();
-    paintHud(ctx, driving, {
-      ...rollingRec, fpsMeasured: measured, fpsDeclared: declared, rateFaithful,
-    }, menu);
-    return text();
-  };
-
-  it("renders the recorder's verdict and holds no band of its own", () => {
-    // The HUD can no longer drift from the arm-time refusal, because it has no
-    // threshold to drift with: the SAME two numbers warn or stay quiet purely
-    // on the verdict the recorder published.
-    expect(at(29.85, 30, false)).toContain("RATE 29.85/30.00 fps");
-    expect(at(29.85, 30, true)).not.toContain("RATE 29.85/30.00");
-  });
-
-  it("keeps the two numbers distinct at every fps a take can hold", () => {
-    // THE reason for two decimals, and the assertion that fails if anyone
-    // trims one. The warning fires at |measured - fps| / fps > tol, so at d
-    // decimals the numbers print IDENTICALLY while the line is red whenever
-    // fps < 10^(2-d). `RATE 30/30 fps` is d=0 at fps=30 and it shipped; d=1
-    // does the same below 10 fps. A 5 fps take is unusual, not impossible —
-    // `hz` is a float — and a red line whose two numbers match reads as a
-    // broken HUD, which is an answer, and the wrong one.
-    expect(at(4.97, 5, false)).toContain("RATE 4.97/5.00 fps");
-    expect(at(4.97, 5, false)).not.toContain("5.0/5.0");   // d=1 would collide
-    expect(at(29.85, 30, false)).not.toContain("30/30");   // d=0 did collide
-  });
-
-  it("names the missing band instead of inventing one", () => {
-    // A backend publishing no tolerance leaves this page with no band at all.
-    // The old 0.9 fallback is worse than nothing here: read as a TOLERANCE it
-    // means +/-90% and cannot fire in either direction — a check that
-    // reassures and protects nothing, sitting beside a readout an operator
-    // trusts.
-    const t = at(26, 30, null);
-    expect(t).toContain("no band published");
-    expect(t).not.toContain("RATE 26.00/30.00");
   });
 });

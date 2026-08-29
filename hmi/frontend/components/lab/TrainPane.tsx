@@ -73,11 +73,14 @@ export function TrainPane({
   /** One list read, TAGGED with what it answers. `loading` is derived from the
    *  tag rather than raised at the top of the effect: "this filter has no
    *  answer yet" is what the spinner means, and raising it in the effect body
-   *  is a cascading render on every read. */
+   *  is a cascading render on every read. `now` rides along so a running row's
+   *  duration is measured against the moment its status was read, never
+   *  against a render-time clock. */
   const [read, setRead] = useState<{
     key: string;
     runs: RunSummary[];
     error: string | null;
+    now: number;
   } | null>(null);
   /** 404/501 anywhere in `/lab`: this build predates the Lab. A property of
    *  the backend, so it replaces the pane rather than reading as a failure. */
@@ -130,16 +133,21 @@ export function TrainPane({
       try {
         const { runs: rows } = await lab.runs({ kind: filters.kind, status: filters.status });
         if (!alive.current || g !== gen.current) return;
-        setRead({ key: listKey, runs: rows, error: null });
+        setRead({ key: listKey, runs: rows, error: null, now: Date.now() / 1000 });
       } catch (e) {
         if (!alive.current || g !== gen.current) return;
         if (isMissing(e)) {
           setNoLab(true);
-          setRead({ key: listKey, runs: [], error: null });
+          setRead({ key: listKey, runs: [], error: null, now: Date.now() / 1000 });
         } else if (!quiet) {
           // The rows already on screen are kept: a failed refresh is not
           // evidence that the runs are gone.
-          setRead((prev) => ({ key: listKey, runs: prev?.runs ?? [], error: reason(e) }));
+          setRead((prev) => ({
+            key: listKey,
+            runs: prev?.runs ?? [],
+            error: reason(e),
+            now: prev?.now ?? 0,
+          }));
         }
       }
     },
@@ -240,13 +248,13 @@ export function TrainPane({
     : `${runs.length} run${runs.length === 1 ? "" : "s"}`;
 
   return (
-    <div className="grid min-h-0 grid-cols-[24rem_minmax(0,1fr)] gap-2 overflow-hidden p-2">
-      <div className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)] gap-2 overflow-hidden">
+    <div className="grid min-h-0 grid-cols-[26rem_minmax(0,1fr)] gap-2 overflow-hidden p-2">
+      <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2 overflow-hidden">
         {/* The launcher's form is taller than a short viewport, and an auto
             grid row would let it push the run list to nothing. Capped here so
-            it scrolls inside its own Panel instead — 60vh leaves the filters
-            and four or five run rows visible on the 720px-high case the
-            cockpit already calls `short`. */}
+            it scrolls inside its own Panel instead — 60vh leaves the runs
+            panel visible on the 720px-high case the cockpit already calls
+            `short`. */}
         <div className="flex max-h-[60vh] min-h-0 flex-col gap-1.5 overflow-hidden">
           {dsError && <Refusal>datasets could not be read: {dsError}</Refusal>}
           <div className="flex shrink-0 items-center justify-end">
@@ -270,12 +278,12 @@ export function TrainPane({
           />
         </div>
 
-        <Panel className="shrink-0">
-          <RunFilters value={filters} onChange={setFilters} />
-        </Panel>
-
+        {/* Filters and the list are ONE panel: the filters only ever answer
+            "which of these rows", and two cards with a gap between them read
+            as two unrelated things. */}
         <Panel>
           <PanelHead title="runs" right={listRight} />
+          <RunFilters value={filters} onChange={setFilters} />
           <RunList
             runs={shown}
             loading={loading}
@@ -284,6 +292,7 @@ export function TrainPane({
             onSelect={setSelected}
             compare={compare}
             onToggleCompare={toggleCompare}
+            now={read?.now ?? 0}
           />
         </Panel>
       </div>

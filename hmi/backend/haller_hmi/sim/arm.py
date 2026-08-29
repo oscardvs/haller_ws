@@ -98,7 +98,8 @@ class SimArmHandle:
         # World lifecycle is owned by ArmManager; nothing per-arm to release.
         pass
 
-    def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
+    def send_goal(self, goal_deg: dict[str, float], *,
+                  speed_cap_deg_s: float | None = None) -> dict[str, float]:
         self.guard.assert_manual()
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
         now = time.monotonic()
@@ -122,7 +123,9 @@ class SimArmHandle:
         # on a fixed per-call cap and reintroduce the over-speed this fixed.
         dt = (1.0 / self.motion.ramp_hz) if self._last_command_at is None \
             else (now - self._last_command_at)
-        max_step_deg = step_budget_deg(dt, self.motion.max_speed_deg_s)
+        cap = self.motion.max_speed_deg_s if speed_cap_deg_s is None \
+            else speed_cap_deg_s
+        max_step_deg = step_budget_deg(dt, cap)
         capped = limit_step(self._last_commanded, measurable, max_step_deg)
         # Translate snake_case → CamelCase + add arm prefix for the world.
         mjcf_goal = {

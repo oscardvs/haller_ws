@@ -21,6 +21,7 @@ import {
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { headsetOrigin, isLoopback } from "@/lib/config";
 import { useTelemetry, type TelemetryFrame } from "@/lib/telemetry";
 import { STANCES, useSoloHand, useStance } from "@/lib/stance";
 import { DeadManIndicator } from "@/components/DeadManIndicator";
@@ -42,10 +43,15 @@ export function TeleopTab({
   arms,
   cameras,
   viewport,
+  onOpenCollect,
 }: {
   arms: ConfigArm[];
   cameras: { source: string }[];
   viewport: Viewport;
+  /** Hands the session over to the Data tab's collect page — the path from
+   *  "session running" to "record a dataset with it" exists in both
+   *  directions. */
+  onOpenCollect?: () => void;
 }) {
   const running = useTelemetry((s) => s.lastFrame?.human_teleop?.running ?? false);
   const leftArm = useTelemetry((s) => s.lastFrame?.human_teleop?.left_arm ?? null);
@@ -63,7 +69,7 @@ export function TeleopTab({
       style={{ gridTemplateColumns: "minmax(300px,352px) minmax(0,1fr)" }}
     >
       <div className="flex min-h-0 flex-col gap-2 overflow-y-auto">
-        <SessionLauncher arms={arms} running={running} />
+        <SessionLauncher arms={arms} running={running} onOpenCollect={onOpenCollect} />
         <HeadsetEntry />
         <SimLeaderCard arms={arms} />
         {hasSimCamera && <SimViewTile placement="inline" />}
@@ -146,9 +152,11 @@ export function TeleopTab({
 function SessionLauncher({
   arms,
   running,
+  onOpenCollect,
 }: {
   arms: ConfigArm[];
   running: boolean;
+  onOpenCollect?: () => void;
 }) {
   // Not component state: the stance is remembered across reloads and shared
   // with the headset page in the same browser, so it lives in lib/stance.ts.
@@ -334,6 +342,30 @@ function SessionLauncher({
             {running ? "stop session" : "start session"}
           </button>
         </div>
+
+        {/* The same rest-pose note the Collect card carries. Both surfaces
+            start a session, so both have to say it — see CollectSessionCard
+            for the incident that put it there. */}
+        {!running && (
+          <div className="rounded-md border border-input px-2.5 py-1.5 text-[10px] text-pretty text-muted-foreground">
+            Park the arm in the <span className="text-foreground font-medium">L
+            rest position</span> before starting — upper arm up, forearm level.
+            A sagged arm reads outside its joint limits, fails preflight, and
+            can trip a servo into overload on the first move.
+          </div>
+        )}
+
+        {/* Stays live while a session runs — handing off to the recorder is
+            the whole point of the link. */}
+        {onOpenCollect && (
+          <button
+            type="button"
+            onClick={onOpenCollect}
+            className="h-7 rounded-md border border-border bg-secondary label-micro tracking-[0.12em] text-muted-foreground hover:text-foreground"
+          >
+            record a dataset with this session →
+          </button>
+        )}
       </div>
     </div>
   );
@@ -656,16 +688,17 @@ function HeadsetEntry() {
   // then corrects is a hydration mismatch. Same idiom as SettingsTab's theme
   // segment: a store that is false on the server and true on the client.
   const mounted = useSyncExternalStore(subscribeNever, () => true, () => false);
-  const origin = mounted ? window.location.origin : null;
+  // NOT window.location.origin: on the Quest "localhost" is the headset
+  // itself. The bundle's baked backend URL minus `/api` is the single HTTPS
+  // origin up.sh serves; the page's own origin is only the dev fallback.
+  const origin = headsetOrigin(mounted ? window.location.origin : null);
 
   const url = origin === null ? null : `${origin}${HEADSET_PATH}`;
   // WebXR only runs in a secure context. Reading a plain-http URL off this
   // card and typing it into the Quest gets a page that loads and then refuses
   // to enter VR, which is a long way to walk to find out.
   const insecure =
-    origin !== null &&
-    !origin.startsWith("https://") &&
-    !/^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(origin);
+    origin !== null && !origin.startsWith("https://") && !isLoopback(origin);
 
   const copy = useCallback(() => {
     if (!url) return;

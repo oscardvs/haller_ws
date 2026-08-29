@@ -33,3 +33,4 @@ dist/
 # server). Debug debris, not work product — the ones committed before this
 # rule stay tracked on purpose.
 .playwright-mcp/
+hmi/backend/outputs/

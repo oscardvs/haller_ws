@@ -103,11 +103,9 @@ export function useSticky<T>(key: string, initial: T): [T, (v: T) => void] {
   return [value, set];
 }
 
-/** Dataset repo slug — the one answer to what a take is called, whichever
- *  surface started it. */
-export function slugify(s: string): string {
-  return (
-    s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 60) ||
-    "task"
-  );
+/** Write a sticky value from outside the hook — for steering a surface the
+ *  operator is not looking at yet. Read fresh at mount, so a tab that is
+ *  unmounted picks it up; one already mounted does not. */
+export function primeSticky<T>(key: string, value: T): void {
+  stickyValues.set(key, value);
 }

@@ -597,8 +597,10 @@ class IdleSampler:
     A cockpit with no session still needs live arms, and the recorder still
     needs a measured rate to refuse against before a session ever starts. This
     runs at telemetry's cadence and steps aside the instant a session attaches
-    — `publish_once` returns None and this simply skips, so there is no
-    stand-down handshake to get wrong.
+    — `tick_once` checks the bus's producer before it so much as reads, so
+    there is no stand-down handshake to get wrong and no idle read left on
+    the wire beside a session's writes (see `tick_once` for why the check
+    must precede the read).
 
     Takes a `sample` callable rather than the arm manager so this module stays
     stdlib-only: the wiring that knows about arms and ROS lives in the lifespan
@@ -622,7 +624,28 @@ class IdleSampler:
         return self._thread is not None and self._thread.is_alive()
 
     def tick_once(self) -> TickSample | None:
-        """One sample, published if the bus is free. Synchronous, for tests."""
+        """One sample, published if the bus is free. Synchronous, for tests.
+
+        The ownership check comes BEFORE `self._sample()`, and that ordering
+        is the point, not an optimisation. On hardware the sample callable is
+        a serial-bus read of every servo, and `publish_once` refusing the
+        RESULT does not un-send the read: sampled-then-refused, this thread
+        kept transmitting on the half-duplex Feetech line at its full cadence
+        for as long as a session ran beside it — colliding with the session
+        thread's goal writes and its own reads (`arm.py` serialises bus access
+        by architecture, not by locks). Measured on the solo rig 2026-08-29:
+        a continuous "no status packet" storm for a whole session, corrupted
+        reseeds, dropped goals.
+
+        A session attaching between this check and the read can still overlap
+        it for at most one in-flight sample at handover — the same one-shot
+        race the effort path already tolerates — which is why the session
+        seeds its own state only after claiming the bus. Holding the bus lock
+        across a hardware read would close that window and is worse: it would
+        block the session's attach for the duration of every idle read.
+        """
+        if self._bus.producer_name is not None:
+            return None
         fields = self._sample()
         if fields is None:
             return None

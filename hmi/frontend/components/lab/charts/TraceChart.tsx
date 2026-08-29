@@ -15,11 +15,14 @@
  * the gap between them is tracking error. It is the most useful reading on
  * this panel and it cost one more series per channel to draw.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 
 import { armGroups, isDrawableTrace, isGripperChannel, shortChannel, type Trace } from "@/lib/lab";
 import { Chip, Panel, PanelHead } from "@/components/lab/ui";
-import { ChartLegend, LineChart, type Series } from "./LineChart";
+import {
+  ChartLegend, LineChart, ProbeLineChart, useElementHeight, type Series,
+} from "./LineChart";
 import { extent, padDomain, secondsTickFormat, seriesColor } from "./svg";
 
 /** Two arms have to fit above the fold with the player; one arm gets the room
@@ -28,6 +31,10 @@ import { extent, padDomain, secondsTickFormat, seriesColor } from "./svg";
 const HEIGHT_ONE = 128;
 const HEIGHT_MANY = 92;
 
+/** What a row spends that is not plot: py-2, the legend line and the border.
+ *  Subtracted when the zoomed rows split the overlay's height. */
+const ROW_CHROME = 34;
+
 const sideLabel = (side: string) => (side === "arm" ? "arm" : `${side} arm`);
 
 export function TraceChart({
@@ -35,12 +42,19 @@ export function TraceChart({
   playheadT,
   overlay,
   onOverlay,
+  zoomed = false,
+  onZoom,
 }: {
   trace: Trace | null;
   /** Episode-relative seconds from the player, or null when nothing plays. */
   playheadT: number | null;
   overlay: boolean;
   onOverlay?: (v: boolean) => void;
+  /** Filling the analysis column as an overlay rather than tiling under the
+   *  player. The rows split the overlay's height instead of taking `HEIGHT_*`. */
+  zoomed?: boolean;
+  /** Toggles `zoomed`; absent, the header carries no zoom control. */
+  onZoom?: (zoomed: boolean) => void;
 }): React.ReactElement {
   // A partial body arriving with a 200 is "no trace", not a render-phase throw
   // that takes the review pane down with it. See `isDrawableTrace`.
@@ -91,7 +105,14 @@ export function TraceChart({
   );
 
   const channels = groups.reduce((n, g) => n + g.channels.length, 0);
-  const height = groups.length > 1 ? HEIGHT_MANY : HEIGHT_ONE;
+
+  /** The zoomed rows' box. Measured rather than fixed: the overlay is
+   *  whatever the analysis column happens to be tall, and two arms split it. */
+  const [rowsBox, setRowsBox] = useState<HTMLDivElement | null>(null);
+  const rowsH = useElementHeight(rowsBox);
+  const height = zoomed
+    ? Math.max(HEIGHT_ONE, Math.floor((rowsH - groups.length * ROW_CHROME) / Math.max(1, groups.length)))
+    : groups.length > 1 ? HEIGHT_MANY : HEIGHT_ONE;
 
   return (
     <Panel className="min-h-0 flex-1">
@@ -109,9 +130,23 @@ export function TraceChart({
             action overlay
           </Chip>
         )}
+        {onZoom && (
+          <button
+            type="button"
+            onClick={() => onZoom(!zoomed)}
+            aria-label={zoomed ? "restore traces chart" : "maximize traces chart"}
+            aria-pressed={zoomed}
+            title={zoomed ? "back to the tiled layout (esc)" : "fill the analysis column"}
+            className="inline-flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-[3px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {zoomed
+              ? <Minimize2 size={11} aria-hidden />
+              : <Maximize2 size={11} aria-hidden />}
+          </button>
+        )}
       </PanelHead>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div ref={setRowsBox} className="min-h-0 flex-1 overflow-y-auto">
         {trace === null || groups.length === 0 ? (
           <div className="px-2.5 py-2">
             <LineChart
@@ -158,7 +193,7 @@ export function TraceChart({
                   {sideLabel(g.side)}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <LineChart
+                  <ProbeLineChart
                     label={`${sideLabel(g.side)} joint traces, degrees`}
                     series={series}
                     height={height}

@@ -460,6 +460,16 @@ def test_the_idle_sampler_publishes_what_its_source_returns():
 
 
 def test_the_idle_sampler_stands_aside_for_a_session_and_returns_after():
+    """While a session holds the bus, the sampler must not ASK its source.
+
+    The claim is about the read, not the publish. On hardware the source is
+    a serial-bus read of every servo, and a refused publish does not un-send
+    it: the previous version of this test pinned `calls["n"] == 3` with the
+    comment "the source is still asked, the bus just refuses" — written from
+    the code, inheriting its blind spot — and the rig it described spent a
+    whole session colliding 20 Hz idle reads with the session's goal writes
+    on a lock-free half-duplex line (solo rig, 2026-08-29).
+    """
     bus = TickBus()
     calls = {"n": 0}
 
@@ -472,10 +482,11 @@ def test_the_idle_sampler_stands_aside_for_a_session_and_returns_after():
 
     session = bus.attach_producer("session")
     assert sampler.tick_once() is None
+    assert calls["n"] == 1, "an owned bus means the source is never touched"
     session.detach()
 
     assert sampler.tick_once() is not None
-    assert calls["n"] == 3, "the source is still asked, the bus just refuses"
+    assert calls["n"] == 2
 
 
 def test_a_sample_carries_the_handles_snapshot_verbatim():

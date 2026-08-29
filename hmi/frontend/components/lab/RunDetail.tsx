@@ -332,8 +332,13 @@ export function RunDetail({
         </div>
       </Panel>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-        <Panel className="shrink-0">
+      {/* Metrics get whatever height the column has; checkpoints and the log
+          take what they need below, capped. Before this split the three shared
+          one long scroll, and reading the log meant scrolling past every
+          chart. The metrics Panel is `relative` because MetricGrid's maximised
+          chart positions its overlay against it. */}
+      <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)_auto] gap-2 overflow-hidden">
+        <Panel className="relative">
           <PanelHead
             title="metrics"
             right={
@@ -342,19 +347,21 @@ export function RunDetail({
                 : undefined
             }
           />
-          <div className="p-2.5">
+          <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
             <MetricGrid rows={rows} steps={spec.steps ?? null} />
           </div>
         </Panel>
 
-        {run && <CheckpointList runId={runId} status={run.status} />}
+        <div className="flex max-h-[45%] min-h-0 flex-col gap-2 overflow-y-auto">
+          {run && <CheckpointList runId={runId} status={run.status} />}
 
-        <Panel className="shrink-0">
-          <PanelHead title="log" right={logLines > 0 ? `${logLines} lines` : undefined} />
-          <div className="p-2.5">
-            <RunLogTail text={log} />
-          </div>
-        </Panel>
+          <Panel className="shrink-0">
+            <PanelHead title="log" right={logLines > 0 ? `${logLines} lines` : undefined} />
+            <div className="p-2.5">
+              <RunLogTail text={log} />
+            </div>
+          </Panel>
+        </div>
       </div>
     </div>
   );

@@ -21,6 +21,7 @@ import { useSticky } from "@/components/cockpit/lib";
 import { CollectPane } from "@/components/lab/CollectPane";
 import { ReviewPane } from "@/components/lab/ReviewPane";
 import { TrainPane } from "@/components/lab/TrainPane";
+import type { ConfigArm } from "@/components/cockpit/teleopPresets";
 import type { CameraInfo } from "@/lib/api";
 
 type SubView = "collect" | "review" | "train";
@@ -33,9 +34,13 @@ const VIEWS = [
 
 export function DataTab({
   cameras,
+  arms,
   onCameraRecord,
 }: {
   cameras: CameraInfo[];
+  /** Off /config — collect's session card offers only the presets these arms
+   *  can actually run. */
+  arms: ConfigArm[];
   onCameraRecord: (id: string, record: boolean) => void;
 }) {
   const [view, setView] = useSticky<SubView>("lab.subview", "collect");
@@ -76,6 +81,7 @@ export function DataTab({
         {view === "collect" && (
           <CollectPane
             cameras={cameras}
+            arms={arms}
             onCameraRecord={onCameraRecord}
             onOpenDataset={openInReview}
           />

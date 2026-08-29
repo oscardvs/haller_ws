@@ -36,10 +36,10 @@ motion:
   max_speed_deg_s: 90.0
   large_move_deg: 30.0
   ramp_hz: 50.0
-  # The session filter at its default 0.100 s is the hidden half of the
-  # ~26 deg/s ceiling. 0.02 s keeps one pole against servo-rattling jitter
-  # while closing ~57% of the gap per 60 Hz tick — effectively out of the way.
-  lpf_tau_s: 0.02
+  # 0.0 = filter fully OFF (legal since 2026-08-29) — this is the
+  # everything-off config, and the 0.02 it used to carry was only ever
+  # "as close to off as validation allowed". The kit ships no output filter.
+  lpf_tau_s: 0.0
 
 # Startup values for the live-tunable mapping knobs (vr_teleop/config.py).
 # Same keys and same clamps as a headset config_update; the panel can still

@@ -16,6 +16,8 @@ from .calibration import (
     CalibrationManager,
     CalibrationState,
     ConflictError,
+    RecenterError,
+    SweepWrapError,
     UnmovedJointsError,
     WrongStateError,
     _calibration_paths,
@@ -239,8 +241,18 @@ async def _lifespan(app: FastAPI):
     # below the time it takes an operator to reach for A/X — but it is a real
     # window, not zero, and a caller that arms programmatically on boot will see
     # it.
+    # A calibration sweep owns the serial line the way a session owns the
+    # tick, but it attaches no bus producer — its reads run inside
+    # telemetry's frame building on the asyncio thread. Stand the sampler
+    # down for the sweep's whole lifetime, or its thread reads beside the
+    # sweep on a lock-free half-duplex bus and the wizard's single-error
+    # abort dies on the first "Port is in use!". Telemetry then falls back
+    # to direct reads, which run on the SAME asyncio thread as the sweep
+    # and therefore cannot collide with it.
     idle_sampler = IdleSampler(human_teleop.tick_bus,
-                               sample=human_teleop.idle_sample,
+                               sample=lambda: (
+                                   None if calibration.current is not None
+                                   else human_teleop.idle_sample()),
                                hz=cfg.telemetry.hz)
     idle_sampler.start()
     # `task` is None on an all-real rig, and the recorder treats that as "these
@@ -437,6 +449,69 @@ async def post_arm_torque(arm_id: str, body: TorqueBody):
     else:
         handle.disable_torque()
     return {"ok": True, "torque": handle.torque_enabled}
+
+
+def _preflight_payload(arm_id: str) -> dict:
+    """One arm's last preflight verdict, in the shape the HMI can act on."""
+    report = arms.preflight_reports().get(arm_id)
+    if report is None:
+        return {"arm_id": arm_id, "ran": False, "ok": None, "message":
+                "no preflight has run for this arm"}
+    return {
+        "arm_id": arm_id,
+        "ran": True,
+        "ok": report.ok(),
+        "skipped": report.skipped,
+        "message": report.message(),
+        "out_of_range": list(report.out_of_range),
+        "calibration_problems": list(report.calibration_problems),
+        "calibration_warnings": list(report.calibration_warnings),
+        "torque_dropped": report.torque_dropped,
+        "torque_refused": list(report.torque_refused),
+        "mode": arms[arm_id].guard.mode.value,
+    }
+
+
+@app.get("/arm/{arm_id}/preflight")
+async def get_arm_preflight(arm_id: str):
+    """Why an arm is refusing, in the operator's own words.
+
+    Preflight has always run at connect and always logged its verdict; it has
+    never been READABLE from the HMI, so the first sign of a failed one was a
+    session that started, drove an arm outside its limits, and tripped a servo
+    into overload. The verdict is the thing that should have been on the
+    screen. 2026-08-28.
+    """
+    _arm_or_404(arm_id)
+    return _preflight_payload(arm_id)
+
+
+@app.post("/arm/{arm_id}/preflight")
+async def post_arm_preflight(arm_id: str):
+    """Re-run preflight, and clear the STOP if the arm now passes.
+
+    This is the "until an operator clears it" the failure log has always
+    promised and nothing has ever provided. The only way to re-check an arm
+    was to restart the backend — which drops torque, lets the arm sag, and
+    hands the next preflight a worse pose than the one it just refused. That
+    loop is unwinnable one joint at a time.
+
+    Re-running is NOT a way to dismiss the refusal: it re-reads the arm and
+    the verdict is whatever the hardware now says. A pose that still fails
+    still fails, and the arm stays in STOP.
+    """
+    handle = _arm_or_404(arm_id)
+    arms.rerun_preflight(arm_id)
+    payload = _preflight_payload(arm_id)
+    if payload.get("ok"):
+        # Preflight dropped torque on the way in; an arm that now passes is
+        # one the operator has physically fixed, so give it back the state a
+        # clean connect would have left it in.
+        handle.enable_torque()
+        handle.guard.set(Mode.MANUAL)
+        payload["mode"] = handle.guard.mode.value
+        payload["torque"] = handle.torque_enabled
+    return payload
 
 
 @app.get("/arm/{arm_id}/presets")
@@ -887,6 +962,8 @@ async def post_calibration_capture_neutral(arm_id: str):
     _require_calibration_session(arm_id)
     try:
         calibration.current.capture_neutral(handle)
+    except RecenterError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except WrongStateError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "state": calibration.current.state.value,
@@ -899,7 +976,7 @@ async def post_calibration_finish_sweep(arm_id: str):
     _require_calibration_session(arm_id)
     try:
         proposed = calibration.current.finish_sweep(handle)
-    except UnmovedJointsError as e:
+    except (UnmovedJointsError, SweepWrapError) as e:
         raise HTTPException(status_code=422, detail=str(e))
     except WrongStateError as e:
         raise HTTPException(status_code=409, detail=str(e))

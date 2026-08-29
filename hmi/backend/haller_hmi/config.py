@@ -68,8 +68,10 @@ class MotionConfig:
     # compound: at the default 0.100 s the session closes only ~28% of each
     # 30 Hz solve's (already capped) step before the next one arrives, and the
     # effective joint speed lands well under every configured limiter. Lower
-    # it (e.g. 0.02) to make max_speed_deg_s the actual binding limit; the
-    # cost is passing more controller jitter through to the servos.
+    # it to weaken that, or set it to 0 to disable the filter outright —
+    # which is the kit's configuration: no output filter, the IK's per-solve
+    # caps are the only shaping. The cost either way is passing more
+    # controller jitter through to the servos.
     lpf_tau_s: float = 0.100
 
     def __post_init__(self) -> None:
@@ -77,9 +79,10 @@ class MotionConfig:
             raise ValueError(
                 f"max_speed_deg_s must be positive, got {self.max_speed_deg_s!r}"
             )
-        if self.lpf_tau_s <= 0:
+        if self.lpf_tau_s < 0:
             raise ValueError(
-                f"lpf_tau_s must be positive, got {self.lpf_tau_s!r}"
+                f"lpf_tau_s must be >= 0 (0 disables the filter), "
+                f"got {self.lpf_tau_s!r}"
             )
         if self.large_move_deg <= 0:
             raise ValueError(

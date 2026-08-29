@@ -13,6 +13,7 @@
 import {
   act, cleanup, fireEvent, render, screen, waitFor, within,
 } from "@testing-library/react";
+import { createRef } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { AutoclassifyDialog } from "@/components/lab/AutoclassifyDialog";
@@ -22,10 +23,13 @@ import {
   DEFAULT_FILTERS, EpisodeFilters, type EpisodeFilterState,
 } from "@/components/lab/EpisodeFilters";
 import { EpisodeRow } from "@/components/lab/EpisodeRow";
+import { EpisodePlayer, type EpisodePlayerHandle } from "@/components/lab/EpisodePlayer";
 import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { PruneDialog } from "@/components/lab/PruneDialog";
 import { ReviewPane } from "@/components/lab/ReviewPane";
-import type { AutoclassPreview, LabEpisode, Mark } from "@/lib/lab";
+import { GripperChart } from "@/components/lab/charts/GripperChart";
+import { TraceChart } from "@/components/lab/charts/TraceChart";
+import type { AutoclassPreview, LabEpisode, Mark, Trace } from "@/lib/lab";
 
 const REPO = "local/so101_pick_cube";
 
@@ -918,5 +922,220 @@ describe("PaneBoundary", () => {
     );
     expect(screen.getByText("a chart")).toBeInTheDocument();
     expect(screen.queryByText(/could not be drawn/i)).not.toBeInTheDocument();
+  });
+});
+
+/* ─── the clickable transport ─────────────────────────────────────────── */
+
+describe("EpisodePlayer — the buttons are the keyboard, clicked", () => {
+  // The footer promises space and [ ] do what the buttons do. That promise
+  // holds only while both paths end in the same handlers, so these tests
+  // drive each path and assert on the SAME outcome: the media element's
+  // state and the speed readout.
+  const PACKED = ep({
+    episode_index: 2, label: 3, duration_s: 15.533,
+    videos: {
+      top: { chunk_index: 0, file_index: 1, from_timestamp: 0, to_timestamp: 15.533 },
+    },
+  });
+
+  function mountPlayer(ref?: React.RefObject<EpisodePlayerHandle | null>) {
+    render(
+      <EpisodePlayer
+        ref={ref}
+        repoId={REPO}
+        episode={PACKED}
+        videoKeys={["top"]}
+        videoKey="top"
+        onVideoKey={() => {}}
+        fps={30}
+        onTime={() => {}}
+      />,
+    );
+    return document.querySelector("video")!;
+  }
+
+  const rateButton = () =>
+    screen.getByRole("button", { name: /^playback rate/ });
+
+  beforeEach(() => {
+    // The rate is sticky by design ("a habit, not a property of the
+    // episode"), so it would otherwise bleed from one test into the next.
+    window.localStorage.clear();
+  });
+
+  it("plays and pauses by button, and says which state it is in", () => {
+    // jsdom's media element never plays, so the element's own verbs are
+    // spies and its events are fired by hand — what is asserted is the
+    // component's wiring, not a codec.
+    const playSpy = vi
+      .spyOn(HTMLMediaElement.prototype, "play")
+      .mockResolvedValue(undefined);
+    const pauseSpy = vi
+      .spyOn(HTMLMediaElement.prototype, "pause")
+      .mockImplementation(() => {});
+    const video = mountPlayer();
+
+    fireEvent.click(screen.getByRole("button", { name: "play" }));
+    expect(playSpy).toHaveBeenCalledTimes(1);
+
+    // The button mirrors the ELEMENT's state, not the click: the label only
+    // flips once the element says it is playing.
+    fireEvent(video, new Event("play"));
+    expect(screen.getByRole("button", { name: "pause" })).toBeInTheDocument();
+
+    Object.defineProperty(video, "paused", { configurable: true, get: () => false });
+    fireEvent.click(screen.getByRole("button", { name: "pause" }));
+    expect(pauseSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("cycles the same speed steps the [ and ] keys step through", () => {
+    const video = mountPlayer();
+    // The cycle wraps, so the top end is one click from the bottom one.
+    for (const want of ["1×", "1.5×", "2×", "4×", "0.5×", "1×"]) {
+      expect(rateButton()).toHaveTextContent(want);
+      fireEvent.click(rateButton());
+    }
+    expect(video.playbackRate).toBe(1.5);
+  });
+
+  it("shares the rate table with the keyboard's stepRate — including its clamp", () => {
+    // stepRate is what the [ ] keys call through the pane's binding table.
+    // A button that cycled through different steps, or one whose top end
+    // disagreed with the key's clamp, would make the footer hint a lie.
+    const ref = createRef<EpisodePlayerHandle>();
+    mountPlayer(ref);
+
+    act(() => ref.current?.stepRate(1));
+    expect(rateButton()).toHaveTextContent("1.5×");
+
+    // ] past the fastest step stays at 4×; the button's wrap and the key's
+    // clamp are different gestures over the SAME table.
+    act(() => ref.current?.stepRate(10));
+    expect(rateButton()).toHaveTextContent("4×");
+  });
+});
+
+/* ─── maximised charts ────────────────────────────────────────────────── */
+
+describe("ReviewPane — a chart can fill the analysis column", () => {
+  const EPISODES = [ep({ episode_index: 0, label: 1 })];
+
+  function mount() {
+    routeFetch({
+      "/lab/datasets/detail": {
+        repo_id: REPO, root: "/d", fps: 30, robot_type: "so_follower",
+        video_keys: ["top"], features: {}, rig: "solo", episodes: EPISODES,
+      },
+      "/lab/datasets/episodes": { total: 1, episodes: EPISODES },
+      "/lab/datasets/split": { order: [], train_episodes: [], eval_episodes: [] },
+      "/lab/datasets/trace": {
+        names: ["shoulder_pan.pos", "gripper.pos"],
+        t: [0, 0.03], state: [[1, 2], [90, 40]], action: [[1, 2], [90, 40]],
+        gripper: { "gripper.pos": [90, 40] },
+      },
+    });
+    render(<ReviewPane repoId={REPO} onPickDataset={() => {}} />);
+    // Let the pane finish booting — list, detail and trace — before the first
+    // click, or the fetch resolutions land mid-test outside act().
+    return waitFor(() =>
+      expect(document.querySelector("[data-series]")).toBeTruthy(),
+    );
+  }
+
+  it("maximises the gripper chart and restores it from the same toggle", async () => {
+    await mount();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "maximize gripper chart" }),
+    );
+
+    const zoomed = document.querySelector("[data-chart-zoom='gripper']");
+    expect(zoomed).toBeTruthy();
+
+    fireEvent.click(
+      within(zoomed as HTMLElement).getByRole("button", { name: "restore gripper chart" }),
+    );
+    expect(document.querySelector("[data-chart-zoom]")).toBeNull();
+  });
+
+  it("maximises the traces chart and Escape restores the tiled layout", async () => {
+    await mount();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "maximize traces chart" }),
+    );
+    expect(document.querySelector("[data-chart-zoom='traces']")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-chart-zoom]")).toBeNull();
+  });
+});
+
+/* ─── the hover probe ─────────────────────────────────────────────────── */
+
+describe("the hover probe — a reading at the mouse, beside the playhead", () => {
+  // A typed trace, with the grader's own thresholds on the gripper channel.
+  // Two samples at t=0 and t=0.03: a pointer at px 100 of the 640px fallback
+  // box lands one-tenth of the way across the plot, so the NEAREST sample is
+  // the first one — the values below are asserted against index 0.
+  const TRACE: Trace = {
+    names: ["shoulder_pan.pos", "gripper.pos"],
+    t: [0, 0.03],
+    state: [[1, 2], [90, 40]],
+    action: [[1, 2], [90, 40]],
+    gripper: [{
+      side: "", name: "gripper.pos", index: 1,
+      closed_below: 40, open_above: 70, values: [90, 40],
+    }],
+  };
+
+  const probePath = () =>
+    document.querySelector("[data-probe]")?.getAttribute("d") ?? null;
+
+  it("draws a crosshair and reads each series at the hovered time", () => {
+    render(<GripperChart trace={TRACE} playheadT={null} />);
+    const svg = screen.getByRole("img", { name: "gripper position" });
+    expect(document.querySelector("[data-probe]")).toBeNull();
+
+    fireEvent.pointerMove(svg, { clientX: 100, clientY: 10 });
+
+    expect(document.querySelector("[data-probe]")).toBeTruthy();
+    // The legend's own spelling of the series, and the sample nearest the
+    // mouse — the readout is a reading, not a restatement of the axis.
+    const readout = document.querySelector("[data-probe-readout]")!;
+    expect(readout).toHaveTextContent("gripper");
+    expect(readout).toHaveTextContent("90.000");
+  });
+
+  it("tracks the mouse, leaves with it, and never touches the playhead", () => {
+    render(<GripperChart trace={TRACE} playheadT={0.02} />);
+    const svg = screen.getByRole("img", { name: "gripper position" });
+    // The playhead is the VIDEO's instant and exists before any mouse.
+    expect(document.querySelector("[data-playhead]")).toBeTruthy();
+
+    fireEvent.pointerMove(svg, { clientX: 100 });
+    const at100 = probePath();
+    fireEvent.pointerMove(svg, { clientX: 200 });
+    expect(probePath()).not.toBe(at100);
+
+    fireEvent.pointerLeave(svg);
+    expect(document.querySelector("[data-probe]")).toBeNull();
+    expect(document.querySelector("[data-probe-readout]")).toBeNull();
+    expect(document.querySelector("[data-playhead]")).toBeTruthy();
+  });
+
+  it("reads the commanded series beside the measured one on the traces chart", () => {
+    render(
+      <TraceChart trace={TRACE} playheadT={null} overlay onOverlay={() => {}} />,
+    );
+    const svg = screen.getByRole("img", { name: /arm joint traces/ });
+
+    fireEvent.pointerMove(svg, { clientX: 100 });
+
+    // state and action are two series of one channel; the gap between them
+    // is tracking error, and the readout has to name both to show it.
+    const readout = document.querySelector("[data-probe-readout]")!;
+    expect(readout).toHaveTextContent("shoulder pan");
+    expect(readout).toHaveTextContent("shoulder pan cmd");
+    expect(readout).toHaveTextContent("1.000");
   });
 });

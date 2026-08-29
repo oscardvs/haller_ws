@@ -73,17 +73,27 @@ logger = logging.getLogger(__name__)
 # construction, so a gate on it can only ever be satisfied. What the gate
 # actually bounded, the ramp still bounds.
 
-#: Countdown from the clutch closing to the earliest possible handover.
-#: One second, not the three the camera path ran: with a zero-error handover
-#: there is nothing to lurch toward, so all this filters is an accidental
-#: grip. It matters because every tracking blip longer than the grace window
-#: costs one full re-acquire — at 3 s a session with a few blips feels broken,
-#: at 1 s it feels like a hiccup.
-ACQUIRE_MS = 1000.0
-#: Floor under that countdown: the clutch must be held, and the side tracked,
-#: for at least this long before authority transfers, however short
-#: `acquire_ms` is set. Handover fires at max(ACQUIRE_MS, MATCH_DWELL_MS).
-MATCH_DWELL_MS = 400.0
+#: Countdown from the clutch closing to handover. ZERO: the clutch engages on
+#: the rising edge, the way `SO101QuestTeleoperator._update_arm` does and the
+#: way 46 recorded episodes were driven.
+#:
+#: The paragraph above already contains the argument for this. The headset
+#: path anchors — squeezing the grip binds the target to wherever the arm
+#: already IS — so the error at handover is zero BY CONSTRUCTION, and what a
+#: countdown filters is therefore only "an accidental grip". That is not worth
+#: what it costs: it is charged on EVERY engage, including the dozens of
+#: deliberate re-clutches it takes to ratchet across a workspace, and every
+#: tracking blip past the grace window bills it again. The operator reads that
+#: as an arm that does not follow their hand.
+#:
+#: The kit has no equivalent and never needed one. What actually bounds the
+#: rig is unchanged and still unconditional: `motion.max_speed_deg_s`, the
+#: per-joint limits, RATE_CAP_DEG_S, the workspace floors and the motion
+#: envelope.
+ACQUIRE_MS = 0.0
+#: Kept at zero for the same reason, and kept as a name because the wire and
+#: the tests both read it. Handover fires at max(ACQUIRE_MS, MATCH_DWELL_MS).
+MATCH_DWELL_MS = 0.0
 #: Per-side tracking-loss grace. Quest controller tracking flickers — hands at
 #: the FOV edge, occlusions — and a long grace is SAFE by construction here:
 #: during the gap no new targets arrive (the arm holds), and on recovery the
@@ -95,12 +105,17 @@ FRAME_AGE_MS_LOSS = 700.0
 #: is why it is named for the control rather than for the absence. Mirrored in
 #: TypeScript as `ClutchReason`.
 CLUTCH_RESTING = "vr_grip_mode"
-#: Joint speed the first instant of DRIVING is allowed to command.
+#: Joint speed the first instant of DRIVING is allowed to command. Retired
+#: with the ramp below; retained because the constructor and the status block
+#: still name it.
 ACQUIRE_RATE_DEG_S = 20.0
-#: Time over which the cap returns to the session's normal rate limit. Long
-#: enough to absorb a handover the anchor somehow did not zero — 30° at
-#: ACQUIRE_RATE_DEG_S closes inside it.
-ACQUIRE_RAMP_MS = 1500.0
+#: Time over which the cap returned to the session's normal rate limit. ZERO:
+#: the ramp existed to absorb "a handover the anchor somehow did not zero",
+#: and on the headset path the anchor always zeroes it — the mapper re-anchors
+#: every frame until the side drives. A 1.5 s climb from 20 deg/s on every
+#: clutch is the single biggest reason this rig tracks a hand differently from
+#: the kit, and the kit ships without it.
+ACQUIRE_RAMP_MS = 0.0
 #: The session's normal joint-rate ceiling, DEGREES PER SECOND.
 #:
 #: Expressed as a rate and converted per tick, not stored as degrees-per-tick:
@@ -662,17 +677,13 @@ class HumanTeleopSession:
             self._reset_clutch_state()
             self._latest_frame_ts_ms = 0
             self._latest_arrival_perf = 0.0
-            # Reset smoothing state to current observed positions where
-            # available. A side with no arm holds an empty pose: every
-            # downstream loop is keyed on the joints present in it, so an
-            # absent side simply contributes nothing rather than needing a
-            # branch at each use.
-            self._committed_left = (self._observed_or_zero(handles["left"])
-                                    if "left" in handles else {})
-            self._committed_right = (self._observed_or_zero(handles["right"])
-                                     if "right" in handles else {})
-            self._steps_left = self._held_steps(self._committed_left)
-            self._steps_right = self._held_steps(self._committed_right)
+            # The smoothing state is seeded AFTER the producer is claimed —
+            # see below. Empty here so no stale pose from a previous session
+            # survives into the gap.
+            self._committed_left = {}
+            self._committed_right = {}
+            self._steps_left = self._held_steps({})
+            self._steps_right = self._held_steps({})
         self._stop_flag.clear()
         # Claim the bus BEFORE the loop exists, so there is no window in which
         # the loop is running and the idle sampler still owns the tick. The
@@ -700,6 +711,24 @@ class HumanTeleopSession:
                 self._cfg = None
                 self._started_at = None
             raise
+        # Seed the smoothing state from where the arms are — AFTER claiming
+        # the producer, never before. The idle sampler checks the bus's owner
+        # before it reads, so from the attach onward the serial line belongs
+        # to this session alone; seeded inside the lock block above, these
+        # reads raced the idle sampler's 20 Hz sampling by construction, and
+        # a read that lost the race fell back to 0° on every joint — an
+        # anchor to a pose the arm is not in, handed to the operator with no
+        # countdown left to absorb it. The loop's own reseed (pending above)
+        # re-reads on the first tick regardless; this pre-seed just means
+        # status() never shows an empty pose to a cockpit that asks early.
+        # Thread-safety: the loop thread does not exist yet, so these fields
+        # have exactly one writer here.
+        self._committed_left = (self._observed_or_zero(handles["left"])
+                                if "left" in handles else {})
+        self._committed_right = (self._observed_or_zero(handles["right"])
+                                 if "right" in handles else {})
+        self._steps_left = self._held_steps(self._committed_left)
+        self._steps_right = self._held_steps(self._committed_right)
         self._thread = threading.Thread(
             target=self._loop,
             name=f"haller-hmi-human-teleop-{left_arm or '-'}-{right_arm or '-'}",
@@ -908,24 +937,32 @@ class HumanTeleopSession:
                 continue
 
             if acq.authority is SideAuthority.HELD:
-                acq.authority = SideAuthority.ACQUIRING
-                acq.since_perf = now
                 self._reseed_pending[side] = True
+                acq.since_perf = now
+                if self._handover_ms() <= 0.0:
+                    # The default, and the kit's clutch: engage on the rising
+                    # edge. ACQUIRING is not entered at all — passing through
+                    # it for a single tick would advertise a state the operator
+                    # can never act on.
+                    acq.authority = SideAuthority.DRIVING
+                    acq.driving_since_perf = now
+                    acq.reason = "driving"
+                    logger.info("human teleop: %s arm engaged", side)
+                    continue
+                acq.authority = SideAuthority.ACQUIRING
 
             if acq.authority is SideAuthority.DRIVING:
                 acq.reason = "driving"
-                continue    # the ramp owns the rest
+                continue
 
+            # Only reachable if a non-zero handover window is configured (the
+            # constructor still takes one, and the tests exercise it).
             acq.reason = "counting"
             held_for_ms = ((now - acq.since_perf) * 1000.0
                            if acq.since_perf is not None else 0.0)
             if held_for_ms >= self._handover_ms():
                 acq.authority = SideAuthority.DRIVING
                 acq.driving_since_perf = now
-                # Here, not only on the next pass: for one tick the block would
-                # otherwise advertise `authority: driving` beside
-                # `reason: counting`, which is the kind of self-contradiction
-                # that teaches an operator to stop reading the diagnostics.
                 acq.reason = "driving"
                 logger.info("human teleop: %s arm acquired", side)
         self._derive_state()
@@ -956,7 +993,12 @@ class HumanTeleopSession:
         acq = self._acq[side]
         if acq.authority is not SideAuthority.DRIVING or acq.driving_since_perf is None:
             return full
-        frac = (now - acq.driving_since_perf) * 1000.0 / max(1.0, self._acquire_ramp_ms)
+        # No ramp configured (the default): the session's normal cap from the
+        # first tick, which is what the kit commands and what the envelope
+        # limits already bound.
+        if self._acquire_ramp_ms <= 0.0:
+            return full
+        frac = (now - acq.driving_since_perf) * 1000.0 / self._acquire_ramp_ms
         if frac >= 1.0:
             return full
         start = self._acquire_rate_deg_s * period
@@ -1086,8 +1128,18 @@ class HumanTeleopSession:
         return, not `goal`, is what the arm actually received. The caller folds
         this back into the committed pose, which is what status()["goal_deg"]
         — and recorder.py's `action` column downstream of it — reports.
+
+        The cap passed is the SESSION's ceiling, not the discrete-move
+        `motion.max_speed_deg_s`: every step arriving here has already been
+        rate-capped at RATE_CAP_DEG_S by `_smooth_step`, and capping again at
+        the (much lower) discrete-move speed made that number the arm's
+        teleop ceiling — 90 deg/s on a rig whose kit reference carries no
+        write-path cap at all. The write stays elapsed-time bounded; the
+        bound is just the same one the session already enforces.
         """
-        return handle.send_goal({joint: float(value) for joint, value in goal.items()})
+        return handle.send_goal(
+            {joint: float(value) for joint, value in goal.items()},
+            speed_cap_deg_s=RATE_CAP_DEG_S)
 
     def _loop(self) -> None:
         with self._lock:
@@ -1102,9 +1154,15 @@ class HumanTeleopSession:
         # `_smooth_step`'s default cap converts against this; the loop
         # always passes an explicit cap, so this is for callers outside it.
         self._period = period
-        # Smoothing time constant (frequency-independent), default ≈ 100 ms.
+        # Smoothing time constant (frequency-independent). Zero means the
+        # filter is OFF (alpha 1, pure passthrough) — the kit ships no output
+        # filter, and with the IK seeded from the committed pose any
+        # attenuation here feeds back into the next solve's step budget.
         tau_s = self._lpf_tau_s
-        alpha = 1.0 - math.exp(-period / tau_s) if period > 0 else 1.0
+        if tau_s <= 0.0 or period <= 0:
+            alpha = 1.0
+        else:
+            alpha = 1.0 - math.exp(-period / tau_s)
         consecutive_errors = 0
         # Ticks per PUBLISHED sample. Derived from a rate rather than
         # configured as a count, so the sampler targets the same real cadence
@@ -1131,7 +1189,22 @@ class HumanTeleopSession:
                         pending = self._reseed_pending[side]
                     if not pending:
                         continue
-                    observed = self._observed_or_zero(handle)
+                    try:
+                        raw = handle.read_joints_deg()
+                    except Exception:
+                        # Keep the request pending and the previous committed
+                        # pose in place, and try again next tick. A failed
+                        # read must never quietly become 0° per joint here:
+                        # with the acquisition countdown at zero, a
+                        # zero-seeded side anchors the operator's hand to a
+                        # pose the arm is not in, and the first squeeze slews
+                        # the arm toward the fiction at the full rate cap.
+                        logger.warning(
+                            "human teleop: %s reseed read failed, retrying"
+                            " next tick", side, exc_info=True)
+                        continue
+                    observed = {joint: float(raw.get(joint, 0.0))
+                                for joint in handle.joint_limits_deg}
                     with self._lock:
                         self._reseed_pending[side] = False
                         if self._acq[side].authority is SideAuthority.DRIVING:

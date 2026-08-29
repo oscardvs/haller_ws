@@ -4,7 +4,7 @@ import { pairingFor } from "../lib/stance";
 import {
   applyServerConfig, clampKnob, DEFAULT_WRIST_PIVOT_M, episodesTotal,
   formatKnob, HAPTIC_FLOOR, ikHapticCues, ORIENT_DEFICIT, parseVrSocketMessage,
-  precisionHeld, PRECISION_STICK_Y, reconcileConfig, sampleVRFrame, stepTuning,
+  precisionHeld, reconcileConfig, sampleVRFrame, stepTuning,
   stickAxes, TUNING_KNOBS, TUNING_REPEAT_MS, WRIST_PIVOT_KEY,
   BUTTON_SQUEEZE, BUTTON_TRIGGER,
   type IkSides, type XRFrameLike, type XRInputSourceLike, type XRSessionLike,
@@ -136,20 +136,15 @@ describe("stickAxes", () => {
 });
 
 describe("precisionHeld", () => {
-  it("engages on the LEFT stick pushed away, past the halfway point", () => {
-    expect(precisionHeld(session([controller("left", { axes: [0, 0, 0, -1] })])))
-      .toBe(true);
-    expect(precisionHeld(session([controller("left", { axes: [0, 0, 0, -0.5] })])))
-      .toBe(false);
-    // Exactly on the threshold counts: the constant is the engage point.
-    expect(precisionHeld(session([
-      controller("left", { axes: [0, 0, 0, PRECISION_STICK_Y] })])))
-      .toBe(true);
-  });
-
-  it("ignores the right stick, which belongs to the tuning list", () => {
-    const s = session([controller("right", { axes: [0, 0, 0, -1] })]);
-    expect(precisionHeld(s)).toBe(false);
+  // The modifier is back on A/X (see vrTeleop.test.ts). This is the guard
+  // that it did not stay on the stick as well: a driver who pushes the left
+  // stick to walk the workspace would otherwise silently halve their gains,
+  // which reads exactly like an arm that has started lagging.
+  it("no longer engages on stick deflection, either hand", () => {
+    for (const hand of ["left", "right"] as const) {
+      expect(precisionHeld(session([controller(hand, { axes: [0, 0, 0, -1] })])))
+        .toBe(false);
+    }
   });
 });
 

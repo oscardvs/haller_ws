@@ -12,7 +12,12 @@ import { useEffect, useState, type RefObject } from "react";
 
 import { useTelemetry } from "@/lib/telemetry";
 import { useRecorder } from "@/lib/recorder";
-import { slugify, type TabId, type Viewport } from "./lib";
+import type { TabId, Viewport } from "./lib";
+
+// The definition moved to lib/recorder.ts (with the draft store that owns its
+// inputs) so lib never imports from components; the re-export keeps this
+// module's long-standing import sites honest.
+export { repoIdFor } from "@/lib/recorder";
 
 export function CommandBar({
   tab,
@@ -172,9 +177,4 @@ function useClock(): string {
     return () => clearInterval(t);
   }, []);
   return now;
-}
-
-/** Shared by the Record popover and the Dataset tab. */
-export function repoIdFor(hfUser: string, task: string): string {
-  return `${hfUser || "local"}/haller_${slugify(task)}`;
 }

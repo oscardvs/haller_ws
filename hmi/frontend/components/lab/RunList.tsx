@@ -11,12 +11,19 @@
  * picking two runs to overlay is one click from the row you are reading, not a
  * separate mode.
  *
+ * A row is two lines: the verdict line (status pill, name, kind, duration,
+ * started-at) and the detail line (the spec summary, then the launch tags).
+ * Duration is measured from the run's own stamps when it has finished, and
+ * against the pane's poll clock while it is running — this component owns no
+ * timer, and a queued run gets no invented elapsed.
+ *
  * `runs` is typed `RunSummary[]` and not `Run[]` on purpose. `GET /lab/runs`
  * returns summaries; `Run` is the detail shape and is assignable to this, so a
  * caller holding either can pass it.
  */
 import type { RunStatus, RunSummary } from "@/lib/lab";
-import { Empty, HeadRow, Refusal } from "@/components/lab/ui";
+import { Empty, Refusal } from "@/components/lab/ui";
+import { fmtDuration } from "@/components/lab/charts/svg";
 
 /** Status → the cockpit's existing signal palette. `running` is MANUAL blue,
  *  not live green: green here would read as "this finished well", and a run
@@ -91,8 +98,8 @@ export function epochSeconds(ts: string | null | undefined): number | null {
 }
 
 /**
- * A started-at short enough for a 42px column: clock time for a run started
- * today, month-day for anything older.
+ * A started-at short enough for a dense list row: clock time for a run
+ * started today, month-day for anything older.
  */
 export function shortWhen(ts: string | null | undefined): string {
   const secs = epochSeconds(ts);
@@ -123,10 +130,6 @@ export function runLabel(r: { id: string; name: string | null }): string {
   return r.name && r.name.trim() !== "" ? r.name : r.id;
 }
 
-/** compare gutter · status · name · kind · started. One template shared by the
- *  header and every row, so the columns cannot drift apart. */
-const COLS = "14px 74px minmax(0,1fr) 52px 42px";
-
 export function RunList({
   runs,
   loading,
@@ -135,6 +138,7 @@ export function RunList({
   onSelect,
   compare,
   onToggleCompare,
+  now,
 }: {
   runs: RunSummary[];
   loading: boolean;
@@ -145,6 +149,10 @@ export function RunList({
    *  toggles. */
   compare: Set<string>;
   onToggleCompare: (id: string) => void;
+  /** Epoch seconds of the pane's last list read — the clock a RUNNING row's
+   *  duration is measured against. It arrives with the poll, so the duration
+   *  ticks without this component owning a timer of its own. */
+  now: number;
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -155,25 +163,21 @@ export function RunList({
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {runs.length > 0 && (
-          <HeadRow
-            style={{ gridTemplateColumns: COLS }}
-            cols={[
-              { key: "cmp", label: "" },
-              { key: "status", label: "status" },
-              { key: "run", label: "run" },
-              { key: "kind", label: "kind" },
-              { key: "at", label: "at", align: "right" },
-            ]}
-          />
-        )}
-
         {runs.length === 0 ? (
           <Empty>{loading ? "reading…" : error ? "nothing to list" : "no runs yet"}</Empty>
         ) : (
           runs.map((r) => {
             const label = runLabel(r);
             const selected = r.id === selectedId;
+            /* A finished run measures against its own stamp; a running one
+               against the poll's clock. A queued run has neither, and gets a
+               "—" rather than an elapsed counted from 1970. */
+            const until =
+              epochSeconds(r.finished_at) ??
+              (r.status === "running" && now > 0 ? now : null);
+            const startedSecs = epochSeconds(r.started_at);
+            const ran =
+              startedSecs !== null && until !== null ? until - startedSecs : null;
             return (
               <div key={r.id} className="relative border-b border-border">
                 <button
@@ -182,48 +186,70 @@ export function RunList({
                   aria-current={selected ? "true" : undefined}
                   title={r.spec_summary ?? label}
                   className={
-                    "grid w-full items-center gap-x-2 px-2.5 py-1 text-left " +
+                    "flex w-full flex-col gap-0.5 py-1.5 pr-2.5 pl-7 text-left " +
                     "transition-colors " +
                     (selected
                       ? "bg-secondary shadow-[inset_3px_0_0_var(--haller-live)]"
                       : "hover:bg-muted")
                   }
-                  style={{ gridTemplateColumns: COLS }}
                 >
-                  {/* The compare checkbox floats over this cell — a checkbox
-                      inside the row button would be interactive content nested
-                      in interactive content, which no screen reader forgives. */}
-                  <span aria-hidden />
-                  <StatusPill status={r.status} />
-                  <span className="truncate font-mono text-[11px]">{label}</span>
-                  <span className="truncate label-micro text-muted-foreground">
-                    {r.kind}
-                  </span>
-                  <span
-                    data-num
-                    title={fullWhen(r.started_at)}
-                    className="text-right font-mono text-[10px] tabular-nums text-muted-foreground"
-                  >
-                    {shortWhen(r.started_at)}
+                  <span className="flex min-w-0 items-center gap-2">
+                    <StatusPill status={r.status} />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+                      {label}
+                    </span>
+                    <span className="label-micro shrink-0 text-muted-foreground">
+                      {r.kind}
+                    </span>
+                    <span
+                      data-num
+                      title={ran !== null ? "how long the run took" : undefined}
+                      className="w-12 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground"
+                    >
+                      {fmtDuration(ran)}
+                    </span>
+                    <span
+                      data-num
+                      title={fullWhen(r.started_at)}
+                      className="w-10 shrink-0 text-right font-mono text-[10px] tabular-nums text-muted-foreground"
+                    >
+                      {shortWhen(r.started_at)}
+                    </span>
                   </span>
 
-                  {/* The backend's own one-line rendering of the spec, verbatim.
-                      Re-deriving it here would let the list and the detail view
-                      describe the same run in two different sentences. */}
-                  {r.spec_summary && (
-                    <span className="col-span-3 col-start-3 truncate font-mono text-[9px] text-muted-foreground">
-                      {r.spec_summary}
+                  {/* The backend's own one-line rendering of the spec,
+                      verbatim. Re-deriving it here would let the list and the
+                      detail view describe the same run in two different
+                      sentences. */}
+                  {(r.spec_summary || (r.tags && r.tags.length > 0)) && (
+                    <span className="flex min-w-0 items-baseline gap-2">
+                      {r.spec_summary && (
+                        <span className="min-w-0 flex-1 truncate font-mono text-[9px] text-muted-foreground">
+                          {r.spec_summary}
+                        </span>
+                      )}
+                      {r.tags?.map((t) => (
+                        <span
+                          key={t}
+                          className="label-micro shrink-0 text-muted-foreground opacity-70"
+                        >
+                          {t}
+                        </span>
+                      ))}
                     </span>
                   )}
                 </button>
 
+                {/* The compare checkbox floats over this row — a checkbox
+                    inside the row button would be interactive content nested
+                    in interactive content, which no screen reader forgives. */}
                 <input
                   type="checkbox"
                   checked={compare.has(r.id)}
                   onChange={() => onToggleCompare(r.id)}
                   aria-label={`compare ${label}`}
                   title="overlay this run in compare"
-                  className="absolute top-[7px] left-2.5 h-3 w-3 shrink-0 cursor-pointer accent-[var(--haller-live)]"
+                  className="absolute top-[9px] left-2.5 h-3 w-3 shrink-0 cursor-pointer accent-[var(--haller-live)]"
                 />
               </div>
             );

@@ -15,16 +15,17 @@
 // bugs were a value the type said was a `number` and the wire said was
 // something else; none of them threw, and each rendered a plausible wrong
 // answer instead.
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { CheckpointList, checkpointName } from "@/components/lab/CheckpointList";
 import { ComparePane, batchKeys, mergeSeries } from "@/components/lab/ComparePane";
+import { MetricGrid } from "@/components/lab/MetricGrid";
 import { RunDetail } from "@/components/lab/RunDetail";
-import { epochSeconds, fullWhen, shortWhen } from "@/components/lab/RunList";
+import { RunList, epochSeconds, fullWhen, shortWhen } from "@/components/lab/RunList";
 import {
   metricKeys, metricX, plottableMetricKeys,
-  type Checkpoint, type MetricRow, type Run,
+  type Checkpoint, type MetricRow, type Run, type RunSummary,
 } from "@/lib/lab";
 
 /* ─── the wire, verbatim ──────────────────────────────────────────────────
@@ -94,6 +95,125 @@ describe("run timestamps are ISO 8601 strings, not unix numbers", () => {
     // ever reported how long it took. Measured against the real pair.
     const secs = epochSeconds(FINISHED)! - epochSeconds(STARTED)!;
     expect(secs).toBe(RAN_SECONDS);
+  });
+});
+
+/* ─── the runs list is a log of experiments ───────────────────────────── */
+
+describe("the runs list reads a row as an experiment, not a process", () => {
+  const summary = (over: Partial<RunSummary>): RunSummary => ({
+    id: "train-x", kind: "train", name: "cube baseline", status: "done",
+    started_at: STARTED, finished_at: FINISHED,
+    spec_summary:
+      "train · local/so101_pick_cube · 35 of 46 episodes · act · 60000 steps",
+    tags: ["baseline", "35ep"],
+    ...over,
+  });
+
+  function mount(runs: RunSummary[], now: number) {
+    return render(
+      <RunList
+        runs={runs}
+        loading={false}
+        error={null}
+        selectedId={null}
+        onSelect={() => {}}
+        compare={new Set()}
+        onToggleCompare={() => {}}
+        now={now}
+      />,
+    );
+  }
+
+  it("measures a finished run against its own two stamps", () => {
+    // 19:33:50 -> 20:27:00 is 53m10s — the stamp pair, not a wall clock.
+    mount([summary({})], 0);
+    expect(screen.getByText("53m 10s")).toBeTruthy();
+  });
+
+  it("measures a running run against the poll's clock, and no other", () => {
+    // The list owns no timer: the pane hands down the moment of its last
+    // read, and the row's elapsed moves exactly when the poll does.
+    mount(
+      [summary({ status: "running", finished_at: null })],
+      epochSeconds(STARTED)! + 125,
+    );
+    expect(screen.getByText("2m 05s")).toBeTruthy();
+  });
+
+  it("invents nothing for a queued run", () => {
+    // No start stamp and no clock: both cells read "—", like every other
+    // absent reading on the page, rather than an elapsed counted from 1970.
+    mount([summary({ status: "queued", started_at: null, finished_at: null })], 0);
+    expect(screen.getAllByText("—")).toHaveLength(2);
+  });
+
+  it("prints the backend's spec summary verbatim, with the launch tags", () => {
+    mount([summary({})], 0);
+    expect(
+      screen.getByText("train · local/so101_pick_cube · 35 of 46 episodes · act · 60000 steps"),
+    ).toBeTruthy();
+    expect(screen.getByText("baseline")).toBeTruthy();
+    expect(screen.getByText("35ep")).toBeTruthy();
+  });
+});
+
+/* ─── a metric chart fills the metrics panel on demand ────────────────── */
+
+describe("MetricGrid — any chart can fill the metrics panel", () => {
+  // Three logged steps of a real-looking ACT row: enough for a curve, few
+  // enough that LTTB keeps them all.
+  const ROWS: MetricRow[] = [
+    { steps: 100, loss: 7.25, grad_norm: 159.6 },
+    { steps: 200, loss: 3.1, grad_norm: 80.2 },
+    { steps: 300, loss: 1.4, grad_norm: 40.0 },
+  ];
+
+  function mount() {
+    // The overlay positions against the nearest relative ancestor — on the
+    // page that is the metrics Panel; here a plain relative div plays it.
+    return render(
+      <div className="relative">
+        <MetricGrid rows={ROWS} steps={null} />
+      </div>,
+    );
+  }
+
+  it("maximises one cell and restores it from the same toggle", () => {
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "maximize loss chart" }));
+    expect(document.querySelector("[data-chart-zoom='loss']")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "restore loss chart" }));
+    expect(document.querySelector("[data-chart-zoom]")).toBeNull();
+  });
+
+  it("Escape restores the grid", () => {
+    mount();
+    fireEvent.click(screen.getByRole("button", { name: "maximize grad_norm chart" }));
+    expect(document.querySelector("[data-chart-zoom='grad_norm']")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(document.querySelector("[data-chart-zoom]")).toBeNull();
+  });
+
+  it("reads values at the mouse, with the EMA underlay out of the readout", () => {
+    mount();
+    // Smoothing draws the raw series underneath at low opacity. It is a
+    // drawn guide, not a second metric — a probe that read it out would
+    // answer "what is loss here" twice with two different numbers.
+    fireEvent.change(screen.getByLabelText("ema smoothing weight"), {
+      target: { value: "0.5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "maximize loss chart" }));
+    const zoomed = document.querySelector("[data-chart-zoom='loss']") as HTMLElement;
+
+    const svg = within(zoomed).getByRole("img", { name: "loss against step" });
+    fireEvent.pointerMove(svg, { clientX: 100, clientY: 10 });
+
+    const readout = zoomed.querySelector("[data-probe-readout]")!;
+    expect(readout).toHaveTextContent("loss");
+    expect(readout.textContent).not.toContain("~raw");
   });
 });
 

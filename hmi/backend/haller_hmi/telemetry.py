@@ -172,6 +172,13 @@ class TelemetryBroadcaster:
             if self._calibration is not None
             else None
         )
+        if active is not None and active.arm_id not in snaps:
+            # Mid-session the arm often has no snapshot at all: capture resets
+            # the bus calibration, so every normalized read fails until save
+            # registers the new one. Block-presence is the frontend's liveness
+            # signal (spec §6), and tick_sweep records the sweep only where the
+            # block is built — so the block must not ride on the snapshot.
+            snaps[active.arm_id] = {}
         for arm_id, snap in snaps.items():
             if active is not None and active.arm_id == arm_id:
                 cal_block = self._calibration_block(active, arm_id)

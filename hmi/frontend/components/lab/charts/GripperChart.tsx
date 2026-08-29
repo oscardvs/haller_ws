@@ -22,11 +22,14 @@
  * so. An invented threshold is worse than a missing one: it looks like a
  * measurement.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 
 import { isDrawableTrace, isGripperChannel, type Trace } from "@/lib/lab";
 import { Panel, PanelHead } from "@/components/lab/ui";
-import { ChartLegend, LineChart, type Guide, type Series } from "./LineChart";
+import {
+  ChartLegend, ProbeLineChart, useElementHeight, type Guide, type Series,
+} from "./LineChart";
 import { extent, padDomain, secondsTickFormat, seriesColor } from "./svg";
 
 const HEIGHT = 104;
@@ -39,10 +42,17 @@ const gripperLabel = (name: string) =>
 export function GripperChart({
   trace: rawTrace,
   playheadT,
+  zoomed = false,
+  onZoom,
 }: {
   trace: Trace | null;
   /** Episode-relative seconds from the player, or null when nothing plays. */
   playheadT: number | null;
+  /** Filling the analysis column as an overlay rather than tiling under the
+   *  player. The plot height comes from the overlay, not from `HEIGHT`. */
+  zoomed?: boolean;
+  /** Toggles `zoomed`; absent, the header carries no zoom control. */
+  onZoom?: (zoomed: boolean) => void;
 }): React.ReactElement {
   // A partial body arriving with a 200 is "no trace", not a render-phase throw
   // that takes the review pane down with it. See `isDrawableTrace`.
@@ -146,26 +156,48 @@ export function GripperChart({
           ? `no graded thresholds for ${uncalibrated.map(gripperLabel).join(", ")}`
           : null;
 
+  /** The zoomed plot's box. Measured rather than fixed: the overlay is
+   *  whatever the analysis column happens to be tall. */
+  const [plotBox, setPlotBox] = useState<HTMLDivElement | null>(null);
+  const plotH = useElementHeight(plotBox);
+
   return (
-    <Panel className="shrink-0">
+    <Panel className={zoomed ? "min-h-0 flex-1" : "shrink-0"}>
       <PanelHead
         title="gripper"
         right={channels.length > 0 ? `${channels.length} ch` : "—"}
-      />
-      <div className="px-2.5 py-2">
-        <LineChart
-          label="gripper position"
-          series={series}
-          height={HEIGHT}
-          xDomain={xDomain}
-          yDomain={yDomain}
-          guides={guides}
-          playhead={playheadT}
-          xTicks={4}
-          xTickFormat={secondsTick}
-          empty={trace ? "no gripper channel" : "no trace"}
-        />
-        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 pl-[42px]">
+      >
+        {onZoom && (
+          <button
+            type="button"
+            onClick={() => onZoom(!zoomed)}
+            aria-label={zoomed ? "restore gripper chart" : "maximize gripper chart"}
+            aria-pressed={zoomed}
+            title={zoomed ? "back to the tiled layout (esc)" : "fill the analysis column"}
+            className="inline-flex h-5.5 w-5.5 shrink-0 items-center justify-center rounded-[3px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {zoomed
+              ? <Minimize2 size={11} aria-hidden />
+              : <Maximize2 size={11} aria-hidden />}
+          </button>
+        )}
+      </PanelHead>
+      <div className={"px-2.5 py-2" + (zoomed ? " flex min-h-0 flex-1 flex-col" : "")}>
+        <div ref={setPlotBox} className={zoomed ? "min-h-0 flex-1" : undefined}>
+          <ProbeLineChart
+            label="gripper position"
+            series={series}
+            height={zoomed ? plotH : HEIGHT}
+            xDomain={xDomain}
+            yDomain={yDomain}
+            guides={guides}
+            playhead={playheadT}
+            xTicks={4}
+            xTickFormat={secondsTick}
+            empty={trace ? "no gripper channel" : "no trace"}
+          />
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1 pl-[42px]">
           <ChartLegend
             items={channels.map((c, i) => ({
               label: gripperLabel(c.name),

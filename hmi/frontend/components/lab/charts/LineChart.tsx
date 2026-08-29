@@ -13,7 +13,7 @@
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import {
-  PAD, type Scale, extent, fmtTick, linePath, hRule, vRule, logTicks,
+  PAD, type Scale, extent, fmtNum, fmtTick, linePath, hRule, vRule, logTicks,
   nearestIndex, niceTicks, padDomain, scale,
 } from "./svg";
 
@@ -45,23 +45,11 @@ export type HoverPoint = {
  *  plot area to put paths in. */
 const FALLBACK_W = 640;
 
-export function LineChart({
-  series,
-  height,
-  log = false,
-  yDomain,
-  xDomain,
-  guides = [],
-  playhead = null,
-  yTickFormat = fmtTick,
-  xTickFormat = fmtTick,
-  yTicks: yTickCount = 3,
-  xTicks: xTickCount = 0,
-  empty = "no data",
-  label,
-  onHover,
-  className = "",
-}: {
+/** Same answer for the maximised charts' height: a real box before the
+ *  ResizeObserver's first tick and inside jsdom. */
+const FALLBACK_H = 320;
+
+export type LineChartProps = {
   series: Series[];
   height: number;
   log?: boolean;
@@ -81,8 +69,31 @@ export function LineChart({
   /** Accessible name. Charts are the readout here, not decoration. */
   label: string;
   onHover?: (p: HoverPoint | null) => void;
+  /** The hover probe, fed back from `onHover`. Kept separate from `playhead`
+   *  on purpose: the playhead is the VIDEO's instant and the probe is the
+   *  mouse's, and over a playing episode both are on screen at once. */
+  probe?: HoverPoint | null;
   className?: string;
-}) {
+};
+
+export function LineChart({
+  series,
+  height,
+  log = false,
+  yDomain,
+  xDomain,
+  guides = [],
+  playhead = null,
+  yTickFormat = fmtTick,
+  xTickFormat = fmtTick,
+  yTicks: yTickCount = 3,
+  xTicks: xTickCount = 0,
+  empty = "no data",
+  label,
+  onHover,
+  probe = null,
+  className = "",
+}: LineChartProps) {
   const [box, setBox] = useState<HTMLDivElement | null>(null);
   const w = useElementWidth(box);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -128,6 +139,13 @@ export function LineChart({
     // that changed nothing about the geometry.
     [onHover, sc, drawable],
   );
+
+  /** Where the probe crosshair and its readout sit. The readout flips to the
+   *  left of the crosshair before it would run off the right edge; 132px is
+   *  the widest it grows with a bimanual row's channels named. */
+  const probePx = probe !== null && hasData ? sc.x(probe.x) : 0;
+  const probeLeft =
+    probePx + 10 + 132 > sc.w ? Math.max(sc.pad.l, probePx - 142) : probePx + 10;
 
   return (
     <div ref={setBox} className={"relative w-full " + className}>
@@ -234,6 +252,17 @@ export function LineChart({
           />
         )}
 
+        {probe !== null && hasData && (
+          <path
+            d={vRule(probe.x, sc)}
+            data-probe=""
+            stroke="var(--haller-rail)"
+            strokeWidth={1}
+            vectorEffect="non-scaling-stroke"
+            fill="none"
+          />
+        )}
+
         {!hasData && (
           <text
             x={w / 2}
@@ -247,6 +276,39 @@ export function LineChart({
           </text>
         )}
       </svg>
+
+      {/* The probe readout is HTML, not SVG text: it tracks the mouse across
+          the whole plot width and must not be clipped by the viewBox. The dot
+          and label are the LEGEND's spelling of the series, so a value reads
+          against the same name the operator just read underneath the chart. */}
+      {probe !== null && hasData && (
+        <div
+          data-probe-readout=""
+          className={
+            "pointer-events-none absolute top-1 z-10 flex flex-col gap-0.5 " +
+            "rounded-[3px] border border-border bg-popover px-1.5 py-1 font-mono " +
+            "text-[9px] whitespace-nowrap text-muted-foreground"
+          }
+          style={{ left: probeLeft }}
+        >
+          <span data-num className="tabular-nums opacity-70">
+            {xTickFormat(probe.x)}
+          </span>
+          {probe.values.map((v) => (
+            <span key={v.id} className="inline-flex items-center gap-1">
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-[1px]"
+                style={{ backgroundColor: v.color }}
+              />
+              <span>{v.label ?? v.id}</span>
+              <span data-num className="tabular-nums text-foreground">
+                {fmtNum(v.y)}
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -281,6 +343,36 @@ export function useElementWidth(node: HTMLElement | null): number {
   }, [node]);
 
   return w;
+}
+
+/** Height twin of `useElementWidth`, for the maximised charts: the zoomed
+ *  plot fills whatever the overlay gives it, and jsdom still gets a real box. */
+export function useElementHeight(node: HTMLElement | null): number {
+  const [h, setH] = useState(FALLBACK_H);
+
+  useLayoutEffect(() => {
+    if (!node) return;
+    const read = () => {
+      const next = node.clientHeight;
+      if (next > 0) setH(next);
+    };
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(read);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [node]);
+
+  return h;
+}
+
+/** A LineChart that owns its own hover probe: crosshair plus a readout that
+ *  tracks the mouse, wired with no consumer state. The metric grid is the
+ *  exception — it shares ONE probe across every cell, so it keeps driving
+ *  `onHover` and `playhead` itself and never uses this. */
+export function ProbeLineChart(props: Omit<LineChartProps, "onHover" | "probe">) {
+  const [probe, setProbe] = useState<HoverPoint | null>(null);
+  return <LineChart {...props} onHover={setProbe} probe={probe} />;
 }
 
 /** A legend row that matches the chart's stroke vocabulary — a 9px dash in

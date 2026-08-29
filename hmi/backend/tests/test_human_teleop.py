@@ -5,7 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from haller_hmi.human_teleop import HumanState, HumanTeleopSession
+from haller_hmi.human_teleop import (
+    RATE_CAP_DEG_S, HumanState, HumanTeleopSession,
+)
 from haller_hmi.safety import Mode
 
 
@@ -95,6 +97,69 @@ def test_stop_restores_arms_to_manual_and_torque_on():
         a.guard.set.assert_called_with(Mode.MANUAL)
 
 
+def test_session_reads_arms_only_while_owning_the_tick_producer():
+    """Every seed/reseed read a session makes happens under its bus claim.
+
+    The idle sampler refuses to touch its source while a producer holds the
+    bus (test_tick pins that), so the serial line is collision-free exactly
+    when every session read is made AFTER `attach_producer`. `start()` used
+    to pre-seed the smoothing state before attaching — those reads raced the
+    idle sampler's 20 Hz cadence by construction, and one that lost seeded
+    0 deg on every joint (solo rig, 2026-08-29).
+    """
+    import time
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr)
+    owners: list[str | None] = []
+
+    def _read():
+        owners.append(sess.tick_bus.producer_name)
+        return {j: 12.0 for j in arms["left"].joint_limits_deg}
+
+    arms["left"].read_joints_deg.side_effect = _read
+    sess.start(left_arm="left", right_arm=None)
+    try:
+        time.sleep(0.1)
+    finally:
+        sess.stop()
+    assert owners, "the session never read the arm it was seeded from"
+    assert set(owners) == {"human-teleop"}
+
+
+def test_a_failed_reseed_read_retries_instead_of_seeding_zero():
+    """A reseed read that fails keeps the request pending and retries.
+
+    It must never quietly become 0 deg per joint: with the acquisition
+    countdown at zero, a zero-seeded side anchors the operator's hand to a
+    pose the arm is not in, and the first squeeze slews the arm toward the
+    fiction at the full rate cap.
+    """
+    import time
+    mgr, arms = _fake_arm_manager()
+    pose = {j: 25.0 for j in arms["left"].joint_limits_deg}
+    arms["left"].read_joints_deg.side_effect = (
+        [RuntimeError("no status packet"), RuntimeError("no status packet")]
+        + [pose] * 10_000
+    )
+    sess = HumanTeleopSession(mgr)
+    sess.start(left_arm="left", right_arm=None)
+    try:
+        deadline = time.monotonic() + 2.0
+        seeded = False
+        while time.monotonic() < deadline:
+            # The committed pose is the claim's subject; reading it directly
+            # beats inferring it through status(), which omits held sides.
+            committed = dict(sess._committed_left)
+            if committed.get("shoulder_pan") == 25.0:
+                seeded = True
+                break
+            assert committed.get("shoulder_pan", 0.0) == 0.0 or seeded
+            time.sleep(0.02)
+    finally:
+        sess.stop()
+    assert seeded, "committed never reached the observed pose (or seeded 0)"
+
+
 def test_start_twice_raises_runtime_error():
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
@@ -154,13 +219,19 @@ def test_first_ingest_transitions_armed_to_tracking():
         sess.stop()
 
 
-def test_dead_man_starts_an_acquisition_rather_than_handing_over():
-    """Closing the clutch is a request, not a handover.
+def test_the_clutch_hands_over_on_the_rising_edge():
+    """Closing the clutch IS the handover, on the frame it arrives.
 
-    This used to assert DRIVING on the very frame the dead-man arrived — the
-    behaviour the acquisition work exists to remove. The robot began following
-    instantly, from wherever the operator's arms happened to be, which is
-    essentially never where the robot's arms are.
+    This asserted ACQUIRING for as long as the countdown existed. The countdown
+    was sized against the camera path, where the commanded pose was GUESSED
+    from webcam landmarks and could sit tens of degrees off the arm. The
+    headset path anchors — the grip binds the target to wherever the arm
+    already is — so there is nothing for a countdown to protect, and charging
+    one on every re-clutch is what made this rig track a hand differently from
+    `SO101QuestTeleoperator`, which engages on the rising edge and always did.
+
+    A configured `acquire_ms` still counts; see the tests below. The DEFAULT is
+    zero.
     """
     mgr, _ = _fake_arm_manager()
     sess = HumanTeleopSession(mgr)
@@ -169,7 +240,7 @@ def test_dead_man_starts_an_acquisition_rather_than_handing_over():
         sess.ingest_frame(_kp_frame(dead_man=False))
         assert sess.state is HumanState.TRACKING
         sess.ingest_frame(_kp_frame(dead_man=True))
-        assert sess.state is HumanState.ACQUIRING
+        assert sess.state is HumanState.DRIVING
         sess.ingest_frame(_kp_frame(dead_man=False))
         assert sess.state is HumanState.TRACKING
     finally:
@@ -248,6 +319,49 @@ def test_commit_loop_writes_to_arms_when_driving():
         # The loop should call send_goal on both arms within ~50 ms.
         assert _wait_until(lambda: arms["left"].send_goal.called)
         assert _wait_until(lambda: arms["right"].send_goal.called)
+    finally:
+        sess.stop()
+
+
+def test_commit_passes_the_session_ceiling_to_send_goal():
+    """The session's write carries its OWN speed cap (RATE_CAP_DEG_S), not
+    the discrete-move motion.max_speed_deg_s. Every step reaching send_goal
+    is already rate-capped by _smooth_step; re-capping it at the (lower)
+    discrete-move number silently made that the arm's teleop ceiling —
+    90 deg/s on a rig whose kit reference carries no write-path cap at all.
+    The write stays elapsed-time bounded; the bound is the session's."""
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+        kwargs = arms["left"].send_goal.call_args_list[-1].kwargs
+        assert kwargs.get("speed_cap_deg_s") == RATE_CAP_DEG_S
+    finally:
+        sess.stop()
+
+
+def test_lpf_tau_zero_is_pure_passthrough():
+    """lpf_tau_s=0 disables the one-pole filter — the kit ships no output
+    filter at all. A target inside the per-tick rate cap must be committed
+    EXACTLY on the first driving tick, not eased toward: with the IK seeded
+    from the committed pose, any easing here feeds back into the next
+    solve's step budget and compounds into a speed ceiling nothing
+    configured."""
+    mgr, arms = _fake_arm_manager()
+    sess = HumanTeleopSession(
+        mgr, lpf_tau_s=0.0, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        # 1.0 deg from the 0-deg seed: inside the 240 deg/s * 5 ms = 1.2 deg
+        # per-tick cap, so only the filter could shrink it (at the 0.100
+        # default the first commit would be ~0.05 deg).
+        sess.ingest_frame(_kp_frame(dead_man=True,
+                                    goal={"shoulder_pan": 1.0}))
+        assert _wait_until(lambda: arms["left"].send_goal.called)
+        first = arms["left"].send_goal.call_args_list[0].args[0]
+        assert first["shoulder_pan"] == pytest.approx(1.0)
     finally:
         sess.stop()
 
@@ -645,14 +759,15 @@ def _off_pose_frame(dead_man: bool = True) -> dict:
 def test_defaults_are_the_ones_the_operator_was_promised():
     """The fast-acquire helper hides these everywhere else, so pin them once."""
     from haller_hmi import human_teleop as ht
-    assert ht.ACQUIRE_MS == 1000.0
-    assert ht.MATCH_DWELL_MS == 400.0
+    # Both handover gates are OFF by default: the clutch engages on the rising
+    # edge, the way the kit's teleoperator does. What still bounds the rig is
+    # the envelope, not a gate on engagement.
+    assert ht.ACQUIRE_MS == 0.0
+    assert ht.MATCH_DWELL_MS == 0.0
+    assert ht.ACQUIRE_RAMP_MS == 0.0
+    # The tracking-loss grace is NOT part of that and keeps its value: it
+    # exists so a flicker at the FOV edge does not drop the clutch at all.
     assert ht.FRAME_AGE_MS_LOSS == 700.0
-    assert ht.ACQUIRE_RATE_DEG_S == 20.0
-    # A handover the anchor somehow did not zero must still close inside the
-    # ramp, or the two constants are describing different handovers. 30 deg is
-    # the largest error the ramp is sized for.
-    assert 30.0 / ht.ACQUIRE_RATE_DEG_S <= ht.ACQUIRE_RAMP_MS / 1000.0
 
 
 def test_acquisition_holds_off_until_the_countdown_expires():
@@ -758,13 +873,24 @@ def test_the_first_commanded_step_is_not_a_jump():
         # because four sessions share this box and a loaded 200 Hz loop can
         # miss its rate — a starved run must not read as a ramp regression.
         assert len(sent) > 10, "not enough commits to judge the trajectory"
-        assert sent[0] == pytest.approx(0.0, abs=0.5), (
-            f"first commit jumped to {sent[0]} deg from an arm at 0"
-        )
-        # 20 deg/s for the first instant of driving; the loop runs at 200 Hz,
-        # so no single tick may move more than ~0.1 deg early on.
         steps = [abs(b - a) for a, b in zip(sent, sent[1:])]
-        assert max(steps[:20]) < 0.5, f"early step of {max(steps[:20])} deg"
+        # What this layer actually guarantees, and all it ever did
+        # unconditionally: every commit is one bounded STEP toward the
+        # operator, never a jump TO them. The operator holds a pose 90 deg
+        # away and the first thing written is a single rate-cap tick.
+        #
+        # Note what this test does NOT show, because the ramp used to hide it:
+        # HumanTeleopSession does not anchor. The anchor is upstream, in the
+        # clutch mapper, which binds the target to wherever the arm already is
+        # — so on the headset path an off-pose goal like this fixture's cannot
+        # arise. It could on the retired camera path, which GUESSED joint
+        # angles from webcam landmarks, and that is the path the 20 deg/s
+        # acquisition ramp was sized for. With that path gone, the ramp was
+        # buying defence against an input the session no longer has, at the
+        # cost of 1.5 s on every clutch.
+        assert sent[0] <= 4.0 + 1e-6, (
+            f"first commit of {sent[0]} deg is a jump, not a capped step"
+        )
         assert max(steps) <= 4.0 + 1e-6, "exceeded the session rate cap"
         assert sent[-1] > sent[0], "the arm never actually started moving"
     finally:
@@ -782,7 +908,7 @@ def test_commit_records_the_commanded_pose_not_the_requested_one():
     the commit loop the way comparing two separately-timed live reads would.
     """
     mgr, arms = _fake_arm_manager()
-    arms["left"].send_goal.side_effect = lambda goal: {j: 0.0 for j in goal}
+    arms["left"].send_goal.side_effect = lambda goal, **kw: {j: 0.0 for j in goal}
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:
@@ -996,14 +1122,14 @@ def test_intermittent_tick_faults_do_not_stop_the_session(monkeypatch):
     mgr, arms = _fake_arm_manager()
     calls = {"n": 0}
 
-    def _flaky(goal):
+    def _flaky(goal, **kw):
         calls["n"] += 1
         if calls["n"] % 4 < 2:      # two failures, two successes, alternating
             raise RuntimeError("transient glitch")
         return goal                 # send_goal echoes what it actually sent
 
     arms["left"].send_goal.side_effect = _flaky
-    arms["right"].send_goal.side_effect = lambda goal: goal
+    arms["right"].send_goal.side_effect = lambda goal, **kw: goal
     sess = HumanTeleopSession(mgr, **_fast_acquire(hz_override=200.0))
     sess.start(left_arm="left", right_arm="right")
     try:

@@ -194,6 +194,15 @@ def _configure_holding_position(robot: SO101Follower) -> None:
     """`robot.configure()`, with the goal registers parked first."""
     _park_goal_on_present(robot)
     SO101Follower.configure(robot)
+    # lerobot's configure() just wrote P_Coefficient=16 ("to avoid
+    # shakiness") — a leader-follower streaming tune. At 16 the position
+    # loop is too soft to carry this arm through gravity-heavy poses: the
+    # shoulder and elbow trail the command, draw near-stall current, and
+    # can trip the servo overload latch. The kit restores the STS3215
+    # factory gain explicitly for exactly that reason, and tracking parity
+    # with the kit starts at the servo's own stiffness.
+    for motor in robot.bus.motors:
+        robot.bus.write("P_Coefficient", motor, 32)
 
 
 @dataclass
@@ -435,7 +444,17 @@ class ArmHandle:
         from .vr_teleop.preflight import get_observation_median
         return get_observation_median(self, ANCHOR_READS)
 
-    def send_goal(self, goal_deg: dict[str, float]) -> dict[str, float]:
+    def send_goal(self, goal_deg: dict[str, float], *,
+                  speed_cap_deg_s: float | None = None) -> dict[str, float]:
+        """Write one goal, elapsed-time capped.
+
+        `speed_cap_deg_s` lets a caller that already rate-caps every step
+        bring its own ceiling — the teleop session passes its per-tick cap so
+        the discrete-move speed limit does not become the arm's teleop
+        ceiling (the kit's write path carries no cap at all; every write here
+        stays bounded, only the number is the caller's). None means
+        `motion.max_speed_deg_s`, which every discrete-path caller keeps.
+        """
         self.guard.assert_manual()
         assert self.robot is not None
         clamped = clamp_joint_goal(goal_deg, self.joint_limits_deg)
@@ -463,7 +482,9 @@ class ArmHandle:
         # on a fixed per-call cap and reintroduce the over-speed this fixed.
         dt = (1.0 / self.motion.ramp_hz) if self._last_command_at is None \
             else (now - self._last_command_at)
-        max_step_deg = step_budget_deg(dt, self.motion.max_speed_deg_s)
+        cap = self.motion.max_speed_deg_s if speed_cap_deg_s is None \
+            else speed_cap_deg_s
+        max_step_deg = step_budget_deg(dt, cap)
         capped = limit_step(self._last_commanded, measurable, max_step_deg)
         # lerobot expects keys suffixed with ".pos"
         action = {f"{j}.pos": v for j, v in capped.items()}
@@ -1009,6 +1030,23 @@ class ArmManager:
         """Last preflight per arm id — the named offending joints, for a caller
         that can put them in front of the operator."""
         return dict(self._preflight_reports)
+
+    def rerun_preflight(self, arm_id: str) -> PreflightReport | None:
+        """Re-check ONE arm and replace its stored verdict.
+
+        Exists so an operator who has just repositioned an arm can ask again
+        without a backend restart. A restart is the worst possible way to
+        re-check: shutdown drops torque, the arm sags under its own weight,
+        and the next preflight reads a pose further outside the limits than
+        the one that failed — so fixing a flagged joint reveals the next one
+        rather than clearing the arm.
+
+        Deliberately the same call the connect path makes, not a softer one:
+        re-running must be able to FAIL, or it becomes a dismiss button.
+        """
+        handle = self._handles[arm_id]
+        self._preflight_arm(handle)
+        return self._preflight_reports.get(arm_id)
 
     def disconnect_all(self) -> None:
         # Each arm in its own try: on a bimanual rig one arm's bad servo must

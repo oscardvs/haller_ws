@@ -200,6 +200,25 @@ FPS_FAITHFUL_FRACTION = 0.005
 #: continuously instead of once. Identical corruption, identical bound.
 RATE_ALERT_AFTER_S = 2.0
 
+#: ARM-time settle gate: `rate_detail()` answers as soon as its window is
+#: FULL; these govern waiting until it is SETTLED. The window is a moving
+#: average over `RATE_MIN_SAMPLES` publishes, so for ~0.5-1 s after the
+#: sampler CHANGES rate (idle ~20 Hz <-> session 30/60 Hz) it sweeps through
+#: values that are nobody's rate. An arm landing in that sweep either 409s
+#: on a transient, or — worse, because silent — freezes a `fps` the rig was
+#: only passing through (a mixed 45 Hz read rounds, passes the faithfulness
+#: gate, and timestamps a 60 Hz take as frame_index/45). Measured in sim,
+#: 2026-08-27: an append armed inside the sweep read 29.934 Hz against a
+#: dataset written at 60 and refused; the same arm a second later passed.
+#: The gate therefore requires `RATE_SETTLE_READS` consecutive window reads,
+#: each within `FPS_FAITHFUL_FRACTION` of the last, before `_freeze_fps`
+#: runs. At 60 Hz one 0.1 s poll turns 20% of the window, so the sweep
+#: moves the average by several percent per read — far above the tolerance,
+#: which is what makes 3 quiet reads proof of stillness rather than luck.
+RATE_SETTLE_READS = 3
+RATE_SETTLE_POLL_S = 0.1
+RATE_SETTLE_TIMEOUT_S = 3.0
+
 # Shortest take worth writing — and, much more importantly, the shortest take
 # lerobot 0.5.1 can write WITHOUT corrupting the dataset.
 #
@@ -817,6 +836,7 @@ class DatasetRecorder:
             logger.warning("recorder: no active cameras — recording state/action/base only")
 
         features = self._build_features(cam_specs)
+        await self._wait_for_settled_rate()
         fps, rate = self._freeze_fps(repo_id)
 
         if self._dataset is not None and self._dataset.repo_id != repo_id:
@@ -1684,6 +1704,41 @@ class DatasetRecorder:
                     }
                 out[f"{side}_{j}"] = entry
         return out
+
+    async def _wait_for_settled_rate(self) -> None:
+        """Hold arming until the measured tick rate stops moving.
+
+        A full window is not a settled one — see `RATE_SETTLE_READS`. The
+        sampler's rate transitions are exactly when an operator arms (the
+        session just started, or just came back from E-STOP), so the sweep
+        is not a corner case but the common path.
+
+        Timeout raises `RateNotMeasuredYet`, the same TRANSIENT 409 a thin
+        window gets, because the remedy is the same: try again in a second.
+        It never falls through to measuring anyway — an unsettled read that
+        happens to sit near an integer freezes a `fps` the rig was passing
+        through, which is mechanism 3 in a new coat.
+        """
+        prev: float | None = None
+        streak = 0
+        deadline = time.monotonic() + RATE_SETTLE_TIMEOUT_S
+        while True:
+            detail = self.tick_bus.rate_detail()
+            hz = float(detail["hz"]) if detail is not None else None
+            if (hz is not None and prev is not None
+                    and abs(hz - prev) / prev <= FPS_FAITHFUL_FRACTION):
+                streak += 1
+                if streak >= RATE_SETTLE_READS - 1:
+                    return
+            else:
+                streak = 0
+            prev = hz
+            if time.monotonic() >= deadline:
+                raise RateNotMeasuredYet(
+                    f"tick rate not measured: the window did not settle "
+                    f"within {RATE_SETTLE_TIMEOUT_S:.0f} s — the sampler is "
+                    f"mid-transition; try again in a second")
+            await asyncio.sleep(RATE_SETTLE_POLL_S)
 
     def _freeze_fps(self, repo_id: str) -> tuple[int, dict]:
         """The integer `fps` this episode opens against, and the measurement.

@@ -42,7 +42,12 @@ def app_with_mocks(monkeypatch, tmp_path):
         "gripper":      MagicMock(model="sts3215", id=6),
     }
     arm.robot.bus.model_resolution_table = {"sts3215": 4096}
-    arm.robot.bus.sync_read.return_value = {"shoulder_pan": 1000, "gripper": 3500}
+    # Centred, because capture_neutral now VERIFIES the re-centre landed
+    # (post-read within RECENTER_TOL_TICKS of 2047) — a mock reporting an
+    # off-centre pose is a mock simulating a failed homing write.
+    arm.robot.bus.sync_read.return_value = {"shoulder_pan": 2048, "gripper": 2048}
+    arm.robot.bus.set_half_turn_homings.return_value = {
+        "shoulder_pan": 0, "gripper": 0}
     arm.robot.calibration = None
     arm.torque_enabled = True
 

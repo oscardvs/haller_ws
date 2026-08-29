@@ -35,7 +35,7 @@ export default function VRTeleopPage() {
         <header>
           <h1 className="text-lg font-mono">VR Teleop</h1>
           <p className="text-[12px] text-muted-foreground">
-            Meta Quest · passthrough AR in the headset browser · per-hand grip to drive · B/Y = E-STOP
+            Meta Quest · passthrough AR in the headset browser · per-hand grip to drive · B = end take · A/X = precision
           </p>
         </header>
         {arms.length ? (

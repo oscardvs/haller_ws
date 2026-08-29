@@ -121,6 +121,25 @@ def test_post_calibration_capture_neutral(app_with_mocks):
     assert r.json()["state"] == "sweeping"
 
 
+def _sweep_plausibly(session, arm_handle, lo=500, hi=3600):
+    """Walk both mocked joints to lo then hi in ≤350-tick steps: the sweep's
+    glitch filter holds teleports for confirmation, and its wrap guard
+    refuses a range wider than any real joint — a synthetic sweep must look
+    like one a hand could make. Fixture seed is 2048 on both joints."""
+    def _steps(frm, to):
+        step = 350 if to > frm else -350
+        return list(range(frm + step, to, step)) + [to]
+    pans = _steps(2048, lo) + _steps(lo, hi)
+    grips = _steps(2048, lo) + _steps(lo, hi)
+    n = max(len(pans), len(grips))
+    pans += [pans[-1]] * (n - len(pans))
+    grips += [grips[-1]] * (n - len(grips))
+    for pan, grip in zip(pans, grips):
+        arm_handle.robot.bus.sync_read.return_value = {
+            "shoulder_pan": pan, "gripper": grip}
+        session.tick_sweep(arm_handle)
+
+
 def test_post_calibration_finish_sweep(app_with_mocks):
     app_with_mocks.post("/calibration/right/start")
     app_with_mocks.post("/calibration/right/capture_neutral")
@@ -128,10 +147,7 @@ def test_post_calibration_finish_sweep(app_with_mocks):
     import haller_hmi.server as srv
     session = srv.calibration.current
     arm_handle = srv.arms["right"]
-    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 500, "gripper": 100}
-    session.tick_sweep(arm_handle)
-    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 3600, "gripper": 4000}
-    session.tick_sweep(arm_handle)
+    _sweep_plausibly(session, arm_handle)
     r = app_with_mocks.post("/calibration/right/finish_sweep")
     assert r.status_code == 200
     body = r.json()
@@ -145,10 +161,7 @@ def test_post_calibration_save_returns_paths(app_with_mocks):
     import haller_hmi.server as srv
     session = srv.calibration.current
     arm_handle = srv.arms["right"]
-    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 500, "gripper": 100}
-    session.tick_sweep(arm_handle)
-    arm_handle.robot.bus.sync_read.return_value = {"shoulder_pan": 3600, "gripper": 4000}
-    session.tick_sweep(arm_handle)
+    _sweep_plausibly(session, arm_handle)
     app_with_mocks.post("/calibration/right/finish_sweep")
     r = app_with_mocks.post("/calibration/right/save")
     assert r.status_code == 200

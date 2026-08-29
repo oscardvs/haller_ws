@@ -19,12 +19,11 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { useTelemetry } from "@/lib/telemetry";
-import { useRecorder } from "@/lib/recorder";
+import { effectiveRepoId, useRecorder } from "@/lib/recorder";
 import {
   api, ApiError, cameraStreamUrl, formatHz, recordRateFaithful, recordRateTolerance,
   type CameraInfo, type EpisodesResponse, type RepoInfo,
 } from "@/lib/api";
-import { repoIdFor } from "./CommandBar";
 import { gridPlan } from "./cameraGrid";
 import { startTake, stopTake, NO_TELEOP_WARNING } from "./recorderActions";
 
@@ -57,14 +56,20 @@ function formatBytes(n: number | undefined): string {
 export function DatasetTab({
   cameras,
   onCameraRecord,
+  datasetFps = null,
 }: {
   cameras: CameraInfo[];
   /** Lifts the accepted toggle back into the cockpit's one camera list, so
    *  every tab reads the same answer to "is this camera in the take". */
   onCameraRecord: (id: string, record: boolean) => void;
+  /** The resumed dataset's write rate, known only when the draft is pinned
+   *  to an on-disk repo (collect's resume card reads it off the episodes).
+   *  Optional: the other surfaces that mount this tab have no resume flow. */
+  datasetFps?: number | null;
 }) {
   const task = useRecorder((s) => s.task);
   const hfUser = useRecorder((s) => s.hfUser);
+  const repoIdOverride = useRecorder((s) => s.repoIdOverride);
   const setTask = useRecorder((s) => s.setTask);
   const setHfUser = useRecorder((s) => s.setHfUser);
   const recording = useRecorder((s) => s.status?.recording ?? false);
@@ -85,7 +90,10 @@ export function DatasetTab({
   const teleopRunning = useTelemetry((s) => s.lastFrame?.human_teleop?.running ?? false);
   const armCount = useTelemetry((s) => Object.keys(s.lastFrame?.arms ?? {}).length);
 
-  const repoId = repoIdFor(hfUser, task);
+  // The repo the next take writes to: a pinned resume target when one is
+  // set, the task/hfUser composition otherwise. Never recomposed locally —
+  // the resume pin IS the dataset the operator picked.
+  const repoId = effectiveRepoId({ repoIdOverride, hfUser, task });
   const logged = cameras.filter((c) => takeStateFor(c).inTake);
   const plan = gridPlan(cameras);
 
@@ -193,6 +201,14 @@ export function DatasetTab({
 
             <div className="rounded-md border border-border bg-muted p-2.5 font-mono text-[10px] break-all">
               {repoId}
+              {/* A pinned resume target, not a guess composed from the task
+                  string — said out loud because the two can name different
+                  datasets, and the pin is the one that wins. */}
+              {repoIdOverride && (
+                <span className="ml-1.5 label-micro text-[var(--haller-live)]">
+                  resuming
+                </span>
+              )}
             </div>
 
             <div className="flex items-baseline gap-2.5 font-mono text-[11px]">
@@ -248,10 +264,20 @@ export function DatasetTab({
 
             {/* Warning, not a block: the backend does not enforce this, so a
                 disabled button here would look like an invariant without being
-                one — and a bring-up take with no teleop is legitimate. */}
+                one — and a bring-up take with no teleop is legitimate. The
+                resume half is different in kind: an append outside the
+                dataset's fps band is REFUSED by the gate, so "no session"
+                there is not a degraded take, it is a take that cannot save. */}
             {!recording && !teleopRunning && (
               <div className="rounded-md border border-[var(--haller-warn)] px-2.5 py-2 text-[11px] text-pretty text-[var(--haller-warn)]">
                 {NO_TELEOP_WARNING}
+                {repoIdOverride && datasetFps !== null && (
+                  <>
+                    {" — and "}
+                    <span className="font-mono">{repoIdOverride}</span>
+                    {` is a ${datasetFps} fps dataset: takes append only from a session running at ${datasetFps} Hz`}
+                  </>
+                )}
               </div>
             )}
 
