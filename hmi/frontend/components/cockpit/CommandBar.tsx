@@ -158,7 +158,7 @@ function hintFor(
     case "cameras":
       return "the Operate tab's chips pick which of these is the primary view";
     case "data":
-      return "collect · review · train — review sorts and filters server-side";
+      return "collect · review · train · runs — review sorts and filters server-side";
     case "settings":
       return "config is read-only — edit hmi/backend/config.yaml and restart";
   }

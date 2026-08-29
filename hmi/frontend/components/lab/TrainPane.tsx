@@ -10,10 +10,10 @@
  *
  * TWO timers would be one too many. `RunDetail` owns the per-run poll (metrics
  * and log by byte offset, armed only while that run is running); the only
- * thing this pane adds is a refetch of the LIST on the same 2 s cadence, armed
- * only while some row says `running`. A list that never refreshes shows a
- * finished run as still burning the GPU; a list that always refreshes makes
- * four requests a second at 3am against a page nobody is reading.
+ * thing this pane adds is `useRunList`, which refetches the LIST on the same
+ * 2 s cadence, armed only while some row says `running`. The read's shape —
+ * the tagged answer, the quiet poll, the in-flight guard — lives in the hook
+ * now, because the Runs tab reads the same list.
  *
  * `kind` and `status` are filtered by the SERVER — `GET /lab/runs` takes both —
  * and only the free-text box is filtered here, because it is a substring match
@@ -25,7 +25,7 @@ import { toast } from "sonner";
 
 import {
   isMissing, lab, reason,
-  type DatasetSummary, type Run, type RunSummary,
+  type DatasetSummary, type Run,
 } from "@/lib/lab";
 import { Button, Empty, Panel, PanelHead, Refusal } from "@/components/lab/ui";
 import { useSticky } from "@/components/cockpit/lib";
@@ -34,11 +34,7 @@ import { RunFilters, DEFAULT_RUN_FILTERS, type RunFilterState } from "@/componen
 import { RunList, runLabel } from "@/components/lab/RunList";
 import { PaneBoundary } from "@/components/lab/PaneBoundary";
 import { RunDetail } from "@/components/lab/RunDetail";
-
-/** The same cadence `RunDetail` polls one run at. Matching it deliberately:
- *  a list that lags the detail view by a different interval shows a run as
- *  `running` in the row the operator is reading `done` in. */
-const LIST_POLL_MS = 2000;
+import { useRunList } from "@/components/lab/useRunList";
 
 export function TrainPane({
   repoId,
@@ -70,33 +66,10 @@ export function TrainPane({
 
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [dsError, setDsError] = useState<string | null>(null);
-  /** One list read, TAGGED with what it answers. `loading` is derived from the
-   *  tag rather than raised at the top of the effect: "this filter has no
-   *  answer yet" is what the spinner means, and raising it in the effect body
-   *  is a cascading render on every read. `now` rides along so a running row's
-   *  duration is measured against the moment its status was read, never
-   *  against a render-time clock. */
-  const [read, setRead] = useState<{
-    key: string;
-    runs: RunSummary[];
-    error: string | null;
-    now: number;
-  } | null>(null);
-  /** 404/501 anywhere in `/lab`: this build predates the Lab. A property of
-   *  the backend, so it replaces the pane rather than reading as a failure. */
-  const [noLab, setNoLab] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
-
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; };
-  }, []);
-
-  /** Bumped on every list read. A poll that was in flight when the filter
-   *  changed must not paint the old filter's rows over the new one's. */
-  const gen = useRef(0);
+  /** 404/501 on the DATASET read: this build predates the Lab. The run list's
+   *  own copy of the same fact comes back from the hook, and either one
+   *  replaces the pane rather than reading as a failure. */
+  const [dsNoLab, setDsNoLab] = useState(false);
 
   /* ── the dataset list, once ───────────────────────────────────────────
      Handed to the launcher untouched: which datasets are trainable and how
@@ -111,7 +84,7 @@ export function TrainPane({
         setDsError(null);
       } catch (e) {
         if (cancelled) return;
-        if (isMissing(e)) setNoLab(true);
+        if (isMissing(e)) setDsNoLab(true);
         else setDsError(reason(e));
       }
     })();
@@ -119,55 +92,12 @@ export function TrainPane({
   }, []);
 
   /* ── the run list ─────────────────────────────────────────────────────
-     `quiet` is the poll. A dropped request while a run is training must not
-     blank a list that is still perfectly good, so a quiet failure is kept and
-     retried on the next tick. */
-  /** What one list read answers: the SERVER-side filter, plus the manual
-   *  refresh generation. A read tagged with anything else would satisfy a
-   *  filter it was not taken under. */
-  const listKey = `${filters.kind ?? "any"}|${filters.status ?? "any"}|${refreshKey}`;
-
-  const loadRuns = useCallback(
-    async (quiet: boolean) => {
-      const g = (gen.current += 1);
-      try {
-        const { runs: rows } = await lab.runs({ kind: filters.kind, status: filters.status });
-        if (!alive.current || g !== gen.current) return;
-        setRead({ key: listKey, runs: rows, error: null, now: Date.now() / 1000 });
-      } catch (e) {
-        if (!alive.current || g !== gen.current) return;
-        if (isMissing(e)) {
-          setNoLab(true);
-          setRead({ key: listKey, runs: [], error: null, now: Date.now() / 1000 });
-        } else if (!quiet) {
-          // The rows already on screen are kept: a failed refresh is not
-          // evidence that the runs are gone.
-          setRead((prev) => ({
-            key: listKey,
-            runs: prev?.runs ?? [],
-            error: reason(e),
-            now: prev?.now ?? 0,
-          }));
-        }
-      }
-    },
-    [filters.kind, filters.status, listKey],
-  );
-
-  useEffect(() => {
-    void loadRuns(false);
-  }, [loadRuns]);
-
-  const runs = useMemo(() => read?.runs ?? [], [read]);
-  const error = read?.error ?? null;
-  const loading = read === null || read.key !== listKey;
-
-  const anyRunning = runs.some((r) => r.status === "running");
-  useEffect(() => {
-    if (!anyRunning || noLab) return;
-    const t = setInterval(() => { void loadRuns(true); }, LIST_POLL_MS);
-    return () => clearInterval(t);
-  }, [anyRunning, noLab, loadRuns]);
+     The tagged read, the quiet poll and the running-only cadence all live in
+     the hook — see `useRunList`. */
+  const {
+    runs, error, loading, now, noLab: listNoLab, refetch,
+  } = useRunList({ kind: filters.kind, status: filters.status });
+  const noLab = dsNoLab || listNoLab;
 
   /** The only browser-side filter. Name and id, which is exactly what the box
    *  says it searches. */
@@ -292,7 +222,7 @@ export function TrainPane({
             onSelect={setSelected}
             compare={compare}
             onToggleCompare={toggleCompare}
-            now={read?.now ?? 0}
+            now={now}
           />
         </Panel>
       </div>

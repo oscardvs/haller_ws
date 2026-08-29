@@ -34,6 +34,8 @@ from .teleop import TeleopSession
 from .telemetry import TelemetryBroadcaster
 from .tick import IdleSampler
 from .recorder import DatasetRecorder, lerobot_home
+from .policy_bridge import FiniteActionIngest, PolicyBridge, ingest_port_from_env
+from .policy_ingest import INGEST_PORT, PolicyIngest
 from .lab.routes import build_lab_router
 from .sim.scene import SceneController
 from .sim.task import InsertionMonitor, TaskMonitor
@@ -141,6 +143,12 @@ recorder: DatasetRecorder | None = None  # constructed in lifespan, after teleme
 # window before lifespan has run.
 scene: SceneController | None = None
 task: TaskMonitor | None = None
+# The server half of the policy wire: the rollout child dials this and streams
+# target degrees; the bridge supplies the three injected callables. Constructed
+# in lifespan — bus_conflict/observe/submit need the recorder, the cameras and
+# the sessions to exist first.
+policy_ingest: PolicyIngest | None = None
+policy_bridge: PolicyBridge | None = None
 
 #: How long POST /sim/scene/reset waits for a requested homing ramp to finish
 #: before dealing cubes. motion.home() only SCHEDULES the ramp, so without a
@@ -313,8 +321,66 @@ async def _lifespan(app: FastAPI):
     recorder = DatasetRecorder(telemetry=telemetry, human_teleop=human_teleop,
                                cameras=cameras, task_monitor=task,
                                tick_bus=human_teleop.tick_bus)
+    # The policy wire's server half. The bridge holds the three production
+    # callables (contract C1-C3: lease.bus_conflict's first caller, the
+    # observation sampler, the commit front door); the ingest owns the socket.
+    # Zero-arg getters for cameras/recorder for the lab router's stated reason:
+    # both are module globals assigned lines above, and a rebind must be seen.
+    global policy_ingest, policy_bridge
+    policy_bridge = PolicyBridge(
+        arms=arms,
+        tick_bus=human_teleop.tick_bus,
+        get_cameras=lambda: cameras,
+        get_recorder=lambda: recorder,
+        calibration=calibration,
+        sessions=(teleop, human_teleop, sim_teleop),
+        # Only real arms have a serial device a foreign process could hold.
+        devices=[a.port for a in cfg.arms if a.enabled and a.source == "real"],
+    )
+    # `FiniteActionIngest`, not the base class: json.loads accepts NaN/Infinity
+    # literals and the frozen decode path would pass them into the clamp, which
+    # resolves non-finite to a joint LIMIT — see the subclass docstring.
+    policy_ingest = FiniteActionIngest(
+        bus_conflict=policy_bridge.bus_conflict,
+        submit=policy_bridge.submit,
+        observe=policy_bridge.observe,
+        on_session_end=policy_bridge.release,
+        # The module's own default port, unless $HALLER_POLICY_INGEST moves it —
+        # the child dials by the same variable (it inherits this environment via
+        # lab/runs.launch), so one setting moves both halves. Host is loopback
+        # only, and no env can widen it.
+        port=ingest_port_from_env(INGEST_PORT),
+    )
+    policy_bridge.attach_ingest(policy_ingest)
+    try:
+        await policy_ingest.start()
+    except OSError:
+        # A stale holder of the port must not cost the operator teleop: the
+        # HMI's first job is the arms. Every rollout child then refuses loudly
+        # ("no policy ingest at ..."), which names this exact condition.
+        logger.exception(
+            "policy ingest could not bind %s — rollouts will be refused at "
+            "the handshake until it can", policy_ingest.status()["url"])
     yield
     logger.info("haller-hmi backend shutting down")
+    # FIRST, before anything below drains the arms: stop admitting and
+    # streaming policy actions. NOT a bare `policy_ingest.stop()`: on 3.12
+    # `wait_closed()` waits for the connection handlers, whose stream loop
+    # runs until the active run is nulled — which stop() does only AFTER the
+    # wait. With a child connected that is a circular wait: shutdown (Ctrl-C,
+    # SIGTERM, --reload) hangs at this exact step while the policy keeps
+    # committing goals, and on --reload the new process takes the arms beside
+    # the old one still writing. `PolicyBridge.shutdown` nulls the run first,
+    # bounds the drain, and releases the tick-bus claim itself (the handler's
+    # finally skips `on_session_end` once the run id is nulled from outside).
+    if policy_bridge is not None:
+        await policy_bridge.shutdown()
+        policy_bridge = None
+        policy_ingest = None
+    elif policy_ingest is not None:      # bridge never built; belt only
+        policy_ingest.active_run_id = None
+        await policy_ingest.stop()
+        policy_ingest = None
     if recorder is not None:
         if recorder.status()["recording"]:
             await recorder.stop_episode(save=True)
@@ -389,6 +455,29 @@ def _require_calibration_session(arm_id: str) -> None:
         raise HTTPException(status_code=409, detail="no active session for this arm")
 
 
+def _refuse_during_rollout() -> None:
+    """409 any operator start path while a policy rollout streams.
+
+    The REVERSE half of the bridge's `bus_conflict`: that one refuses a
+    rollout while an operator drives; without this, `/teleop/start`,
+    `/teleop/sim/start` and `/calibration/{arm}/start` would all succeed
+    mid-rollout — none of them attaches a tick-bus producer, so nothing else
+    refuses them — putting a session's OS thread (or a torque-cutting sweep)
+    beside the ingest's asyncio commits on one half-duplex serial line.
+
+    Race-free where it is called from an `async def` route with no await
+    between this check and the session claiming its arms: rollout admission
+    happens on this same event loop. Callable before the lifespan has run
+    (`policy_bridge` still None) because routes are mountable without it —
+    then there is no ingest, so there is nothing to refuse.
+    """
+    if policy_bridge is None:
+        return
+    conflict = policy_bridge.rollout_conflict()
+    if conflict:
+        raise HTTPException(status_code=409, detail=conflict)
+
+
 # ---- routes --------------------------------------------------------------
 
 @app.get("/health")
@@ -440,6 +529,7 @@ async def post_arm_goal(arm_id: str, body: dict[str, float]):
     which is the incident this plan exists to prevent; a bounded jog cannot
     reproduce it the same way.
     """
+    _refuse_during_rollout()
     handle = _arm_or_404(arm_id)
     if not handle.torque_enabled:
         raise HTTPException(
@@ -476,6 +566,7 @@ async def post_arm_mode(arm_id: str, body: ArmModeBody):
 
 @app.post("/arm/{arm_id}/home")
 async def post_arm_home(arm_id: str):
+    _refuse_during_rollout()
     handle = _arm_or_404(arm_id)
     try:
         sent = motion_policy.home(handle)
@@ -577,6 +668,7 @@ async def delete_arm_preset(arm_id: str, name: str):
 
 @app.post("/arm/{arm_id}/preset")
 async def post_arm_preset(arm_id: str, body: PresetBody):
+    _refuse_during_rollout()
     handle = _arm_or_404(arm_id)
     try:
         goal = presets.get(body.name, arm_id)
@@ -676,6 +768,9 @@ async def get_teleop():
 async def post_teleop_start(body: TeleopStartBody):
     _arm_or_404(body.leader)
     _arm_or_404(body.follower)
+    # No await between this and teleop.start(): the check and the session's
+    # claim are one atomic stretch on the event loop the ingest admits on.
+    _refuse_during_rollout()
     try:
         teleop.start(body.leader, body.follower, hz=body.hz)
     except ValueError as e:
@@ -706,6 +801,10 @@ async def post_human_teleop_start(body: HumanTeleopStartBody):
     for arm_id in (body.left_arm, body.right_arm):
         if arm_id:
             _arm_or_404(arm_id)
+    # The session's own attach_producer would 409 anyway (ProducerConflict);
+    # asking first buys the sentence that names the RUN — and heals a claim
+    # whose run is already gone, so a dead rollout never costs a start.
+    _refuse_during_rollout()
     try:
         human_teleop.start(
             left_arm=body.left_arm, right_arm=body.right_arm, hz=body.hz,
@@ -792,6 +891,11 @@ async def teleop_sim_start(body: SimTeleopStartBody):
     # they can't interleave — PROVIDED nothing in this function's own body
     # awaits in the middle of claiming the arm. See the next comment: this is
     # exactly what src.prepare() would have broken if left inline.
+    # Checked twice, and both are load-bearing: here so a mid-rollout request
+    # refuses before the replay path loads a whole LeRobotDataset for nothing,
+    # and again after the await below, because src.prepare() yields the loop
+    # and a rollout could be admitted while it runs.
+    _refuse_during_rollout()
     leader_cfg = body.leader
     src_kind = leader_cfg.get("source")
     if src_kind == "mouse":
@@ -816,6 +920,9 @@ async def teleop_sim_start(body: SimTeleopStartBody):
     # awaits" as an invariant to remember — the one await here is placed
     # before sim_teleop.start() claims the follower, not interleaved with it.
     await asyncio.to_thread(src.prepare)
+    # The recheck after the one await — from here to start() nothing yields,
+    # so this is the atomic stretch the comment above promises.
+    _refuse_during_rollout()
     try:
         sim_teleop.start(follower_id=body.follower, source=src, hz=body.hz)
     except RuntimeError as e:
@@ -994,6 +1101,12 @@ def get_calibration_status():
 @app.post("/calibration/{arm_id}/start")
 async def post_calibration_start(arm_id: str):
     _arm_or_404(arm_id)
+    # The bridge refuses a rollout while a sweep runs (its calibration
+    # branch); this is the missing reverse half. Without it a sweep cuts
+    # torque on the target arm mid-rollout while the policy keeps driving the
+    # other one, and after save the still-streaming policy resumes under a
+    # freshly redefined zero.
+    _refuse_during_rollout()
     try:
         session = calibration.start(arms, arm_id)
     except ConflictError as e:

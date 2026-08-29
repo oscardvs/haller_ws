@@ -755,6 +755,9 @@ export function ReviewPane({
             // there is nothing else here to derive it from.
             fps={detail?.fps ?? 0}
             onTime={onTime}
+            // J/L made physical: the transport's step buttons walk the same
+            // server-ordered window the keyboard does.
+            onStep={step}
           />
           </PaneBoundary>
 

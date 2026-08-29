@@ -1,35 +1,37 @@
 "use client";
 
 /**
- * The LAB workspace: one tab, three sub-views, one selected dataset.
+ * The LAB workspace: one tab, four sub-views, one selected dataset.
  *
- * Collect · review · train is the order the work actually happens in, and the
- * repo id is the thread between them — opening a dataset from the collect
- * shelf or from the train launcher lands in review with that repo already
- * chosen. Both the sub-view and the repo are sticky, because tabs mount and
- * unmount and losing your place in a 46-episode review because you glanced at
- * Cameras is the kind of small betrayal that makes an operator stop trusting
- * the surface.
+ * Collect · review · train · runs is the order the work actually happens in,
+ * and the repo id is the thread between the first three — opening a dataset
+ * from the collect shelf or from the train launcher lands in review with that
+ * repo already chosen. Runs sits after train because it reads what train
+ * produced: the trained models, overlaid. Both the sub-view and the repo are
+ * sticky, because tabs mount and unmount and losing your place in a
+ * 46-episode review because you glanced at Cameras is the kind of small
+ * betrayal that makes an operator stop trusting the surface.
  *
  * Sticky, not persisted: a reload is a fresh session. See `useSticky`.
  */
 import { useCallback } from "react";
-import Link from "next/link";
 
 import { SubNav } from "@/components/lab/ui";
 import { useSticky } from "@/components/cockpit/lib";
 import { CollectPane } from "@/components/lab/CollectPane";
 import { ReviewPane } from "@/components/lab/ReviewPane";
 import { TrainPane } from "@/components/lab/TrainPane";
+import { RunsPane } from "@/components/lab/RunsPane";
 import type { ConfigArm } from "@/components/cockpit/teleopPresets";
 import type { CameraInfo } from "@/lib/api";
 
-type SubView = "collect" | "review" | "train";
+type SubView = "collect" | "review" | "train" | "runs";
 
 const VIEWS = [
   { id: "collect", label: "collect", hint: "compose the take and record it" },
   { id: "review", label: "review", hint: "watch, mark keep/reject, tag" },
   { id: "train", label: "train", hint: "launch a run on the kept set" },
+  { id: "runs", label: "runs", hint: "compare trained models side by side" },
 ] as const satisfies readonly { id: SubView; label: string; hint: string }[];
 
 export function DataTab({
@@ -63,16 +65,9 @@ export function DataTab({
         >
           {repo ?? "no dataset selected"}
         </span>
-        {/* Compare is a deep-link route: it is the one Lab surface allowed to
-            scroll, and it opens beside the cockpit rather than replacing it. */}
-        <Link
-          href="/lab/compare"
-          target="_blank"
-          rel="noreferrer"
-          className="label-micro shrink-0 text-muted-foreground transition-colors hover:text-[var(--haller-live)]"
-        >
-          compare runs ↗
-        </Link>
+        {/* The old "compare runs ↗" link lived here; the Runs sub-view is that
+            surface in the cockpit now, and it carries its own ↗ deep link for
+            the shareable form. */}
       </SubNav>
 
       {/* `grid` rather than `block` so the pane stretches to the row instead of
@@ -100,6 +95,7 @@ export function DataTab({
           <ReviewPane key={repo ?? "none"} repoId={repo} onPickDataset={setRepo} />
         )}
         {view === "train" && <TrainPane repoId={repo} onOpenDataset={openInReview} />}
+        {view === "runs" && <RunsPane />}
       </div>
     </div>
   );

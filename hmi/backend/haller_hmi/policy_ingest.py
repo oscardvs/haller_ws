@@ -190,11 +190,17 @@ class PolicyIngest:
                     self._host, self._port)
 
     async def stop(self) -> None:
+        # Null the run FIRST: the handler's stream loop spins on
+        # `while self.active_run_id is not None`, and on Python 3.12
+        # wait_closed() waits for connection handlers — nulling after it is
+        # a circular wait that hangs shutdown while the policy keeps
+        # committing goals (reproduced on this box, 2026-08-29; a --reload
+        # then puts two processes on one Feetech bus).
+        self.active_run_id = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        self.active_run_id = None
 
     @property
     def port(self) -> int:
@@ -422,7 +428,11 @@ class PolicyIngest:
                 # targets, which is a different policy than the one under test.
                 self.last_refusal = str(e)
                 await self._send(writer, self.refusal_message(str(e)))
-                self.active_run_id = None
+                # Return WITHOUT nulling: the handler's `finally` is the one
+                # place that both nulls the run and fires on_session_end.
+                # Nulling here made its `== run_id` guard miss, and the
+                # bridge's tick-bus producer claim leaked until the next
+                # rollout handshake happened to sweep it.
                 return
             outcome = self._submit(self.active_run_id or "", seq, action)
             self.actions_committed += 1

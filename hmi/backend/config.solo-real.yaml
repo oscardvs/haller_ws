@@ -159,6 +159,9 @@ cameras:
     width: 640
     height: 480
     fps: 30
+    # The kit ACTs' one visual feature is observation.images.top (so101_pick_cube),
+    # so this view rolls out AND records under that key — precedent config.bimanual-sim.yaml:83.
+    dataset_key: top
   - id: wrist_left
     role: wrist
     arm_id: left
