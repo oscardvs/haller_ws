@@ -325,6 +325,25 @@ def _extra_args(payload: dict) -> list[str]:
     return [str(arg) for arg in raw]
 
 
+def _int_list(payload: dict, key: str) -> list[int]:
+    """A list of whole numbers, or a 400 that names what arrived.
+
+    Shape only — nothing here knows which episodes exist. `_requested_episodes`
+    is the one that checks a list against a dataset, and it needs a `detail`
+    this caller has not read.
+    """
+    raw = (payload or {}).get(key)
+    if not isinstance(raw, (list, tuple)):
+        raise HTTPException(
+            status_code=400, detail=f"{key} must be a list of whole numbers")
+    try:
+        return [int(v) for v in raw]
+    except (TypeError, ValueError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} must be a list of whole numbers: {e}") from e
+
+
 def _policy_inputs(payload: dict, detail: dict) -> dict | None:
     """The observation columns the policy may read, resolved against the
     dataset — or `None` for "let LeRobot derive them".
@@ -957,6 +976,97 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
                 spec,
                 name=str(trained["repo_id"] or "").split("/")[-1],
                 spec_summary=" · ".join(bits),
+            )
+            return {"id": record["id"]}
+
+    @router.post("/lab/runs/eval", dependencies=local_only)
+    def post_eval(payload: JsonBody):
+        """Score a checkpoint episode by episode, writing `episode_loss.jsonl`.
+
+        `runners/eval_runner.py` has existed and been registered in
+        `runs.RUNNERS` since it was written, and until this route there was no
+        way to start one: `autoclass`'s `policy-loss` mode answered
+        `available: false` on every dataset because the only thing that writes
+        the file it reads could not be launched.
+
+        **`source_run` is the ergonomic half and the reason this is not just
+        `{checkpoint, repo_id}`.** Per-episode loss is only interpretable
+        against the split the run was scored on — a checkpoint scored over
+        episodes it TRAINED on produces small numbers that rank nothing — so
+        naming a training run copies its `repo_id` and its held-out
+        `eval_episodes` across, which is the comparison anyone actually wants.
+        Either field can still be given explicitly, and an explicit one wins.
+
+        What this route does NOT re-check is the child's own spec contract:
+        that the checkpoint directory exists and holds a `config.json`, that
+        the named episodes are in the dataset, that the policy loads at all.
+        Those are `eval_runner.build_plan`'s, `lab/` cannot import `runners/`,
+        and a second copy here is a rule that has to agree with the first
+        forever. Only the SHAPE of what gets written into the spec is checked
+        here, because a malformed spec is this route's own output.
+        """
+        spec_in = _spec_of(payload, marker="checkpoint")
+
+        with as_http():
+            spec: dict = {}
+            source_run = str(spec_in.get("source_run") or "").strip()
+            if source_run:
+                # `runs.load` applies RUN_ID_RE and containment, so a crafted
+                # id cannot walk out of the run store.
+                source = runs_mod.load(source_run)
+                source_spec = source.get("spec") or {}
+                spec["repo_id"] = str(source_spec.get("repo_id") or "")
+                # The HELD-OUT episodes, not `episodes` — that key is the whole
+                # kept set, most of which the checkpoint was fitted on.
+                held_out = source_spec.get("eval_episodes")
+                if held_out:
+                    spec["episodes"] = [int(e) for e in held_out]
+                spec["source_run"] = source_run
+
+            checkpoint = str(spec_in.get("checkpoint") or "").strip()
+            if not checkpoint and source_run:
+                # The newest checkpoint of the named run, which is what "score
+                # the run I just finished" means. `checkpoints()` is the same
+                # reader the UI lists them with, and it sorts NEWEST FIRST — so
+                # this is row 0, not the last row.
+                found = runs_mod.checkpoints(source_run)
+                if not found:
+                    raise HTTPException(status_code=400, detail=(
+                        f"{source_run} has written no checkpoint yet — there is "
+                        "nothing to score."))
+                checkpoint = str(found[0]["path"])
+            if not checkpoint:
+                raise HTTPException(status_code=400, detail=(
+                    "checkpoint is required — a pretrained_model directory, or "
+                    "pass source_run to take the newest one from a training run"))
+            spec["checkpoint"] = checkpoint
+
+            # Explicit beats inherited, so a caller can score the same
+            # checkpoint over a different set without unpicking `source_run`.
+            if spec_in.get("repo_id") is not None:
+                spec["repo_id"] = str(spec_in["repo_id"]).strip().strip("/")
+            if spec_in.get("episodes") is not None:
+                spec["episodes"] = _int_list(spec_in, "episodes")
+            if not spec.get("repo_id"):
+                raise HTTPException(status_code=400, detail=(
+                    "repo_id is required — pass it, or pass source_run to take "
+                    "it from a training run"))
+
+            spec["device"] = str(spec_in.get("device") or DEFAULT_DEVICE)
+            if spec_in.get("batch_size") is not None:
+                spec["batch_size"] = _positive_int(spec_in, "batch_size", 8)
+
+            n = len(spec.get("episodes") or [])
+            record = runs_mod.launch(
+                "eval",
+                spec,
+                name=spec["repo_id"].split("/")[-1],
+                spec_summary=" · ".join([
+                    "eval",
+                    spec["repo_id"],
+                    f"{n} held-out episode(s)" if n else "every episode",
+                    f"from {source_run}" if source_run else "",
+                ]).replace(" · ·", " ·").rstrip(" ·"),
             )
             return {"id": record["id"]}
 

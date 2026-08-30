@@ -285,6 +285,13 @@ def _launch_train(client: TestClient, **spec) -> str:
     return body["id"]
 
 
+def _launch_train_eval(client: TestClient, **spec) -> str:
+    """POST an eval spec that must succeed, and return the run id."""
+    response = client.post("/lab/runs/eval", json=spec)
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
 def _spec_on_disk(store: Path, run_id: str) -> dict:
     """`spec.json` as the CHILD would read it — never the route's response.
 
@@ -489,6 +496,121 @@ def test_a_repo_id_that_does_not_exist_is_a_404(home, client):
     assert "local/nope" in response.json()["detail"]
 
 
+# ============================================================================
+# POST /lab/runs/eval
+# ============================================================================
+
+def _eval_checkpoint(store: Path, run_id: str, step: str) -> Path:
+    """A checkpoint directory shaped the way LeRobot writes one.
+
+    Distinct from `_checkpoint` further down, which takes a run DIRECTORY and
+    writes no `config.json` — `eval_runner` refuses a directory without one, so
+    these tests need the file to exist.
+    """
+    model = store / run_id / "train" / "checkpoints" / step / "pretrained_model"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "config.json").write_text("{}")
+    return model
+
+
+def test_eval_takes_the_repo_and_the_HELD_OUT_episodes_from_a_training_run(
+        home, store, client):
+    """Per-episode loss only ranks anything when it is measured on episodes the
+    checkpoint did NOT train on. `eval_episodes` and not `episodes`, which is
+    the whole kept set."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    _eval_checkpoint(store, train_id, "010000")
+
+    run_id = _launch_train_eval(client, source_run=train_id)
+
+    spec = _spec_on_disk(store, run_id)
+    train_spec = _spec_on_disk(store, train_id)
+    assert spec["repo_id"] == REPO
+    assert spec["episodes"] == train_spec["eval_episodes"]
+    assert spec["episodes"] != train_spec["episodes"]
+    assert spec["source_run"] == train_id
+
+
+def test_eval_defaults_to_the_NEWEST_checkpoint_of_the_source_run(
+        home, store, client):
+    """`runs.checkpoints()` sorts newest first, so "the checkpoint" is row 0.
+    Taking the last row would score the OLDEST one and quietly rank a
+    half-trained policy."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    _eval_checkpoint(store, train_id, "010000")
+    newest = _eval_checkpoint(store, train_id, "090000")
+
+    run_id = _launch_train_eval(client, source_run=train_id)
+
+    assert _spec_on_disk(store, run_id)["checkpoint"] == str(newest)
+
+
+def test_eval_refuses_a_source_run_that_has_no_checkpoint_yet(home, store, client):
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+
+    response = client.post(
+        "/lab/runs/eval", json={"source_run": train_id})
+
+    assert response.status_code == 400, response.text
+    assert "no checkpoint" in response.json()["detail"]
+
+
+def test_an_explicit_checkpoint_and_episodes_beat_the_source_run(
+        home, store, client):
+    """So the same checkpoint can be scored over a different set without
+    unpicking `source_run`."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    _eval_checkpoint(store, train_id, "010000")
+    other = _eval_checkpoint(store, train_id, "020000")
+
+    run_id = _launch_train_eval(
+        client, source_run=train_id, checkpoint=str(other), episodes=[0, 1])
+
+    spec = _spec_on_disk(store, run_id)
+    assert spec["checkpoint"] == str(other)
+    assert spec["episodes"] == [0, 1]
+
+
+def test_eval_without_a_source_run_needs_a_checkpoint_and_a_repo(home, client):
+    make_dataset(home / REPO, n_episodes=3)
+
+    missing_ckpt = client.post("/lab/runs/eval", json={"repo_id": REPO})
+    assert missing_ckpt.status_code == 400, missing_ckpt.text
+    assert "checkpoint" in missing_ckpt.json()["detail"]
+
+    missing_repo = client.post("/lab/runs/eval", json={"checkpoint": "/tmp/x"})
+    assert missing_repo.status_code == 400, missing_repo.text
+    assert "repo_id" in missing_repo.json()["detail"]
+
+
+def test_eval_episodes_must_be_whole_numbers(home, client):
+    """Shape only — whether the episode EXISTS is the child's check. A bare
+    string would otherwise be written into the spec as its characters."""
+    make_dataset(home / REPO, n_episodes=3)
+
+    response = client.post("/lab/runs/eval", json={
+        "repo_id": REPO, "checkpoint": "/tmp/x", "episodes": "0,1"})
+
+    assert response.status_code == 400, response.text
+    assert "episodes" in response.json()["detail"]
+
+
+def test_eval_launches_the_eval_runner_and_not_the_trainer(home, store, client):
+    """The kind is what picks the module out of `runs.RUNNERS`; getting it
+    wrong would start a training run against an eval spec."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    _eval_checkpoint(store, train_id, "010000")
+
+    run_id = _launch_train_eval(client, source_run=train_id)
+
+    record = json.loads((store / run_id / "run.json").read_text())
+    assert record["kind"] == "eval"
+    assert record["argv"][2] == "haller_hmi.runners.eval_runner"
 
 
 def test_policy_inputs_reach_the_spec_resolved_to_shapes(home, store, client):

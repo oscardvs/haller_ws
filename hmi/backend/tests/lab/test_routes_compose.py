@@ -104,6 +104,11 @@ RUN_ROUTES = frozenset({
     ("GET", "/lab/runs/metrics"),
     ("POST", "/lab/runs/train"),
     ("POST", "/lab/runs/rollout"),
+    # Starts `runners/eval_runner.py`, which writes the `episode_loss.jsonl`
+    # that `autoclass`'s `policy-loss` mode is the only reader of. The runner
+    # and the reader both predate this route, and without it that mode
+    # answered `available: false` on every dataset.
+    ("POST", "/lab/runs/eval"),
     ("GET", "/lab/runs/{run_id}"),
     ("GET", "/lab/runs/{run_id}/metrics"),
     ("GET", "/lab/runs/{run_id}/log"),
