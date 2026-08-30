@@ -24,11 +24,20 @@
  * x domain and one crosshair, so reading `loss` against `grad_norm` at the
  * same step is a glance rather than an arithmetic exercise.
  *
+ * THE GRID FITS THE PANEL. Every cell was 130px tall whatever the window was,
+ * so nine keys made three rows in a panel with room for one and a half, and
+ * the answer to "how is this run doing" was behind a scrollbar inside a card
+ * inside a fixed-viewport shell. Rows are `minmax(MIN_CELL_H, 1fr)` against a
+ * definite container height instead: every chart takes an equal share of
+ * whatever the panel has, and the scrollbar comes back only when even the
+ * minimum will not fit. Each cell measures its own plot box, which is why a
+ * cell is a component rather than a loop body.
+ *
  * Any cell can be maximised to fill the metrics panel — the same overlay the
  * Review pane's charts use (`data-chart-zoom`, Escape or the header toggle to
  * restore). The tiled charts stay mounted underneath, and the zoomed chart
- * gets its own hover probe: at 130px a curve is a shape, and reading VALUES
- * off it is what the big chart is for.
+ * gets its own hover probe: a tiled curve is a shape, and reading VALUES off
+ * it is what the big chart is for.
  */
 import { useEffect, useMemo, useState } from "react";
 import { Maximize2, Minimize2 } from "lucide-react";
@@ -46,12 +55,29 @@ import {
 } from "@/components/lab/charts/svg";
 import { useSticky } from "@/components/cockpit/lib";
 
-/** Above this a 20rem-wide chart is drawing several samples per pixel. LTTB
- *  keeps the ones that carry the shape — plain striding drops exactly the
- *  spike you opened the chart to find. */
+/** Above this a tiled chart is drawing several samples per pixel. LTTB keeps
+ *  the ones that carry the shape — plain striding drops exactly the spike you
+ *  opened the chart to find. */
 const MAX_POINTS = 1200;
 
-const CHART_H = 130;
+/** The floor a cell may be squeezed to before the grid gives up and scrolls.
+ *  Below about this the plot area is shorter than its own axis labels, and a
+ *  chart nobody can read is worse than a scrollbar.
+ *
+ *  Measured against the case that has to fit: nine keys on a 1500px-wide
+ *  window is four columns and THREE rows, and at 132 those three rows wanted
+ *  50px more than the panel had — a scrollbar for one row of charts. */
+const MIN_CELL_H = 112;
+
+/** Track width, and the number that decides how tall the charts are: columns
+ *  come out of `auto-fill`, rows are what is left over, so a track that is one
+ *  hair too wide costs a whole row of height.
+ *
+ *  16rem, measured on the two windows this runs on. At 17rem a 1830px cockpit
+ *  fits four columns, which makes nine keys THREE rows of 95px; at 16rem it
+ *  fits five, which makes them two rows of 150. The plot keeps ~206px of width
+ *  after the y-axis gutter, which is a curve, not a smear. */
+const CELL_MIN_W = "16rem";
 
 /** The one pair that shares a chart. The gap between train and eval loss IS
  *  the overfitting reading, and it is only legible on one set of axes. */
@@ -241,7 +267,7 @@ export function MetricGrid({
 
   if (rows.length === 0) {
     return (
-      <div className="flex min-h-[100px] flex-col">
+      <div className="flex h-full min-h-[100px] flex-col">
         {/* Only reachable while a run that could still log one is going:
             `RunDetail` does not open this panel for a run with nothing left to
             draw, so "waiting" is never a promise to a run that has stopped. */}
@@ -254,7 +280,7 @@ export function MetricGrid({
   // strings is not a chart, and an empty grid says nothing about why.
   if (cells.length === 0) {
     return (
-      <div className="flex min-h-[100px] flex-col">
+      <div className="flex h-full min-h-[100px] flex-col">
         <Empty>no numeric keys logged yet</Empty>
       </div>
     );
@@ -263,8 +289,8 @@ export function MetricGrid({
   const readout = hover?.values.filter((v) => !v.id.endsWith("~raw")) ?? [];
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2">
         <Segmented
           label="metric y scale"
           options={SCALE_OPTIONS}
@@ -305,7 +331,7 @@ export function MetricGrid({
 
       {/* The synchronised readout. One strip for the whole grid, because the
           crosshair is one crosshair. */}
-      <div className="flex h-4 items-center gap-2 overflow-hidden font-mono text-[10px] whitespace-nowrap text-muted-foreground">
+      <div className="flex h-4 shrink-0 items-center gap-2 overflow-hidden font-mono text-[10px] whitespace-nowrap text-muted-foreground">
         {hover ? (
           <>
             <span data-num className="tabular-nums text-foreground">
@@ -325,7 +351,7 @@ export function MetricGrid({
       </div>
 
       {!plotted && (
-        <Note>
+        <Note className="shrink-0">
           Nothing in this run is logged against{" "}
           <span className="font-mono">{axis === "wall" ? "wall-clock" : axis}</span> — the
           rows that carry no such value are dropped rather than stacked at zero. Try
@@ -333,70 +359,34 @@ export function MetricGrid({
         </Note>
       )}
 
-      <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(20rem,1fr))]">
-        {cells.map((cell, ci) => {
-          // A log axis on a series that reaches zero or below is not a smaller
-          // axis, it is a wrong one — `lr` decays to 0 and a reward can be
-          // negative. Those cells stay linear whatever the toggle says.
-          const log = scale === "log" && cell.positive;
-          return (
-            <div
-              key={cell.id}
-              className="flex flex-col gap-1 rounded-md border border-border bg-[var(--haller-inset)] p-1.5"
-            >
-              <div className="flex min-w-0 items-baseline justify-between gap-2 px-0.5">
-                {cell.pair ? (
-                  <ChartLegend
-                    className="min-w-0 shrink"
-                    items={cell.series.map((s) => ({ label: s.key, color: s.color }))}
-                  />
-                ) : (
-                  <span
-                    className="label-micro min-w-0 truncate text-muted-foreground"
-                    title={cell.id}
-                  >
-                    {cell.id}
-                  </span>
-                )}
-                <span className="flex shrink-0 items-baseline gap-1.5">
-                  {cell.series.map((s) => (
-                    <span
-                      key={s.key}
-                      data-num
-                      title={`last ${s.key}`}
-                      className="font-mono text-[10px] tabular-nums"
-                      style={{ color: cell.pair ? s.color : "var(--foreground)" }}
-                    >
-                      {fmtNum(s.ys[s.ys.length - 1])}
-                    </span>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => setZoom(cell.id)}
-                    aria-label={`maximize ${cell.id} chart`}
-                    title="fill the metrics panel (esc to restore)"
-                    className="inline-flex h-4.5 w-4.5 items-center justify-center rounded-[3px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                  >
-                    <Maximize2 size={10} aria-hidden />
-                  </button>
-                </span>
-              </div>
-
-              <LineChart
-                label={`${cell.keys.join(" and ")} against ${axis}`}
-                series={drawn[ci]}
-                height={CHART_H}
-                log={log}
-                xDomain={xDomain}
-                xTicks={3}
-                xTickFormat={axis === "wall" ? fmtDuration : fmtTick}
-                playhead={hover?.x ?? null}
-                onHover={setHover}
-                empty="no samples on this axis"
-              />
-            </div>
-          );
-        })}
+      {/* `1fr` rows against the panel's own height: the charts divide what is
+          left after the controls rather than each insisting on 130px and
+          pushing the rest below the fold. `overflow-y-auto` is the floor
+          case — a window too short for MIN_CELL_H scrolls, which is the one
+          honest answer left. */}
+      <div
+        className="grid min-h-0 flex-1 gap-2 overflow-y-auto"
+        style={{
+          gridTemplateColumns: `repeat(auto-fill, minmax(${CELL_MIN_W}, 1fr))`,
+          gridAutoRows: `minmax(${MIN_CELL_H}px, 1fr)`,
+        }}
+      >
+        {cells.map((cell, ci) => (
+          <MetricCell
+            key={cell.id}
+            cell={cell}
+            series={drawn[ci]}
+            axis={axis}
+            // A log axis on a series that reaches zero or below is not a
+            // smaller axis, it is a wrong one — `lr` decays to 0 and a reward
+            // can be negative. Those cells stay linear whatever the toggle says.
+            log={scale === "log" && cell.positive}
+            xDomain={xDomain}
+            playhead={hover?.x ?? null}
+            onHover={setHover}
+            onZoom={setZoom}
+          />
+        ))}
       </div>
 
       {/* The maximised cell covers the whole metrics panel — positioned
@@ -452,6 +442,97 @@ export function MetricGrid({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * One tile: a label, the last value, and a plot that takes whatever height the
+ * grid row gives it.
+ *
+ * A COMPONENT rather than a loop body for one reason — `useElementHeight` is a
+ * hook, and the plot has to be measured per cell. The alternative was to
+ * compute a height here from the column count, which means re-deriving in
+ * JavaScript what `auto-fill` already decided in CSS, and being wrong about it
+ * on every window the two disagree on.
+ */
+function MetricCell({
+  cell,
+  series,
+  axis,
+  log,
+  xDomain,
+  playhead,
+  onHover,
+  onZoom,
+}: {
+  cell: Cell;
+  series: Series[];
+  axis: MetricAxis;
+  log: boolean;
+  xDomain: [number, number] | undefined;
+  playhead: number | null;
+  onHover: (p: HoverPoint | null) => void;
+  onZoom: (id: string) => void;
+}) {
+  const [box, setBox] = useState<HTMLDivElement | null>(null);
+  const h = useElementHeight(box);
+  return (
+    <div className="flex min-h-0 flex-col gap-1 overflow-hidden rounded-md border border-border bg-[var(--haller-inset)] p-1.5">
+      <div className="flex min-w-0 shrink-0 items-baseline justify-between gap-2 px-0.5">
+        {cell.pair ? (
+          <ChartLegend
+            className="min-w-0 shrink"
+            items={cell.series.map((s) => ({ label: s.key, color: s.color }))}
+          />
+        ) : (
+          <span
+            className="label-micro min-w-0 truncate text-muted-foreground"
+            title={cell.id}
+          >
+            {cell.id}
+          </span>
+        )}
+        <span className="flex shrink-0 items-baseline gap-1.5">
+          {cell.series.map((s) => (
+            <span
+              key={s.key}
+              data-num
+              title={`last ${s.key}`}
+              className="font-mono text-[10px] tabular-nums"
+              style={{ color: cell.pair ? s.color : "var(--foreground)" }}
+            >
+              {fmtNum(s.ys[s.ys.length - 1])}
+            </span>
+          ))}
+          <button
+            type="button"
+            onClick={() => onZoom(cell.id)}
+            aria-label={`maximize ${cell.id} chart`}
+            title="fill the metrics panel (esc to restore)"
+            className="inline-flex h-4.5 w-4.5 items-center justify-center rounded-[3px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Maximize2 size={10} aria-hidden />
+          </button>
+        </span>
+      </div>
+
+      {/* Measured, not fixed. jsdom reports 0 and `useElementHeight` keeps its
+          fallback, so the tests still get a drawable chart. */}
+      <div ref={setBox} className="min-h-0 flex-1">
+        <LineChart
+          label={`${cell.keys.join(" and ")} against ${axis}`}
+          series={series}
+          height={h}
+          log={log}
+          xDomain={xDomain}
+          xTicks={3}
+          xTickFormat={axis === "wall" ? fmtDuration : fmtTick}
+          playhead={playhead}
+          onHover={onHover}
+          empty="no samples on this axis"
+        />
+      </div>
     </div>
   );
 }

@@ -15,12 +15,24 @@
  * requests a second at 3am. A transient failure is swallowed and retried on the
  * next tick — a dropped request must not blank a run that is still training.
  *
+ * WHAT GETS THE HEIGHT. This column is a fixed slice of a fixed-viewport
+ * shell, so every panel that is always open is height taken from the one the
+ * operator is actually reading. Three of them were: a four-line header, the
+ * charts, and a full-height log — which left the metrics panel about 230px,
+ * one row of a three-row grid, with the rest behind a scrollbar. So the
+ * forensic lines (argv, the rollout's policy path) fold behind a toggle, the
+ * log is a DRAWER that opens on demand, and the charts take everything left.
+ * A run with no metrics to draw — a rollout, an export, a prune — inverts
+ * that: its stdout is the only account it has, so the drawer is forced open
+ * and the question never arises.
+ *
  * EVERY buffer here is per-run — both byte offsets, both append targets, the
  * armed delete — so a different run is a different component: the caller keys
  * this on `runId` and the whole set resets at once, refs included. Rendering it
  * without that key inherits the previous run's log.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -33,10 +45,12 @@ import { Button, Empty, Panel, PanelHead, Refusal, Stat } from "@/components/lab
 import { fmtDuration } from "@/components/lab/charts/svg";
 import { StatusPill, epochSeconds, fullWhen, runLabel, shortWhen } from "@/components/lab/RunList";
 import { MetricGrid } from "@/components/lab/MetricGrid";
+import { RunVitals } from "@/components/lab/RunVitals";
 import { CheckpointList } from "@/components/lab/CheckpointList";
 import { RolloutDialog } from "@/components/lab/RolloutDialog";
 import { RunLogTail } from "@/components/lab/RunLogTail";
 import { TagChips } from "@/components/lab/TagChips";
+import { useSticky } from "@/components/cockpit/lib";
 
 const POLL_MS = 2000;
 
@@ -73,6 +87,15 @@ export function RunDetail({
    *  re-render it. A FINISHED run carries `finished_at` and needs no clock, so
    *  nothing here ticks for one. */
   const [now, setNow] = useState(0);
+  /** argv and the rollout's policy path. Per-run state, not sticky: they are
+   *  read once when something looks wrong, and a page that reopens them on
+   *  every run has just moved the clutter back. */
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  /** The log drawer. STICKY, because this is a preference about how the
+   *  operator works — someone chasing a stall wants the tail open on every run
+   *  they click through, and re-opening it each time is the kind of small
+   *  friction that gets a surface abandoned. */
+  const [logOpen, setLogOpen] = useSticky<boolean>("lab.train.log.open", false);
 
   /** Opaque resume offsets. Handed straight back, never interpreted. */
   const metricOff = useRef(0);
@@ -166,6 +189,25 @@ export function RunDetail({
     return n;
   }, [log]);
 
+  /** The last non-blank line, for the head of a CLOSED drawer. A collapsed log
+   *  that shows nothing makes the operator open it to find out whether
+   *  anything is happening, which defeats collapsing it.
+   *
+   *  Split on CARRIAGE RETURNS as well as newlines. lerobot's progress bar is
+   *  tqdm, which redraws by writing `\r` and never a newline, so the whole
+   *  hour of it is ONE line by `\n` — and the head rendered forty overlapping
+   *  frames of `Training: 2%| | 2201/90000 …` run together. A `\r` segment is
+   *  a frame, and the last frame is the current one. */
+  const lastLogLine = useMemo(() => {
+    if (!log) return "";
+    const frames = log.split(/[\r\n]/);
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const s = frames[i].trim();
+      if (s) return s;
+    }
+    return "";
+  }, [log]);
+
   const lastStep = useMemo(() => {
     for (let i = rows.length - 1; i >= 0; i--) {
       const x = metricX(rows[i], "step");
@@ -198,6 +240,10 @@ export function RunDetail({
    */
   const showMetrics =
     plottableMetricKeys(rows).length > 0 || (writesMetrics && live);
+  /** The drawer is forced open for a run whose stdout is its only account —
+   *  a rollout, an export, a prune. `logOpen` is the operator's preference and
+   *  only gets asked when there is something else to look at. */
+  const logExpanded = !showMetrics || logOpen;
   const argv = run?.argv?.join(" ") ?? null;
   /** `finished_at` where the run has one, otherwise the poll's clock. `now` is
    *  0 until the first tick of a RUNNING run — a run that has neither has no
@@ -327,6 +373,19 @@ export function RunDetail({
                     />
                   </>
                 )}
+                {/* Was its own line under the row. A dataset id is short and
+                    this row is where every other "what was this run" fact
+                    already is. */}
+                <span title={spec.repo_id ?? undefined} className="min-w-0">
+                  <Stat
+                    label="repo"
+                    value={
+                      <span className="inline-block max-w-[16rem] truncate align-bottom">
+                        {spec.repo_id ?? "—"}
+                      </span>
+                    }
+                  />
+                </span>
                 <Stat label="ran" value={fmtDuration(elapsed)} />
                 <span title={fullWhen(run.started_at)}>
                   <Stat label="started" value={shortWhen(run.started_at)} />
@@ -342,9 +401,18 @@ export function RunDetail({
                 )}
               </div>
 
-              {/* The checkpoint this rollout loaded. The repo below it is the
-                  dataset it was TRAINED on, which the route resolves from the
-                  checkpoint rather than from anything the operator had open. */}
+              {/* Tags read-only: the frozen `/lab` contract has no route that
+                  writes a run's tags. They are set at launch, in the spec.
+
+                  One line with the disclosure, rather than a line each: three
+                  rows of small grey text above the charts is the clutter this
+                  layout was losing. */}
+              {/* The checkpoint this rollout loaded — VISIBLE, not folded. It
+                  is the subject of the run, the way `repo` is a training run's;
+                  a rollout draws no charts, so nothing is competing for the
+                  line. The repo in the row above is the dataset it was TRAINED
+                  on, which the route resolves from the checkpoint rather than
+                  from anything the operator had open. */}
               {isRollout && (
                 <div className="flex items-baseline gap-2">
                   <span className="label-micro shrink-0 text-muted-foreground">policy</span>
@@ -357,30 +425,48 @@ export function RunDetail({
                 </div>
               )}
 
-              <div className="flex items-baseline gap-2">
-                <span className="label-micro shrink-0 text-muted-foreground">repo</span>
-                <span
-                  className="min-w-0 truncate font-mono text-[10px]"
-                  title={spec.repo_id ?? undefined}
-                >
-                  {spec.repo_id ?? "—"}
-                </span>
+              <div className="flex min-w-0 items-center gap-2">
+                {run.tags && run.tags.length > 0 && <TagChips tags={run.tags} />}
+                {argv && (
+                  <button
+                    type="button"
+                    onClick={() => setDetailsOpen(!detailsOpen)}
+                    aria-expanded={detailsOpen}
+                    title="the command line this run actually executed"
+                    className="label-micro ml-auto inline-flex shrink-0 items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    {detailsOpen ? (
+                      <ChevronDown size={11} aria-hidden />
+                    ) : (
+                      <ChevronRight size={11} aria-hidden />
+                    )}
+                    argv
+                  </button>
+                )}
               </div>
 
-              {/* The child's command line. Months later it is the only thing
-                  that answers "what did this actually run". */}
-              {argv && (
-                <div className="flex items-baseline gap-2">
-                  <span className="label-micro shrink-0 text-muted-foreground">argv</span>
-                  <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground" title={argv}>
-                    {argv}
-                  </span>
+              {/* Months later argv is the only thing that answers "what did
+                  this actually run", so open it WRAPS rather than truncating:
+                  half a command line cannot be copied. */}
+              {detailsOpen && argv && (
+                <div className="min-w-0 rounded-md border border-border bg-[var(--haller-inset)] p-2 font-mono text-[10px] break-all text-muted-foreground">
+                  {argv}
                 </div>
               )}
 
-              {/* Read-only: the frozen `/lab` contract has no route that writes
-                  a run's tags. They are set at launch, in the spec. */}
-              {run.tags && run.tags.length > 0 && <TagChips tags={run.tags} />}
+              {/* Step, percentage, ETA and the headline numbers — the reading
+                  this page did not have. Only for a run that logs metrics; a
+                  prune has no progress to report and would get a bar stuck at
+                  nothing. */}
+              {writesMetrics && (
+                <RunVitals
+                  rows={rows}
+                  steps={typeof spec.steps === "number" ? spec.steps : null}
+                  lastStep={lastStep}
+                  elapsed={elapsed}
+                  live={live}
+                />
+              )}
             </>
           )}
         </div>
@@ -400,19 +486,19 @@ export function RunDetail({
       <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
         {showMetrics && (
           // `relative` because MetricGrid's maximised chart positions its
-          // overlay against this panel. `flex-[1.4]` against the log's 1: the
-          // charts are the reading while a run trains, and the tail below is
-          // for catching the line that explains a stall.
-          <Panel className="relative min-h-0 flex-[1.4]">
-            <PanelHead
-              title="metrics"
-              right={
-                lastStep !== null
-                  ? `step ${Math.round(lastStep)}${spec.steps ? ` / ${spec.steps}` : ""}`
-                  : undefined
-              }
-            />
-            <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+          // overlay against this panel. It takes the whole column now: the
+          // charts ARE the reading while a run trains, and the tail below is
+          // for catching the line that explains a stall — which is a thing you
+          // go and look for, not a thing you watch.
+          <Panel className="relative min-h-0 flex-1">
+            {/* No reading in the head: the grid's own control strip already
+                says how many keys and rows, and the step count moved up to the
+                progress rule where it belongs. */}
+            <PanelHead title="metrics" />
+            {/* `overflow-hidden`, not `auto`. The grid divides this box among
+                its cells rather than stacking 130px charts past the bottom of
+                it, so a scrollbar here would mean the fit failed. */}
+            <div className="min-h-0 flex-1 overflow-hidden p-2.5">
               <MetricGrid rows={rows} steps={spec.steps ?? null} />
             </div>
           </Panel>
@@ -428,14 +514,44 @@ export function RunDetail({
           />
         )}
 
-        <Panel className="min-h-0 flex-1">
+        <Panel className={logExpanded ? "min-h-0 flex-[0.7]" : "shrink-0"}>
           <PanelHead
             title="log"
             right={logLines > 0 ? `${logLines} lines` : undefined}
-          />
-          <div className="flex min-h-0 flex-1 flex-col p-2.5">
-            <RunLogTail text={log} fill />
-          </div>
+          >
+            {/* Closed, the head carries the last line. A collapsed log that
+                shows nothing makes you open it to find out whether anything is
+                happening, which is the opposite of collapsing it. */}
+            {!logExpanded && lastLogLine && (
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground"
+                title={lastLogLine}
+              >
+                {lastLogLine}
+              </span>
+            )}
+            {showMetrics && (
+              <button
+                type="button"
+                onClick={() => setLogOpen(!logOpen)}
+                aria-expanded={logExpanded}
+                title={logExpanded ? "close the log and give the charts the room" : "open the log"}
+                className="label-micro inline-flex shrink-0 items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {logExpanded ? (
+                  <ChevronDown size={11} aria-hidden />
+                ) : (
+                  <ChevronRight size={11} aria-hidden />
+                )}
+                {logExpanded ? "close" : "open"}
+              </button>
+            )}
+          </PanelHead>
+          {logExpanded && (
+            <div className="flex min-h-0 flex-1 flex-col p-2.5">
+              <RunLogTail text={log} fill />
+            </div>
+          )}
         </Panel>
       </div>
 

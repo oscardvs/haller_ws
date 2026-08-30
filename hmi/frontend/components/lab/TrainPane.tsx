@@ -18,6 +18,18 @@
  * `kind` and `status` are filtered by the SERVER — `GET /lab/runs` takes both —
  * and only the free-text box is filtered here, because it is a substring match
  * over rows that have already arrived.
+ *
+ * THE RAIL IS ONE THING AT A TIME. The launcher used to sit in a 40vh box with
+ * its own scrollbar above the list, which showed two form fields and four run
+ * rows and did neither job. It is uncapped now and FOLDS ITSELF the moment a
+ * run is selected: picking a run is the operator saying they are done
+ * composing one, and the rail becomes the list. Reopening is one click and the
+ * choice sticks, so an operator who wants both keeps both.
+ *
+ * Compare moved out of the right column and into the foot of the list, where
+ * the tickboxes are. It was a permanent 34px strip saying "0 selected" above
+ * the run detail — height charged to every run, for a control used on none of
+ * them. It appears when something is ticked.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -62,6 +74,16 @@ export function TrainPane({
      operator who is rolling out rather than training should not have to fold
      it again after every glance at Review. */
   const [launcherOpen, setLauncherOpen] = useSticky<boolean>("lab.train.launcher.open", true);
+  /* Fold the launcher when the operator picks a run — composing one and
+     watching one are two jobs and the rail only has room for either. Keyed on
+     the selection CHANGING, not on it being set, so reopening the launcher
+     while a run is selected sticks instead of being folded away again on the
+     next render. */
+  const lastSelected = useRef<string | null>(selected);
+  useEffect(() => {
+    if (selected !== null && selected !== lastSelected.current) setLauncherOpen(false);
+    lastSelected.current = selected;
+  }, [selected, setLauncherOpen]);
   const [seededFrom, setSeededFrom] = useSticky<string | null>("lab.train.repo.seed", repoId);
   useEffect(() => {
     if (repoId && repoId !== seededFrom) {
@@ -185,13 +207,16 @@ export function TrainPane({
 
   return (
     <div className="grid min-h-0 grid-cols-[26rem_minmax(0,1fr)] gap-2 overflow-hidden p-2">
-      <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2 overflow-hidden">
-        {/* The launcher's form is taller than a short viewport, and an auto
-            grid row would let it push the run list to nothing. Capped so it
-            scrolls inside its own Panel instead — and 40vh rather than the
-            original 60, because at 60 the run list below it was two rows on
-            an 800px-high window, which is not a list. */}
-        <div className="flex max-h-[40vh] min-h-0 flex-col gap-1.5 overflow-hidden">
+      <div className="grid min-h-0 grid-rows-[minmax(0,auto)_minmax(7rem,1fr)] gap-2 overflow-hidden">
+        {/* UNCAPPED. The 40vh box it used to live in showed two fields at a
+            time on a 1080p screen, which is a form you fill in by scrolling —
+            the complaint this layout exists to answer. It takes the height it
+            needs instead — `minmax(0,auto)` and not `auto`, or a form taller
+            than the rail refuses to shrink and clips the list off the bottom
+            edge rather than scrolling. The list keeps a 7rem floor — its head
+            and a row — so it can never be squeezed to nothing, and folding the
+            launcher is one click away. */}
+        <div className="flex min-h-0 flex-col gap-1.5 overflow-y-auto">
           {dsError && <Refusal>datasets could not be read: {dsError}</Refusal>}
           <div className="flex shrink-0 items-center justify-between gap-2">
             <Button
@@ -235,7 +260,13 @@ export function TrainPane({
             as two unrelated things. */}
         <Panel>
           <PanelHead title="runs" right={listRight} />
-          <RunFilters value={filters} onChange={setFilters} />
+          {/* The filters are what you use when the list OWNS the rail. With
+              the launcher open there is room for the head and about two rows,
+              and spending all of it on two chip rows and a search box left a
+              list with no runs in it — the filters answering "which of these"
+              about nothing. Rows win; the head keeps reporting the filtered
+              count, so a filter left on is still visible. */}
+          {!launcherOpen && <RunFilters value={filters} onChange={setFilters} />}
           <RunList
             runs={shown}
             loading={loading}
@@ -246,43 +277,47 @@ export function TrainPane({
             onToggleCompare={toggleCompare}
             now={now}
           />
+
+          {/* Compare is a deep link, not a mode: the ticked set is the whole
+              state of `/lab/compare`, so it opens in its own tab and the url is
+              the thing worth keeping. One run overlaid on nothing is just the
+              run, which is why the link needs two.
+
+              At the foot of the list it sits under the tickboxes that fill it,
+              and it costs nothing on the runs nobody compares. */}
+          {compare.size > 0 && (
+            <div className="flex h-8.5 shrink-0 items-center gap-2 border-t border-border px-3">
+              <span className="label-tracked shrink-0 text-muted-foreground">compare</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
+                <span data-num className="tabular-nums text-foreground">{compare.size}</span>
+                {compare.size < 2 ? " ticked — needs two" : " ticked"}
+              </span>
+              <Button
+                tone="ghost"
+                onClick={() => setCompare(new Set<string>())}
+                title="untick every run"
+              >
+                clear
+              </Button>
+              {compare.size >= 2 && (
+                <Link
+                  href={`/lab/compare?runs=${compareIds.map(encodeURIComponent).join(",")}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="label-micro shrink-0 text-muted-foreground transition-colors hover:text-[var(--haller-live)]"
+                >
+                  open ↗
+                </Link>
+              )}
+            </div>
+          )}
         </Panel>
       </div>
 
-      <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-2 overflow-hidden">
-        {/* Compare is a deep link, not a mode: the ticked set is the whole
-            state of `/lab/compare`, so it opens in its own tab and the url is
-            the thing worth keeping. One run overlaid on nothing is just the
-            run, which is why the link needs two. */}
-        <div className="flex h-8.5 shrink-0 items-center gap-2 overflow-hidden rounded-lg bg-card px-3 shadow-[0_0_0_1px_var(--border)]">
-          <span className="label-tracked shrink-0 text-muted-foreground">compare</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted-foreground">
-            <span data-num className="tabular-nums text-foreground">{compare.size}</span>
-            {" selected for compare"}
-            {compare.size < 2 && " — needs at least two"}
-          </span>
-          {compare.size > 0 && (
-            <Button
-              tone="ghost"
-              onClick={() => setCompare(new Set<string>())}
-              title="untick every run"
-            >
-              clear
-            </Button>
-          )}
-          {compare.size >= 2 && (
-            <Link
-              href={`/lab/compare?runs=${compareIds.map(encodeURIComponent).join(",")}`}
-              target="_blank"
-              rel="noreferrer"
-              className="label-micro shrink-0 text-muted-foreground transition-colors hover:text-[var(--haller-live)]"
-            >
-              open compare ↗
-            </Link>
-          )}
-        </div>
-
-        <div className="flex min-h-0 flex-col overflow-hidden">
+      {/* One run, the whole height. Compare used to sit above this in a strip
+          of its own; it lives under the list it is filled from now. */}
+      <div className="flex min-h-0 flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* Keyed: every buffer in there is per-run — two byte offsets, the
               metric rows, the log text, the armed delete — and a remount
               resets the whole set at once rather than a list of resets that
