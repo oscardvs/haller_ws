@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 
 import { lab, isMissing, reason, type Checkpoint, type RunStatus } from "@/lib/lab";
-import { Button, Chip, Empty, HeadRow, Panel, PanelHead, Refusal } from "@/components/lab/ui";
+import { Button, Chip, HeadRow, Panel, PanelHead, Refusal } from "@/components/lab/ui";
 
 /** With the roll-out column and without it. A caller that cannot run a policy
  *  — anything but the Train tab's detail pane today — gets the three-column
@@ -35,6 +35,15 @@ export function checkpointName(path: string): string {
   const last = parts[parts.length - 1] ?? path;
   if (last !== "pretrained_model") return last;
   return parts[parts.length - 2] ?? last;
+}
+
+/** `060000 · step 60000`, or just `last` for the symlink, whose step is null
+ *  on purpose. Beside `checkpointName` because it is the same question asked
+ *  one level up — how a checkpoint is SPOKEN OF — and the launcher and its
+ *  button must not answer it two different ways. */
+export function stepLabel(c: Checkpoint): string {
+  const name = checkpointName(c.path);
+  return c.step !== null ? `${name} · step ${c.step}` : name;
 }
 
 export function CheckpointList({
@@ -110,7 +119,19 @@ export function CheckpointList({
     <Panel className="shrink-0">
       <PanelHead
         title="checkpoints"
-        right={rows.length > 0 ? `${rows.length} on disk` : undefined}
+        right={
+          rows.length > 0
+            ? `${rows.length} on disk`
+            : /* The empty state IS the head. A run 6% in has written no
+                 checkpoint yet and that is not news worth 90px of a column the
+                 charts are queueing for — it was `Empty`'s full scanline
+                 treatment under a live run, every run, for the first hour. */
+              list === null && !error
+                ? "reading…"
+                : status === "running"
+                  ? "none yet"
+                  : "none"
+        }
       />
 
       {error && (
@@ -119,15 +140,7 @@ export function CheckpointList({
         </div>
       )}
 
-      {rows.length === 0 ? (
-        <Empty>
-          {list === null && !error
-            ? "reading…"
-            : status === "running"
-              ? "no checkpoint written yet"
-              : "no checkpoints"}
-        </Empty>
-      ) : (
+      {rows.length === 0 ? null : (
         /* Viewport-relative rather than 168px: on a train run this list is the
            thing you came for — it is what a rollout is launched from — and a
            fixed cap showed four of thirteen under an empty log panel that had

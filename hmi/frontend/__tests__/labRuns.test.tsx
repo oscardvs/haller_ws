@@ -518,3 +518,73 @@ describe("ComparePane survives a refused metrics request", () => {
     expect(screen.queryByText(/compare failed/)).toBeNull();
   });
 });
+
+
+/* ─── the comparison is actable ───────────────────────────────────────── */
+
+describe("ComparePane can launch the run it just declared the winner", () => {
+  /** A directory the runner created but never finished writing. */
+  const CK_PARTIAL_PATH =
+    "/home/odesha/robot-data/runs/train-20260826-213350-act_so101_pick_cube" +
+    "/train/checkpoints/065000/pretrained_model";
+
+  /** The compare page's own requests, plus the per-row checkpoint read the
+   *  launcher makes. `/checkpoints` is matched before the generic `/lab/runs/`
+   *  fallback, which it also matches. */
+  function backend(checkpoints: Checkpoint[]) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/lab/runs/metrics")) {
+          return new Response(JSON.stringify({ runs: {} }), { status: 200 });
+        }
+        if (url.includes("/checkpoints")) {
+          return new Response(JSON.stringify({ checkpoints }), { status: 200 });
+        }
+        if (url.includes("/metrics")) {
+          return new Response(
+            JSON.stringify({ offset: 0, rows: [{ steps: 1, loss: 0.5 }] }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/lab/runs/")) {
+          const id = decodeURIComponent(url.split("/lab/runs/")[1].split("?")[0]);
+          return new Response(JSON.stringify({
+            id, kind: "train", name: id, status: "done",
+            started_at: STARTED, finished_at: FINISHED, tags: [],
+            spec: { repo_id: "local/so101_pick_cube", policy_type: "act" },
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      },
+    );
+  }
+
+  it("puts a rollout on every compared run's row", async () => {
+    // The reading this page exists for is "that one won". Before this the only
+    // way to act on it was to leave the page, find the run again in the Train
+    // tab and scroll to its checkpoints — a comparison that could not be acted
+    // on from where it was made.
+    backend([{ step: 60000, path: CK_PATH, has_model: true }]);
+    render(<ComparePane runIds={["train-a", "train-b"]} />);
+
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /roll out/i })).toHaveLength(2),
+    );
+    // And it is the launcher, not a link: clicking it opens the dialog that
+    // names what is about to move.
+    fireEvent.click(screen.getAllByRole("button", { name: /roll out train-a/i })[0]);
+    expect(screen.getByRole("dialog", { name: /roll out a policy/i })).toBeTruthy();
+  });
+
+  it("offers nothing on a run that wrote nothing loadable", async () => {
+    // A comparison of two runs that died before their first checkpoint is
+    // still a comparison. The control stays, disabled, and says why.
+    backend([{ step: 65000, path: CK_PARTIAL_PATH, has_model: false }]);
+    render(<ComparePane runIds={["train-a"]} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /roll out train-a/i })).toBeDisabled(),
+    );
+  });
+});

@@ -20,9 +20,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { CheckpointList } from "@/components/lab/CheckpointList";
+import { RolloutButton } from "@/components/lab/RolloutButton";
 import { RolloutDialog } from "@/components/lab/RolloutDialog";
+import { RolloutWatch } from "@/components/lab/RolloutWatch";
 import { RunDetail } from "@/components/lab/RunDetail";
-import { type Checkpoint } from "@/lib/lab";
+import { type Checkpoint, type Run, type RunStatus } from "@/lib/lab";
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -43,6 +45,10 @@ const CK_PARTIAL_PATH =
   "/train/checkpoints/065000/pretrained_model";
 
 const REPO = "local/so101_pick_cube";
+
+/** `runs.py::_now()`'s spelling — ISO 8601 UTC, never a unix number. The
+ *  elapsed readouts are measured against it. */
+const STARTED = "2026-08-26T19:33:50+00:00";
 
 /** `GET /lab/datasets/detail`, in `_detail_wire`'s spelling. Trimmed to the
  *  keys this dialog reads, plus enough around them to keep the shape
@@ -544,5 +550,210 @@ describe("RunDetail reads a rollout's spec, not a training run's", () => {
     // own floor must not read like one that never approached it.
     mountRun({ ...stamped, allow_slow: true });
     await waitFor(() => expect(screen.getByText(/waived/i)).toBeTruthy());
+  });
+});
+
+
+/* ─── launching from a surface that has no checkpoint list ────────────── */
+
+/**
+ * The compare view's launcher.
+ *
+ * The reading that page exists for is "this run won", and until now the only
+ * way to act on it was to leave, find the run again in the Train tab, and
+ * scroll to its checkpoints. `RolloutButton` folds that list into the button:
+ * it reads the run's checkpoints itself, opens on the newest LOADABLE one, and
+ * hands the rest to the dialog as a select.
+ *
+ * Every assertion below is about what the operator can and cannot reach —
+ * which step it opens on, which steps it offers, and the three different
+ * shapes of "not here". A disabled button and an absent one say different
+ * things, and getting them the wrong way round either hides a control that
+ * works or advertises one that never will.
+ */
+describe("RolloutButton launches from a run row", () => {
+  const TRAIN: Run = {
+    id: "train-20260826-213350-act_so101_pick_cube",
+    kind: "train", name: "act_so101_pick_cube", status: "done",
+    started_at: STARTED, finished_at: STARTED, tags: [],
+    spec: { repo_id: REPO, policy_type: "act" },
+  };
+
+  /** The two requests this button's flow makes, plus the dialog's. The
+   *  checkpoints route is matched BEFORE the generic `/lab/runs/` fallback:
+   *  `/lab/runs/train-x/checkpoints` matches both, and the wrong order answers
+   *  a directory listing with a run record. */
+  function buttonBackend(opts: {
+    checkpoints?: Checkpoint[] | { status: number };
+  } = {}) {
+    const calls: Call[] = [];
+    const cks = opts.checkpoints ?? [ck()];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, init });
+        if (url.includes("/lab/datasets/detail")) {
+          return new Response(JSON.stringify(soloDetail), { status: 200 });
+        }
+        if (init?.method === "POST" && url.includes("/lab/runs/rollout")) {
+          return new Response(JSON.stringify({ id: "rollout-1" }), { status: 200 });
+        }
+        if (url.includes("/checkpoints")) {
+          return "status" in cks
+            ? new Response(JSON.stringify({ detail: "no such route" }), { status: cks.status })
+            : new Response(JSON.stringify({ checkpoints: cks }), { status: 200 });
+        }
+        return new Response(JSON.stringify({
+          id: "rollout-1", kind: "rollout", name: null, status: "queued",
+          started_at: null, finished_at: null, tags: [], spec: {},
+        }), { status: 200 });
+      },
+    );
+    return calls;
+  }
+
+  const rollOut = () => screen.getByRole("button", { name: /roll out/i });
+
+  it("opens on the newest loadable step, and offers only the loadable ones", async () => {
+    // Three on disk: a numbered one, the `last` symlink (step null ON PURPOSE),
+    // and a half-written 065000. The newest LOADABLE is 060000 — `last` cannot
+    // win it by sorting as zero, and the partial one must not be offered at
+    // all, because the dialog would only refuse it.
+    buttonBackend({
+      checkpoints: [
+        ck({ step: null, path: CK_LAST_PATH }),
+        ck(),
+        ck({ step: 65000, path: CK_PARTIAL_PATH, has_model: false }),
+      ],
+    });
+    render(<RolloutButton run={TRAIN} onLaunched={vi.fn()} />);
+
+    await waitFor(() => expect(rollOut()).not.toHaveAttribute("disabled"));
+    fireEvent.click(rollOut());
+
+    const picker = screen.getByLabelText("checkpoint to roll out") as HTMLSelectElement;
+    expect(picker.value).toBe(CK_PATH);
+    expect([...picker.options].map((o) => o.value)).toEqual([CK_PATH, CK_LAST_PATH]);
+  });
+
+  it("launches the step the operator picked, not the one it opened on", async () => {
+    // The whole point of the select. A dialog that showed the choice and then
+    // sent the checkpoint it opened on would look right on every screen.
+    const calls = buttonBackend({
+      checkpoints: [ck(), ck({ step: null, path: CK_LAST_PATH })],
+    });
+    render(<RolloutButton run={TRAIN} onLaunched={vi.fn()} />);
+    await waitFor(() => expect(rollOut()).not.toHaveAttribute("disabled"));
+    fireEvent.click(rollOut());
+
+    fireEvent.change(screen.getByLabelText("checkpoint to roll out"), {
+      target: { value: CK_LAST_PATH },
+    });
+    await nameTheArm();
+    fireEvent.click(startButton());
+
+    await waitFor(() => expect(post(calls)).toBeTruthy());
+    expect(sentSpec(calls).policy_path).toBe(CK_LAST_PATH);
+  });
+
+  it("shows a disabled button, with the reason, while a run has nothing loadable", async () => {
+    // The ordinary state of a run that started twenty minutes ago. It changes
+    // on its own, so the control stays on screen: hiding it means the operator
+    // watching that run never learns it is there.
+    buttonBackend({ checkpoints: [] });
+    const running = { ...TRAIN, status: "running" as RunStatus };
+    render(<RolloutButton run={running} onLaunched={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(rollOut().getAttribute("title")).toMatch(/no checkpoint written yet/i),
+    );
+    expect(rollOut()).toHaveAttribute("disabled");
+  });
+
+  it("renders nothing at all when the backend has no checkpoints route", async () => {
+    // A 404 is a build that cannot answer the question. A permanently dead
+    // control on every row is worse than silence — the same rule
+    // `CheckpointList` follows for the same 404.
+    buttonBackend({ checkpoints: { status: 404 } });
+    render(<RolloutButton run={TRAIN} onLaunched={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /roll out/i })).toBeNull(),
+    );
+  });
+
+  it("asks nothing at all about a run that writes no checkpoints", async () => {
+    // A rollout, an export and a prune have none. Not a disabled button and
+    // not an empty read: no request and no control.
+    const calls = buttonBackend();
+    render(
+      <RolloutButton
+        run={{ ...TRAIN, id: "rollout-9", kind: "rollout" }}
+        onLaunched={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /roll out/i })).toBeNull();
+    expect(calls.some((c) => c.url.includes("/checkpoints"))).toBe(false);
+  });
+});
+
+/* ─── watching the run it started ─────────────────────────────────────── */
+
+/**
+ * The strip that appears once a rollout is launched from the compare view.
+ *
+ * It exists because that page has no run list and no detail pane: without it,
+ * a launch from a bookmarked comparison would set an arm moving and then say
+ * nothing about it — and `stop`, which ends this run, would be reachable only
+ * by the E-STOP, which ends everything.
+ */
+describe("RolloutWatch watches the rollout this surface started", () => {
+  const RUNNING: Run = {
+    id: "rollout-1", kind: "rollout", name: null, status: "running",
+    started_at: STARTED, finished_at: null, tags: [],
+    spec: { policy_path: CK_PATH, duration_s: 60, device: "cuda", side: "right" },
+  };
+
+  function watchBackend() {
+    const calls: Call[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, init });
+        if (url.includes("/stop")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify(RUNNING), { status: 200 });
+      },
+    );
+    return calls;
+  }
+
+  it("says the arm is moving, and stops THIS run rather than everything", async () => {
+    const calls = watchBackend();
+    render(<RolloutWatch run={RUNNING} onDismiss={vi.fn()} />);
+
+    expect(screen.getByText(/the arm is moving/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^stop$/i }));
+
+    await waitFor(() =>
+      expect(calls.some(
+        (c) => c.init?.method === "POST" && c.url.endsWith("/lab/runs/rollout-1/stop"),
+      )).toBe(true),
+    );
+  });
+
+  it("offers dismiss and not stop once the run is over", () => {
+    // Nothing is moving, so there is nothing to stop; the strip is now a
+    // reading, and clearing it must not read as ending anything.
+    watchBackend();
+    render(
+      <RolloutWatch
+        run={{ ...RUNNING, status: "done", finished_at: STARTED, exit_code: 0 }}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /^stop$/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /dismiss/i })).toBeTruthy();
+    expect(screen.queryByText(/the arm is moving/i)).toBeNull();
   });
 });

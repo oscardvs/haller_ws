@@ -28,6 +28,15 @@
  * when the operator typed one. Two paths to the same number is how a UI ends
  * up reassuring an operator about a check it did not make.
  *
+ * ## Which step
+ *
+ * Opened from a checkpoint row, this dialog runs the row that was clicked and
+ * shows no picker: the list behind it IS the choice. Opened from a surface
+ * with no such list — the compare view, where the question is "that run won,
+ * run it" — the same choice has to be made somewhere, so the caller hands the
+ * whole set and the header becomes a select. One dialog either way; the only
+ * difference is whether the step was already answered.
+ *
  * ## Which arm
  *
  * A dataset whose columns carry no side prefix (`rig === "solo"` — the shape
@@ -49,7 +58,7 @@ import {
 import {
   Button, Dialog, Field, Note, NumberInput, Refusal, Select, TextInput, WarnBox,
 } from "@/components/lab/ui";
-import { checkpointName } from "@/components/lab/CheckpointList";
+import { checkpointName, stepLabel } from "@/components/lab/CheckpointList";
 
 const DEVICES = ["cuda", "cpu"] as const;
 
@@ -78,11 +87,24 @@ const hz = (n: number) => `${Number(n.toFixed(3))} Hz`;
 
 export function RolloutDialog({
   checkpoint,
+  checkpoints,
   repoId,
   onClose,
   onLaunched,
 }: {
+  /** The one this opens on, and the one it launches unless the operator
+   *  changes it below. */
   checkpoint: Checkpoint;
+  /**
+   * Every checkpoint the step may be changed to WITHOUT leaving the dialog,
+   * `checkpoint` among them. Omitted where the caller already showed a list
+   * and the operator clicked a row — see "Which step" above.
+   *
+   * Only loadable ones belong here: a partial directory is a step this dialog
+   * would then have to refuse, and offering it in a select is offering a
+   * choice that cannot be taken.
+   */
+  checkpoints?: Checkpoint[];
   /** The dataset the run that WROTE this checkpoint trained on, off its spec.
    *  Null when the run does not record one — then the rig question is asked
    *  rather than answered. */
@@ -90,6 +112,9 @@ export function RolloutDialog({
   onClose: () => void;
   onLaunched: (run: Run) => void;
 }) {
+  /** The step to run, by PATH — the path is what the route loads and the
+   *  only thing about a checkpoint that is unique. */
+  const [path, setPath] = useState(checkpoint.path);
   const [duration, setDuration] = useState(DEFAULT_ROLLOUT_DURATION_S);
   const [rateSource, setRateSource] = useState<RateSource>("trained");
   const [declaredHz, setDeclaredHz] = useState<number | null>(null);
@@ -105,6 +130,12 @@ export function RolloutDialog({
 
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<Failure | null>(null);
+
+  /** What is actually launched. Falls back to the one the dialog opened on, so
+   *  a caller whose list does not contain it still launches the checkpoint it
+   *  asked for rather than nothing. */
+  const choices = checkpoints ?? [checkpoint];
+  const active = choices.find((c) => c.path === path) ?? checkpoint;
 
   /** The training dataset, for the three facts this dialog cannot invent: the
    *  rig (does it have to ask for a side), the fps (what "as trained" will
@@ -150,7 +181,7 @@ export function RolloutDialog({
     setBusy(true);
     setFailure(null);
     const spec: RolloutSpec = {
-      policy_path: checkpoint.path,
+      policy_path: active.path,
       duration_s: seconds,
       device,
       // Absent on the `trained` path — that absence IS the request for the
@@ -190,7 +221,7 @@ export function RolloutDialog({
       setBusy(false);
     }
   }, [
-    allowMismatch, allowSlow, checkpoint.path, declared, detail, device,
+    allowMismatch, allowSlow, active.path, declared, detail, device,
     onClose, onLaunched, rateSource, seconds, side, task,
   ]);
 
@@ -198,7 +229,7 @@ export function RolloutDialog({
   // at the door instead, for the same reason the route refuses an over-long
   // duration: a button that launches a doomed run and reports it dead
   // afterwards is worse than one that will not launch it.
-  const blocked = busy || sideMissing || rateBad || !checkpoint.has_model;
+  const blocked = busy || sideMissing || rateBad || !active.has_model;
   const footer = (
     <>
       <Button onClick={onClose} disabled={busy}>cancel</Button>
@@ -221,13 +252,30 @@ export function RolloutDialog({
 
   return (
     <Dialog title="roll out a policy" onClose={onClose} footer={footer} wide>
+      {/* One line for WHICH policy, whether or not it can be changed, with
+          the path underneath it either way — the path is what gets loaded,
+          and it is the only thing that tells two runs' `060000` apart. */}
       <div className="flex flex-col gap-1">
-        <span className="label-micro text-muted-foreground">
-          {checkpointName(checkpoint.path)}
-          {checkpoint.step !== null && ` · step ${checkpoint.step}`}
-        </span>
+        {choices.length > 1 ? (
+          <Field
+            label="checkpoint"
+            hint="the newest step this run wrote is picked for you"
+          >
+            <Select
+              value={active.path}
+              aria-label="checkpoint to roll out"
+              onChange={(e) => setPath(e.target.value)}
+            >
+              {choices.map((c) => (
+                <option key={c.path} value={c.path}>{stepLabel(c)}</option>
+              ))}
+            </Select>
+          </Field>
+        ) : (
+          <span className="label-micro text-muted-foreground">{stepLabel(active)}</span>
+        )}
         <span className="font-mono text-[10px] break-all text-muted-foreground">
-          {checkpoint.path}
+          {active.path}
         </span>
       </div>
 
@@ -246,7 +294,7 @@ export function RolloutDialog({
 
       {failure && <Refusal tone={failure.tone}>{failure.text}</Refusal>}
 
-      {!checkpoint.has_model && (
+      {!active.has_model && (
         <Refusal>
           this checkpoint directory has no model file — the child will refuse to
           load it. Pick one that is not marked partial.
@@ -372,7 +420,7 @@ export function RolloutDialog({
 
       <Note className="rounded-md border border-border bg-muted px-2.5 py-2">
         <RolloutSentence
-          name={checkpointName(checkpoint.path)}
+          name={checkpointName(active.path)}
           seconds={seconds}
           rateSource={rateSource}
           declared={declared}

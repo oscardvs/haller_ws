@@ -14,9 +14,20 @@
  * against nothing. The dropped keys are named rather than hidden — that a run
  * logged something the others did not is itself worth knowing.
  *
- * This is the one surface in the cockpit allowed to scroll: it is a deep link,
- * not a control surface, nothing here stops the robot, and the number of
- * charts is set by the trainer's log rather than by a layout.
+ * This is the one surface in the cockpit allowed to scroll: the number of
+ * charts is set by the trainer's log rather than by a layout, and clipping a
+ * metric because it landed in row four would hide exactly the run that failed.
+ *
+ * ## It reads, and it acts on the reading
+ *
+ * Everything below the run list is a reading. The run list itself is not: the
+ * whole point of putting three runs side by side is to pick one, and until
+ * `roll out` appeared on these rows the only way to act on that verdict was to
+ * go back to the cockpit and find the run again in the Train tab. So each
+ * training run carries its own launcher (`RolloutButton`), and a rollout
+ * started here is watched here (`RolloutWatch`) — because this page can be a
+ * bookmark on a second monitor, and a surface that starts an arm moving and
+ * then says nothing about it is worse than one that could not start it.
  */
 import Link from "next/link";
 import { Fragment, useEffect, useMemo, useState } from "react";
@@ -25,6 +36,8 @@ import { CompareChart } from "@/components/lab/charts/CompareChart";
 import { fmtNum, seriesColor } from "@/components/lab/charts/svg";
 import { HparamDiff } from "@/components/lab/HparamDiff";
 import { PaneBoundary } from "@/components/lab/PaneBoundary";
+import { RolloutButton } from "@/components/lab/RolloutButton";
+import { RolloutWatch } from "@/components/lab/RolloutWatch";
 import { Empty, Note, Panel, PanelHead, Refusal, Segmented } from "@/components/lab/ui";
 import {
   isBusy, isMissing, lab, plottableMetricKeys, reason,
@@ -153,6 +166,9 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
     refusal: string | null;
     noLab: boolean;
   } | null>(null);
+  /** The rollout started from one of these rows, while it is worth watching.
+   *  One at a time — see `RolloutWatch`. */
+  const [launched, setLaunched] = useState<Run | null>(null);
   const [log, setLog] = useState(true);
   /** Default ON, unlike the metric grid. Three overlaid noisy series is a
    *  hairball; on this page the reader is after the SHAPE of the divergence,
@@ -306,6 +322,19 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
 
   return (
     <div className="flex flex-col gap-3">
+      {/* Above the run list, because an arm in motion outranks every reading
+          on this page. Keyed on the id so a second launch starts clean rather
+          than inheriting the last run's clock. */}
+      {launched && (
+        <PaneBoundary what="the rollout strip">
+          <RolloutWatch
+            key={launched.id}
+            run={launched}
+            onDismiss={() => setLaunched(null)}
+          />
+        </PaneBoundary>
+      )}
+
       <Panel>
         <PanelHead
           title="Runs"
@@ -316,7 +345,12 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
         ) : (
           <div className="flex flex-col">
             {runs.map((r, i) => (
-              <RunLegendRow key={r.id} run={r} colour={seriesColor(i)} />
+              <RunLegendRow
+                key={r.id}
+                run={r}
+                colour={seriesColor(i)}
+                onLaunched={setLaunched}
+              />
             ))}
           </div>
         )}
@@ -507,7 +541,15 @@ export function ComparePane({ runIds }: { runIds: string[] }) {
 
 /* ---- one run in the legend ---------------------------------------------- */
 
-function RunLegendRow({ run, colour }: { run: Run; colour: string }) {
+function RunLegendRow({
+  run,
+  colour,
+  onLaunched,
+}: {
+  run: Run;
+  colour: string;
+  onLaunched: (rollout: Run) => void;
+}) {
   const label = run.name ?? run.id;
   const repo = typeof run.spec?.repo_id === "string" ? run.spec.repo_id : null;
   const policy = typeof run.spec?.policy_type === "string" ? run.spec.policy_type : null;
@@ -527,6 +569,10 @@ function RunLegendRow({ run, colour }: { run: Run; colour: string }) {
         </span>
       )}
       <StatusPill status={run.status} />
+      {/* The verdict this page exists to reach, made actable where it is
+          reached. Renders nothing at all on a run that wrote no checkpoints —
+          see `RolloutButton`. */}
+      <RolloutButton run={run} onLaunched={onLaunched} />
       {/* The Lab has exactly one deep link — this page — so there is no url
           that opens a single run. This goes back to the cockpit, where the
           run list and its detail pane live. */}
