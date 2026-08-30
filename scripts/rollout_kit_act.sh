@@ -12,7 +12,7 @@ usage() {
 usage: rollout_kit_act.sh {v1|v2} [duration_s]
 
   v1            kit-act-so101-pick-cube-v1-60k (60k steps, 2026-08-26)
-  v2            kit-act-so101-pick-cube-v2-20k (20k steps, 2026-08-29)
+  v2            kit-act-so101-pick-cube-v2-100k (100k steps, 67 episodes, 2026-08-29)
   duration_s    how long to stream (default 30; server ceiling 900)
 
 environment:
@@ -29,14 +29,14 @@ by not choosing.
 
 examples:
   scripts/rollout_kit_act.sh v1           # 60k ACT, 30 s, left arm
-  scripts/rollout_kit_act.sh v2 10        # 20k ACT, 10 s
+  scripts/rollout_kit_act.sh v2 10        # 100k ACT, 10 s
   CHECKPOINT=020000 scripts/rollout_kit_act.sh v2 10
 EOF
 }
 
 case "${1:-}" in
   v1) run_id="kit-act-so101-pick-cube-v1-60k" ;;
-  v2) run_id="kit-act-so101-pick-cube-v2-20k" ;;
+  v2) run_id="kit-act-so101-pick-cube-v2-100k" ;;
   -h|--help|"") usage; [ "${1:-}" = "" ] && exit 2 || exit 0 ;;
   *) echo "unknown policy '${1}' — want v1 or v2" >&2; usage; exit 2 ;;
 esac

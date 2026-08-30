@@ -242,6 +242,9 @@ export function MetricGrid({
   if (rows.length === 0) {
     return (
       <div className="flex min-h-[100px] flex-col">
+        {/* Only reachable while a run that could still log one is going:
+            `RunDetail` does not open this panel for a run with nothing left to
+            draw, so "waiting" is never a promise to a run that has stopped. */}
         <Empty>waiting for the first logged step…</Empty>
       </div>
     );

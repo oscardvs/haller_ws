@@ -1403,3 +1403,158 @@ def test_start_accepts_the_cadences_inside_the_bound(hz):
         assert sess.status()["running"] is True
     finally:
         sess.stop()
+
+
+# ---- reload recovery: the driver's token ---------------------------------
+#
+# The grace window is cleared only by a pose frame, and that rule is measured
+# in (see `test_a_second_socket_dropping_cannot_extend_the_disconnect_grace`).
+# It also means a RELOAD costs the session: the page is back in a second but
+# cannot send a pose until the operator clicks Enter VR, which takes longer
+# than five. A token tells the returning driver apart from a stray tab.
+
+def test_the_token_is_only_handed_out_while_a_session_runs():
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr)
+    assert sess.driver_token() is None
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        token = sess.driver_token()
+        assert token
+    finally:
+        sess.stop()
+    assert sess.driver_token() is None
+
+
+def test_each_session_gets_its_own_token():
+    """A token that outlived its session would let a page reattach to whatever
+    happens to be running now — someone else's take, on the same rig."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr)
+    sess.start(left_arm="left", right_arm="right")
+    first = sess.driver_token()
+    sess.stop()
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        assert sess.driver_token() != first
+        assert sess.reattach(first) is False
+    finally:
+        sess.stop()
+
+
+def test_a_matching_token_buys_the_longer_re_entry_window():
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
+                                      ws_disconnect_grace_s=0.1,
+                                      ws_reattach_grace_s=30.0))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        sess.notify_ws_disconnected()
+        assert sess.reattach(sess.driver_token()) is True
+        # The short window would have stopped this session by now; the long
+        # one is still running, with no pose frame having arrived.
+        _time.sleep(0.4)
+        assert sess.running is True
+        assert sess.state is not HumanState.IDLE
+    finally:
+        sess.stop()
+
+
+def test_a_wrong_token_buys_nothing_and_the_session_still_stops():
+    """The stray-tab case, now with a guess at the token. Everything the
+    original rule protected still holds."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
+                                      ws_disconnect_grace_s=0.1,
+                                      ws_reattach_grace_s=30.0))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        sess.notify_ws_disconnected()
+        assert sess.reattach("not-the-token") is False
+        assert sess.reattach("") is False
+        assert _wait_until(lambda: sess.state is HumanState.IDLE, timeout=1.0)
+    finally:
+        sess.stop()
+
+
+def test_the_re_entry_window_is_one_shot_per_silence():
+    """The returning page is not streaming yet, so it goes idle, is closed, and
+    reconnects — over and over. If each of those bought another window we would
+    be back to the tab that never lets go."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
+                                      ws_disconnect_grace_s=0.1,
+                                      ws_reattach_grace_s=0.3))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        token = sess.driver_token()
+        sess.notify_ws_disconnected()
+        assert sess.reattach(token) is True
+        assert sess.reattach(token) is False     # second ask, same silence
+        assert _wait_until(lambda: sess.state is HumanState.IDLE, timeout=2.0)
+    finally:
+        sess.stop()
+
+
+def test_a_pose_frame_re_arms_the_window_for_the_next_silence():
+    """Having actually resumed is the evidence that spending it again is safe
+    — otherwise one reload would cost every later one."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
+                                      ws_disconnect_grace_s=0.1,
+                                      ws_reattach_grace_s=30.0))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        token = sess.driver_token()
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        sess.notify_ws_disconnected()
+        assert sess.reattach(token) is True
+        sess.ingest_frame(_kp_frame(dead_man=True))   # operator is back in XR
+        assert sess._ws_disconnected_at_perf is None
+        sess.notify_ws_disconnected()                 # and leaves again
+        assert sess.reattach(token) is True
+    finally:
+        sess.stop()
+
+
+def test_reattaching_a_healthy_session_is_a_no_op_that_succeeds():
+    """A page that reloads while the headset never stopped streaming has
+    nothing to extend, and must not be told its session is gone."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0))
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        assert sess.reattach(sess.driver_token()) is True
+        assert sess._ws_disconnected_at_perf is None
+    finally:
+        sess.stop()
+
+
+def test_the_auto_stop_says_why_and_the_reason_outlives_the_session():
+    """It used to be silent — INFO, under app loggers that serve at WARNING —
+    so an operator who reloaded and found the start button back had nothing,
+    anywhere, telling them what happened. The surface reads this AFTER
+    `running` has already gone false, so it must survive the stop."""
+    mgr, _ = _fake_arm_manager()
+    sess = _sess(mgr, **_fast_acquire(hz_override=200.0,
+                                      ws_disconnect_grace_s=0.1))
+    sess.start(left_arm="left", right_arm="right")
+    assert sess.status()["stopped_reason"] is None
+    try:
+        sess.ingest_frame(_kp_frame(dead_man=True))
+        sess.notify_ws_disconnected()
+        assert _wait_until(lambda: sess.state is HumanState.IDLE, timeout=1.0)
+        reason = sess.status()["stopped_reason"]
+        assert reason and "no pose" in reason
+    finally:
+        sess.stop()
+    # A fresh session is not still explaining the last one's death.
+    sess.start(left_arm="left", right_arm="right")
+    try:
+        assert sess.status()["stopped_reason"] is None
+    finally:
+        sess.stop()

@@ -184,6 +184,22 @@ describe("parseVrSocketMessage", () => {
     expect(msg?.config).not.toHaveProperty("type");
   });
 
+  it("reads the session token off the driver handout", () => {
+    // The backend sends this once, to the connection whose pose frame it just
+    // took. It is the page's proof, across a reload, that a running session is
+    // its own — see lib/teleopSessionToken.
+    const msg = parseVrSocketMessage({ type: "session", token: "tok-123" });
+    expect(msg).toEqual({ kind: "session", token: "tok-123" });
+  });
+
+  it("refuses a session message with no usable token", () => {
+    // Storing an empty token would make the page present one on the way back
+    // and be told, correctly but confusingly, that its session is gone.
+    expect(parseVrSocketMessage({ type: "session" })).toBeNull();
+    expect(parseVrSocketMessage({ type: "session", token: "" })).toBeNull();
+    expect(parseVrSocketMessage({ type: "session", token: 7 })).toBeNull();
+  });
+
   it("reads the clamped echo back off config_applied", () => {
     const msg = parseVrSocketMessage({ type: "config_applied",
                                        config: { scale_translation: 4 } });

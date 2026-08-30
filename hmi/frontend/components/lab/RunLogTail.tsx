@@ -30,9 +30,15 @@ const MAX_CHARS = 200_000;
 export function RunLogTail({
   text,
   height = 240,
+  fill = false,
 }: {
   text: string;
   height?: number;
+  /** Take the whole height the parent gives instead of a fixed strip. For a
+   *  run whose log IS the reading — a rollout logs no metrics and writes no
+   *  checkpoints, so its stdout is the only account of what happened — the
+   *  240px strip put a traceback behind a scrollbar on a full-height column. */
+  fill?: boolean;
 }) {
   const ref = useRef<HTMLPreElement>(null);
   /** Sampled on scroll, so at the moment the text changes it still holds the
@@ -68,16 +74,17 @@ export function RunLogTail({
   };
 
   return (
-    <div className="relative">
+    <div className={"relative " + (fill ? "min-h-0 flex-1" : "")}>
       <pre
         ref={ref}
         onScroll={onScroll}
         tabIndex={0}
         aria-label="run log tail"
-        style={{ height }}
+        style={fill ? undefined : { height }}
         className={
           "overflow-y-auto rounded-md border border-border bg-[var(--haller-inset)] " +
           "p-2 font-mono text-[10px] leading-[1.5] break-all whitespace-pre-wrap " +
+          (fill ? "h-full " : "") +
           (body ? "" : "text-muted-foreground")
         }
       >

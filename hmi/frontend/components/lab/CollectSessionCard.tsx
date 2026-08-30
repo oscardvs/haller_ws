@@ -13,7 +13,7 @@
  * the headset opens. Recording without a session stays allowed-and-warned —
  * that warning lives on the recorder card, not here.
  */
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
@@ -54,6 +54,23 @@ export function CollectSessionCard({
   const rightAuth = useTelemetry(
     (s) => s.lastFrame?.human_teleop?.acquire?.right?.authority ?? null,
   );
+
+  // Why a session ended when nobody pressed stop. The backend's WS-grace
+  // auto-stop used to be completely silent — INFO-level, and the app loggers
+  // serve at WARNING — so an operator who reloaded and found the start button
+  // back had nothing anywhere telling them what had happened.
+  const stoppedReason = useTelemetry(
+    (s) => s.lastFrame?.human_teleop?.stopped_reason ?? null,
+  );
+  const toldRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Once per reason, not once per frame: this arrives at telemetry rate and
+    // holds its value until the next session starts.
+    if (running || !stoppedReason || toldRef.current === stoppedReason) return;
+    toldRef.current = stoppedReason;
+    toast.warning(`teleop session ended — ${stoppedReason}`);
+  }, [running, stoppedReason]);
+  useEffect(() => { if (running) toldRef.current = null; }, [running]);
 
   const [stance, pickStance] = useStance();
   const [soloHand] = useSoloHand();

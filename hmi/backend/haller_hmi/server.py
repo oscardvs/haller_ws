@@ -193,6 +193,10 @@ class HumanTeleopStartBody(BaseModel):
     hz: float = 60.0
 
 
+class HumanTeleopReattachBody(BaseModel):
+    token: str
+
+
 class SimTeleopStartBody(BaseModel):
     follower: str
     hz: float = 60.0
@@ -822,6 +826,24 @@ async def post_human_teleop_stop():
     return {"ok": True, **human_teleop.status()}
 
 
+@app.post("/teleop/human/reattach")
+async def post_human_teleop_reattach(body: HumanTeleopReattachBody):
+    """The driver's page is back after a reload; hold the session for it.
+
+    The SECOND door into `HumanTeleopSession.reattach`, and it exists because
+    the first one cannot cover a reload. `VRTeleopPanel` opens the pose socket
+    only on entering XR, so a page that has just reloaded has no socket at all
+    to say `attach` on — and it cannot get one until the operator clicks Enter
+    VR, which is the very thing the window is meant to buy time for. A page
+    that reloads with a token in `sessionStorage` calls this on mount instead.
+
+    Never a 4xx: a token that no longer matches (the session really did end, or
+    someone else's is running now) is an ANSWER, not a failure — the page uses
+    it to drop the stale token and offer a fresh start.
+    """
+    return {"ok": human_teleop.reattach(body.token), **human_teleop.status()}
+
+
 @app.post("/teleop/human/home")
 async def post_human_teleop_home():
     """Park every non-driving side at home, inside the running session.
@@ -1027,6 +1049,23 @@ def get_record_status():
     if recorder is None:
         raise HTTPException(status_code=503, detail="recorder not ready")
     return recorder.status()
+
+
+@app.get("/record/schema")
+def get_record_schema():
+    """The feature set a take started right now would write.
+
+    Exists for `haller_hmi.dataset_migrate`, which has to migrate an older
+    dataset to the schema `_open_dataset` will actually compare against. The
+    recorded camera set is runtime state, so the running rig is the only thing
+    that knows it — a migration computed from config.yaml would target a schema
+    the recorder still refuses. Shapes go out as lists; JSON has no tuple.
+    """
+    if recorder is None:
+        raise HTTPException(status_code=503, detail="recorder not ready")
+    features = {k: {**v, "shape": list(v["shape"])}
+                for k, v in recorder.features().items()}
+    return {"features": features}
 
 
 @app.post("/record/start")
@@ -1272,6 +1311,15 @@ async def ws_vr_teleop_in(ws: WebSocket):
             if mtype == "request_settings":
                 await ws.send_json(_settings_message())
                 continue
+            if mtype == "attach":
+                # A client that drove this session before the stream went
+                # quiet, coming back. See `HumanTeleopSession.reattach` for why
+                # the token is the discriminator and why the window it buys is
+                # one-shot.
+                ok = human_teleop.reattach(str(msg.get("token") or ""))
+                await ws.send_json({"type": "attach_result", "ok": ok})
+                continue
+            first_frame = not streamed
             streamed = True
             try:
                 human_teleop.ingest_frame(vr_wire.normalize_frame(msg))
@@ -1279,6 +1327,14 @@ async def ws_vr_teleop_in(ws: WebSocket):
                 # One malformed frame must never drop the operator's
                 # connection mid-session.
                 logger.exception("vr teleop ingest_frame failed")
+            if first_frame:
+                # The pose frame IS the proof: this connection is driving, so
+                # it — and only it — is told the session's token, to present
+                # on the way back from a reload. A page parked on the landing
+                # screen never streams and so never sees one.
+                token = human_teleop.driver_token()
+                if token:
+                    await ws.send_json({"type": "session", "token": token})
             now = asyncio.get_running_loop().time()
             if now - last_state >= state_period:
                 last_state = now

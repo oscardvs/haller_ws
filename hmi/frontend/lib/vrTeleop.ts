@@ -1008,7 +1008,16 @@ export type TuningValues = Record<string, number | boolean | string | null>;
 
 export type VrSocketMessage =
   | { kind: "ik_state"; config: TuningValues | null; sides: IkSides }
-  | { kind: "config_applied"; config: TuningValues };
+  | { kind: "config_applied"; config: TuningValues }
+  /** This connection's pose frame was taken, so the backend has named it the
+   *  driver and handed over the session's token. Held across a reload so the
+   *  page can prove, on the way back, that the session is its own.
+   *
+   *  `config?: undefined` is not filler: every other variant carries one, and
+   *  without it `msg.config` stops type-checking across the union and every
+   *  reader has to narrow first. Spelling out that this message HAS no config
+   *  keeps the union readable and says the true thing. */
+  | { kind: "session"; token: string; config?: undefined };
 
 /**
  * Read one server → client message off the teleop socket.
@@ -1044,6 +1053,11 @@ export function parseVrSocketMessage(raw: unknown): VrSocketMessage | null {
   }
   if (m.type === "config_applied") {
     return { kind: "config_applied", config: config ?? {} };
+  }
+  if (m.type === "session") {
+    const token = (msg as { token?: unknown }).token;
+    if (typeof token === "string" && token) return { kind: "session", token };
+    return null;
   }
   return null;
 }

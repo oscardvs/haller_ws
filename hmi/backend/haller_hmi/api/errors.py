@@ -33,8 +33,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from fastapi import HTTPException
-
 
 class DataDependencyError(RuntimeError):
     """pandas/pyarrow missing. 503, because the request would have worked on a
@@ -62,7 +60,21 @@ def as_http() -> Iterator[None]:
         with as_http():
             detail = catalog.dataset_detail(repo_id)
             return catalog.plan_eval_split(detail["episodes"], ...)
+
+    **FastAPI is imported HERE, not at module scope, and that is load-bearing.**
+    The two classes above are plain `RuntimeError`s — domain facts about a
+    dataset — and `lab/catalog.py` imports this module to name them. A DETACHED
+    RUNNER reaches catalog through that same import (`rollout_runner`'s
+    `resolve_rig` needs `dataset_root`), and it runs under `~/venvs/haller-lab`:
+    lerobot 0.6.1 and torch, no FastAPI, because the serving stack has no
+    business in a process that holds a policy. At module scope this import made
+    every rollout die before its first observation with
+    `ModuleNotFoundError: No module named 'fastapi'` — 2026-08-29, on the first
+    rollout ever launched from the cockpit. Only the LADDER is HTTP; the classes
+    are not, and now the module's import cost matches that split.
     """
+    from fastapi import HTTPException
+
     try:
         yield
     except DataDependencyError as e:

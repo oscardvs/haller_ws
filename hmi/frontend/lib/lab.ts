@@ -47,6 +47,20 @@ export function isBusy(e: unknown): boolean {
 }
 
 /**
+ * True when the backend read the request and refused it on its merits.
+ *
+ * The rollout route is the reason this exists. Its 400s are not malformed
+ * JSON — they are the rate gate ("that is a different dynamical system, not a
+ * faster or slower one"), a checkpoint whose dataset has been pruned away, a
+ * duration over the ceiling. Every one of them is a sentence the operator has
+ * to read and act on, so they get a panel that persists, not a toast that
+ * vanishes — the same treatment as a 409, arrived at from a different place.
+ */
+export function isRefused(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 400;
+}
+
+/**
  * True when the backend refused because this client is not on the loopback.
  *
  * `--host 0.0.0.0` is how the Quest reaches the HMI, and reaching it must not
@@ -264,6 +278,10 @@ export type DatasetDetail = {
   root: string;
   fps: number;
   robot_type: string;
+  /** Every instruction the takes were recorded under. A LIST because lerobot
+   *  allows several; `_first_task` is the backend's own rule for reading one
+   *  out of it, and the rollout launcher applies the same one. */
+  tasks: string[];
   /** Camera keys, WITHOUT the `observation.images.` prefix where the backend
    *  strips it — the picker shows whatever it is given. */
   video_keys: string[];
@@ -414,6 +432,104 @@ export type TrainSpec = {
   episodes?: number[];
 };
 
+/* ─── rollout ─────────────────────────────────────────────────────────── */
+
+/**
+ * What a rollout run is ASKED to do. `POST /lab/runs/rollout`.
+ *
+ * A rollout is a run like any other and NOT a bus handover: the detached
+ * child loads the checkpoint and runs inference, and the SERVER keeps the
+ * Feetech bus and commits the child's targets through the same chain every
+ * other leader goes through — LPF, rate cap, clamp, collision guard,
+ * workspace floors, E-STOP. Which is why launching one is a POST and not a
+ * mode: nothing here hands anything over.
+ *
+ * Only `policy_path` is required, and every optional below is optional in the
+ * same direction — leaving it out is the CORRECT value rather than a shortcut
+ * past a decision. `control_hz` most of all: omitted, the server runs the
+ * policy at the rate its training dataset was recorded at, which it reads
+ * from the checkpoint itself. See `RolloutRecord`.
+ */
+export type RolloutSpec = {
+  /** The model directory — `.../checkpoints/060000/pretrained_model`, which
+   *  is exactly the path `Checkpoint.path` carries. */
+  policy_path: string;
+  duration_s: number;
+  device: string;
+  /**
+   * The rate to drive the policy at, in Hz. OMIT IT to get the rate it was
+   * trained at.
+   *
+   * Sending one is a declaration the server checks against the fps of the
+   * dataset the checkpoint records, and a divergence is a 400 with a sentence
+   * naming both numbers — not a warning. `allow_rate_mismatch` is the only
+   * way past it, and the run then says so in its own spec forever.
+   */
+  control_hz?: number;
+  /** Launch anyway when the declared rate is not the trained one. */
+  allow_rate_mismatch?: boolean;
+  /** Let the run continue when the MEASURED rate falls under the floor. A
+   *  different gate on a different event: this one is the child's, checked
+   *  over warmup inference cycles before a single target is sent. */
+  allow_slow?: boolean;
+  /**
+   * Which arm an UNPREFIXED policy drives — `"left"` or `"right"`.
+   *
+   * Required exactly when the training dataset's columns carry no side
+   * (`rig === "solo"`, the shape the kit's datasets have), and refused rather
+   * than guessed by the child: the two arms are 40 cm apart, and a rollout
+   * aimed at the wrong one is a collision, not a typo. Ignored on a rig whose
+   * columns name their own side.
+   */
+  side?: string;
+  /** The language instruction, for a policy conditioned on one. The dataset's
+   *  own recorded task is the honest default. */
+  task?: string;
+  robot_type?: string;
+};
+
+/**
+ * A rollout spec as the RUN echoes it back, with the rate decision stamped.
+ *
+ * The extra fields are the server's, written at launch whether or not
+ * anything was overridden, so a run read months later says where its rate
+ * came from instead of reading as a deliberate agreement between two numbers.
+ * `control_hz_trained_source`/`_reason` are on the wire too and are
+ * deliberately not typed here: they are the diagnostic half of a refusal that
+ * never reached this client, and nothing renders them.
+ */
+export type RolloutRecord = RolloutSpec & {
+  control_hz: number;
+  /** The fps of the dataset the checkpoint was trained on, or null when that
+   *  chain could not be walked — in which case the operator had to declare a
+   *  rate and there was no second source to check it against. */
+  control_hz_trained: number | null;
+  /** `"trained_fps"` when the operator left the rate alone. Without this a
+   *  run that got the right rate for free is indistinguishable from one where
+   *  somebody typed it. */
+  control_hz_declared_by: "request" | "trained_fps";
+  control_hz_trained_repo_id: string | null;
+  /** Whether the trained rate was ever MEASURED, and what was measured. A
+   *  PASS against a dataset that only declared its fps is a declaration
+   *  agreeing with a declaration. */
+  control_hz_trained_measured: boolean;
+  control_hz_trained_measured_hz: number | null;
+  control_hz_mismatch_override: boolean;
+  repo_id?: string;
+};
+
+/**
+ * The ceiling and the default, in seconds — `runs.py::MAX_ROLLOUT_DURATION_S`
+ * and `routes_runs.py::DEFAULT_ROLLOUT_DURATION_S`.
+ *
+ * Copies, and the SERVER is the authority: it refuses over its own ceiling at
+ * the door, and the child refuses again on the spec. These two only shape the
+ * spinner, so a drift shows up as the backend's refusal on a number the box
+ * offered — never as a run that outlives what the operator agreed to.
+ */
+export const MAX_ROLLOUT_DURATION_S = 900;
+export const DEFAULT_ROLLOUT_DURATION_S = 60;
+
 /** A run as the LIST reports it — no full spec, just enough for a row. */
 export type RunSummary = {
   id: string;
@@ -437,7 +553,11 @@ export type RunSummary = {
 /** A run as `GET /lab/runs/{id}` reports it: everything the list has, plus
  *  what was actually asked for and how it ended. */
 export type Run = RunSummary & {
-  spec: Partial<TrainSpec> & Record<string, unknown>;
+  /** Both shapes, because `kind` is what says which one arrived and a run
+   *  read from the list has neither in hand. `Record<string, unknown>` stays:
+   *  a spec is whatever the launching route wrote, and this pane must not
+   *  drop a field it has no type for. */
+  spec: Partial<TrainSpec & RolloutRecord> & Record<string, unknown>;
   /** The child's command line. The one thing that answers "what did this
    *  actually run" months later. */
   argv?: string[];
@@ -595,6 +715,18 @@ export const lab = {
   run: (id: string) => getJson<Run>(`/lab/runs/${encodeURIComponent(id)}`),
 
   train: (spec: TrainSpec) => postJson<{ id: string }>("/lab/runs/train", { spec }),
+
+  /**
+   * Runs a trained policy ON THE ARMS, as a detached job. Loopback-only.
+   *
+   * Answers with a run id, not a result — the same shape as `train` and
+   * `prune`, and for the same reason: the thing it starts outlives the
+   * request. The run is where the handshake, the measured control rate and
+   * the streamed target count are reported, and `stopRun` is what ends it
+   * early.
+   */
+  rollout: (spec: RolloutSpec) =>
+    postJson<{ id: string }>("/lab/runs/rollout", { spec }),
 
   runMetrics: (id: string, offset: number) =>
     getJson<MetricsPage>(

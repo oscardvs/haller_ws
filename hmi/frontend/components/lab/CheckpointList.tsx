@@ -14,9 +14,13 @@
 import { useEffect, useState } from "react";
 
 import { lab, isMissing, reason, type Checkpoint, type RunStatus } from "@/lib/lab";
-import { Chip, Empty, HeadRow, Panel, PanelHead, Refusal } from "@/components/lab/ui";
+import { Button, Chip, Empty, HeadRow, Panel, PanelHead, Refusal } from "@/components/lab/ui";
 
+/** With the roll-out column and without it. A caller that cannot run a policy
+ *  — anything but the Train tab's detail pane today — gets the three-column
+ *  table it always had rather than an empty gutter. */
 const COLS = "minmax(0,1fr) 56px 84px";
+const COLS_ROLLOUT = "minmax(0,1fr) 56px 84px 72px";
 
 /** The CHECKPOINT directory's name — `060000`, or `last` for the symlink.
  *
@@ -36,9 +40,20 @@ export function checkpointName(path: string): string {
 export function CheckpointList({
   runId,
   status,
+  onRollout,
 }: {
   runId: string;
   status: RunStatus;
+  /**
+   * Run this checkpoint on the arms. Absent means no column: this list is
+   * also a plain readout of what is on disk, and a surface that cannot launch
+   * must not show a button that does nothing.
+   *
+   * Raised rather than handled here — the launcher needs the RUN's dataset to
+   * know whether it has to ask which arm, and this component knows only the
+   * run id. The owner has the run.
+   */
+  onRollout?: (checkpoint: Checkpoint) => void;
 }) {
   const [list, setList] = useState<Checkpoint[] | null>(null);
   const [missing, setMissing] = useState(false);
@@ -76,6 +91,7 @@ export function CheckpointList({
   if (missing) return null;
 
   const rows = list ?? [];
+  const cols = onRollout ? COLS_ROLLOUT : COLS;
   // `is_link` left the frozen contract, so "latest" is derived from the
   // highest step rather than from a symlink the backend no longer reports.
   // Highest step IS the newest checkpoint; nothing else about the set is
@@ -112,13 +128,19 @@ export function CheckpointList({
               : "no checkpoints"}
         </Empty>
       ) : (
-        <div className="max-h-[168px] min-h-0 overflow-y-auto">
+        /* Viewport-relative rather than 168px: on a train run this list is the
+           thing you came for — it is what a rollout is launched from — and a
+           fixed cap showed four of thirteen under an empty log panel that had
+           taken the rest of the column. The log still gets whatever is left,
+           because this panel takes only what its rows need. */
+        <div className="max-h-[34vh] min-h-0 overflow-y-auto">
           <HeadRow
-            style={{ gridTemplateColumns: COLS }}
+            style={{ gridTemplateColumns: cols }}
             cols={[
               { key: "name", label: "name" },
               { key: "step", label: "step", align: "right" },
               { key: "state", label: "state", align: "right" },
+              ...(onRollout ? [{ key: "run", label: "run", align: "right" as const }] : []),
             ]}
           />
           {rows.map((c) => (
@@ -126,7 +148,7 @@ export function CheckpointList({
               key={c.path}
               title={c.path}
               className="grid items-center gap-2 border-b border-border px-2.5 py-1"
-              style={{ gridTemplateColumns: COLS }}
+              style={{ gridTemplateColumns: cols }}
             >
               <span className="truncate font-mono text-[10px]">{checkpointName(c.path)}</span>
               <span data-num className="text-right font-mono text-[10px] tabular-nums">
@@ -147,6 +169,23 @@ export function CheckpointList({
                   </Chip>
                 )}
               </span>
+              {/* A partial checkpoint gets no button at all rather than a
+                  disabled one: there is nothing to enable it, and the `partial`
+                  chip beside it already says why. */}
+              {onRollout && (
+                <span className="flex justify-end">
+                  {c.has_model && (
+                    <Button
+                      tone="ghost"
+                      onClick={() => onRollout(c)}
+                      title={`run ${checkpointName(c.path)} on the arms`}
+                      aria-label={`roll out ${checkpointName(c.path)}`}
+                    >
+                      roll out
+                    </Button>
+                  )}
+                </span>
+              )}
             </div>
           ))}
         </div>

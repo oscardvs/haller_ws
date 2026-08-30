@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ApiError } from "@/lib/api";
 import {
   armGroups, epLabel, isBusy, isDrawableTrace, isForbidden, isMissing,
-  trainableCount,
+  isRefused, trainableCount,
   isGripperChannel, lab, labVideoUrl, metricKeys, metricX, qs, reason,
   rigLabel, shortChannel, sliceFor, videoSrcKey,
   type LabEpisode, type MetricRow, type Trace,
@@ -52,6 +52,20 @@ function ep(over: Partial<LabEpisode> = {}): LabEpisode {
 
 beforeEach(() => vi.restoreAllMocks());
 afterEach(() => vi.restoreAllMocks());
+
+describe("the refusal predicates say which refusal it was", () => {
+  // Three different next moves, and the operator's is different in each: a
+  // 404 hides the surface, a 403 says "do it on the machine", a 400 is a
+  // decision the backend made about the request itself — the rollout rate
+  // gate, which is a sentence to read and act on, not a fault.
+  it("separates a 400 from a 404, a 403 and a 409", () => {
+    expect(isRefused(new ApiError(400, "refusing to roll out at 25 Hz"))).toBe(true);
+    for (const status of [403, 404, 409, 500, 501]) {
+      expect(isRefused(new ApiError(status, "x"))).toBe(false);
+    }
+    expect(isRefused(new Error("network"))).toBe(false);
+  });
+});
 
 describe("qs", () => {
   it("omits null, undefined and the empty string", () => {
@@ -396,6 +410,29 @@ describe("lab client — what actually goes on the wire", () => {
     });
     expect(body(calls[0]).spec.policy_type).toBe("act");
     expect(body(calls[0]).spec.episodes).toEqual([0, 1, 2]);
+  });
+
+  it("wraps a rollout spec in `spec`, and omits what was not chosen", () => {
+    // The route reads both a flat body and a wrapped one (`_spec_of`), and
+    // `train` wraps — one shape for both launch routes, so a reader of either
+    // is reading the same thing.
+    //
+    // The OMISSION is the claim worth pinning: an absent `control_hz` is how
+    // the operator asks for the rate the policy was trained at, and the server
+    // stamps `control_hz_declared_by: "trained_fps"` because of it. A client
+    // that sent `control_hz: undefined` would serialise nothing either — but
+    // one that filled in a default would change what the run RECORDS about
+    // itself, while running at exactly the same rate.
+    const { calls } = routeFetch({ "/lab/runs/rollout": { id: "rollout-1" } });
+    void lab.rollout({
+      policy_path: "/runs/train-x/train/checkpoints/060000/pretrained_model",
+      duration_s: 60, device: "cuda", side: "right",
+    });
+    expect(calls[0].url).toContain("/lab/runs/rollout");
+    expect((calls[0].init as RequestInit).method).toBe("POST");
+    const spec = body(calls[0]).spec;
+    expect(spec.side).toBe("right");
+    expect("control_hz" in spec).toBe(false);
   });
 
   it("asks for the split rather than computing one", () => {

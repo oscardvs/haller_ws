@@ -247,3 +247,73 @@ def test_the_legacy_teleop_sockets_and_pages_are_gone(app_with_mocks):
     with pytest.raises(Exception):
         with client.websocket_connect("/ws/teleop/human/in"):
             pass
+
+
+# ---- reload recovery: the two doors into `reattach` -----------------------
+
+def test_the_token_reaches_only_a_connection_that_streamed(app_with_mocks):
+    """The pose frame IS the proof. A page parked on the landing screen never
+    streams, so it never learns the token — which is what stops `reattach`
+    from being something any tab can call."""
+    srv.human_teleop.driver_token.return_value = "tok-123"
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        assert ws.receive_json()["type"] == "settings"
+        ws.send_json({"type": "request_settings"})
+        assert ws.receive_json()["type"] == "settings"   # still no token
+        ws.send_json(_kp_frame())
+        assert ws.receive_json() == {"type": "session", "token": "tok-123"}
+
+
+def test_the_token_is_handed_over_once_not_every_frame(app_with_mocks):
+    srv.human_teleop.driver_token.return_value = "tok-123"
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json(_kp_frame())
+        assert ws.receive_json()["type"] == "session"
+        ws.send_json(_kp_frame())
+        assert ws.receive_json()["type"] == "ik_state"
+
+
+def test_attach_on_the_socket_reaches_the_session(app_with_mocks):
+    """The reconnect door: the server closed an idle socket, the client came
+    straight back, and says who it is."""
+    srv.human_teleop.reattach.return_value = True
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "attach", "token": "tok-123"})
+        assert ws.receive_json() == {"type": "attach_result", "ok": True}
+    srv.human_teleop.reattach.assert_called_with("tok-123")
+
+
+def test_an_attach_is_not_a_pose_frame(app_with_mocks):
+    """It must not make this connection count as having streamed: a page that
+    only ever said `attach` is still not driving, so closing it must not start
+    a grace window."""
+    srv.human_teleop.reattach.return_value = False
+    with app_with_mocks.websocket_connect("/ws/teleop/vr/in") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "attach", "token": "nope"})
+        ws.receive_json()
+    assert not srv.human_teleop.notify_ws_disconnected.called
+    assert not srv.human_teleop.ingest_frame.called
+
+
+def test_reattach_route_answers_a_dead_token_rather_than_failing(app_with_mocks):
+    """The reload door. `ok: false` is an ANSWER — the page drops the stale
+    token and offers a fresh start — so it must not arrive as a 4xx."""
+    srv.human_teleop.reattach.return_value = False
+    res = app_with_mocks.post("/teleop/human/reattach", json={"token": "old"})
+    assert res.status_code == 200, res.text
+    assert res.json()["ok"] is False
+    srv.human_teleop.reattach.assert_called_with("old")
+
+
+def test_reattach_route_holds_the_session_for_a_live_token(app_with_mocks):
+    srv.human_teleop.reattach.return_value = True
+    res = app_with_mocks.post("/teleop/human/reattach", json={"token": "tok"})
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+
+
+def test_reattach_needs_a_token(app_with_mocks):
+    assert app_with_mocks.post("/teleop/human/reattach", json={}).status_code == 422

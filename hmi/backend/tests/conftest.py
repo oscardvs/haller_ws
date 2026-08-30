@@ -125,10 +125,16 @@ def app_with_mocks(monkeypatch, tmp_path):
     # and the send would fail silently (caught), so the socket tests would
     # hang waiting for a push that never comes.
     human_teleop_mock.ik_sides.return_value = {"left": {}, "right": {}}
+    # Same reason, one message later: the socket hands the session's token to
+    # the connection whose first pose frame it takes, and a bare Mock there is
+    # not JSON-serialisable either. None is also the honest default — this stub
+    # session is not running, so it has no token to give.
+    human_teleop_mock.driver_token.return_value = None
+    human_teleop_mock.reattach.return_value = False
     human_teleop_mock.status.return_value = {
         "running": False, "state": "idle",
         "left_arm": None, "right_arm": None,
-        "started_at": None, "last_error": None,
+        "started_at": None, "last_error": None, "stopped_reason": None,
         "tracking": {"left": {"age_ms": None, "lost": False},
                      "right": {"age_ms": None, "lost": False}},
         "goal_deg": {"left": {}, "right": {}},
