@@ -106,7 +106,12 @@ rejected: a software AV1 encoder cannot keep up with realtime multi-camera
 capture on the machines this runs on.
 
 **Every episode gets its own video file per camera** — `video_files_size_in_mb`
-is pinned to 0 in `meta/info.json` so lerobot rotates rather than packs. Stock
+is pinned to `VIDEO_FILE_ROTATE_MB` (0.0001, a hundred bytes) in
+`meta/info.json` so lerobot rotates rather than packs. It was 0 until lerobot
+0.6.1, the venv that trains, began rejecting a non-positive value when it LOADS
+a dataset — a zero made every recorded dataset untrainable, so the pin is now
+the smallest positive number instead of zero, which lands the rotate test in
+exactly the same place. Stock
 lerobot 0.5.1 packs several episodes into one file, and the packer
 (`video_utils.concatenate_video_files`) remuxes the appended episode's packets
 without re-basing their timestamps, so the mp4 muxer rejects them:

@@ -243,6 +243,29 @@ RATE_SETTLE_TIMEOUT_S = 3.0
 # a demonstration.
 MIN_SAVEABLE_FRAMES = 2
 
+# The video-file size cap written into `info.json`, in MB. A SENTINEL meaning
+# "rotate always", not a size budget: `_one_video_file_per_episode` needs
+# lerobot's `latest_size_in_mb + ep_size_in_mb >= cap` test to be true for every
+# episode, so the cap has to sit below the smallest pair of video files that can
+# ever exist. A hundred bytes is under an empty MP4's own header.
+#
+# It was 0, which said that perfectly, until the lab venv moved to lerobot
+# 0.6.1 and `DatasetInfo.__post_init__` started VALIDATING the field on LOAD:
+#
+#   ValueError: video_files_size_in_mb must be positive, got 0
+#
+# — raised before a single frame is read, so a zero was a dataset this rig
+# could write and then never train on. 0.5.1, the venv that records, has no such
+# check and took the zero happily; nothing failed until training. The smallest
+# positive value satisfies the validator and leaves the rotate test landing
+# exactly as it did.
+#
+# NOT an integer, though lerobot annotates the field `int`: every whole number
+# is at least 1 MB, and this rig has kept a 6.7 KB episode. Two short takes
+# under a 1 MB cap would pack into one file and hit the muxer bug below — the
+# 2026-08-09 failure, restored by a rounder-looking constant.
+VIDEO_FILE_ROTATE_MB = 0.0001
+
 # LeRobot's OWN names for the two task-outcome columns (lerobot.utils.constants
 # REWARD/DONE). Spelled out here rather than invented, because the whole point
 # of these two features is that a public dataset — notably
@@ -1264,7 +1287,7 @@ class DatasetRecorder:
 
         # Guard BEFORE anything is touched: every video file this episode
         # points at has to be its own. If lerobot packed two episodes into one
-        # file — which `video_files_size_in_mb = 0` prevents for anything we
+        # file — which `VIDEO_FILE_ROTATE_MB` prevents for anything we
         # record, but not for a dataset that arrived from elsewhere — then the
         # last take's frames can only be removed by re-encoding, and this is
         # the wrong tool. Refuse whole rather than half-delete.
@@ -1474,7 +1497,7 @@ class DatasetRecorder:
         `KeyError: 'size'`. One upstream muxer bug, and the whole session is a
         single unreadable episode. That is exactly what happened on 2026-08-09.
 
-        `video_files_size_in_mb = 0` makes the size test
+        `VIDEO_FILE_ROTATE_MB` makes the size test
         (`latest + episode >= limit`) true for every episode after the first, so
         each one takes the rotate-to-a-new-file branch — a plain `shutil.move`,
         no concatenation, no muxer. Per-episode video files are a valid v3
@@ -1482,10 +1505,15 @@ class DatasetRecorder:
         metadata, so readers do not care. It costs one file per camera per
         episode and buys back the entire pipeline.
 
+        The cap is a hair above 0 rather than 0 itself because lerobot 0.6.1
+        rejects a non-positive one at LOAD time, which is where training reads
+        it — see `VIDEO_FILE_ROTATE_MB` for why it is that number and not a
+        round one.
+
         Revisit if lerobot fixes the remux (it needs a per-stream dts offset
         carried across the file boundary); until then this must stay.
         """
-        ds.meta.info["video_files_size_in_mb"] = 0
+        ds.meta.info["video_files_size_in_mb"] = VIDEO_FILE_ROTATE_MB
         # Persist it: `resume` rebuilds the metadata from info.json, so a value
         # kept only in memory would be lost the next time the backend starts and
         # the second episode of the NEXT session would hit the muxer again.

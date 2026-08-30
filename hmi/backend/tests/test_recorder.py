@@ -27,6 +27,7 @@ from haller_hmi.recorder import (
     REWARD_FEATURE,
     SCORING_INFO_KEY,
     SO101_JOINT_ORDER,
+    VIDEO_FILE_ROTATE_MB,
     WALL_CLOCK_INFO_KEY,
     DatasetRecorder,
 )
@@ -1196,8 +1197,13 @@ async def test_every_episode_gets_its_own_video_file(tmp_path):
     assert all(f.stat().st_size > 0 for f in files)
     # Persisted, not just in memory: `resume` rebuilds metadata from info.json,
     # so a value kept only in RAM would let the NEXT session pack and crash.
-    assert json.loads((root / "meta" / "info.json").read_text())[
-        "video_files_size_in_mb"] == 0
+    on_disk = json.loads((root / "meta" / "info.json").read_text())[
+        "video_files_size_in_mb"]
+    assert on_disk == VIDEO_FILE_ROTATE_MB
+    # POSITIVE, or lerobot 0.6.1 refuses to load the dataset at all and the
+    # episodes above can never be trained on — the rotate above is only half
+    # the contract, and the half that failed silently.
+    assert on_disk > 0
 
     # And it survives the resume path, which is how every session after the
     # first one opens the dataset.
