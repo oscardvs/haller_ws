@@ -489,6 +489,89 @@ def test_a_repo_id_that_does_not_exist_is_a_404(home, client):
     assert "local/nope" in response.json()["detail"]
 
 
+
+
+def test_policy_inputs_reach_the_spec_resolved_to_shapes(home, store, client):
+    """The spec carries the RESOLVED map, not the names that were ticked. The
+    dataset can grow a column the next day — that is exactly what happened on
+    2026-08-29 — and a spec holding only names would re-resolve to a different
+    observation space on a relaunch while looking identical on the page."""
+    make_dataset(home / REPO, n_episodes=3)
+
+    run_id = _launch_train(
+        client, repo_id=REPO,
+        policy_inputs=["observation.state", "observation.images.top"])
+
+    assert _spec_on_disk(store, run_id)["policy_input_features"] == {
+        "observation.state": {"type": "STATE", "shape": [6]},
+        "observation.images.top": {"type": "VISUAL", "shape": [480, 640, 3]},
+    }
+
+
+def test_a_column_left_out_of_policy_inputs_stays_out_of_the_spec(home, store, client):
+    """The point of the field. LeRobot takes every `observation.*` column when
+    it derives the space itself, so a run that means to exclude one has to say
+    so here or the exclusion never happens."""
+    make_dataset(home / REPO, n_episodes=3)
+    info = json.loads((home / REPO / "meta" / "info.json").read_text())
+    info["features"]["observation.wall_clock"] = {
+        "dtype": "float32", "shape": [1], "names": ["t"]}
+    (home / REPO / "meta" / "info.json").write_text(json.dumps(info))
+
+    run_id = _launch_train(
+        client, repo_id=REPO,
+        policy_inputs=["observation.state", "observation.images.top"])
+
+    spec = _spec_on_disk(store, run_id)
+    assert "observation.wall_clock" not in spec["policy_input_features"]
+
+
+def test_no_policy_inputs_leaves_the_key_off_the_spec_entirely(home, store, client):
+    """Absent means "LeRobot's own rule", which is what every run before this
+    field did and what an API caller that has not been updated still gets. A
+    key defaulted to the narrow set here would change those runs silently."""
+    make_dataset(home / REPO, n_episodes=3)
+
+    run_id = _launch_train(client, repo_id=REPO)
+
+    assert "policy_input_features" not in _spec_on_disk(store, run_id)
+
+
+def test_policy_inputs_naming_a_column_the_dataset_lacks_is_a_400(home, client):
+    """Same rule as `episodes`: the dataset resolved, the request is what is
+    wrong. Silently dropping the name would train on a smaller observation
+    space than was ticked and nothing would say so."""
+    make_dataset(home / REPO, n_episodes=3)
+
+    response = client.post("/lab/runs/train", json={
+        "repo_id": REPO, "policy_inputs": ["observation.state", "observation.nope"]})
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "observation.nope" in detail
+    assert "observation.state" in detail
+
+
+def test_an_empty_policy_inputs_list_is_a_400(home, client):
+    make_dataset(home / REPO, n_episodes=3)
+
+    response = client.post(
+        "/lab/runs/train", json={"repo_id": REPO, "policy_inputs": []})
+
+    assert response.status_code == 400, response.text
+
+
+def test_policy_inputs_that_is_not_a_list_is_a_400(home, client):
+    """A bare string would otherwise resolve as its characters."""
+    make_dataset(home / REPO, n_episodes=3)
+
+    response = client.post("/lab/runs/train", json={
+        "repo_id": REPO, "policy_inputs": "observation.state"})
+
+    assert response.status_code == 400, response.text
+    assert "policy_inputs" in response.json()["detail"]
+
+
 def test_episodes_naming_an_episode_the_dataset_does_not_have_is_a_400(home, client):
     """A 400 and not a 404, because the dataset resolved — what is wrong is the
     list in the request. LeRobot drops an unknown index SILENTLY, so a typo'd

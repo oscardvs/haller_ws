@@ -28,6 +28,7 @@ and not the composition above it.
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -279,6 +280,27 @@ def test_stale_is_true_when_the_marks_no_longer_describe_the_dataset(home, clien
 # ============================================================================
 # GET /lab/datasets/detail
 # ============================================================================
+
+def test_detail_says_which_columns_the_policy_should_read(home, client):
+    """The launcher ticks these, and the train route validates against the
+    same rule. Deriving the default in the browser instead would be a second
+    implementation of one answer — and the drift would be a policy trained on
+    an observation space the form never showed.
+
+    `observation.wall_clock` is the case that matters: LeRobot would take it
+    as an input, and a per-episode clock is something a policy can fit instead
+    of looking at the image."""
+    make_dataset(home / REPO, n_episodes=3)
+    info = json.loads((home / REPO / "meta" / "info.json").read_text())
+    info["features"]["observation.wall_clock"] = {
+        "dtype": "float32", "shape": [1], "names": ["t"]}
+    (home / REPO / "meta" / "info.json").write_text(json.dumps(info))
+
+    body = _detail(client)
+
+    assert body["policy_inputs_default"] == [
+        "observation.state", "observation.images.top"]
+
 
 def test_a_detail_episode_carries_the_wire_names_and_only_those(home, client):
     make_dataset(home / REPO, n_episodes=3)

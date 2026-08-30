@@ -47,6 +47,7 @@ import glob
 import json
 import os
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -265,6 +266,111 @@ def _video_keys(info: dict) -> list[str]:
         k for k, f in (info.get("features") or {}).items()
         if f.get("dtype") == "video"
     ]
+
+
+# ---- what the policy is allowed to look at ----
+# LeRobot derives a policy's observation space from the DATASET: every column
+# whose name starts with `observation` becomes an input feature, with no way to
+# opt one out (`lerobot/utils/feature_utils.py:157-180`). That rule turns a
+# schema migration into a silent change of what the policy consumes — on
+# 2026-08-29 it handed ACT `observation.effort` (recorded on 27 of 113
+# episodes, zero-filled on the rest), `observation.base` (all-zero on every
+# episode) and `observation.wall_clock` (seconds since the episode began, a
+# clock the policy can fit instead of looking at the image).
+#
+# `--policy.input_features` is honoured when set — `policies/factory.py:305`
+# only derives the space `if not cfg.input_features` — so naming the columns
+# explicitly is the way to pin an observation space that survives the next
+# migration. These two functions build that map.
+
+#: LeRobot's own prefix test. Spelled out rather than imported from
+#: `lerobot.utils.constants`: this module is imported by the SERVING venv,
+#: which has no lerobot 0.6.1 (see `api/errors.py`'s note on the same split).
+OBS_PREFIX = "observation"
+
+#: The one `observation.*` column LeRobot types as ENV rather than STATE.
+OBS_ENV_STATE = "observation.environment_state"
+
+#: The state vector every SO-101 recording here carries.
+OBS_STATE = "observation.state"
+
+
+def policy_feature(key: str, spec: dict) -> dict | None:
+    """One `PolicyFeature`, as LeRobot would derive it — or None if `key` is
+    not an observation at all.
+
+    Mirrors `dataset_to_policy_features`, including the `(h, w, c)` →
+    `(c, h, w)` flip it applies to a visual column whose last axis is named
+    `channel`/`channels`. Shapes go out as the CHANNEL-FIRST form the policy
+    config holds, because that is what is being handed straight back to it.
+    """
+    dtype = spec.get("dtype")
+    shape = [int(d) for d in (spec.get("shape") or [])]
+    if dtype in ("image", "video"):
+        if len(shape) != 3:
+            raise ValueError(
+                f"{key}: a visual feature needs 3 dimensions, got {shape}")
+        names = spec.get("names")
+        if (isinstance(names, (list, tuple)) and len(names) == 3
+                and names[2] in ("channel", "channels")):
+            shape = [shape[2], shape[0], shape[1]]
+        return {"type": "VISUAL", "shape": shape}
+    if key == OBS_ENV_STATE:
+        return {"type": "ENV", "shape": shape}
+    if key.startswith(OBS_PREFIX):
+        return {"type": "STATE", "shape": shape}
+    return None
+
+
+def policy_input_features(features: dict, names: Sequence[str]) -> dict:
+    """Resolve chosen column names into a `--policy.input_features` map.
+
+    Raises `ValueError` — a 400 through `as_http` — rather than dropping a name
+    it cannot resolve. A typo'd column that fell out silently would train a
+    policy on a SMALLER observation space than the operator ticked, and the run
+    would look entirely normal while doing it.
+    """
+    chosen = list(names)
+    if not chosen:
+        raise ValueError(
+            "policy_inputs is empty — a policy with no observations has "
+            "nothing to condition on. Omit the field to let LeRobot derive "
+            "the observation space from the dataset.")
+    out: dict[str, dict] = {}
+    for name in chosen:
+        if name in out:
+            continue
+        spec = features.get(name)
+        if spec is None:
+            known = ", ".join(sorted(
+                k for k in features if k.startswith(OBS_PREFIX))) or "none"
+            raise ValueError(
+                f"{name!r} is not a column of this dataset — "
+                f"observations available: {known}")
+        feature = policy_feature(name, spec)
+        if feature is None:
+            raise ValueError(
+                f"{name!r} is not an observation, so it cannot be a policy "
+                f"input (names must start with {OBS_PREFIX!r})")
+        out[name] = feature
+    return out
+
+
+def default_policy_inputs(features: dict) -> list[str]:
+    """The observation space to offer before anyone ticks anything: the state
+    vector and the cameras, which is what `act` was trained on here before the
+    migration added three more columns to the dataset.
+
+    A dataset with no `observation.state` gets every observation instead —
+    that is LeRobot's own default, and guessing a narrower one for a schema
+    this has never seen would be the same silent narrowing the pin exists to
+    prevent.
+    """
+    obs = [k for k in features if k.startswith(OBS_PREFIX)]
+    visual = [k for k in obs if features[k].get("dtype") in ("image", "video")]
+    if OBS_STATE not in obs:
+        return obs
+    return [OBS_STATE, *visual]
 
 
 def list_datasets() -> list[dict]:
@@ -540,6 +646,12 @@ def _build_detail(root: Path, info: dict) -> dict:
             k: {"dtype": f.get("dtype"), "shape": f.get("shape"), "names": f.get("names")}
             for k, f in (info.get("features") or {}).items()
         },
+        # Which of those columns the launcher ticks before anyone touches it.
+        # Published rather than re-derived in the browser for the same reason
+        # the eval split is: two implementations of one answer drift, and the
+        # drift here would be a policy trained on an observation space the
+        # form did not show.
+        "policy_inputs_default": default_policy_inputs(info.get("features") or {}),
         "episodes": episodes,
     }
 

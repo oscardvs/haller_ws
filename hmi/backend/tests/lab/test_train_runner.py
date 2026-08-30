@@ -263,6 +263,35 @@ def test_the_eval_sample_cap_is_optional(tmp_path):
     assert flag(argv, "--max_eval_samples") is None
 
 
+def test_a_pinned_observation_space_reaches_lerobot_as_json(tmp_path):
+    """`--policy.input_features` is the only way to stop LeRobot deriving the
+    observation space from the dataset — and taking every `observation.*`
+    column with it. Compact JSON because draccus parses the value as one
+    argument and a space in it would split the flag."""
+    spec = make_spec(tmp_path, policy_input_features={
+        "observation.state": {"type": "STATE", "shape": [6]},
+        "observation.images.top": {"type": "VISUAL", "shape": [3, 480, 640]},
+    })
+
+    value = flag(train_runner.build_argv(spec), "--policy.input_features")
+
+    assert value is not None
+    assert " " not in value
+    assert json.loads(value) == {
+        "observation.state": {"type": "STATE", "shape": [6]},
+        "observation.images.top": {"type": "VISUAL", "shape": [3, 480, 640]},
+    }
+
+
+def test_no_pin_leaves_lerobot_deriving_the_space_itself(tmp_path):
+    """Absent is not the same as empty. `policies/factory.py` fills the space
+    in `if not cfg.input_features`, so emitting nothing is what keeps a spec
+    written before this field behaving exactly as it did."""
+    argv = train_runner.build_argv(make_spec(tmp_path))
+
+    assert flag(argv, "--policy.input_features") is None
+
+
 def test_extra_args_pass_through_verbatim_and_last(tmp_path):
     """Verbatim so anything LeRobot supports stays reachable; last so an
     operator can override a default this function emitted."""

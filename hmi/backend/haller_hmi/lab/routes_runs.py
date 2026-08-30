@@ -325,6 +325,26 @@ def _extra_args(payload: dict) -> list[str]:
     return [str(arg) for arg in raw]
 
 
+def _policy_inputs(payload: dict, detail: dict) -> dict | None:
+    """The observation columns the policy may read, resolved against the
+    dataset — or `None` for "let LeRobot derive them".
+
+    `None` and `[]` are different answers on purpose. Absent means the caller
+    has no opinion and LeRobot's own rule applies, which is what every run
+    before this field did and what an API caller that has not been updated
+    still gets. An empty list is a caller that ticked nothing, and
+    `policy_input_features` refuses it.
+    """
+    raw = (payload or {}).get("policy_inputs")
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise HTTPException(
+            status_code=400, detail="policy_inputs must be a list of strings")
+    return catalog.policy_input_features(
+        detail.get("features") or {}, [str(name) for name in raw])
+
+
 def _requested_episodes(payload: dict, detail: dict) -> list[int] | None:
     """The caller's explicit episode set, validated, or `None` for "the review".
 
@@ -671,6 +691,7 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
             # "must resolve to a real dataset" check — and it is also the read
             # that makes the two below possible at all.
             detail = catalog.dataset_detail(repo_id)
+            policy_input_features = _policy_inputs(spec_in, detail)
             chosen = _requested_episodes(spec_in, detail)
             keep_list = detail["keep_list"] if chosen is None else chosen
             plan = catalog.plan_eval_split(
@@ -713,6 +734,14 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
                 "device": device,
                 "job_name": job_name,
                 "extra_args": extra_args,
+                # RESOLVED, not the names the caller sent: the run's own record
+                # of the observation space it was given, shapes and all. The
+                # dataset it was resolved against can grow a column the next
+                # day — that is exactly what happened on 2026-08-29 — and a
+                # spec holding only the names would re-resolve to a different
+                # space on a relaunch while looking identical.
+                **({"policy_input_features": policy_input_features}
+                   if policy_input_features is not None else {}),
             }
             record = runs_mod.launch(
                 "train",

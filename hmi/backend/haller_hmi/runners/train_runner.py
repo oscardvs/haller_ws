@@ -162,6 +162,18 @@ def build_argv(spec: dict) -> list[str]:
     if eval_split > 0:
         argv.append(f"--dataset.eval_split={eval_split}")
 
+    # The observation space, pinned by name. Without this LeRobot derives it
+    # from the dataset and takes EVERY `observation.*` column
+    # (`lerobot/utils/feature_utils.py:170`), so a column added by a schema
+    # migration becomes a policy input that nobody chose — see
+    # `catalog.policy_input_features`. Emitted only when the spec carries one:
+    # `policies/factory.py:305` derives the space `if not cfg.input_features`,
+    # so an absent key leaves LeRobot's own behaviour exactly as it was.
+    inputs = spec.get("policy_input_features")
+    if inputs:
+        argv.append("--policy.input_features=" + json.dumps(
+            inputs, separators=(",", ":")))
+
     argv += [
         f"--policy.type={spec.get('policy_type', 'act')}",
         f"--policy.device={spec.get('device', 'cuda')}",

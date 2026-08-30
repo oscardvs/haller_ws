@@ -323,6 +323,11 @@ def _detail_wire(detail: dict) -> dict:
         "codebase_version": detail["codebase_version"],
         "video_keys": detail["video_keys"],
         "features": detail["features"],
+        # Which of those columns the launcher ticks. Sent rather than derived
+        # in the browser: the same rule validates the choice on the way back
+        # in, and a second implementation of it would drift into a policy
+        # trained on an observation space the form never showed.
+        "policy_inputs_default": detail["policy_inputs_default"],
         "rig": detail["rig"],
         "joints": detail["joints"],
         "tasks": detail["tasks"],
