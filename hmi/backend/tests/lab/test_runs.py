@@ -86,6 +86,29 @@ finally:
         write_result(rdir, status, code)
 '''
 
+#: A second stand-in, reporting what `launch` gave it rather than doing work:
+#: the `PYTHONPATH` the child was started with, and where its own `haller_hmi`
+#: came from. Written from INSIDE the child on purpose — a path the launcher
+#: computed and then failed to pass would satisfy an assertion on `child_env`
+#: and still kill every real run.
+PATH_RUNNER = '''\
+import json
+import os
+import sys
+from pathlib import Path
+
+import haller_hmi
+from haller_hmi.lab.runs import write_result
+
+spec = json.loads(Path(sys.argv[1]).read_text())
+rdir = Path(spec["run_dir"])
+(rdir / "seen.json").write_text(json.dumps({
+    "pythonpath": os.environ.get("PYTHONPATH", ""),
+    "haller_hmi": haller_hmi.__file__,
+}))
+write_result(rdir, "done", 0)
+'''
+
 #: Long enough that nothing finishes on its own inside a test.
 FOREVER_S = 120.0
 
@@ -219,6 +242,42 @@ def test_the_child_is_launched_with_the_lab_interpreter(lab):
     assert record["argv"][0] == sys.executable
     assert record["runner_python"] == sys.executable
     assert record["argv"][1:3] == ["-m", "fake_runner"]
+
+
+def test_backend_dir_is_the_directory_haller_hmi_lives_in():
+    """The `parents[2]` walk in `runs.py`, checked from a file that counts its
+    own — the two arithmetics are independent, so moving either module makes
+    this fail rather than making every run fail."""
+    assert runs.BACKEND_DIR == BACKEND
+    assert (runs.BACKEND_DIR / "haller_hmi" / "__init__.py").exists()
+
+
+def test_the_child_is_given_the_path_to_import_haller_hmi(lab, tmp_path, monkeypatch):
+    """`runner_python()` is a venv with no `haller_hmi` installed in it.
+
+    The lab venv is lerobot 0.6.1 + torch and nothing of this package, so
+    `-m haller_hmi.runners.train_runner` resolves ONLY because `launch` puts
+    `BACKEND_DIR` on the child's `PYTHONPATH`. It was missing once, and every
+    kind — train, eval, rollout, export — died on `ModuleNotFoundError` after
+    the UI had reported the run started.
+
+    FIRST, so a run imports the checkout that launched it and not an older copy
+    further down an inherited path, and the rest kept: `env` is how the caller
+    hands the child a module of its own, and this box exports a long ROS
+    `PYTHONPATH` the child inherits.
+    """
+    (tmp_path / "path_runner.py").write_text(PATH_RUNNER)
+    monkeypatch.setitem(runs.RUNNERS, "train", "path_runner")
+
+    record = lab.launch(name="path")
+    seen_path = lab.store / record["id"] / "seen.json"
+    assert _wait_for(seen_path.exists), "child never reached its work"
+    seen = json.loads(seen_path.read_text())
+    parts = seen["pythonpath"].split(os.pathsep)
+
+    assert parts[0] == str(runs.BACKEND_DIR)
+    assert Path(seen["haller_hmi"]).resolve() == BACKEND / "haller_hmi" / "__init__.py"
+    assert str(tmp_path) in parts[1:], "the caller's own entry was dropped"
 
 
 def test_there_is_no_record_kind(lab):

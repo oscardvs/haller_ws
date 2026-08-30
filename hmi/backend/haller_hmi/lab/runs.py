@@ -35,7 +35,11 @@ is the one a reader will otherwise "restore":
   serving venv is lerobot 0.5.1 on purpose; `~/venvs/haller-lab` is lerobot
   0.6.1 + torch 2.11.0+cu130. The serving venv cannot import
   `lerobot.scripts.lerobot_rollout` at all, and that one module is the entire
-  reason the second venv exists.
+  reason the second venv exists. That interpreter has no `haller_hmi` in it,
+  so `launch` puts `BACKEND_DIR` on the child's `PYTHONPATH` — the kit could
+  skip this because it launched `sys.executable`, which already had the
+  package. Without it every `-m haller_hmi.runners...` dies on
+  `ModuleNotFoundError` before it reads its spec.
 * **`launch` records `tags` and a `spec_summary`** — the one-line string the UI
   prints verbatim, and the only place a run remembers what it was asked for once
   its spec is superseded.
@@ -130,6 +134,20 @@ LAB_PYTHON = Path.home() / "venvs" / "haller-lab" / "bin" / "python"
 
 #: Environment variable overriding `LAB_PYTHON`.
 LAB_PYTHON_ENV = "HALLER_LAB_PYTHON"
+
+#: `hmi/backend` — the directory a child must have on `sys.path` to import
+#: `haller_hmi` at all. Resolved from `__file__` rather than `Path.cwd()`, so a
+#: run imports the checkout that launched it no matter where the server was
+#: started from.
+#:
+#: The serving process gets this path for free (uvicorn's `--app-dir`, or an
+#: editable install in the serving venv); the lab venv gets neither, and is
+#: deliberately kept that way. Installing `haller_hmi` into it would drag this
+#: package's dependency set across the very venv split the second interpreter
+#: exists to maintain, so the path is handed to the child instead — the same
+#: `PYTHONPATH=hmi/backend` every runner module documents being run by hand
+#: with.
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 #: Environment variable overriding the run store's location.
 RUNS_DIR_ENV = "HALLER_RUNS"
@@ -343,6 +361,17 @@ def launch(
     # Unbuffered, so the log pane shows progress as it happens instead of in
     # 4 KB bursts — an hour into a training run, a buffered child looks hung.
     child_env["PYTHONUNBUFFERED"] = "1"
+    # PREPENDED, and the rest kept rather than replaced: this box exports a long
+    # ROS `PYTHONPATH` that the server inherited and the child must keep, and
+    # `env` is how a caller hands a child a module of its own. First, so a run
+    # imports the checkout that launched it rather than an older copy sitting
+    # further down an inherited path.
+    inherited = [
+        part
+        for part in child_env.get("PYTHONPATH", "").split(os.pathsep)
+        if part and part != str(BACKEND_DIR)
+    ]
+    child_env["PYTHONPATH"] = os.pathsep.join([str(BACKEND_DIR), *inherited])
 
     try:
         with open(log_path, "ab") as log:
