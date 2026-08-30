@@ -30,6 +30,7 @@ import {
   REMOTE_REFUSED,
   rigLabel,
   trainableCount,
+  trainJobName,
   type DatasetDetail,
   type DatasetSummary,
   type PolicyType,
@@ -39,8 +40,8 @@ import {
   type TrainSpec,
 } from "@/lib/lab";
 import {
-  Button, Field, Note, NumberInput, Panel, PanelHead, Refusal, Select, TextInput,
-  WarnBox,
+  Button, Chip, Field, Note, NumberInput, Panel, PanelHead, Refusal, Select,
+  TextInput, WarnBox,
 } from "@/components/lab/ui";
 import { TagChips } from "@/components/lab/TagChips";
 import { useSticky } from "@/components/cockpit/lib";
@@ -69,8 +70,12 @@ type Form = {
   saveEvery: number;
   workers: number;
   device: string;
-  /** Empty means "use the derived name"; the box shows that as a placeholder
-   *  so the operator can see it without it becoming an override. */
+  /** Empty means "use the derived name" — see `trainJobName`. The box shows
+   *  the derived name as a placeholder so the operator can read it without it
+   *  becoming an override, and `auto` next to the box is the way back once
+   *  one has been typed. Sticky like the rest of the form, which is exactly
+   *  why the way back has to exist: a name typed once outlives the run it was
+   *  typed for and would otherwise re-label every run after it. */
   jobName: string;
   tags: string[];
 };
@@ -237,11 +242,107 @@ export function TrainLauncher({
   // same sum as `marks.train`; `trainableCount` prefers it and falls back.
   const keptCount = keptIdx?.length ?? trainableCount(picked?.marks);
 
-  const derivedName = useMemo(() => {
-    const tail = repoId ? repoId.split("/").pop() || repoId : "";
-    return (tail ? `${form.policy}_${tail}` : form.policy).slice(0, 60);
-  }, [form.policy, repoId]);
-  const jobName = form.jobName.trim() || derivedName;
+  /* ── what the policy is allowed to look at ────────────────────────────
+     LeRobot builds a policy's observation space out of the DATASET: every
+     `observation.*` column becomes an input, and nothing can opt one out. So
+     a column added by a schema migration becomes a policy input that nobody
+     chose — which is what happened here on 2026-08-29, when `observation.
+     effort`, `observation.base` and `observation.wall_clock` arrived and ACT
+     started training on a per-episode CLOCK it could fit instead of looking
+     at the image.
+
+     Every observation column in the dataset, in the dataset's own order. */
+  const obsColumns = useMemo(
+    () =>
+      detail && detail.repo_id === repoId
+        ? Object.keys(detail.features ?? {}).filter((k) => k.startsWith("observation"))
+        : [],
+    [detail, repoId],
+  );
+
+  /* Per repo, because a column list is a fact about ONE dataset — sticky
+     state would carry `observation.effort` onto a dataset that has no such
+     column, and the launch would 400 on a name the operator never typed. An
+     absent entry means "not touched", which is what makes the default below
+     follow the dataset instead of freezing at first render. */
+  const [inputsByRepo, setInputsByRepo] =
+    useState<ReadonlyMap<string, readonly string[]>>(() => new Map());
+
+  /** The ticked columns. The default comes from the BACKEND — the same rule
+   *  that validates the choice on the way back in — so the form cannot show
+   *  one space and the run train on another. */
+  const chosenInputs = useMemo(() => {
+    if (!repoId || obsColumns.length === 0) return null;
+    const touched = inputsByRepo.get(repoId);
+    const fallback = detail?.policy_inputs_default ?? obsColumns;
+    // Filtered through `obsColumns` so the order is always the dataset's and
+    // a stale name can never reach the spec.
+    const wanted = new Set(touched ?? fallback);
+    return obsColumns.filter((k) => wanted.has(k));
+  }, [repoId, obsColumns, inputsByRepo, detail]);
+
+  const toggleInput = useCallback(
+    (key: string) => {
+      if (!repoId || chosenInputs === null) return;
+      const next = chosenInputs.includes(key)
+        ? chosenInputs.filter((k) => k !== key)
+        : obsColumns.filter((k) => k === key || chosenInputs.includes(k));
+      setInputsByRepo((m) => new Map(m).set(repoId, next));
+    },
+    [repoId, chosenInputs, obsColumns],
+  );
+
+  const excluded = chosenInputs === null
+    ? 0
+    : obsColumns.length - chosenInputs.length;
+
+  /* ── names already in use ─────────────────────────────────────────────
+     Only so a relaunch of an identical config comes out as `_v2` rather than
+     as a second row with the first one's name. Read once per mount — the
+     panel remounts on every tab switch — and extended locally at launch,
+     because the run that just went out is the one most likely to be repeated
+     next. Never blocking and never surfaced: a failed read costs a duplicate
+     LABEL, and the run id underneath it is the server's and unique either
+     way. Unfiltered by status on purpose — a set that honoured the run
+     list's filter chips would hand out a name that is on screen. */
+  const [taken, setTaken] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { runs } = await lab.runs({ kind: "train" });
+        if (cancelled) return;
+        setTaken((prev) => {
+          const next = new Set(prev);
+          for (const r of runs) if (r.name) next.add(r.name);
+          return next;
+        });
+      } catch {
+        // See above: the counter is a courtesy, not a correctness guarantee.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  /** What the run is called when nobody types a name: the policy, the
+   *  dataset, and every hyperparameter that changes the outcome. See
+   *  `trainJobName` — the spelling lives there, next to the spec it names, so
+   *  this component is not a second place to look for it. */
+  const derivedName = trainJobName(
+    {
+      repoId,
+      policy: form.policy,
+      episodes: keptCount,
+      steps: form.steps,
+      batch: form.batch,
+      evalSplit,
+      seed: form.seed,
+      mode: form.mode,
+    },
+    taken,
+  );
+  const custom = form.jobName.trim();
+  const jobName = custom || derivedName;
 
   const launch = async () => {
     if (!repoId || noRunner) return;
@@ -265,10 +366,20 @@ export function TrainLauncher({
       job_name: jobName,
       tags: form.tags,
       ...(keptIdx ? { episodes: keptIdx } : {}),
+      // Omitted rather than guessed when the detail read failed: absent means
+      // "LeRobot's own rule", and sending a list built from a dataset this
+      // form never managed to read would pin the wrong space confidently.
+      ...(chosenInputs && chosenInputs.length > 0
+        ? { policy_inputs: [...chosenInputs] }
+        : {}),
     };
     try {
       const { id } = await lab.train(spec);
       toast.success(`run ${id} queued`);
+      // This name is spent. Next launch of the same config derives `_v2`
+      // without waiting for a list read that may never be taken — the panel
+      // often gets folded away the moment the run starts.
+      setTaken((prev) => new Set(prev).add(spec.job_name));
       // The POST answers with an id, not a run. Read the run back so the pane
       // gets the runner's own record; if that second call fails the launch
       // still happened, so hand over what the accepted POST proves — the id,
@@ -303,7 +414,7 @@ export function TrainLauncher({
     <Panel className="min-h-0 flex-1">
       <PanelHead title="new run" right={jobName} />
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-3">
         <Field
           label="dataset"
           hint={
@@ -350,7 +461,29 @@ export function TrainLauncher({
           </WarnBox>
         )}
 
-        <div className="grid gap-2.5 [grid-template-columns:repeat(auto-fill,minmax(9.5rem,1fr))]">
+        {/* The sentence this whole panel exists to be able to write — directly
+            under the dataset it is about, and ABOVE the fold. It used to sit
+            last, under the tags, which on a 1080p rail is the one part of the
+            form nobody sees without scrolling: the panel's whole argument,
+            filed where it could not be read. */}
+        <Note className="rounded-md border border-border bg-muted px-2.5 py-2">
+          <SplitSentence
+            repoId={repoId}
+            evalSplit={evalSplit}
+            mode={form.mode}
+            plan={plan}
+            planning={planning}
+            planError={planError}
+            keptCount={keptCount}
+            labels={labels}
+          />
+        </Note>
+
+        {/* THREE columns in the 26rem rail, not two. Every control in here is
+            a short number or a two-word select, and at 9.5rem they made five
+            rows of a form that has to share the rail with the run list —
+            300px of height spent on whitespace either side of `8`. */}
+        <div className="grid gap-x-2.5 gap-y-2 [grid-template-columns:repeat(auto-fill,minmax(6.75rem,1fr))]">
           <Field label="policy">
             <Select
               value={form.policy}
@@ -456,12 +589,84 @@ export function TrainLauncher({
           </Field>
         </div>
 
-        <Field label="job name" hint="names the checkpoint directory">
-          <TextInput
-            value={form.jobName}
-            placeholder={derivedName}
-            onChange={(e) => patch({ jobName: e.target.value })}
-          />
+        {/* The observation space, ticked rather than inherited. LeRobot takes
+            EVERY `observation.*` column when nobody says otherwise, so this
+            row is the only place a column added by a migration can be kept
+            out of the policy. */}
+        {chosenInputs !== null && (
+          <div
+            className="flex flex-col gap-1.5"
+            role="group"
+            aria-label="policy inputs"
+          >
+            <span className="label-tracked text-muted-foreground">
+              policy inputs
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {obsColumns.map((key) => (
+                <Chip
+                  key={key}
+                  on={chosenInputs.includes(key)}
+                  onClick={() => toggleInput(key)}
+                  title={
+                    chosenInputs.includes(key)
+                      ? `${key} — the policy reads this`
+                      : `${key} — held out of the observation space`
+                  }
+                >
+                  {key.replace(/^observation\./, "")}
+                </Chip>
+              ))}
+            </div>
+            <span className="text-[10px] text-pretty text-muted-foreground">
+              {chosenInputs.length === 0 ? (
+                <span style={{ color: "var(--haller-warn)" }}>
+                  nothing ticked — the run will launch with LeRobot&apos;s own
+                  set, which is every column above
+                </span>
+              ) : excluded > 0 ? (
+                <>
+                  {excluded} column{excluded === 1 ? "" : "s"} held out of the
+                  observation space · untick anything the policy should not be
+                  able to fit
+                </>
+              ) : (
+                "every observation column goes to the policy · untick the ones it should not be able to fit"
+              )}
+            </span>
+          </div>
+        )}
+
+        {/* Derived, not blank. The name is what the run list shows, and a
+            name that does not move when the hyperparameters do is how three
+            different runs end up looking like one. Typing still wins — this
+            is a default, not a rule — and `auto` is the way back. */}
+        <Field
+          label="job name"
+          hint={
+            custom
+              ? "your name — clear the box, or press auto, to follow the settings again"
+              : "follows the dataset and the settings above · names the checkpoint directory"
+          }
+        >
+          <span className="flex min-w-0 items-center gap-1.5">
+            <TextInput
+              value={form.jobName}
+              placeholder={derivedName}
+              onChange={(e) => patch({ jobName: e.target.value })}
+            />
+            <Button
+              disabled={!custom}
+              onClick={() => patch({ jobName: "" })}
+              title={
+                custom
+                  ? `drop this name and follow the settings: ${derivedName}`
+                  : "already following the settings"
+              }
+            >
+              auto
+            </Button>
+          </span>
         </Field>
 
         <div className="flex flex-col gap-1.5" role="group" aria-label="run tags">
@@ -472,20 +677,6 @@ export function TrainLauncher({
             onRemove={(t) => patch({ tags: form.tags.filter((x) => x !== t) })}
           />
         </div>
-
-        {/* The sentence this whole panel exists to be able to write. */}
-        <Note className="rounded-md border border-border bg-muted px-2.5 py-2">
-          <SplitSentence
-            repoId={repoId}
-            evalSplit={evalSplit}
-            mode={form.mode}
-            plan={plan}
-            planning={planning}
-            planError={planError}
-            keptCount={keptCount}
-            labels={labels}
-          />
-        </Note>
 
         {noRunner && <Refusal>this backend has no lab runner</Refusal>}
         {refusal && <Refusal>refused: {refusal}</Refusal>}

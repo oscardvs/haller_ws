@@ -286,6 +286,12 @@ export type DatasetDetail = {
    *  strips it — the picker shows whatever it is given. */
   video_keys: string[];
   features: Record<string, FeatureSpec>;
+  /** The observation columns the launcher ticks before anyone touches it:
+   *  the state vector and the cameras. Computed by the BACKEND — the same
+   *  rule that validates the choice on the way back in — because a browser
+   *  that derived its own would drift from it, and the drift would be a
+   *  policy trained on an observation space the form did not show. */
+  policy_inputs_default?: string[];
   rig: Rig;
   episodes: LabEpisode[];
 };
@@ -430,7 +436,123 @@ export type TrainSpec = {
    *  `--dataset.episodes`; sending it explicitly is what makes a run
    *  reproducible after the marks have moved on. */
   episodes?: number[];
+  /** The observation columns the policy may read.
+   *
+   *  LeRobot derives this from the dataset when it is not sent, and takes
+   *  EVERY `observation.*` column with no way to opt one out. That turned the
+   *  2026-08-29 schema migration into a silent change of what ACT consumed —
+   *  a per-episode clock among it. Sending the list pins the space:
+   *  `--policy.input_features` is honoured when set.
+   *
+   *  Omitted, not defaulted, when the caller has no opinion: absent is
+   *  LeRobot's own behaviour, and `[]` is refused rather than promoted to it.
+   *  The backend resolves these names to shapes and stores THAT. */
+  policy_inputs?: string[];
 };
+
+/* ─── the derived job name ────────────────────────────────────────────── */
+
+/** What the checkpoint directory can carry, and what still reads as a name
+ *  in a 26rem rail. Longer than this and the run list truncates the half
+ *  that distinguishes one run from the next. */
+const MAX_JOB_NAME = 60;
+
+/** Everything the derived name spells out. One argument object rather than
+ *  eight positional numbers: the day a field is added, a caller that forgot
+ *  it fails to compile instead of silently naming runs after the wrong
+ *  hyperparameter. */
+export type JobNameParts = {
+  repoId: string | null;
+  policy: PolicyType | string;
+  /** How many episodes the run is pinned to — NOT the dataset's total. Two
+   *  runs over the same dataset before and after a prune are different runs
+   *  and must not share a name. */
+  episodes: number;
+  steps: number;
+  batch: number;
+  evalSplit: number;
+  seed: number;
+  mode: SplitMode;
+};
+
+/** Anything that is not a plain word becomes an underscore, so the name is
+ *  safe as a path segment wherever LeRobot puts it. */
+const slug = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+/** `90000` → `90k`. Round thousands only: `1500` stays `1500`, because a step
+ *  count that is not a round thousand is a debug run and `1.5k` reads as a
+ *  rounding of something else. */
+const stepTag = (n: number) => {
+  const s = Math.max(0, Math.round(n));
+  return s >= 1000 && s % 1000 === 0 ? `${s / 1000}k` : String(s);
+};
+
+/**
+ * The name a run gets when the operator does not type one.
+ *
+ * It exists because the operator's own naming is `act_hilti_box_91` typed
+ * once and then sticky forever: three runs at three different step counts
+ * arrive in the list under one name, and the only way to tell them apart is
+ * to open each one and read its spec. So the name says what the run IS —
+ * policy, dataset, how many episodes, and every hyperparameter that changes
+ * the result:
+ *
+ *     act_so101_pick_cube_91ep_90k_b16_ev10_s42
+ *
+ * `device` and `workers` are left out on purpose (they change how long it
+ * takes, never what comes out), and so are the eval/save cadences. The split
+ * SEED is in, but only under `random` — `recent` ignores it, and a name that
+ * carries a number the run does not use invites the operator to change that
+ * number expecting a different split.
+ *
+ * `taken` is the names already in use. A repeat of an identical config — a
+ * relaunch after a crash, most often — gets `_v2`, `_v3`, which is both
+ * unique and the true description of what it is. Pass the set you have; the
+ * run id underneath is unique regardless, so a stale or missing set costs a
+ * duplicate label and nothing more.
+ *
+ * The DATASET is what gets trimmed when the whole thing will not fit, never
+ * the tail: the hyperparameters are the half that tells two runs apart.
+ */
+export function trainJobName(
+  parts: JobNameParts,
+  taken?: ReadonlySet<string>,
+): string {
+  const { repoId, policy, episodes, steps, batch, evalSplit, seed, mode } = parts;
+  const head = slug(String(policy)) || "run";
+  const tail = [
+    episodes > 0 ? `${Math.round(episodes)}ep` : null,
+    stepTag(steps),
+    `b${Math.max(1, Math.round(batch))}`,
+    evalSplit > 0 ? `ev${Math.round(evalSplit * 100)}` : "noeval",
+    evalSplit > 0 ? (mode === "recent" ? "recent" : `s${Math.round(seed)}`) : null,
+  ]
+    .filter((x): x is string => x !== null)
+    .join("_");
+
+  const name = (room: number) => {
+    const ds = slug(repoId ? repoId.split("/").pop() || repoId : "")
+      .slice(0, Math.max(0, room))
+      .replace(/_+$/, "");
+    return [head, ds, tail].filter(Boolean).join("_");
+  };
+
+  // The dataset gets whatever the fixed half leaves over — and a `_vN` is
+  // part of the fixed half, so a de-duplicated name trims the dataset one
+  // character further rather than dropping the suffix that made it unique.
+  const room = (extra: number) =>
+    MAX_JOB_NAME - head.length - tail.length - 2 - extra;
+
+  const base = name(room(0));
+  if (!taken?.has(base)) return base;
+  for (let v = 2; v < 1000; v += 1) {
+    const suffix = `_v${v}`;
+    const candidate = name(room(suffix.length)) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return base;
+}
 
 /* ─── rollout ─────────────────────────────────────────────────────────── */
 

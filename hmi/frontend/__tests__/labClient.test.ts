@@ -12,7 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ApiError } from "@/lib/api";
 import {
   armGroups, epLabel, isBusy, isDrawableTrace, isForbidden, isMissing,
-  isRefused, trainableCount,
+  isRefused, trainableCount, trainJobName,
   isGripperChannel, lab, labVideoUrl, metricKeys, metricX, qs, reason,
   rigLabel, shortChannel, sliceFor, videoSrcKey,
   type LabEpisode, type MetricRow, type Trace,
@@ -275,6 +275,110 @@ describe("the trainable count", () => {
     // will actually be handed. Recomputing would make the badge argue with
     // the runner.
     expect(trainableCount({ keep: 1, reject: 0, unset: 1, train: 99 })).toBe(99);
+  });
+});
+
+describe("the derived job name", () => {
+  // The launcher's name field is sticky, so whatever it says is what every
+  // FUTURE run is called until someone retypes it. Oscar's real run list is
+  // the failure this exists for: three `act_hilti_box_91` rows, at 10000,
+  // 10000 and 90000 steps, one of them dead — one name over three different
+  // runs, and no way to tell which was which without opening each.
+  const BASE = {
+    repoId: "local/so101_pick_cube",
+    policy: "act" as const,
+    episodes: 91,
+    steps: 90000,
+    batch: 16,
+    evalSplit: 0.1,
+    seed: 42,
+    mode: "random" as const,
+  };
+
+  it("spells out the dataset and every hyperparameter that changes the result", () => {
+    expect(trainJobName(BASE)).toBe("act_so101_pick_cube_91ep_90k_b16_ev10_s42");
+  });
+
+  it("moves when any of them moves — which is the whole point", () => {
+    // Stated as inequality between the three runs from the screenshot rather
+    // than as three literals: what matters is that they are DIFFERENT, not
+    // what each one happens to spell.
+    const names = new Set([
+      trainJobName({ ...BASE, steps: 10000 }),
+      trainJobName({ ...BASE, steps: 90000 }),
+      trainJobName({ ...BASE, steps: 90000, batch: 8 }),
+      trainJobName({ ...BASE, episodes: 46 }),
+      trainJobName({ ...BASE, evalSplit: 0.2 }),
+      trainJobName({ ...BASE, seed: 7 }),
+      trainJobName({ ...BASE, policy: "smolvla" }),
+      trainJobName({ ...BASE, repoId: "local/so101_box" }),
+    ]);
+    expect(names.size).toBe(8);
+  });
+
+  it("leaves out what does not change the outcome", () => {
+    // The seed is only read under `random` (`split.py` shuffles there and
+    // nowhere else). A name that carried it under `recent` would invite the
+    // operator to reshuffle expecting a different holdout.
+    const recent = trainJobName({ ...BASE, mode: "recent" });
+    expect(recent).toContain("recent");
+    expect(recent).not.toContain("s42");
+    expect(trainJobName({ ...BASE, mode: "recent", seed: 7 })).toBe(recent);
+  });
+
+  it("says noeval rather than ev0, and drops the seed with it", () => {
+    // eval_split 0 is a run with no val curve at all; `ev0` reads like a
+    // fraction someone typed, and a seed on a split that was never drawn is
+    // a number describing nothing.
+    const none = trainJobName({ ...BASE, evalSplit: 0 });
+    expect(none).toContain("noeval");
+    expect(none).not.toMatch(/_s\d/);
+  });
+
+  it("numbers a repeat of an identical config instead of colliding", () => {
+    // The case the screenshot is: a run that DIED, relaunched unchanged.
+    const first = trainJobName(BASE);
+    const second = trainJobName(BASE, new Set([first]));
+    const third = trainJobName(BASE, new Set([first, second]));
+    expect(second).toBe(`${first}_v2`);
+    expect(third).toBe(`${first}_v3`);
+    // A name taken by something else entirely must not push it either.
+    expect(trainJobName(BASE, new Set(["act_hilti_box_91"]))).toBe(first);
+  });
+
+  it("keeps a debug run's odd step count spelled out", () => {
+    expect(trainJobName({ ...BASE, steps: 1500 })).toContain("_1500_");
+    expect(trainJobName({ ...BASE, steps: 250000 })).toContain("_250k_");
+  });
+
+  it("trims the DATASET to fit, never the half that tells runs apart", () => {
+    const long = trainJobName({
+      ...BASE,
+      repoId: "local/a_very_long_dataset_name_that_will_not_fit_in_sixty_chars",
+    });
+    expect(long.length).toBeLessThanOrEqual(60);
+    // The discriminating tail survives whole, and so does the `_vN` on top
+    // of it — a truncation that ate either would hand out a duplicate.
+    expect(long.endsWith("_91ep_90k_b16_ev10_s42")).toBe(true);
+    const dup = trainJobName(
+      { ...BASE, repoId: "local/a_very_long_dataset_name_that_will_not_fit_in_sixty_chars" },
+      new Set([long]),
+    );
+    expect(dup.length).toBeLessThanOrEqual(60);
+    expect(dup.endsWith("_91ep_90k_b16_ev10_s42_v2")).toBe(true);
+    expect(dup).not.toBe(long);
+  });
+
+  it("keeps the name safe as a path segment", () => {
+    // It reaches LeRobot as `--job_name`. A slash or a space in there is a
+    // directory the operator did not ask for.
+    const odd = trainJobName({ ...BASE, repoId: "local/so101 pick/cube v2!" });
+    expect(odd).toMatch(/^[a-z0-9_]+$/);
+  });
+
+  it("still names something when no dataset is picked", () => {
+    // The panel renders this into its header before anything is chosen.
+    expect(trainJobName({ ...BASE, repoId: null })).toBe("act_91ep_90k_b16_ev10_s42");
   });
 });
 
