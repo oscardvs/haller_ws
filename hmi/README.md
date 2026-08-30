@@ -9,13 +9,18 @@ Unified web HMI for the Haller robot. Replaces the legacy `web_teleop.py`.
 ## Simulation
 
 Three MuJoCo presets let you bring the HMI up against simulated arms — solo,
-bimanual, leader+follower. See [docs/setup/sim.md](../docs/setup/sim.md).
+bimanual, leader+follower — with no hardware attached. See
+[docs/setup/sim.md](../docs/setup/sim.md), and [Which config](#which-config)
+for every preset the repo ships.
 
 ```bash
 ./scripts/run_hmi.sh --config hmi/backend/config.solo-sim.yaml
 ./scripts/run_hmi.sh --config hmi/backend/config.bimanual-sim.yaml
 ./scripts/run_hmi.sh --config hmi/backend/config.leader-follower-sim.yaml
 ```
+
+`run_hmi.sh` serves the *prebuilt* frontend, so `pnpm build` has to have run
+once in `hmi/frontend` before the first launch — see [Prerequisites](#prerequisites).
 
 ## Repository layout
 
@@ -36,26 +41,39 @@ hmi/
 ## Prerequisites
 
 - Python venv with ROS 2 Jazzy access and lerobot installed — see [`docs/setup/lerobot-environment.md`](../docs/setup/lerobot-environment.md).
-- At least one SO-101 follower configured and calibrated — see [`docs/setup/so101-arm.md`](../docs/setup/so101-arm.md). The default config expects calibration id `haller_follower` reachable at `/dev/haller_arm_follower`.
+- The arms your chosen config declares, configured and calibrated — see [`docs/setup/so101-arm.md`](../docs/setup/so101-arm.md). The **default** `config.yaml` is the Jetson bimanual rig: `right` on `/dev/haller_arm_uart` (calibration id `haller_follower`) and `left` on `/dev/haller_arm_leader` (calibration id `haller_leader`). That is not the only rig in the tree — pick another with `--config`, see [Which config](#which-config).
 - Node 20+ and pnpm on whichever host runs the frontend (built against Node 20.20 / pnpm 10).
+- A built frontend, once, before the first `run_hmi.sh` and after every frontend change:
+  ```bash
+  cd hmi/frontend && pnpm install && pnpm build
+  ```
+  `run_hmi.sh` and the systemd unit serve `.next/standalone` — a prebuilt bundle, not a dev server. Without it Node exits with `Cannot find module .../.next/standalone/server.js`.
 
-## Quick start (operator laptop)
+## Bring-up
 
-Two terminals. First, the backend:
-
-```bash
-source ~/venvs/haller-hmi/bin/activate-haller-hmi
-cd ~/haller_ws/hmi/backend
-haller-hmi                       # uvicorn on http://0.0.0.0:8000
-```
-
-Second, the frontend:
+One command brings up both halves on this host — backend on `:8000`, prebuilt
+frontend on `:3000`:
 
 ```bash
-cd ~/haller_ws/hmi/frontend
-pnpm install                     # first time only
-pnpm dev                         # Next dev server on http://localhost:3000
+./scripts/run_hmi.sh                                            # default config.yaml
+./scripts/run_hmi.sh --config hmi/backend/config.solo-real.yaml  # some other rig
 ```
+
+It sources the backend venv (ROS + venv + isolation hooks), pins `MUJOCO_GL=egl`,
+copies Next's static assets into `.next/standalone/` (Next 16's standalone output
+doesn't bundle them), then runs `uvicorn` and the prebuilt Next server, killing
+both on Ctrl-C.
+
+Both ports are overridable. `run_hmi.sh` pre-checks the *frontend* port and
+refuses to start if it is taken, rather than let Next die on `EADDRINUSE` while
+the backend keeps booting — a half-up stack that reads as a backend fault:
+
+```bash
+FRONTEND_PORT=3001 ./scripts/run_hmi.sh --config hmi/backend/config.solo-real.yaml
+```
+
+`BACKEND_PORT` moves uvicorn, but the frontend needs a **rebuild** to follow it —
+see [Pointing the frontend at a remote backend](#pointing-the-frontend-at-a-remote-backend).
 
 Open <http://localhost:3000>. You should see the cockpit: one fixed-viewport
 surface that never scrolls.
@@ -65,11 +83,84 @@ surface that never scrolls.
   configured arm.
 - A red E-STOP in the header, on every tab.
 
-### Pointing the frontend at a remote backend
+### Which config
+
+`--config` (equivalently `HALLER_HMI_CONFIG`) selects the rig. It is the one
+argument that matters, because a config naming a `/dev` node this machine
+doesn't have fails at startup, not at first use:
+
+| Config | Arms | Rig |
+|---|---|---|
+| `config.yaml` *(default)* | `right` → `/dev/haller_arm_uart`, `left` → `/dev/haller_arm_leader` | Jetson, bimanual, real |
+| `config.desktop-real.yaml` | `left` → `/dev/haller_arm_leader`, `right` → `/dev/haller_arm_uart_usb` | Desktop, bimanual, real — no Jetson |
+| `config.solo-real.yaml` | `left` → `/dev/haller_arm_leader` | Desktop, ONE real arm |
+| `config.solo-raw.yaml` | `left` → `/dev/haller_arm_leader` | As solo-real, every advisory shaping stage neutralized — the tracing config |
+| `config.hybrid-real-sim.yaml` | `left` real, `right` MuJoCo | One real arm standing in a bimanual chain |
+| `config.solo-sim.yaml` | `right` MuJoCo | No hardware |
+| `config.bimanual-sim.yaml` | `left` + `right` MuJoCo | No hardware |
+| `config.leader-follower-sim.yaml` | `left` + `right` MuJoCo | No hardware |
+| `config.bimanual-insertion.yaml` | `left` + `right` MuJoCo | bimanual-sim with the fixture-and-pin insertion scene |
+
+The `/dev/haller_*` names are udev symlinks from
+[`scripts/99-haller-devices.rules`](../scripts/99-haller-devices.rules). If one
+is missing, the rules aren't installed or that board isn't plugged in.
+
+### Quest teleop bring-up (desktop)
+
+`run_hmi.sh` serves plain HTTP, which is fine for the cockpit but not for
+WebXR — the headset needs a secure context. `scripts/quest-teleop/up.sh` brings
+the same stack up behind a single HTTPS origin (Caddy), frontend on `:3001`,
+and prints the URL to open in the headset:
 
 ```bash
-NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm dev
+scripts/quest-teleop/up.sh                # real arms on the Jetson (started over ssh)
+scripts/quest-teleop/up.sh --local        # real arms HERE (config.desktop-real.yaml)
+scripts/quest-teleop/up.sh --solo         # one real arm here (config.solo-real.yaml)
+scripts/quest-teleop/up.sh --solo --raw   # ditto, tracing config (config.solo-raw.yaml)
+scripts/quest-teleop/up.sh --sim          # MuJoCo arms here (config.bimanual-sim.yaml)
+scripts/quest-teleop/up.sh --insertion    # sim, insertion scene
+scripts/quest-teleop/up.sh --tailscale    # serve the origin on the tailnet; composes with the rest
+scripts/quest-teleop/down.sh              # stop the desktop half
 ```
+
+Unknown flags are fatal rather than ignored. Logs land in `/tmp/haller-quest/`.
+`--tailscale` is the escape hatch for a LAN that won't bridge the desktop and
+the headset — see the header comment in `up.sh` and
+[`QUICKSTART-QUEST.md`](./QUICKSTART-QUEST.md).
+
+### Manual, two terminals
+
+For a frontend dev loop, or when the two halves run on different hosts:
+
+```bash
+source ~/venvs/haller-hmi/bin/activate-haller-hmi
+cd ~/haller_ws/hmi/backend
+haller-hmi                       # uvicorn on http://0.0.0.0:8000
+```
+
+```bash
+cd ~/haller_ws/hmi/frontend
+pnpm install                     # first time only
+pnpm dev                         # Next dev server on http://localhost:3000
+```
+
+### Pointing the frontend at a remote backend
+
+`NEXT_PUBLIC_BACKEND_URL` is read in `lib/config.ts` and defaults to
+`http://localhost:8000`. Being a `NEXT_PUBLIC_` variable it is **compiled into
+the client bundle**, so where you set it depends on how the frontend runs:
+
+```bash
+# dev server: set it at run time
+NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm dev
+
+# prebuilt bundle (what run_hmi.sh serves): set it at BUILD time, and rebuild
+NEXT_PUBLIC_BACKEND_URL=http://orin.local:8000 pnpm build
+```
+
+Exporting it only at launch has no effect on an already-built bundle. This is
+also why `BACKEND_PORT` alone isn't enough: move uvicorn off `:8000` and the
+browser keeps calling `:8000` until the frontend is rebuilt against the new URL.
 
 ## Operating an arm
 
@@ -398,7 +489,11 @@ Adding the second arm later is a config edit; see the "Roadmap: leader → secon
 - **Sliders are disabled and don't move.** Check the mode badge — only `manual` enables them. Also disabled while teleop is running for participating arms.
 - **Joint sliders show 0° for everything.** Telemetry is connected but the backend's `state_snapshot` is failing — most likely the calibration file doesn't match the configured `calibration_id`. Check the backend log for the arm-telemetry warning.
 - **Backend startup fails with `No calibration for arm ... (calibration_id=...)`.** The arm has no calibration file in either `robots/so_follower/` or `teleoperators/*/`. The log includes the exact `lerobot-calibrate` command. Run it, then restart `haller-hmi`.
-- **Backend crashes at startup with `Could not open port`.** The USB symlink doesn't exist. `ls -l /dev/haller_arm_follower` — if missing, the udev rules aren't installed or the board isn't plugged in.
+- **Backend crashes at startup with `Could not open port`.** The USB symlink doesn't exist. `ls -l /dev/haller_arm_*` and compare against the ports your config declares — if one is missing, the udev rules aren't installed or that board isn't plugged in.
+- **Backend startup fails with `FeetechMotorsBus motor check failed` and `Full found motor list: {}`.** The serial port opened but *no* servo answered. Zero motors — not a subset — means the servo chain is unpowered, so check the bench PSU before suspecting the bus: **7.4 V and a current limit of at least 5 A**. A 2–3 A limit collapses the rail on the first stall transient and looks exactly like dead hardware. A missing *subset* of IDs is the different problem: a servo whose ID or baud was never programmed.
+- **Frontend won't start: `Cannot find module '.../.next/standalone/server.js'`.** The frontend was never built. `cd hmi/frontend && pnpm install && pnpm build`.
+- **`run_hmi.sh` exits with "port 3000 is already in use".** Something else holds the frontend port. `fuser -k 3000/tcp`, or bring it up elsewhere with `FRONTEND_PORT=3001`.
+- **A frontend change doesn't show up after a rebuild.** `next build` swaps `.next/` underneath an already-running server, which keeps serving the old bundle. Restart the frontend.
 - **Teleop follower position is offset from leader (especially `shoulder_lift`).** The two arms have different calibration midpoints — see "Calibrating an arm" under the Teleop section above. Re-run the calibration wizard on one arm while it holds the same physical neutral pose as the other.
 - **Teleop start returns 400 "leader and follower must be different arms".** Pick different arms in the two dropdowns (click `⇄` to swap).
 - **Teleop start returns 409 "teleop already running".** Stop the current session first, then start a new one.
