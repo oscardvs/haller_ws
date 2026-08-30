@@ -34,3 +34,8 @@ dist/
 # rule stay tracked on purpose.
 .playwright-mcp/
 hmi/backend/outputs/
+
+# Lab run state (train/rollout dirs). The runner writes these relative to the
+# process cwd, which is the repo root under scripts/run_hmi.sh — so they land
+# here as well as under hmi/backend/.
+outputs/
