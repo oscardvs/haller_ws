@@ -33,6 +33,7 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 
+from .random_spec import RandomSpec
 from .world import MuJoCoWorld
 
 logger = logging.getLogger(__name__)
@@ -215,47 +216,13 @@ def place_zone_geom(model: mujoco.MjModel) -> int:
     return int(gid)
 
 
-@dataclass(frozen=True)
-class RandomSpec:
-    """How much the scene is allowed to vary between episodes.
-
-    Defaults are tuned for pick-and-place on the bimanual bench: enough
-    variation that a policy can't memorise one layout, little enough that every
-    cube stays inside both arms' reach.
-    """
-    #: Per-axis uniform jitter around each cube's home slot, metres. 0.04 keeps
-    #: a cube within the 0.23-0.35 m reach band its slot was chosen for.
-    xy_jitter_m: float = 0.04
-    #: Uniform yaw jitter about world +z, radians. pi = fully random heading; a
-    #: cube is symmetric under 90° so anything past pi/4 is already "any yaw",
-    #: but pi costs nothing and is the honest description.
-    yaw_jitter_rad: float = math.pi
-    #: Permute the cubes' colours among themselves, so "the red one" is not
-    #: always in the same slot. Colours themselves stay on the builder's
-    #: palette — a task instruction can still name them.
-    shuffle_colors: bool = True
-    #: Per-axis uniform jitter on each light's position, metres.
-    light_pos_jitter_m: float = 0.15
-    #: Relative jitter on each light's diffuse intensity (0.15 = ±15%).
-    light_diffuse_jitter: float = 0.15
-    #: Per-axis jitter on the FIXED scene cameras' positions, metres. DEFAULT
-    #: OFF, on purpose: these cameras are what the recorder saves, so moving
-    #: them changes the observation distribution itself and throws away the
-    #: framing solved for in `sim/builder.py`. Turn it on only if you actually
-    #: want viewpoint robustness and are willing to re-check that the bench
-    #: still fills the frame.
-    cam_pos_jitter_m: float = 0.0
-    #: Minimum centre-to-centre distance between two cubes whose vertical
-    #: extents overlap, metres. 0.06 leaves ~2 cm of clear bench between two
-    #: 4 cm cubes even when both are yawed 45°.
-    min_separation_m: float = 0.06
-    #: Extra clearance kept between a cube and the bench edge, on top of the
-    #: cube's own footprint.
-    bench_margin_m: float = 0.02
-    #: Bound on the rejection sampler's retries per cube. See _sample_cube_xy
-    #: for the fallback that makes this bound safe rather than merely finite.
-    max_placement_attempts: int = 48
-
+# `RandomSpec` is imported at the top of this module from `random_spec.py`,
+# which holds the dataclass itself so that `config.py` can validate the YAML
+# `sim_random:` block against its field names without dragging mujoco into a
+# no-GPU preflight (see that module's docstring). It is re-exported here
+# because every caller in the tree — and every test — spells it
+# `from .sim.scene import RandomSpec`, and the pair is a unit: the spec is
+# meaningless except as the thing `SceneController` below consumes.
 
 class SceneController:
     """Resets and randomizes the bench between episodes.
@@ -306,6 +273,20 @@ class SceneController:
         self._fixed_cams = [i for i in range(model.ncam)
                             if int(model.cam_bodyid[i]) == 0]
         self._cam_pos = np.array(model.cam_pos, dtype=float)
+
+        # The place zone, for `keep_place_zone_clear`. Read off `geom_pos`
+        # rather than `data.geom_xpos` because the pad is a worldbody geom
+        # (`geom_bodyid == 0`), so the two are the same array and this needs no
+        # forward kinematics — nothing here may touch `data`, which the stepper
+        # owns. None on the insertion scene, whose builder strips the pad
+        # (`place_zone_geom` raises), and which has no pad to keep clear.
+        try:
+            zone = place_zone_geom(model)
+        except KeyError:
+            self._zone_box: tuple[np.ndarray, np.ndarray] | None = None
+        else:
+            self._zone_box = (np.array(model.geom_pos[zone][:2], dtype=float),
+                              np.array(model.geom_size[zone][:2], dtype=float))
 
         bench_gid = mujoco.mj_name2id(
             model, mujoco.mjtObj.mjOBJ_GEOM, BENCH_GEOM_NAME)
@@ -497,13 +478,35 @@ class SceneController:
             candidate = home_xy + rng.uniform(-j, j, size=2) * scale
             candidate[0] = float(np.clip(candidate[0], -lim_x, lim_x))
             candidate[1] = float(np.clip(candidate[1], -lim_y, lim_y))
-            if self._clear_of(candidate, home_z, half, placed):
+            if (self._clear_of(candidate, home_z, half, placed)
+                    and self._off_place_zone(candidate)):
                 return candidate
         logger.warning(
             "cube %s: no placement cleared min_separation_m=%.3f in %d tries; "
             "falling back to its home slot", cube.name,
             self.spec.min_separation_m, attempts)
         return home_xy.copy()
+
+    def _off_place_zone(self, xy: np.ndarray) -> bool:
+        """The cube's centre is not over the place zone.
+
+        Tests the pad's FULL half-extent, not the acceptance box
+        `cube_placed` actually scores (which is the pad shrunk by
+        `SuccessSpec.zone_inset_m`). Deliberately the stricter of the two, for
+        two reasons: it is a superset, so clearing this clears the predicate
+        with room to spare, and it keeps the thresholds in `sim/task.py` out of
+        this module — `task.py` imports `scene.py`, so reaching the other way
+        for `zone_inset_m` would close the cycle.
+
+        Every home slot passes with margin (`cube_2`, the closest, sits 0.13 m
+        from the pad centre against its 0.06 m half-extent), which is what lets
+        `_sample_cube_xy`'s shrink-toward-home fallback stay safe: the position
+        the retry bound converges on is one this test already accepts.
+        """
+        if self._zone_box is None or not self.spec.keep_place_zone_clear:
+            return True
+        centre, half = self._zone_box
+        return bool(np.any(np.abs(xy - centre) > half))
 
     def _clear_of(self, xy: np.ndarray, z: float, half: np.ndarray,
                   placed: list[tuple[np.ndarray, str]]) -> bool:
