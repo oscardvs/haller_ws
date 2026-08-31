@@ -37,7 +37,7 @@ from .recorder import DatasetRecorder, lerobot_home
 from .policy_bridge import FiniteActionIngest, PolicyBridge, ingest_port_from_env
 from .policy_ingest import INGEST_PORT, PolicyIngest
 from .lab.routes import build_lab_router
-from .sim.scene import SceneController
+from .sim.scene import RandomSpec, SceneController
 from .sim.task import InsertionMonitor, TaskMonitor
 from .sim.teleop import SimLeaderTeleop
 from .vr_teleop import wire as vr_wire
@@ -266,7 +266,13 @@ async def _lifespan(app: FastAPI):
     # source: sim, so this is the test, here and in every /sim/* route.
     _world = arms.world()
     if _world is not None:
-        scene = SceneController(_world)
+        # `cfg.sim_random` is key-checked at load (config._sim_random_from), so
+        # an empty dict here means "RandomSpec's defaults" and a populated one
+        # cannot carry a key RandomSpec would reject. Without this the headset
+        # path had no way to reach the jitter that `sim/record.py --xy-jitter-m`
+        # reaches on the scripted path.
+        scene = SceneController(
+            _world, RandomSpec(**cfg.sim_random) if cfg.sim_random else None)
         # The monitor follows the scene, from the one config key. Wiring the
         # cube predicate to an insertion scene would score every episode a
         # failure and the dataset would look like a operator problem rather

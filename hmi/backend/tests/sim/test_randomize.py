@@ -251,3 +251,63 @@ def test_randomize_false_undoes_a_previous_randomization_of_lights_and_colours()
 
     assert np.array_equal(world.model.light_diffuse, base_diffuse)
     assert np.array_equal(_rgba_of_cubes(world, ctl), base_rgba)
+
+
+def _free_success_seeds(world, spec, seeds=range(200)) -> list[int]:
+    """Seeds whose scene scores a success with the arms never commanded.
+
+    Polls once per 30 Hz control tick, exactly as `EpisodeRunner` does: the
+    monitor accumulates `held_s` BETWEEN POLLS, so a single poll after a long
+    settle always reports 0 s held and would report every scene clean.
+    """
+    from haller_hmi.sim.task import TaskMonitor
+    ctl = SceneController(world, spec)
+    monitor = TaskMonitor(world)
+    hits = []
+    for seed in seeds:
+        ctl.reset(seed=seed)
+        monitor.reset()
+        for _ in range(45):                      # 1.5 s, well past settle_s
+            with world.view() as (model, data):
+                for _ in range(17):              # one 1/30 s tick of physics
+                    mujoco.mj_step(model, data)
+            if monitor.poll()["success"]:
+                hits.append(seed)
+                break
+    return hits
+
+
+def test_wide_jitter_never_deals_a_cube_onto_the_place_zone():
+    """An episode may not begin with the task already done.
+
+    Regression, measured 2026-08-31: at `xy_jitter_m` 0.14 — the value
+    `sim/record.py --xy-jitter-m` documents — 23 of seeds 0..199 dealt a cube
+    into the place zone. `TaskMonitor` is built with `target=None` everywhere
+    in this repo, so it scores `any` cube on the pad; those episodes ended
+    SUCCESS in 18 frames with both arms parked at home, and a 200-episode
+    dataset carried 23 takes of a stationary bench labelled `next.reward` 1.0.
+
+    0.25 is here as well as 0.14 because the guarantee must come from the
+    rejection sampler, not from the jitter happening to be too small to reach
+    the pad — which is exactly what made the default 0.04 look fine for months.
+    """
+    world = make_world(cubes=3)
+    for jitter in (0.04, 0.14, 0.25):
+        spec = RandomSpec(xy_jitter_m=jitter)
+        assert _free_success_seeds(world, spec) == [], (
+            f"xy_jitter_m={jitter} deals cubes onto the place zone")
+
+
+def test_the_place_zone_guard_is_what_keeps_it_clear():
+    """The test above must fail for the stated reason, not by luck.
+
+    Without this, a future change that quietly stopped the guard from running
+    would leave the regression test passing on any jitter small enough to miss
+    the pad, and the guarantee would be gone with nothing to say so.
+    """
+    world = make_world(cubes=3)
+    unguarded = RandomSpec(xy_jitter_m=0.14, keep_place_zone_clear=False)
+    assert _free_success_seeds(world, unguarded), (
+        "expected the unguarded sampler to still reach the pad at 0.14 — if it "
+        "no longer does, the guard's regression test is no longer proving "
+        "anything and both need rewriting against a jitter that does")

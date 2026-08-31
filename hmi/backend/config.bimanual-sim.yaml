@@ -109,3 +109,27 @@ cameras:
     fps: 30
     record: true
     dataset_key: right_wrist  # π0.5 right_wrist_0_rgb
+
+# How much the bench varies between resets — the fields of sim.scene.RandomSpec.
+# Reached by POST /sim/scene/reset, so this is the HEADSET path's scene
+# distribution, the counterpart of `sim/record.py --xy-jitter-m` on the
+# unattended scripted path.
+sim_random:
+  # 0.14, matching the scripted batch, rather than RandomSpec's 0.04 default.
+  # Not because a human needs failures injected — the flag's original purpose
+  # was to take the scripted expert from ~100% to ~65% so its dataset had
+  # honest negatives (sim/scripted.py, 2026-08-31) — but because two collection
+  # paths sampling DIFFERENT scene distributions produce datasets that cannot
+  # be compared or co-trained without a shift nothing downstream would flag.
+  #
+  # The cost is real and worth knowing at one episode per operator-minute:
+  # 0.14 puts roughly a third of the cubes outside the 0.23-0.35 m reach band
+  # sim/builder.py chose its slots for (the scripted expert's failures sort
+  # cleanly by reach — 118-134 mm or 313-353 mm from the base, against
+  # 144-315 mm for every success). Those are the takes where a human is worth
+  # more than the script: an operator can reposition, regrasp, or hand the
+  # cube to the other arm where the expert simply misses.
+  #
+  # Drop it to 0.04 for a rehearsal session where reaching everything easily
+  # matters more than matching the batch.
+  xy_jitter_m: 0.14

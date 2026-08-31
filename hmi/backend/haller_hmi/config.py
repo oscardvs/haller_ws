@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -278,6 +278,41 @@ class Config:
     # cube predicate would label every episode a failure, and the two knobs
     # would eventually be set inconsistently if they were separate.
     sim_task: str = "cubes"
+    # How much the sim scene varies between resets — the fields of
+    # `sim.scene.RandomSpec`, validated at load and passed through verbatim.
+    # Empty (the default) means RandomSpec's own defaults.
+    #
+    # This exists because the jitter was reachable ONLY from
+    # `sim/record.py --xy-jitter-m`, i.e. only on the unattended scripted
+    # path. A headset session resets the bench through POST /sim/scene/reset,
+    # which built its `SceneController` with no spec at all, so human takes
+    # were pinned to `xy_jitter_m` 0.04 with no way to say otherwise. Two
+    # collection paths that cannot be given the same scene distribution
+    # produce datasets that are not comparable, and nothing would have said so.
+    sim_random: dict = field(default_factory=dict)
+
+
+def _sim_random_from(raw: dict | None) -> dict:
+    """Validate the `sim_random:` section's keys against `RandomSpec`'s fields.
+
+    Key-checked here, at load, for `_teleop_from`'s reason: a typo'd knob that
+    silently means "default" is indistinguishable from the knob not working,
+    and this one is a distribution the recorded data inherits.
+    """
+    raw = dict(raw or {})
+    if not raw:
+        return {}
+    # Local import: `sim.scene` pulls in mujoco, which a config-only caller
+    # (calibration bootstrap, the tests, any real-rig boot) must not pay for.
+    from .sim.random_spec import RandomSpec
+    allowed = {f.name for f in fields(RandomSpec)}
+    unknown = sorted(set(raw) - allowed)
+    if unknown:
+        raise ValueError(
+            f"sim_random: unknown key(s) {unknown} — not a field of "
+            f"RandomSpec ({sorted(allowed)})."
+        )
+    return raw
 
 
 def _teleop_from(raw: dict | None) -> dict:
@@ -315,6 +350,7 @@ def load_config(path: Path | None = None) -> Config:
         sim_task=str(raw.get("sim_task", "cubes")),
         sim_seed=(None if raw.get("sim_seed") is None
                   else int(raw["sim_seed"])),
+        sim_random=_sim_random_from(raw.get("sim_random")),
     )
 
 
