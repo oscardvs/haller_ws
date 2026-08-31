@@ -54,6 +54,7 @@ import numpy as np
 
 from ..api.errors import DataDependencyError, DatasetBusyError
 from . import review as review_mod
+from . import units
 from .grade import VERDICTS, grade_episode
 from .schema import RigSpec
 from .split import plan_eval_split
@@ -72,6 +73,7 @@ __all__ = [
     "dataset_fps",
     "dataset_rate_provenance",
     "dataset_root",
+    "dataset_units",
     "delete_dataset",
     "episode_trace",
     "hf_home",
@@ -268,6 +270,159 @@ def _video_keys(info: dict) -> list[str]:
     ]
 
 
+# ---- what unit the numbers are in ----
+# Added 2026-08-31, when armnet's metadata was read for the first time and the
+# Lab turned out to have no way to say "I do not know what unit this column is
+# in". Everything below is derived from `info.json` alone, so it costs the
+# polled listing nothing and cannot fail on a dataset whose parquet is absent.
+
+def _state_names(info: dict) -> tuple[str, ...]:
+    """`observation.state`'s column names, synthesising `j0..jN` from the shape
+    when the writer omitted them, the same rule `schema._state_names` applies,
+    so a nameless dataset gets the same width here as it does in the grader.
+
+    Read straight from `features` rather than via `RigSpec.from_info`, which
+    would be the tidier call. `RigSpec` also parses the calibration block on
+    its way past (`schema.py:108` -> `_gripper_range`), and `dataset_units`
+    has to survive EXACTLY the malformed metadata it exists to describe, so it
+    does not route through a reader that also has to parse that block.
+    History: that parse assumed the block was a dict, and a dataset whose
+    `haller_joint_calibration` was a bare string raised AttributeError out of
+    `schema._gripper_range` (found 2026-08-31, fixed same day: it now falls
+    back to `DEFAULT_GRIPPER_RANGE`). Staying off that path keeps this
+    function's guarantee its own rather than borrowed.
+    """
+    feature = ((info or {}).get("features") or {}).get("observation.state") or {}
+    names = feature.get("names")
+    if names:
+        return tuple(str(n) for n in names)
+    try:
+        dim = int((feature.get("shape") or ())[0])
+    except (IndexError, KeyError, TypeError, ValueError):
+        dim = 0
+    return tuple(f"j{i}" for i in range(dim))
+
+
+def dataset_units(info: dict) -> dict:
+    """What unit this dataset's state/action columns are in, and how sure we are.
+
+    THE PROBLEM THIS EXISTS TO STOP. Every number the Lab renders (a trace, a
+    sweep bar, a grasp threshold) is drawn from `observation.state` with no
+    unit attached, and until now the page presented all of them identically.
+    On a Haller recording those are degrees. On a foreign SO-101 recording they
+    may be normalized `[-100, 100]`, and the two are indistinguishable by
+    inspection: both are small signed numbers with plausible joint-shaped
+    trajectories. G9 in `HALLER_ROADMAP.md` is entirely about that
+    indistinguishability, and its whole mitigation is metadata. So the honest
+    thing for the catalog to publish is not a unit but a PROVENANCE: who said
+    so, and whether an exact conversion exists.
+
+    `convertible` is the field that matters and it is deliberately strict. It
+    is True only when every column of `observation.state` has a usable
+    calibrated range, which is the precondition `lab/units.py` enforces before
+    it will convert anything. A dataset that is 11/12 calibrated is not 92 %
+    convertible; it is not convertible, because a row with one column left in
+    the wrong unit is worse than a row nobody converted.
+
+    Never raises. This is called from `list_datasets`, which walks every
+    directory under `HF_LEROBOT_HOME` and must not let one malformed dataset
+    take the page down (see `_info`'s note on the same rule). `units.py` raises
+    because its callers are converting data; this reports because its caller is
+    drawing a listing.
+    """
+    names = list(_state_names(info))
+    block = info.get(units.CALIBRATION_INFO_KEY)
+    declared = isinstance(block, dict)
+    state_unit = block.get("state_unit") if declared else None
+
+    if not declared:
+        return {
+            "declared": False,
+            "source": "undeclared",
+            "state_unit": None,
+            "convertible": False,
+            "joints_total": len(names),
+            "joints_calibrated": 0,
+            "uncalibrated": names,
+            "reason": (
+                f"no {units.CALIBRATION_INFO_KEY} block in meta/info.json"
+            ),
+            # Written as a sentence because it is shown to an operator, and
+            # "unknown" has to arrive as a warning rather than as a blank field
+            # that reads like a default.
+            "note": (
+                "Units unknown: this dataset was not recorded by Haller and "
+                "does not declare what unit its joint columns are in. It may "
+                "be degrees or normalised [-100, 100]; the two look identical "
+                "in a plot. Values are shown exactly as recorded and must not "
+                "be read as degrees."
+            ),
+        }
+
+    try:
+        ranges = units.joint_ranges_from_info(info)
+    except units.UnitsUnknown as e:
+        ranges, block_error = {}, str(e)
+    else:
+        block_error = None
+
+    calibrated = [n for n in names if n in ranges]
+    uncalibrated = [n for n in names if n not in ranges]
+    convertible = bool(names) and not uncalibrated
+
+    if convertible:
+        note = (
+            f"Haller-calibrated: {state_unit or 'unknown'} state, with a "
+            f"calibrated range on all {len(names)} joints, so the map to "
+            f"normalised [-100, 100] / [0, 100] is exact and reversible "
+            f"(lab/units.py)."
+        )
+        reason = None
+    else:
+        reason = block_error or (
+            f"{len(uncalibrated)} of {len(names)} joints have no usable "
+            f"calibrated range"
+        )
+        note = (
+            f"Partly calibrated, so NOT convertible: {reason}. A row cannot be "
+            f"converted column by column, so this dataset's joint values stay "
+            f"in whatever unit they were recorded in."
+        )
+
+    return {
+        "declared": True,
+        "source": units.CALIBRATION_INFO_KEY,
+        # Reported verbatim, and it is a DATASET-LEVEL SUMMARY that over-claims
+        # on the grippers: an SO-101 gripper is RANGE_0_100 under every
+        # configuration (`so_follower.py:59`), never degrees. The per-joint
+        # `norm_mode` in the block is the authority, and `units.py` reads it.
+        "state_unit": state_unit,
+        "convertible": convertible,
+        "joints_total": len(names),
+        "joints_calibrated": len(calibrated),
+        "uncalibrated": uncalibrated,
+        "reason": reason,
+        "note": note,
+    }
+
+
+def _units_summary(info: dict) -> dict:
+    """The three scalars of `dataset_units`, for the POLLED listing.
+
+    The card gets no joint-name lists: `GET /lab/datasets` is polled and this
+    endpoint's whole design rule is that it opens no parquet and ships no
+    per-item detail (see `list_datasets`). Three booleans and a string are
+    enough for a card to show "units unknown"; the reasons belong on the page
+    you open next.
+    """
+    u = dataset_units(info)
+    return {
+        "declared": u["declared"],
+        "state_unit": u["state_unit"],
+        "convertible": u["convertible"],
+    }
+
+
 # ---- what the policy is allowed to look at ----
 # LeRobot derives a policy's observation space from the DATASET: every column
 # whose name starts with `observation` becomes an input feature, with no way to
@@ -415,6 +570,10 @@ def list_datasets() -> list[dict]:
                 "codebase_version": info.get("codebase_version"),
                 "video_keys": _video_keys(info),
                 "rig": RigSpec.from_info(info).rig,
+                # Three scalars, not the full block: a card that cannot say
+                # "units unknown" is a card that shows a foreign dataset as if
+                # it were one of ours.
+                "units": _units_summary(info),
                 "tasks": _tasks(root),
                 "size_bytes": _dir_size(root),
                 "modified": path.stat().st_mtime,
@@ -637,6 +796,11 @@ def _build_detail(root: Path, info: dict) -> dict:
         "codebase_version": info.get("codebase_version"),
         "video_keys": video_keys,
         "rig": rig.rig,
+        # The full provenance, next to the columns it describes. `features`
+        # right below says a column is float32[12]; this says whether those 12
+        # numbers are degrees, normalised, or undeclared, which `features`
+        # cannot express and LeRobot has no slot for.
+        "units": dataset_units(info),
         # Keyed by the same `side` an episode's `arms` entries carry, so the
         # chart labelling a sweep bar looks its joint name up rather than
         # assuming the kit's five. "" is the unprefixed solo arm.
