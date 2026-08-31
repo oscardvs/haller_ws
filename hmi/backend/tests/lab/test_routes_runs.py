@@ -292,6 +292,13 @@ def _launch_train_eval(client: TestClient, **spec) -> str:
     return response.json()["id"]
 
 
+def _launch_simeval(client: TestClient, **spec) -> str:
+    """POST a sim-eval spec that must succeed, and return the run id."""
+    response = client.post("/lab/runs/simeval", json=spec)
+    assert response.status_code == 200, response.text
+    return response.json()["id"]
+
+
 def _spec_on_disk(store: Path, run_id: str) -> dict:
     """`spec.json` as the CHILD would read it — never the route's response.
 
@@ -611,6 +618,225 @@ def test_eval_launches_the_eval_runner_and_not_the_trainer(home, store, client):
     record = json.loads((store / run_id / "run.json").read_text())
     assert record["kind"] == "eval"
     assert record["argv"][2] == "haller_hmi.runners.eval_runner"
+
+
+# ============================================================================
+# POST /lab/runs/simeval
+# ============================================================================
+#
+# The counterpart to the eval route above, and the reason it is a second route
+# rather than a flag on that one: `eval` measures per-episode training LOSS over
+# recorded frames and `simeval` measures SUCCESS RATE against `sim/task.py`'s
+# predicate on a MuJoCo bench. The two are not comparable numbers, so they do
+# not share a run kind, a spec or a run row.
+
+#: The 12 columns Haller's recorder writes for the bimanual bench. Passed as
+#: `action_names` wherever a test has no dataset to read them from.
+SIM_ACTION_NAMES = [
+    f"{side}_{joint}"
+    for side in ("left", "right")
+    for joint in ("shoulder_pan", "shoulder_lift", "elbow_flex",
+                  "wrist_flex", "wrist_roll", "gripper")
+]
+
+
+def test_simeval_takes_the_policy_and_the_REPO_from_a_training_run(
+        home, store, client):
+    """`repo_id` is not decoration on this route. It is what tells the child
+    which column of the policy's action vector is which joint, and a sim
+    evaluation with that mapping guessed scores a policy whose wrist is driven
+    by the shoulder's number."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    checkpoint = _eval_checkpoint(store, train_id, "010000")
+
+    run_id = _launch_simeval(client, source_run=train_id)
+
+    spec = _spec_on_disk(store, run_id)
+    assert spec["policy_path"] == str(checkpoint)
+    assert spec["repo_id"] == REPO
+    assert spec["source_run"] == train_id
+
+
+def test_simeval_defaults_to_the_NEWEST_checkpoint_of_the_source_run(
+        home, store, client):
+    """`runs.checkpoints()` sorts newest first, so "the checkpoint" is row 0.
+    Row -1 would score the oldest and report a half-trained policy's rate."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    _eval_checkpoint(store, train_id, "010000")
+    newest = _eval_checkpoint(store, train_id, "090000")
+
+    run_id = _launch_simeval(client, source_run=train_id)
+
+    assert _spec_on_disk(store, run_id)["policy_path"] == str(newest)
+
+
+def test_simeval_refuses_a_source_run_that_has_no_checkpoint_yet(
+        home, store, client):
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+
+    response = client.post("/lab/runs/simeval", json={"source_run": train_id})
+
+    assert response.status_code == 400, response.text
+    assert "no checkpoint" in response.json()["detail"]
+
+
+def test_an_explicit_policy_path_and_repo_beat_the_source_run(
+        home, store, client):
+    """So the checkpoint from one run can be scored against another dataset's
+    column layout without unpicking `source_run`."""
+    make_dataset(home / REPO, n_episodes=6)
+    train_id = _launch_train(client, repo_id=REPO, eval_split=0.34)
+    _eval_checkpoint(store, train_id, "010000")
+    other = _eval_checkpoint(store, train_id, "020000")
+
+    run_id = _launch_simeval(
+        client, source_run=train_id, policy_path=str(other),
+        repo_id="local/other")
+
+    spec = _spec_on_disk(store, run_id)
+    assert spec["policy_path"] == str(other)
+    assert spec["repo_id"] == "local/other"
+
+
+def test_simeval_without_a_source_run_needs_a_policy_path(home, client):
+    response = client.post(
+        "/lab/runs/simeval", json={"repo_id": REPO})
+
+    assert response.status_code == 400, response.text
+    assert "policy_path" in response.json()["detail"]
+
+
+def test_simeval_refuses_to_guess_the_action_layout(home, client):
+    """Neither `repo_id` nor `action_names` means nothing on disk says which
+    column is which joint. Guessing it does not fail loudly: it scores zero and
+    reads as a bad policy."""
+    response = client.post(
+        "/lab/runs/simeval", json={"policy_path": "/tmp/ckpt"})
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "repo_id" in detail and "action_names" in detail
+
+
+def test_action_names_are_an_accepted_substitute_for_a_repo(home, store, client):
+    """A checkpoint whose dataset has since been pruned still has a layout, and
+    naming it explicitly is the only way to say so."""
+    run_id = _launch_simeval(
+        client, policy_path="/tmp/ckpt", action_names=SIM_ACTION_NAMES)
+
+    spec = _spec_on_disk(store, run_id)
+    assert spec["action_names"] == SIM_ACTION_NAMES
+    assert "repo_id" not in spec or not spec["repo_id"]
+    # The one-line summary still reads, with no empty segment where the missing
+    # repo would have been.
+    summary = json.loads((store / run_id / "run.json").read_text())["spec_summary"]
+    assert summary.startswith("sim eval")
+    assert " ·  · " not in summary
+
+
+def test_action_names_must_be_a_list(home, client):
+    """A bare string accepted as a list would arrive at the child as 18
+    single-character column names."""
+    response = client.post("/lab/runs/simeval", json={
+        "policy_path": "/tmp/ckpt", "action_names": "left_shoulder_pan"})
+
+    assert response.status_code == 400, response.text
+    assert "action_names" in response.json()["detail"]
+
+
+def test_simeval_passes_the_seed_list_through_verbatim(home, store, client):
+    """Seeds ARE the experiment. Replaying exactly the layouts a previous run
+    scored is the comparison this route exists for, so the list is not sorted,
+    de-duplicated or trimmed on the way to the spec."""
+    run_id = _launch_simeval(
+        client, policy_path="/tmp/ckpt", action_names=SIM_ACTION_NAMES,
+        seeds=[9, 2, 9])
+
+    assert _spec_on_disk(store, run_id)["seeds"] == [9, 2, 9]
+
+
+def test_simeval_seeds_must_be_whole_numbers(home, client):
+    """Shape only. Whether the seed produces a solvable bench is the sim's
+    business, not this route's."""
+    response = client.post("/lab/runs/simeval", json={
+        "policy_path": "/tmp/ckpt", "action_names": SIM_ACTION_NAMES,
+        "seeds": "0,1"})
+
+    assert response.status_code == 400, response.text
+    assert "seeds" in response.json()["detail"]
+
+
+def test_the_bench_settings_reach_the_spec(home, store, client):
+    """`spec.json` is the run's own record of what it was asked for, so every
+    knob that changes the number has to be in it - including the rig config,
+    which is NOT resolved here: `simeval_runner._config_path` applies the
+    `$HALLER_HMI_CONFIG`-then-default rule, and resolving it in this process
+    would answer with the SERVER's rig on a box where the two differ."""
+    run_id = _launch_simeval(
+        client, policy_path="/tmp/ckpt", action_names=SIM_ACTION_NAMES,
+        config="/rigs/bimanual-sim.yaml", control_hz=20, max_episode_s=45,
+        episodes=4, seed_start=100, randomize=False, mirror=True,
+        task="put the red cube on the pad", robot_type="so101_bimanual",
+        device="cpu")
+
+    spec = _spec_on_disk(store, run_id)
+    assert spec["config"] == "/rigs/bimanual-sim.yaml"
+    assert spec["control_hz"] == 20.0
+    assert spec["max_episode_s"] == 45.0
+    assert spec["episodes"] == 4
+    assert spec["seed_start"] == 100
+    assert spec["randomize"] is False
+    assert spec["mirror"] is True
+    assert spec["task"] == "put the red cube on the pad"
+    assert spec["robot_type"] == "so101_bimanual"
+    assert spec["device"] == "cpu"
+
+
+def test_an_explicit_null_step_cap_reaches_the_spec_as_null(home, store, client):
+    """A run with no per-tick step cap is a different experiment, not a missing
+    field, so it must not be defaulted away between the browser and the child."""
+    run_id = _launch_simeval(
+        client, policy_path="/tmp/ckpt", action_names=SIM_ACTION_NAMES,
+        max_speed_deg_s=None)
+
+    spec = _spec_on_disk(store, run_id)
+    assert "max_speed_deg_s" in spec
+    assert spec["max_speed_deg_s"] is None
+
+
+def test_a_zero_step_cap_is_refused_rather_than_read_as_off(home, client):
+    response = client.post("/lab/runs/simeval", json={
+        "policy_path": "/tmp/ckpt", "action_names": SIM_ACTION_NAMES,
+        "max_speed_deg_s": 0})
+
+    assert response.status_code == 400, response.text
+    assert "max_speed_deg_s" in response.json()["detail"]
+
+
+def test_simeval_launches_the_simeval_runner_and_not_the_eval_runner(
+        home, store, client):
+    """The kind is what picks the module out of `runs.RUNNERS`. Getting it wrong
+    here would start a training-loss job against a spec that names no dataset
+    episodes, and report its number under this run's id."""
+    run_id = _launch_simeval(
+        client, policy_path="/tmp/ckpt", action_names=SIM_ACTION_NAMES)
+
+    record = json.loads((store / run_id / "run.json").read_text())
+    assert record["kind"] == "simeval"
+    assert record["argv"][2] == "haller_hmi.runners.simeval_runner"
+    assert record["argv"][2] == runs.RUNNERS["simeval"]
+
+
+def test_simeval_is_local_only(home, lan):
+    """`--host 0.0.0.0` is how the Quest reaches the HMI. Reaching it must not
+    also mean starting a GPU job from the LAN."""
+    response = lan.post("/lab/runs/simeval", json={
+        "policy_path": "/tmp/ckpt", "action_names": SIM_ACTION_NAMES})
+
+    assert response.status_code == 403, response.text
 
 
 def test_policy_inputs_reach_the_spec_resolved_to_shapes(home, store, client):

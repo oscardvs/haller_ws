@@ -344,6 +344,21 @@ def _int_list(payload: dict, key: str) -> list[int]:
             detail=f"{key} must be a list of whole numbers: {e}") from e
 
 
+def _string_list(payload: dict, key: str) -> list[str]:
+    """A list of strings, or a 400 that names what arrived.
+
+    A bare string is refused rather than wrapped, for `_extra_args`'s reason one
+    field over: `"left_shoulder_pan"` accepted as a list would arrive at the
+    child as 18 single-character column names, and the refusal it eventually
+    produced would name neither this route nor the field.
+    """
+    raw = (payload or {}).get(key)
+    if not isinstance(raw, (list, tuple)):
+        raise HTTPException(
+            status_code=400, detail=f"{key} must be a list of strings")
+    return [str(v) for v in raw]
+
+
 def _policy_inputs(payload: dict, detail: dict) -> dict | None:
     """The observation columns the policy may read, resolved against the
     dataset — or `None` for "let LeRobot derive them".
@@ -1032,7 +1047,7 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
                 found = runs_mod.checkpoints(source_run)
                 if not found:
                     raise HTTPException(status_code=400, detail=(
-                        f"{source_run} has written no checkpoint yet — there is "
+                        f"{source_run} has written no checkpoint yet. There is "
                         "nothing to score."))
                 checkpoint = str(found[0]["path"])
             if not checkpoint:
@@ -1067,6 +1082,135 @@ def build_runs_router(deps: LabDeps) -> APIRouter:
                     f"{n} held-out episode(s)" if n else "every episode",
                     f"from {source_run}" if source_run else "",
                 ]).replace(" · ·", " ·").rstrip(" ·"),
+            )
+            return {"id": record["id"]}
+
+    @router.post("/lab/runs/simeval", dependencies=local_only)
+    def post_simeval(payload: JsonBody):
+        """Score a checkpoint by SUCCESS RATE in the MuJoCo sim.
+
+        The counterpart to `POST /lab/runs/eval`, and deliberately a separate
+        route and a separate run kind. That one measures per-episode training
+        LOSS over recorded frames, which ranks demonstrations and cannot rank
+        policies; this one runs the policy against a seeded bench and counts how
+        often `sim/task.py`'s predicate fired. Two numbers that are not
+        comparable do not share a run row.
+
+        **`source_run` is the ergonomic half**, exactly as it is on the eval
+        route: naming a training run takes its newest checkpoint and its
+        `repo_id`. The `repo_id` is not decoration here - it is what tells the
+        child which column of the policy's action vector is which joint
+        (`rollout_runner.resolve_rig`), and a sim evaluation with that mapping
+        guessed would score a policy whose wrist is being driven by the
+        shoulder's number. An explicit `policy_path` or `repo_id` wins.
+
+        **Seeds are the experiment**, so they are passed through verbatim when
+        given. Re-running the same list against a different checkpoint is the
+        comparison this route exists for; `episodes` + `seed_start` is the
+        convenience when there is nothing to compare against yet.
+
+        What this route does NOT re-check is the child's own spec contract: that
+        the checkpoint directory exists and holds a `config.json`, that the rig
+        config names a sim arm, that the policy's arms match the bench's. Those
+        are `simeval_runner.build_plan`'s, `lab/` cannot import `runners/`, and a
+        second copy here is a rule that has to agree with the first forever. Only
+        the SHAPE of what goes into the spec is checked, because a malformed spec
+        is this route's own output.
+        """
+        spec_in = _spec_of(payload, marker="policy_path")
+
+        with as_http():
+            spec: dict = {}
+            source_run = str(spec_in.get("source_run") or "").strip()
+            if source_run:
+                # `runs.load` applies RUN_ID_RE and containment, so a crafted
+                # id cannot walk out of the run store.
+                source = runs_mod.load(source_run)
+                source_spec = source.get("spec") or {}
+                spec["repo_id"] = str(source_spec.get("repo_id") or "")
+                spec["source_run"] = source_run
+
+            policy_path = str(spec_in.get("policy_path") or "").strip()
+            if not policy_path and source_run:
+                # Newest first, which is what "score the run I just finished"
+                # means. `checkpoints()` is the same reader the UI lists them
+                # with, so this is row 0 and never the last row.
+                found = runs_mod.checkpoints(source_run)
+                if not found:
+                    raise HTTPException(status_code=400, detail=(
+                        f"{source_run} has written no checkpoint yet. There is "
+                        "nothing to score."))
+                policy_path = str(found[0]["path"])
+            if not policy_path:
+                raise HTTPException(status_code=400, detail=(
+                    "policy_path is required: a pretrained_model directory, or "
+                    "pass source_run to take the newest one from a training run"))
+            spec["policy_path"] = policy_path
+
+            if spec_in.get("repo_id") is not None:
+                spec["repo_id"] = str(spec_in["repo_id"]).strip().strip("/")
+            if spec_in.get("action_names") is not None:
+                spec["action_names"] = _string_list(spec_in, "action_names")
+            if not spec.get("repo_id") and not spec.get("action_names"):
+                raise HTTPException(status_code=400, detail=(
+                    "cannot tell which joints the policy's action vector holds: "
+                    "pass repo_id (or source_run to take it from a training "
+                    "run), or action_names. Guessing it would score a policy "
+                    "whose joints are driven by each other's numbers."))
+
+            if spec_in.get("seeds") is not None:
+                spec["seeds"] = _int_list(spec_in, "seeds")
+            if spec_in.get("episodes") is not None:
+                spec["episodes"] = _positive_int(spec_in, "episodes", 1)
+            if spec_in.get("seed_start") is not None:
+                spec["seed_start"] = _non_negative_int(spec_in, "seed_start", 0)
+
+            # The rig YAML the bench is built from. Passed through as a STRING
+            # and never resolved here: `simeval_runner._config_path` applies the
+            # `$HALLER_HMI_CONFIG`-then-default rule, and a second resolution in
+            # this process would answer with the SERVER's config on a box where
+            # the two differ.
+            if spec_in.get("config") is not None:
+                spec["config"] = str(spec_in["config"])
+            if spec_in.get("control_hz") is not None:
+                spec["control_hz"] = _positive_float(spec_in, "control_hz", 30.0)
+            if spec_in.get("max_episode_s") is not None:
+                spec["max_episode_s"] = _positive_float(
+                    spec_in, "max_episode_s", 20.0)
+            if "max_speed_deg_s" in spec_in:
+                # An explicit null means "no per-tick step cap", which is a
+                # different experiment and not a missing field, so it is carried
+                # through as null rather than defaulted away.
+                raw_cap = spec_in["max_speed_deg_s"]
+                spec["max_speed_deg_s"] = (
+                    None if raw_cap is None
+                    else _positive_float(spec_in, "max_speed_deg_s", 60.0))
+            if spec_in.get("randomize") is not None:
+                spec["randomize"] = bool(spec_in["randomize"])
+            if spec_in.get("mirror") is not None:
+                spec["mirror"] = bool(spec_in["mirror"])
+            for key in ("task", "robot_type", "side"):
+                if spec_in.get(key) is not None:
+                    spec[key] = str(spec_in[key])
+            spec["device"] = str(spec_in.get("device") or DEFAULT_DEVICE)
+
+            n = len(spec.get("seeds") or []) or int(spec.get("episodes") or 0)
+            # Built from non-empty parts rather than joined-then-squeezed:
+            # `repo_id` is genuinely optional on this route (a caller may pass
+            # `action_names` instead), so the eval route's trailing-separator
+            # cleanup would leave a hole in the middle here rather than at the
+            # end, where that trick works.
+            bits = ["sim eval"]
+            if spec.get("repo_id"):
+                bits.append(spec["repo_id"])
+            bits.append(f"{n} episode(s)" if n else "default episodes")
+            if source_run:
+                bits.append(f"from {source_run}")
+            record = runs_mod.launch(
+                "simeval",
+                spec,
+                name=(spec.get("repo_id") or "policy").split("/")[-1],
+                spec_summary=" · ".join(bits),
             )
             return {"id": record["id"]}
 

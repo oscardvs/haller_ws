@@ -109,6 +109,12 @@ RUN_ROUTES = frozenset({
     # and the reader both predate this route, and without it that mode
     # answered `available: false` on every dataset.
     ("POST", "/lab/runs/eval"),
+    # Starts `runners/simeval_runner.py`, which runs the checkpoint against the
+    # MuJoCo bench and writes the `sim_eval.jsonl` / `sim_eval_summary.json`
+    # pair. The counterpart to `eval` above: that one measures training LOSS
+    # over recorded frames, this one measures SUCCESS RATE against
+    # `sim/task.py`'s predicate.
+    ("POST", "/lab/runs/simeval"),
     ("GET", "/lab/runs/{run_id}"),
     ("GET", "/lab/runs/{run_id}/metrics"),
     ("GET", "/lab/runs/{run_id}/log"),

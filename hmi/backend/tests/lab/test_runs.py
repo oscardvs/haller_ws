@@ -285,7 +285,8 @@ def test_there_is_no_record_kind(lab):
     bus and the bus stays in the serving process, because `/estop` walks every
     motor in-process — a detached child cannot be allowed to own it."""
     assert "record" not in runs.RUNNERS
-    assert set(runs.RUNNERS) == {"train", "eval", "rollout", "export"}
+    assert set(runs.RUNNERS) == {
+        "train", "eval", "simeval", "rollout", "export"}
 
     with pytest.raises(ValueError, match="unknown job kind"):
         runs.launch("record", {"repo_id": "local/x"})

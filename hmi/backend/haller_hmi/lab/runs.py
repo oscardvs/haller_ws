@@ -101,9 +101,16 @@ RUN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 #: launch tests point `HALLER_LAB_PYTHON` at `/bin/true`, which ignores its
 #: arguments and exits 0 — so a launch "succeeds" and its run directory appears
 #: whether or not the module resolves.
+#: `simeval` is the sim SUCCESS RATE and `eval` is per-episode training LOSS.
+#: Two kinds and not one flag on a third, because they answer different
+#: questions from different inputs: `eval` reads recorded frames and never moves
+#: anything, `simeval` runs the policy against a MuJoCo bench and scores it with
+#: `sim/task.py`'s predicate. Collapsing them would put one `result.json` and one
+#: run row over two numbers that are not comparable.
 RUNNERS = {
     "train": "haller_hmi.runners.train_runner",
     "eval": "haller_hmi.runners.eval_runner",
+    "simeval": "haller_hmi.runners.simeval_runner",
     "rollout": "haller_hmi.runners.rollout_runner",
     "export": "haller_hmi.runners.export_runner",
 }
