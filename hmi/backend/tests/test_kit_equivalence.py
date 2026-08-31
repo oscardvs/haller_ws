@@ -25,7 +25,9 @@ old FK is sim-guard-only, and green here includes that record still holding.
 
 Harness notes:
   * the reference is imported straight from the read-only kit checkout via a
-    sys.path insert (KIT_SRC below);
+    sys.path insert (env HALLER_KIT_SRC, default /home/odesha/vr-teleop-kit/src).
+    That checkout lives outside the repo and is machine-local, so a missing one
+    skips this module the same way a missing URDF skips the solver tests;
   * everything requires mujoco (pytest.importorskip);
   * solver/drift tests require the SO-101 URDF (env SO101_URDF, default
     /home/odesha/SO-ARM100/Simulation/SO101/so101_new_calib.urdf) and skip
@@ -46,9 +48,23 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco")
 
-KIT_SRC = "/home/odesha/vr-teleop-kit/src"
-if KIT_SRC not in sys.path:
-    sys.path.insert(0, KIT_SRC)
+# The REFERENCE kit is a read-only checkout outside the repo, so its absence is
+# an environment fact, not a verdict on the port: skip, like the URDF below.
+# Only the VENDORED copy is a hard failure (see _import_vendored), because that
+# is the thing this suite exists to prove landed.
+KIT_SRC_ENV = "HALLER_KIT_SRC"
+DEFAULT_KIT_SRC = Path("/home/odesha/vr-teleop-kit/src")
+
+_raw_kit_src = os.environ.get(KIT_SRC_ENV)
+KIT_SRC = Path(_raw_kit_src).expanduser() if _raw_kit_src else DEFAULT_KIT_SRC
+if not KIT_SRC.is_dir():
+    pytest.skip(
+        f"reference kit not found at {KIT_SRC}: set {KIT_SRC_ENV} or clone "
+        "vr-teleop-kit; the equivalence proof needs the reference sources",
+        allow_module_level=True,
+    )
+if str(KIT_SRC) not in sys.path:
+    sys.path.insert(0, str(KIT_SRC))
 
 kit_pm = importlib.import_module("vr_teleop_kit.core.pose_mapping")
 kit_ik = importlib.import_module("vr_teleop_kit.ik.so101_ik")
