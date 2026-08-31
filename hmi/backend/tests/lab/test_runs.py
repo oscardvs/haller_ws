@@ -127,6 +127,27 @@ def _wait_for(predicate, timeout: float = WAIT_S, interval: float = 0.02) -> boo
     return bool(predicate())
 
 
+def _reconciled(run_id: str, status: str = "done") -> bool:
+    """Has `load()` settled on a FINISHED record for this run?
+
+    The event a test about a finished run cares about is not `result.json`
+    appearing. The runner writes that file from its `finally` (`runs.py:685`)
+    and only then unwinds the interpreter, so between the write and the exit
+    there is a live pid whose `/proc/<pid>/cmdline` still carries the run id,
+    which is exactly what `_pid_alive` reports on (`runs.py:245`). A test that
+    waited on the file and then asserted `alive is False` in the next statement
+    was racing that gap, and lost about one run in four on this laptop.
+
+    Waiting on the record instead makes both halves of `load()`'s reconciliation
+    (`runs.py:419`) the condition: the status the runner reported, and a pid
+    that is gone. The second implies the first is whole, since the child cannot
+    exit before its own `write_text` returns, so a half-written `result.json`
+    can never be read as `died` here.
+    """
+    loaded = runs.load(run_id)
+    return loaded["status"] == status and not loaded["alive"]
+
+
 class _Lab:
     """A private run store plus a launcher for the stand-in runner."""
 
@@ -271,7 +292,11 @@ def test_the_child_is_given_the_path_to_import_haller_hmi(lab, tmp_path, monkeyp
 
     record = lab.launch(name="path")
     seen_path = lab.store / record["id"] / "seen.json"
-    assert _wait_for(seen_path.exists), "child never reached its work"
+    # The same two-events race as the clean-run test, one file along: PATH_RUNNER
+    # creates `seen.json`, writes it, and only then reports (`write_result`), so
+    # the path that exists is not yet the path that is readable. Waiting for the
+    # finished record is what makes the `json.loads` below whole.
+    assert _wait_for(lambda: _reconciled(record["id"])), "child never reported what it saw"
     seen = json.loads(seen_path.read_text())
     parts = seen["pythonpath"].split(os.pathsep)
 
@@ -327,11 +352,19 @@ def test_the_log_is_appended_live_because_the_child_runs_unbuffered(lab):
 # ---- status is written by the runner, never inferred ----
 
 def test_a_clean_run_reaches_done_through_result_json(lab):
+    """A run left to finish on its own: `done`, exit 0, and nothing still alive.
+
+    The wait is on the RECORD, never on `result.json` appearing. The file is
+    written from the child's `finally` and the child is still alive for the
+    interpreter shutdown that follows it, so the file is the earlier of two
+    events and `alive is False` asserted against it failed on roughly one run
+    in four here. `_reconciled` above is the event this test is about.
+    """
     record = lab.launch(name="clean", metrics=[{"step": 1, "loss": 0.5}],
                         checkpoints=[100])
     run_id = record["id"]
 
-    assert _wait_for(lambda: (lab.store / run_id / "result.json").exists())
+    assert _wait_for(lambda: _reconciled(run_id)), "the run never finished"
     loaded = runs.load(run_id)
 
     assert loaded["status"] == "done"
