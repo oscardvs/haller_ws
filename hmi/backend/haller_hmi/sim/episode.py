@@ -126,7 +126,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -323,6 +323,52 @@ class EpisodeRecord:
             "sim_s": self.sim_s,
             "reason": self.reason,
         }
+
+
+@dataclass(frozen=True)
+class EpisodeTick:
+    """One control tick that actually happened, for a recorder to write down.
+
+    Handed to `EpisodeRunner.run_episode`'s `on_tick` after the physics step
+    and after the predicate poll, so one callback sees the whole transition:
+    `obs`/`effort` are what the driver SAW, `action` is what the bench
+    COMMITTED in response, and `success` is what the predicate said about the
+    state that produced.
+
+    THE TWO CLOCKS ARE BOTH HERE BECAUSE THE FIELDS STRADDLE THE STEP, and
+    collapsing them is a real off-by-one-tick. `sim_s` is `data.time` BEFORE
+    the step, so it is when `obs` and `effort` were measured and it is what a
+    dataset's per-frame capture time must be; `end_sim_s` is `data.time` after,
+    so it is when `success` was decided. Stamping a frame with the end instead
+    was measured on 2026-08-31 to put every row exactly 0.034 s (one tick at
+    30 Hz) ahead of lerobot's own `frame_index / fps`.
+
+    `obs` is not copied. It is the driver's own observation dict, images
+    included, and the tens of megabytes a copy would cost per episode buy
+    nothing: the callback runs to completion before the loop advances, so
+    nothing can mutate it underneath a reader that does its work inline.
+    """
+
+    step: int
+    #: Sim seconds at the START of this tick: when `obs` and `effort` were read.
+    sim_s: float
+    #: Sim seconds at the END of this tick: the state `success` describes.
+    end_sim_s: float
+    obs: dict
+    #: Committed joint degrees, post-clamp and post-rate-limit. See
+    #: `EpisodeRunner.committed_deg` for why this and not the driver's raw
+    #: return value is what a dataset's `action` column holds.
+    action: list[float]
+    #: Read at `sim_s`, alongside `obs`, and never after the step: the dataset
+    #: writes it as `observation.effort`, and an observation column measured on
+    #: the far side of the transition it is filed under is the same off-by-one
+    #: as the clock above, on the one channel that carries contact.
+    effort: list[float]
+    #: The predicate's verdict on the state this tick produced. This is the
+    #: whole reason the dataset is auto-labelled, and it is `TaskMonitor`'s
+    #: answer verbatim: nothing here softens it, and nothing here has a second
+    #: opinion.
+    success: bool
 
 
 @dataclass
@@ -623,6 +669,53 @@ class EpisodeRunner:
         per_arm = {arm: self.world.read_qpos_deg(arm) for arm in self.arm_ids}
         return [float(per_arm[arm][joint]) for arm, joint in self.layout]
 
+    def effort(self) -> list[float]:
+        """The 12-element effort vector, in the state vector's own layout.
+
+        A signed fraction of each joint's own torque limit, clipped to
+        [-1, 1]. `world.read_effort_norm` (`world.py:206`) computes it and its
+        docstring owns the unit. Exposed here rather than left to callers to
+        assemble because the LAYOUT is this class's, not the world's: the world
+        answers per-arm dicts, and turning two of those into one 12-vector in
+        the recorder's left-then-right order is the same join `state()` does.
+
+        Nothing in the scoring loop reads it. It exists for `sim/record.py`,
+        which has to fill `observation.effort` on every recorded frame: an arm
+        that CAN report effort and writes zeros anyway would be indistinguishable
+        from `recorder.py`'s documented "no effort channel on that take"
+        sentinel, which is a lie about the one column that carries contact.
+        """
+        per_arm = {arm: self.world.read_effort_norm(arm) for arm in self.arm_ids}
+        return [float(per_arm[arm][joint]) for arm, joint in self.layout]
+
+    def committed_deg(self) -> list[float]:
+        """The 12-element goal the actuators are ACTUALLY holding, in degrees.
+
+        Not the vector the driver last returned: `act()` clamps it to the
+        MJCF's joint ranges and rate limits it against
+        `EpisodeSpec.max_speed_deg_s`, and what reaches `data.ctrl` is the
+        result. This is that result.
+
+        WHICH OF THE TWO BELONGS IN A DATASET'S `action` COLUMN, and why it is
+        this one. The real rig records `TickSample.goal_deg`, which
+        `human_teleop.py:500` describes as "the last COMMITTED target"
+        (`_committed_left` / `_committed_right`), i.e. post-safety, after the
+        same `clamp_joint_goal` and rate cap. So recording the committed goal
+        here is not a sim-side choice at all, it is the teleop rig's choice
+        restated on a bench that happens to apply the cap itself.
+
+        It is also the only one that explains the data. The state trajectory in
+        a recorded episode was produced BY these numbers; a raw driver target
+        that the limiter then clipped moved nothing, and training `action` on it
+        would fit a mapping whose labels did not cause the transitions beside
+        them. That gap is widest exactly where a scripted expert is most
+        useful: `ScriptedPickPlace` commands waypoints far outside one tick's
+        60 deg/s budget, so on the approach the raw target and the committed one
+        differ by tens of degrees for tens of ticks.
+        """
+        return [float(self._last_commanded[arm][joint])
+                for arm, joint in self.layout]
+
     def act(self, action: list[float]) -> None:
         """Commit one 12-element target vector to the actuators.
 
@@ -673,8 +766,9 @@ class EpisodeRunner:
             while float(data.time) < self._sim_target - 0.5 * timestep:
                 mujoco.mj_step(model, data)
 
-    def run_episode(self, episode: int, seed: int,
-                    driver: EpisodeDriver) -> EpisodeRecord:
+    def run_episode(self, episode: int, seed: int, driver: EpisodeDriver,
+                    on_tick: Callable[[EpisodeTick], None] | None = None,
+                    ) -> EpisodeRecord:
         """Reset for `seed`, act until the predicate fires or the clock runs out.
 
         The predicate is polled AFTER the step, on the state the action
@@ -686,6 +780,30 @@ class EpisodeRunner:
         still SCORED rather than assumed failed. The last poll has already
         happened by then, so a script that finishes on a successful placement
         gets the success it earned.
+
+        ## `on_tick`, and why recording is a hook rather than a second loop
+
+        `sim/record.py` writes a `LeRobotDataset` out of these episodes, and it
+        needs one row per control tick carrying the observation, the committed
+        action and the predicate's verdict. It could have re-driven
+        `reset_episode`/`observe`/`act`/`advance` itself, and that is exactly
+        what it must not do: the rules that make this loop's number mean
+        something (the predicate polled after the step and never before, an
+        episode ending the moment success is declared, a `driver_stop` still
+        being SCORED rather than assumed failed) would then exist in two
+        places, and the copy that generates the training data would be free to
+        drift from the copy that evaluates against it. A dataset labelled by a
+        slightly different rule than the eval harness applies is the one bug
+        that makes every downstream number quietly incomparable.
+
+        So there is one loop, and recording watches it. The callback fires
+        AFTER the step and AFTER the poll, once per tick that actually
+        happened: never for the tick where a driver answered None (nothing was
+        commanded and nothing moved, so there is no transition to record), and
+        never before the first step. `obs` is the SAME dict the driver acted
+        on, passed by reference rather than re-rendered: a second render would
+        be a different moment, three camera frames later, and would also double
+        the cost of the run.
         """
         started = time.perf_counter()
         self.reset_episode(seed)
@@ -695,7 +813,20 @@ class EpisodeRunner:
         reason = REASON_TIMEOUT
         verdict = self.monitor.poll()
         for _ in range(self.spec.max_steps):
-            action = driver.act(self.observe())
+            obs = self.observe()
+            if on_tick is not None:
+                # BEFORE the step: this is when `obs` was captured, and a frame
+                # stamped with the tick's END would sit a whole control period
+                # ahead of the observation it labels. Measured 2026-08-31
+                # against the version that stamped the end: every frame's
+                # `observation.wall_clock` ran exactly 0.034 s past lerobot's
+                # own `frame_index / fps`, i.e. one tick, for the whole dataset.
+                # Read under `view()` rather than computed from `steps` so it
+                # stays the physics clock's own answer.
+                with self.world.view() as (_model, data):
+                    obs_sim_s = float(data.time)
+            effort = self.effort() if on_tick is not None else None
+            action = driver.act(obs)
             if action is None:
                 reason = REASON_DRIVER_STOP
                 break
@@ -703,6 +834,18 @@ class EpisodeRunner:
             self.advance()
             steps += 1
             verdict = self.monitor.poll()
+            if on_tick is not None:
+                with self.world.view() as (_model, data):
+                    tick_end_s = float(data.time)
+                on_tick(EpisodeTick(
+                    step=steps - 1,
+                    sim_s=obs_sim_s,
+                    end_sim_s=tick_end_s,
+                    obs=obs,
+                    action=self.committed_deg(),
+                    effort=effort,
+                    success=bool(verdict.get("success")),
+                ))
             if verdict.get("success"):
                 reason = REASON_SUCCESS
                 break
@@ -725,8 +868,9 @@ class EpisodeRunner:
             held_s=float(verdict.get("held_s") or 0.0),
         )
 
-    def run(self, seeds: Iterable[int],
-            driver: EpisodeDriver) -> Iterator[EpisodeRecord]:
+    def run(self, seeds: Iterable[int], driver: EpisodeDriver,
+            on_tick: Callable[[EpisodeTick], None] | None = None,
+            ) -> Iterator[EpisodeRecord]:
         """Every seed in order, one record each, yielded as it lands.
 
         A generator rather than a list: `runners/simeval_runner.py` appends each
@@ -735,7 +879,7 @@ class EpisodeRunner:
         it costs nothing to keep.
         """
         for episode, seed in enumerate(seeds):
-            record = self.run_episode(episode, int(seed), driver)
+            record = self.run_episode(episode, int(seed), driver, on_tick)
             logger.info("episode %d (seed %d): %s in %d steps, %.2f sim s",
                         record.episode, record.seed,
                         "SUCCESS" if record.success else record.reason,
