@@ -568,13 +568,24 @@ describe("ComparePane can launch the run it just declared the winner", () => {
     backend([{ step: 60000, path: CK_PATH, has_model: true }]);
     render(<ComparePane runIds={["train-a", "train-b"]} />);
 
-    await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: /roll out/i })).toHaveLength(2),
-    );
+    await waitFor(() => {
+      const buttons = screen.getAllByRole("button", { name: /roll out/i });
+      expect(buttons).toHaveLength(2);
+      // ENABLED, not merely present. The button renders straight away and
+      // stays disabled until that row's own `/checkpoints` read lands, and
+      // `fireEvent.click` on a disabled button is a no-op that leaves nothing
+      // behind to wait for: the dialog never opens, and the failure reads as
+      // "the launcher does not work" rather than as "the test clicked too
+      // early". Waiting only for the button to EXIST made this a race the
+      // machine won on a good day and lost whenever the suite was busy.
+      for (const b of buttons) expect(b).toBeEnabled();
+    });
     // And it is the launcher, not a link: clicking it opens the dialog that
     // names what is about to move.
     fireEvent.click(screen.getAllByRole("button", { name: /roll out train-a/i })[0]);
-    expect(screen.getByRole("dialog", { name: /roll out a policy/i })).toBeTruthy();
+    expect(
+      await screen.findByRole("dialog", { name: /roll out a policy/i }),
+    ).toBeTruthy();
   });
 
   it("offers nothing on a run that wrote nothing loadable", async () => {

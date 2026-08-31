@@ -119,6 +119,110 @@ export function rigLabel(rig: Rig | string | null | undefined): string {
   }
 }
 
+/**
+ * What unit a dataset's joint columns are in, as the polled listing says it.
+ *
+ * Three scalars and no sentences, because `/lab/datasets` is polled and the
+ * backend deliberately keeps the joint-name lists and the operator-facing note
+ * on the detail endpoint (`catalog._units_summary`). It is enough for a card
+ * to warn; the reasons are one click away.
+ *
+ * `state_unit` is the block-level declaration, VERBATIM, and it over-claims:
+ * an SO-101 gripper is `range_0_100` under every configuration
+ * (lerobot's `so_follower.py:59` pins it with no `use_degrees` branch), so a
+ * dataset that says `"deg"` is still mixing two unit systems inside one
+ * 12-column vector. Nothing in the UI should render it as the unit of every
+ * column; it is provenance, not a label.
+ */
+export type DatasetUnitsSummary = {
+  /** Whether the dataset carries a `haller_joint_calibration` block at all.
+   *  False is the foreign case: a corpus pulled off the Hub, which says
+   *  nothing about what its numbers mean. */
+  declared: boolean;
+  state_unit: string | null;
+  /** True only when EVERY column has a usable calibrated range, which is the
+   *  precondition the backend's converter enforces before it will touch a row
+   *  (`lab/units.py`). A dataset that is 11/12 calibrated is not 92 %
+   *  convertible; it is not convertible, because a row with one column left
+   *  in the other unit keeps its width and its plausible magnitudes and
+   *  nothing downstream can see it. */
+  convertible: boolean;
+};
+
+/** The whole provenance, as the detail endpoint carries it next to `features`.
+ *
+ *  `features` can say a column is `float32[12]`; it has no slot for what those
+ *  twelve numbers MEAN, and LeRobot never asks. This is that slot. `note` is
+ *  written server-side rather than composed here so the page and the
+ *  co-training caller that refuses the same dataset describe it identically. */
+export type DatasetUnits = DatasetUnitsSummary & {
+  /** Where the answer came from: the metadata key, or `"undeclared"`. */
+  source: string;
+  joints_total: number;
+  joints_calibrated: number;
+  /** The columns with no usable calibrated range, BY NAME. "1 joint is
+   *  uncalibrated" is a fact nobody can act on; "right_gripper" is a fixable
+   *  dataset. */
+  uncalibrated: string[];
+  reason: string | null;
+  note: string;
+};
+
+/** What a card or a header shows about the unit, or null when there is
+ *  nothing to say. */
+export type UnitsAlert = { label: string; note: string };
+
+/** Said when the dataset declares nothing at all. Only reached when the
+ *  summary shape is all the caller has: the detail endpoint ships its own
+ *  sentence and it is the better one, because it also counts the joints. */
+const UNITS_UNKNOWN_NOTE =
+  "units unknown: this dataset does not declare what unit its joint columns " +
+  "are in. it may be degrees or normalised [-100, 100], and the two look " +
+  "identical in a plot. values are shown exactly as recorded and must not be " +
+  "read as this robot's degrees.";
+
+/** Said when the block is there but incomplete. */
+const UNITS_PARTIAL_NOTE =
+  "units partly declared: not every joint has a calibrated range, so there " +
+  "is no exact conversion for a row. the values stay in whatever unit they " +
+  "were recorded in and must not be read as this robot's degrees.";
+
+/**
+ * The warning to show about a dataset's units, or null when there is none.
+ *
+ * WHY THIS IS A WARNING AND NOT A LABEL. Every number the Lab draws (a
+ * trace, a sweep bar, a gripper guide, a grasp threshold) comes out of
+ * `observation.state` with no unit attached, and the page used to render all
+ * of them identically. On a Haller recording they are degrees. On a foreign
+ * SO-101 recording they may be normalised [-100, 100], and nothing about the
+ * plot distinguishes the two: both are small signed numbers on
+ * joint-shaped trajectories. Reading one as the other does not fail, it
+ * silently moves every threshold and verdict derived from it.
+ *
+ * Takes either shape (`DatasetUnitsSummary` from a card, `DatasetUnits` from
+ * the detail) and prefers the backend's own sentence when it is there, so the
+ * two surfaces never explain one dataset in two different ways.
+ *
+ * Returns null when `convertible` is true and ONLY then: a dataset whose every
+ * column has a calibrated range is one where the map to normalised is exact
+ * and reversible, and there is nothing for an operator to be careful about.
+ * Also null while the field is absent, which is a backend that predates it:
+ * the same "hide me, do not fail" rule every other optional field here
+ * follows.
+ */
+export function unitsAlert(
+  units: (Partial<DatasetUnits> & DatasetUnitsSummary) | null | undefined,
+): UnitsAlert | null {
+  if (!units || units.convertible) return null;
+  const declared = units.declared === true;
+  return {
+    label: declared ? "units partial" : "units unknown",
+    // The server's sentence names the joints and counts them; the constants
+    // here only stand in for the polled card, which is not sent either.
+    note: units.note ?? (declared ? UNITS_PARTIAL_NOTE : UNITS_UNKNOWN_NOTE),
+  };
+}
+
 export type DatasetMarks = {
   keep: number;
   reject: number;
@@ -154,6 +258,10 @@ export type DatasetSummary = {
    *  training on the pre-prune copy silently undoes the prune. */
   is_backup: boolean;
   rig: Rig;
+  /** Three scalars saying whether these numbers are this robot's degrees.
+   *  Optional: a backend that predates it omits the field, and `unitsAlert`
+   *  reads that as "nothing to say" rather than as a warning. */
+  units?: DatasetUnitsSummary;
   /** At least one mark no longer describes the episode it was made about —
    *  an episode was pruned and the survivors renumbered. The marks on this
    *  dataset cannot be trusted until they are re-checked, which is a louder
@@ -293,6 +401,9 @@ export type DatasetDetail = {
    *  policy trained on an observation space the form did not show. */
   policy_inputs_default?: string[];
   rig: Rig;
+  /** The whole unit provenance, beside the `features` it describes. Optional
+   *  for the same reason as `DatasetSummary.units`. */
+  units?: DatasetUnits;
   episodes: LabEpisode[];
 };
 

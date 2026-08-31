@@ -217,6 +217,37 @@ haller-ws-fd. All additive except the DELETE route, which is new:
   box with NO BACKUP OF ANY KIND (verified 2026-08-26: one NVMe, no external
   media, no sync, and the 500G NTFS partition is on the same physical disk).
 
+Added 2026-08-31, when a foreign dataset's metadata was read for the first time
+and neither response had any way to say what unit its numbers were in. Additive,
+both fields optional on an older backend:
+
+* `/lab/datasets` rows carry `units: {declared, state_unit, convertible}`.
+  THREE SCALARS, deliberately, because this endpoint is polled and answers out
+  of `info.json` alone.
+* `detail` carries `units: {declared, source, state_unit, convertible,
+  joints_total, joints_calibrated, uncalibrated[], reason, note}`, beside the
+  `features` it describes. `features` can say a column is `float32[12]`; it has
+  no slot for what those twelve numbers mean, and LeRobot has none either.
+* `convertible` is the field that decides anything, and it is strict: true only
+  when EVERY state column has a usable calibrated range, which is the
+  precondition `lab/units.py` enforces before it will convert a row. A dataset
+  that is 11/12 calibrated is not 92 % convertible; it is not convertible.
+* `state_unit` is the block-level declaration verbatim, and it OVER-CLAIMS on
+  the grippers: an SO-101 gripper is `range_0_100` under every configuration
+  (`so_follower.py:59` pins it with no `use_degrees` branch), so a 12-column
+  vector genuinely mixes two unit systems even when the block says `"deg"`.
+  Render it as provenance, never as the unit of every column.
+* `note` is a sentence written for an operator and is the one to show. It is
+  composed server-side so the page and the co-training caller that refuses the
+  same dataset (`units.joint_ranges_from_info`, which raises where this
+  reports) cannot describe one dataset two different ways.
+
+The point is narrow and worth repeating wherever this is rendered: a number
+from a foreign dataset is not this robot's degrees, and reading it as degrees
+silently moves every threshold and verdict derived from it. Nothing about a
+plot separates the two, both being small signed numbers on joint-shaped
+trajectories, which is why this travels as metadata or not at all.
+
 Repo-ids are QUERY parameters, never path segments: they contain a slash and a
 `{repo_id:path}` route would shadow every sub-resource under it.
 

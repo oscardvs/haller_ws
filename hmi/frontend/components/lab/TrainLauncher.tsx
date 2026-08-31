@@ -31,6 +31,7 @@ import {
   rigLabel,
   trainableCount,
   trainJobName,
+  unitsAlert,
   type DatasetDetail,
   type DatasetSummary,
   type PolicyType,
@@ -196,6 +197,16 @@ export function TrainLauncher({
      the index would name a different take in the summary than the one the
      trainer holds out. */
   const detail = repoId === null ? null : details.get(repoId) ?? null;
+
+  // From the LISTING's three scalars, so the warning is on screen the moment a
+  // dataset is picked rather than one request later. The detail's sentence is
+  // read separately below and only for the tooltip: handing `detail` itself to
+  // a helper makes the React compiler treat it as possibly mutated and it then
+  // refuses to preserve the memos above that depend on it.
+  const pickedUnits = unitsAlert(picked?.units);
+  // The server's own sentence, which names the joints with no calibrated
+  // range. A plain string read, for the reason just above.
+  const pickedUnitsNote = detail?.units?.note;
 
   useEffect(() => {
     if (!repoId || details.has(repoId)) return;
@@ -421,6 +432,24 @@ export function TrainLauncher({
             picked && !pickedIsBackup ? (
               <>
                 {picked.task ?? "no task recorded"} · {rigLabel(picked.rig)}
+                {/* On the launcher because this is where the consequence is
+                    paid: a policy trained on columns whose unit nobody
+                    declared learns that unit, and the run it produces then
+                    commands the arms in it. The chips on the shelf and in
+                    review warn about reading the numbers; this warns about
+                    fitting them. */}
+                {pickedUnits && (
+                  <>
+                    {" · "}
+                    <span
+                      style={{ color: "var(--haller-warn)" }}
+                      title={pickedUnitsNote ?? pickedUnits.note}
+                      data-units-alert
+                    >
+                      {pickedUnits.label}
+                    </span>
+                  </>
+                )}
               </>
             ) : pickedIsBackup ? (
               <span style={{ color: "var(--haller-warn)" }}>

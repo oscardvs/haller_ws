@@ -41,7 +41,7 @@ from haller_hmi.api.deps import LabDeps
 from haller_hmi.lab import catalog, runs
 from haller_hmi.lab.routes_datasets import build_datasets_router
 
-from ._dataset import CLEAN, STILL, make_dataset, write_review
+from ._dataset import CLEAN, STILL, make_dataset, state_names, write_review
 
 #: The one dataset almost every test builds.
 REPO = "local/smoke"
@@ -64,7 +64,22 @@ LOOPBACK_HOST = "127.0.0.1"
 #: `review_stale` and `tasks`.
 DATASET_ROW_KEYS = frozenset({
     "repo_id", "task", "episodes", "frames", "duration_s", "size_bytes",
-    "marks", "is_backup", "rig", "stale",
+    "marks", "is_backup", "rig", "stale", "units",
+})
+
+#: The three scalars a CARD's `units` carries, EXACTLY. Deliberately smaller
+#: than the detail's block: `GET /lab/datasets` is polled, so the joint-name
+#: lists and the operator-facing sentence live on the detail endpoint. Pinned
+#: as an exact set in both directions, because the failure that matters is not
+#: a missing field but the full block being pushed through both wires by
+#: someone tidying up the "duplication" (`catalog._units_summary`).
+UNITS_SUMMARY_KEYS = frozenset({"declared", "state_unit", "convertible"})
+
+#: The full block a DETAIL response carries. `note` is the sentence an operator
+#: reads; `uncalibrated` names the joints that made `convertible` false.
+UNITS_DETAIL_KEYS = frozenset({
+    "declared", "source", "state_unit", "convertible", "joints_total",
+    "joints_calibrated", "uncalibrated", "reason", "note",
 })
 
 #: A detail/episodes-page episode, EXACTLY. `arms` and `videos` are the
@@ -277,6 +292,70 @@ def test_stale_is_true_when_the_marks_no_longer_describe_the_dataset(home, clien
     assert _rows(client)[REPO]["stale"] is True
 
 
+def test_a_card_says_when_it_does_not_know_what_unit_the_numbers_are_in(
+    home, client,
+):
+    """The foreign dataset, on the polled endpoint.
+
+    `make_dataset` with no `gripper_range` writes no `haller_joint_calibration`
+    block at all, which is exactly the shape a dataset pulled off the Hub has
+    (`armnet/armnetbench_v01_lerobot_bimanual_so101`, read 2026-08-31). Its
+    joint columns may be degrees or normalised [-100, 100] and the two are
+    indistinguishable by inspection, so the card has to be able to say so.
+
+    A card that cannot carry this renders a foreign corpus identically to one
+    of ours, and every threshold and verdict downstream is then read in a unit
+    nobody declared.
+    """
+    make_dataset(home / REPO, n_episodes=1)
+
+    units = _rows(client)[REPO]["units"]
+
+    assert set(units) == set(UNITS_SUMMARY_KEYS), (
+        f"unexpected {sorted(set(units) - UNITS_SUMMARY_KEYS)}, "
+        f"missing {sorted(UNITS_SUMMARY_KEYS - set(units))}"
+    )
+    assert units["declared"] is False
+    assert units["state_unit"] is None
+    assert units["convertible"] is False
+
+
+def test_a_haller_recorded_card_declares_its_unit(home, client):
+    """The other half of the same field, so the warning is not just the
+    default. `gripper_range` writes the calibration block a Haller recording
+    carries, and with a usable range on every column the map to normalised is
+    exact and reversible (`lab/units.py`)."""
+    make_dataset(home / REPO, n_episodes=1, gripper_range=(-10.0, 100.0))
+
+    units = _rows(client)[REPO]["units"]
+
+    assert units == {
+        "declared": True, "state_unit": "deg", "convertible": True,
+    }
+
+
+def test_the_card_carries_the_summary_and_not_the_whole_block(home, client):
+    """The listing is POLLED and the detail is not, and that is the whole
+    reason two shapes of this field exist (`catalog._units_summary`).
+
+    Pinned because the tempting edit is to delete the summary as duplication
+    and push `dataset_units` through both wires. That ships a joint-name list
+    and two English sentences per dataset on a request the page repeats on a
+    timer, over the LAN the Quest is on. The three scalars are enough for a
+    card to warn; the reasons belong on the page you open next.
+    """
+    make_dataset(home / REPO, n_episodes=1)
+
+    card = _rows(client)[REPO]["units"]
+    detail = _detail(client)["units"]
+
+    assert set(card) < set(detail), "the card must be a strict subset of the block"
+    for key in UNITS_SUMMARY_KEYS:
+        assert card[key] == detail[key], f"the two shapes disagree on {key!r}"
+    for key in ("note", "reason", "uncalibrated", "joints_total"):
+        assert key not in card, f"the polled card is carrying {key!r}"
+
+
 # ============================================================================
 # GET /lab/datasets/detail
 # ============================================================================
@@ -300,6 +379,61 @@ def test_detail_says_which_columns_the_policy_should_read(home, client):
 
     assert body["policy_inputs_default"] == [
         "observation.state", "observation.images.top"]
+
+
+def test_the_detail_carries_the_whole_unit_provenance(home, client):
+    """`features` says a column is `float32[12]`; this says what those twelve
+    numbers MEAN, which `features` has no slot for and LeRobot never asks.
+
+    The sentence is asserted by its point, not by its wording: a number from a
+    foreign dataset is not this robot's degrees, and reading it as degrees
+    silently moves every threshold and verdict derived from it. It is written
+    server-side and shipped rather than composed in the browser, so the page
+    and the co-training caller that refuses the same dataset
+    (`units.joint_ranges_from_info`) cannot end up describing it differently.
+    """
+    make_dataset(home / REPO, n_episodes=1)
+
+    units = _detail(client)["units"]
+
+    assert set(units) == set(UNITS_DETAIL_KEYS), (
+        f"unexpected {sorted(set(units) - UNITS_DETAIL_KEYS)}, "
+        f"missing {sorted(UNITS_DETAIL_KEYS - set(units))}"
+    )
+    assert units["declared"] is False
+    assert units["convertible"] is False
+    assert units["joints_total"] == 6
+    assert units["joints_calibrated"] == 0
+    assert units["uncalibrated"] == list(state_names("solo"))
+    assert "must not be read as degrees" in units["note"]
+
+
+def test_the_detail_names_the_joints_that_made_it_unconvertible(home, client):
+    """The half-migrated dataset, which is likelier on this box than the
+    foreign one: a corpus recorded across a recalibration, or one whose block
+    predates a joint. 5 of 6 calibrated is not 83 % convertible; it is not
+    convertible, because a row converted column by column keeps its width and
+    its plausible magnitudes with one column left in the other unit.
+
+    The joint NAME is what has to reach the wire. "1 joint is uncalibrated" is
+    a fact nobody can act on; "gripper.pos is uncalibrated" is a fixable
+    dataset."""
+    make_dataset(home / REPO, n_episodes=1, gripper_range=(-10.0, 100.0))
+    path = home / REPO / "meta" / "info.json"
+    info = json.loads(path.read_text())
+    dropped = info["haller_joint_calibration"]["joints"].pop("gripper.pos")
+    assert dropped, "the fixture must have had a gripper.pos entry to remove"
+    path.write_text(json.dumps(info))
+
+    units = _detail(client)["units"]
+
+    assert units["declared"] is True
+    assert units["convertible"] is False
+    assert units["joints_calibrated"] == 5
+    assert units["uncalibrated"] == ["gripper.pos"]
+    # The count is in the sentence and the NAME is in the list beside it: the
+    # sentence is what an operator reads first, the list is what they act on.
+    assert "1 of 6" in units["note"]
 
 
 def test_a_detail_episode_carries_the_wire_names_and_only_those(home, client):

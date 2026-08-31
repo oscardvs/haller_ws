@@ -36,6 +36,7 @@ import {
   reason,
   REMOTE_REFUSED,
   rigLabel,
+  unitsAlert,
   type DatasetDetail,
   type DatasetSummary,
   type LabEpisode,
@@ -644,6 +645,12 @@ export function ReviewPane({
 
   const task = detail?.episodes.find((e) => e.task)?.task ?? summary?.task ?? null;
   const stale = summary?.stale === true;
+  // The DETAIL's block first, because it is the one carrying the server's
+  // sentence: it names the joints that have no calibrated range and counts
+  // them, where the polled card can only say that something is wrong. The
+  // card's three scalars stand in until the detail lands, so the warning is
+  // on screen from the first paint rather than one request later.
+  const units = unitsAlert(detail?.units ?? summary?.units);
   const videoKeys = detail?.video_keys ?? [];
 
   return (
@@ -677,6 +684,23 @@ export function ReviewPane({
             title={STALE_NOTE}
           >
             stale marks
+          </Chip>
+        )}
+
+        {/* Beside the rig and the marks, not buried in a details panel: every
+            number on this page (the traces, the gripper guides, the sweep
+            totals, the thresholds a verdict was decided by) is drawn from
+            columns whose unit this chip is the only statement about. */}
+        {units && (
+          <Chip
+            on
+            colour="var(--haller-warn)"
+            tabIndex={-1}
+            className="pointer-events-none"
+            title={units.note}
+            data-units-alert
+          >
+            {units.label}
           </Chip>
         )}
 

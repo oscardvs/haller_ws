@@ -286,6 +286,15 @@ def _dataset_wire(row: dict) -> dict:
     `seconds -> duration_s`, `review -> marks`, `review_stale -> stale`. The
     card deliberately carries no episode list: this endpoint is POLLED, and
     `catalog.list_datasets` opens no parquet to answer it.
+
+    `units` is `catalog._units_summary`, THREE SCALARS AND NOT THE FULL BLOCK,
+    and the difference is the same polling rule: the card gets
+    `declared`/`state_unit`/`convertible`, while the joint-name lists and the
+    operator-facing sentence stay on `_detail_wire`, one click away. Carried at
+    all because a card that cannot say "units unknown" is a card that shows a
+    foreign dataset exactly as it shows one of ours, and the two are
+    indistinguishable by inspection: both are small signed numbers with
+    joint-shaped trajectories (`catalog.dataset_units`).
     """
     return {
         "repo_id": row["repo_id"],
@@ -298,6 +307,7 @@ def _dataset_wire(row: dict) -> dict:
         "is_backup": row["is_backup"],
         "rig": row["rig"],
         "stale": row["review_stale"],
+        "units": row["units"],
     }
 
 
@@ -314,6 +324,14 @@ def _detail_wire(detail: dict) -> dict:
 
     `episode_frames` is the one thing dropped: it is `{index: frames}`, JSON
     would stringify its keys, and every value is already on its episode.
+
+    `units` is the FULL block here, not the listing's three scalars: this is
+    the response that carries `features`, and `features` can say a column is
+    `float32[12]` while having no slot at all for what those twelve numbers
+    MEAN. So the two travel together, and the extra fields the detail carries
+    (`uncalibrated`, `reason`, `note`) are the ones an operator needs after
+    reading "units unknown" on a card: which joints, why, and the sentence
+    saying the values must not be read as this robot's degrees.
     """
     return {
         "repo_id": detail["repo_id"],
@@ -329,6 +347,7 @@ def _detail_wire(detail: dict) -> dict:
         # trained on an observation space the form never showed.
         "policy_inputs_default": detail["policy_inputs_default"],
         "rig": detail["rig"],
+        "units": detail["units"],
         "joints": detail["joints"],
         "tasks": detail["tasks"],
         "total_episodes": detail["total_episodes"],

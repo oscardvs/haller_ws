@@ -16,6 +16,13 @@
  * Backups are shown, not hidden. A prune leaves the pre-prune copy behind, and
  * an operator who cannot see it cannot delete it — but training on it silently
  * undoes the prune, so the card says so and wears the warn colour.
+ *
+ * A card also says when the backend cannot tell what unit the numbers in a
+ * corpus are in. It carries three scalars for that and not the reasons
+ * (`catalog._units_summary`, because this endpoint is polled), and it is on
+ * the card rather than one page deeper because a foreign dataset and one of
+ * ours are indistinguishable by inspection: the warning has to be readable
+ * before the dataset is opened, marked, or trained on.
  */
 import { useCallback, useEffect, useState } from "react";
 
@@ -24,6 +31,7 @@ import {
   lab,
   reason,
   rigLabel,
+  unitsAlert,
   type DatasetSummary,
 } from "@/lib/lab";
 import {
@@ -152,6 +160,12 @@ function DatasetCard({
   onOpen: (repoId: string) => void;
 }) {
   const rig = rigLabel(d.rig);
+  // A card is polled, so it gets the three scalars and not the sentence: the
+  // label is the whole warning here, and the note it hovers is this file's own
+  // copy. What it is warning about is that this corpus's numbers may not be
+  // this robot's degrees, and every threshold and verdict drawn from them
+  // moves silently if they are read as degrees anyway.
+  const units = unitsAlert(d.units);
   return (
     <button
       type="button"
@@ -159,9 +173,16 @@ function DatasetCard({
       aria-current={selected ? "true" : undefined}
       aria-label={
         `open ${d.repo_id} — ${d.episodes} episode${d.episodes === 1 ? "" : "s"}, ` +
-        rig + (d.is_backup ? ", " + BACKUP_NOTE : "")
+        rig + (d.is_backup ? ", " + BACKUP_NOTE : "") +
+        (units ? ", " + units.label : "")
       }
-      title={d.is_backup ? BACKUP_NOTE : d.repo_id}
+      title={
+        // Two lines rather than one: the chips inside the card are
+        // pointer-events-none so the card owns every tooltip, and a units
+        // warning must not cost the repo-id the operator hovers for.
+        [d.is_backup ? BACKUP_NOTE : d.repo_id, units?.note]
+          .filter(Boolean).join("\n")
+      }
       className={
         "flex min-w-0 flex-col gap-1 overflow-hidden rounded-md border border-border " +
         "bg-[var(--haller-inset)] p-1.5 text-left transition-colors " +
@@ -191,6 +212,17 @@ function DatasetCard({
             className="pointer-events-none"
           >
             backup
+          </Chip>
+        )}
+        {units && (
+          <Chip
+            on
+            colour="var(--haller-warn)"
+            tabIndex={-1}
+            className="pointer-events-none"
+            data-units-alert
+          >
+            {units.label}
           </Chip>
         )}
         <Chip tabIndex={-1} className="pointer-events-none">
