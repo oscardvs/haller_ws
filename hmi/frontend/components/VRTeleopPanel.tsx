@@ -158,6 +158,12 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   // Memoised because half the callbacks below take it as a dependency, and a
   // fresh array every render would rebuild every one of them.
   const armIds = useMemo(() => arms.map((a) => a.id), [arms]);
+  // Is there a bench to re-deal at all? `/sim/*` exists only when some arm is
+  // `source: sim` — that is the backend's own test for a world, not a separate
+  // flag — so on the real tower every one of those routes answers 409/503
+  // forever. `some`, not `every`: a hybrid rig has a MuJoCo bench in it and
+  // that bench still wants dealing between takes.
+  const hasBench = useMemo(() => arms.some(isSimArm), [arms]);
   const [supported, setSupported] = useState<boolean | null>(null);
   const [inSession, setInSession] = useState(false);
   const [xrMode, setXrMode] = useState<TeleopXRSession["mode"] | null>(null);
@@ -264,6 +270,14 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
   const takeEpochRef = useRef(0);
   // What ARM settled on, so ROLL writes to the same dataset the gate opened.
   const gatePairRef = useRef<{ repoId: string; task: string } | null>(null);
+  // The seed the bench in front of the operator was dealt from.
+  //
+  // Drawn HERE rather than left to the server because a seedless
+  // /sim/scene/reset answers `last_seed: null` — it seeds from fresh entropy
+  // and reports no number — so a scene nobody named is a scene nobody can ask
+  // for again. Holding it makes "re-record" mean what the operator thinks it
+  // means: the SAME bench, not merely another one (see `redealBench`).
+  const benchSeedRef = useRef<number | null>(null);
   // When the operator last asked for home during the prompt and was told no.
   const runTakeRef = useRef<((ev: TakeEvent) => void) | null>(null);
   const dirtyTuneRef = useRef<Set<string>>(new Set());
@@ -592,6 +606,41 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
    *  `effectiveRepoId`, so a dataset the desk RESUMED is the repo this take
    *  lands in too. Recomposing here would split the dataset between desk and
    *  headset. */
+  /** Re-deal the sim bench between takes.
+   *
+   *  WHY THIS RUNS AT ALL: nothing else resets the scene on the server path —
+   *  the only reset is this endpoint, and until now no page called it. A
+   *  headset session therefore recorded every take from wherever the last one
+   *  left the cubes, and after a SAVED take the cube is sitting on the place
+   *  zone, so take N+1 begins with the task already done. `TaskMonitor` scores
+   *  `any` cube on the pad, so that take auto-labels SUCCESS in ~18 frames
+   *  with the operator not having moved. The scripted path hit the same class
+   *  of bug through wide jitter (`RandomSpec.keep_place_zone_clear`); this is
+   *  the teleop half of it, and jitter cannot fix this one.
+   *
+   *  `fresh: false` reproduces the bench exactly — a re-record is the same
+   *  scene again, which is the only reading of "re-record" that makes the
+   *  retry comparable to the take it replaces.
+   *
+   *  Never throws. A failed re-deal must not turn into a failed STOP: the take
+   *  is already banked by the time this runs, and the operator's next take
+   *  starting on a stale bench is a data problem they can see and fix, while a
+   *  toast saying the stop failed is a lie about a take that is safely on disk.
+   *  A rig with no sim world (the real tower) answers 409/503 here forever,
+   *  which is why the failure is logged quietly rather than surfaced. */
+  const redealBench = useCallback(async (opts: { fresh: boolean }) => {
+    if (!hasBench) return;
+    if (opts.fresh || benchSeedRef.current === null) {
+      // 2^31, so it is a plain int for pydantic and reads sanely in a log.
+      benchSeedRef.current = Math.floor(Math.random() * 2 ** 31);
+    }
+    try {
+      await api.simSceneReset(benchSeedRef.current);
+    } catch (e) {
+      console.warn("[vr] bench not re-dealt", e);
+    }
+  }, [hasBench]);
+
   const armAct = useCallback(async () => {
     const rec = useRecorder.getState();
     const task = rec.task.trim();
@@ -605,6 +654,18 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       repoIdOverride: rec.repoIdOverride, hfUser: rec.hfUser, task,
     });
     gatePairRef.current = { repoId, task };
+    // The FIRST take of a session, and only that one — `stopAct` deals every
+    // later bench. `sim_seed` defaults to null, which the config documents as
+    // "don't reset at startup", so without this take 1 is the builder's
+    // unjittered home layout on every session and every restart: the one
+    // scene guaranteed to be over-represented in the dataset. `redealBench`
+    // draws a seed when it has none, so the null check is the whole condition.
+    //
+    // NOT awaited, and that is the point: ARM is the operator's B press and
+    // the gate below is what refuses a bad take, so nothing about opening it
+    // may wait on a bench call. The deal lands during the ARM round-trip and
+    // long before ROLL, which is a second, deliberate press away.
+    if (benchSeedRef.current === null) void redealBench({ fresh: true });
     try {
       const st = await api.recordArm(repoId, task);
       gateServerRef.current = true;
@@ -636,7 +697,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       toast.error(`arm refused: ${refusalText(e)}`);
       settleTake("idle");
     }
-  }, [buzzBoth, refreshEpisodes, settleTake]);
+  }, [buzzBoth, redealBench, refreshEpisodes, settleTake]);
 
   /** ROLL: frames start landing. Under a local gate there is nothing to roll
    *  into, so this is the plain /record/start the page held back — which is
@@ -734,6 +795,11 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       }
       void refreshEpisodes(st?.repo_id);
       await rec.refresh();
+      // The bench, for the take AFTER this one. A saved take gets a new scene;
+      // a discarded one gets its own scene back, so the retry is a retry.
+      // Ordered after the save has landed and before the re-arm, so no reset
+      // can ever run against a recorder that is still holding an episode open.
+      await redealBench({ fresh: act.save });
       // A local gate has no server-side rearm — hold ARMED here again, which
       // re-probes /record/arm and upgrades the moment it exists.
       if (!gateServerRef.current && act.rearm) await armAct();
@@ -741,7 +807,7 @@ export function VRTeleopPanel({ arms }: { arms: ConfigArm[] }) {
       toast.error(`stop refused: ${refusalText(e)}`);
       settleTake(await recorderTakeState());
     }
-  }, [armAct, refreshEpisodes, settleTake]);
+  }, [armAct, redealBench, refreshEpisodes, settleTake]);
 
   /** One step of the take machine: the pure transition, the cue it earns,
    *  then the REST act it demands. The sticks, the A/X hold, the desktop

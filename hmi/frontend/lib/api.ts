@@ -155,6 +155,18 @@ export const api = {
   humanTeleopReattach: (token: string) =>
     postJson<{ ok: boolean } & HumanTeleopStatus>(
       "/teleop/human/reattach", { token }),
+  /** Re-deal the sim bench. `seed` null means fresh entropy; passing one back
+   *  reproduces that scene exactly, which is how a re-record gets the SAME
+   *  bench rather than a new one.
+   *
+   *  `home_arms` is left false here on purpose: sending the arms home mid-
+   *  session moves the ROBOT, and the endpoint 409s outright while an episode
+   *  is open (homing under a rolling recorder would splice a move nobody
+   *  demonstrated into the action column). A reset between takes moves the
+   *  bench and nothing else. */
+  simSceneReset: (seed?: number | null) =>
+    postJson<{ ok: true } & SimSceneSnapshot>(
+      "/sim/scene/reset", seed == null ? {} : { seed }),
   recordStatus: () => getJson<RecordStatus>("/record/status"),
   recordStart: (repoId: string, task: string) =>
     postJson<{ ok: true } & RecordStatus>("/record/start", { repo_id: repoId, task }),
@@ -339,6 +351,23 @@ export type CollisionStatus = {
  * Optional because a backend that predates the gate reports only the boolean.
  */
 export type RecordState = "idle" | "armed" | "recording";
+
+/** What `GET /sim/scene` and `POST /sim/scene/reset` both answer with.
+ *
+ *  `last_seed` is the seed the bench was RESET FROM, and it is null whenever
+ *  the caller passed none — the server seeds from fresh entropy and does not
+ *  invent a number to report back, so that scene cannot be asked for again.
+ *  A caller that needs to reproduce a bench must therefore draw the seed
+ *  ITSELF and pass it; see the take loop in `VRTeleopPanel`. */
+export type SimSceneSnapshot = {
+  cubes: { name: string; pos: number[]; quat: number[]; rgba: number[] }[];
+  lights: { name: string; pos: number[]; diffuse: number[] }[];
+  cameras: { name: string; pos: number[] }[];
+  last_seed: number | null;
+  randomized: boolean;
+  mirrored: boolean;
+  reset_count: number;
+};
 
 export type RecordStatus = {
   recording: boolean;

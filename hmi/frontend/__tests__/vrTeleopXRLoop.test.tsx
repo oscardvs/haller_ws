@@ -51,8 +51,9 @@ const gate = vi.hoisted(() => ({
 }));
 
 const { recordArm, recordRoll, recordStop, humanTeleopHome, estop,
-        humanTeleopStop, recordStart } = vi.hoisted(() => ({
+        humanTeleopStop, recordStart, simSceneReset } = vi.hoisted(() => ({
   recordArm: vi.fn(),
+  simSceneReset: vi.fn(),
   recordRoll: vi.fn(),
   recordStop: vi.fn(),
   humanTeleopHome: vi.fn(),
@@ -85,6 +86,7 @@ vi.mock("../lib/api", async (importOriginal) => {
       recordStart,
       recordRoll,
       recordStop,
+      simSceneReset,
       estop,
     },
   };
@@ -266,6 +268,9 @@ beforeEach(async () => {
   recordRoll.mockImplementation(async () => settle("recording"));
   recordStop.mockImplementation(async (_save: boolean, rearm?: boolean) =>
     settle(rearm ? "armed" : "idle"));
+  simSceneReset.mockImplementation(async (seed?: number | null) =>
+    ({ ok: true, cubes: [], lights: [], cameras: [], last_seed: seed ?? null,
+       randomized: true, mirrored: false, reset_count: 1 }));
   humanTeleopHome.mockResolvedValue({ sides: ["left", "right"] });
   estop.mockResolvedValue({ ok: true });
   humanTeleopStop.mockResolvedValue({ ok: true });
@@ -618,5 +623,81 @@ describe("a /record/status read that resolves across a transition", () => {
 
     await pressB(hs, t);                               // armed -> rolling
     expect(recordRoll).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---- the bench, between takes ----------------------------------------------
+
+describe("re-dealing the sim bench around a take", () => {
+  /** Seeds the panel asked for, in order. */
+  const seeds = () => simSceneReset.mock.calls.map((c) => c[0] as number | null);
+
+  it("deals a bench before the first take, so take 1 is not always the same one",
+     async () => {
+    // `sim_seed` defaults to null — the config's documented "don't reset at
+    // startup" — so a backend that has just booted stands on the builder's
+    // unjittered home slots. Without this deal, every session's take 1 is
+    // that identical layout, and it is the one scene a dataset over-samples
+    // no matter how wide the jitter is set.
+    render(<VRTeleopPanel arms={ARMS} />);
+    await clickEnterPassthrough();
+
+    await pressB(hs, 1000);                    // idle -> armed
+    expect(simSceneReset).toHaveBeenCalledTimes(1);
+    expect(typeof seeds()[0]).toBe("number");  // named, therefore reproducible
+  });
+
+  it("re-deals with a NEW seed after a take is saved", async () => {
+    // The reason this exists at all: nothing else on the server path resets
+    // the scene, so take N+1 used to start wherever take N left the cubes —
+    // and after a SUCCESSFUL take that means the cube is already on the place
+    // zone, which `TaskMonitor` scores as a success in ~18 frames with the
+    // operator not having moved.
+    const t = await intoARollingTake();
+    const before = simSceneReset.mock.calls.length;
+
+    await pressB(hs, t);                       // end the take: {save, rearm}
+
+    expect(simSceneReset.mock.calls.length).toBe(before + 1);
+    const [first, last] = [seeds()[0], seeds()[seeds().length - 1]];
+    expect(last).not.toBe(first);              // a save earns a new scene
+  });
+
+  it("waits for the take to be banked before it moves anything", async () => {
+    // Ordering, not politeness: a reset that overtook the save would move the
+    // cubes under a recorder still holding the episode open, and the frames
+    // it wrote last would show a bench that teleported.
+    const t = await intoARollingTake();
+    const order: string[] = [];
+    recordStop.mockImplementationOnce(async () => {
+      order.push("stop");
+      return { ...gate.status, state: "armed", recording: false };
+    });
+    simSceneReset.mockImplementationOnce(async () => {
+      order.push("reset");
+      return { ok: true, cubes: [], lights: [], cameras: [], last_seed: 1,
+               randomized: true, mirrored: false, reset_count: 2 };
+    });
+
+    await pressB(hs, t);
+
+    expect(order).toEqual(["stop", "reset"]);
+  });
+
+  it("never asks a real rig for a bench it does not have", async () => {
+    // `/sim/*` exists only when some arm is `source: sim`; on the tower every
+    // one of those routes answers 409/503 forever. A take loop that fired
+    // them anyway would put a failing request on the operator's path once per
+    // take, for a bench that is not there.
+    const REAL = ARMS.map((a) => ({ ...a, port: "/dev/ttyACM0", source: "real" as const }));
+    render(<VRTeleopPanel arms={REAL} />);
+    await clickEnterPassthrough();
+
+    let t = await pressB(hs, 1000);
+    t = await pressB(hs, t);
+    await pressB(hs, t);
+
+    expect(recordStop).toHaveBeenCalled();     // the take loop still ran
+    expect(simSceneReset).not.toHaveBeenCalled();
   });
 });
