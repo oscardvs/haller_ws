@@ -1,0 +1,246 @@
+---
+title: Where Haller is, and why π0.5
+description: The honest state of the project — a 45% ACT baseline whose failures are all missed grasps, two exhausted training levers, and why the next move is a generalist policy on the same data. Includes a walk through π0.5's actual mechanism, verified against the installed source.
+---
+
+Haller can pick up a cube and put it in a box **45% of the time**. This page explains how that number was reached, why the obvious ways to improve it have already been tried and measured, what π0.5 actually does inside, and what the run currently training is meant to settle.
+
+It is written to be read by someone who has not been following along, and it keeps the dead ends in. The dead ends are most of the value: two of them cost real time, and one of them was killed by a two-minute measurement instead of a two-hour experiment.
+
+## 1. Where the project actually is
+
+One SO-101 arm. One camera, looking down at the table. No wrist cameras — the rig did not have any when the data was recorded.
+
+| | |
+|---|---|
+| Episodes recorded | 113 |
+| Kept after review | **91** (22 rejected) |
+| Median episode | 19.5 s |
+| Frames | 74,382 at 30 fps |
+| Task | pick up the cube, place it in the box |
+| Policy | ACT, chunk size 100 |
+| **Real-world success** | **9/20 = 45%** (95% Wilson CI **26–66%**) |
+
+The headline number matters less than the shape of the failures. Of the eleven failed attempts, **almost all were missed grasps**, with a few grasped-then-dropped. There were **no** wrong-place failures and **no** freezing.
+
+That absence is the interesting part. A policy that has not seen enough situations fails by going to the wrong place, or by stalling when the scene does not match anything it knows. Haller does neither. It goes to the right place, at the right time, and closes on air by a few millimetres.
+
+That is a **precision** signature, and precision failures point somewhere very specific.
+
+## 2. Why more training and more data are not the lever
+
+The instinct after a 45% result is to train longer or record more. Both were tried. Both are measured. Neither is the lever.
+
+**Training longer bought almost nothing.** Eighteen times the training steps — 5k to 90k — moved held-out loss from 0.4213 to 0.4026. That is a **4.4% improvement for 18× the compute**, and the curve was still creeping down at the end. Real, but a terrible exchange rate.
+
+**Augmentation confirmed the ceiling is not overfitting.** The train/validation gap was over 5× at 19 epochs, which looks exactly like a model memorising its training set. So augmentation was switched on as a regulariser, and it *worked as a regulariser*: training L1 rose from 0.0598 to 0.0723, and the gap narrowed from 6.73× to 5.65×. The ceiling did not move — best validation loss was 0.4083 against 0.4026 without.
+
+That result is worth sitting with, because it settles more than it appears to:
+
+<Callout type="info">
+The anti-overfitting treatment took effect, and the ceiling did not move. **So the ceiling was never overfitting.** And since more data acts largely as a regulariser too, more data of the same kind is unlikely to move it either.
+</Callout>
+
+The reason is visible in the failure mode. At the instant that decides a grasp, the gripper is directly above the cube — and from a top-down camera, the gripper is *occluding the very thing it is trying to grasp*. The few-millimetre relationship that determines success is not in the image.
+
+More episodes give you more samples of an observation that is ambiguous exactly when it matters. That is an **observability** problem, not a sample-count problem. No amount of additional data from the same viewpoint conjures information the viewpoint does not contain.
+
+The fix is a camera that can see the gripper and the cube together. That is the wrist camera, and it is the reason the project is not currently grinding on this dataset.
+
+## 3. The measurement bottleneck
+
+There is a harder constraint underneath all of this, and it shapes every decision.
+
+**Rollout trials are the scarce resource, not GPU time.** Every success rate on this page was scored by a human watching an arm and writing down yes or no. Twenty of those take an evening. Twenty thousand training steps take a few hours and no attention at all.
+
+And twenty trials cannot answer the questions people want to ask of them:
+
+<TrialResolution />
+
+At 20 trials, a policy that is genuinely at 45% and one genuinely at 70% produce confidence intervals that overlap. A no-change re-test of the same checkpoint returns ≥12/20 about **13%** of the time — so a "promising" result is more often luck than progress.
+
+The consequence is a working rule: **screen changes offline before spending trials on them.** That rule just paid for itself.
+
+### The ensembling experiment, killed for the price of one rollout
+
+Temporal ensembling was the leading candidate to fix missed grasps: it is inference-only, costs no retraining, and makes a chunked policy look at the world every step instead of every 3.33 seconds. Two keys in a config file.
+
+Offline replay of recorded episodes through the modified checkpoint showed it **cuts the gripper's peak closing speed by 32%** at the default coefficient of `+0.01`, and by 18% at `−0.05`. Against a policy whose dominant failure is *already* missed grasps, that is precisely the wrong direction.
+
+It also turned out that at the default coefficient, ensembling is on average *staler* than the baseline it replaces — the weighting runs opposite to everyone's intuition. That argument, with the arithmetic, is on its own page:
+
+<Callout type="info">
+[**Temporal ensembling**](/docs/data/temporal-ensembling) — the overlapping-chunk picture, the exponential weighting whose sign surprises people, and why the mechanism is a low-pass filter rather than a freshness fix.
+</Callout>
+
+Forty planned rollouts, cancelled on a measurement that took two minutes. That is the bottleneck rule working.
+
+## 4. What π0.5 actually is
+
+With inference tricks ruled out and more same-viewpoint data ruled out, the remaining question is whether the **policy architecture** is the limit. That is what π0.5 is here to answer.
+
+Everything in this section was verified against the installed `lerobot/policies/pi05/` source rather than recalled from papers.
+
+π0.5 is a **vision-language model with a separate action expert** bolted alongside it. Two networks, deliberately different sizes:
+
+| Half | Size | Job |
+|---|---|---|
+| PaliGemma backbone | `gemma_2b` | look at the scene, read the instruction, build a rich representation of both |
+| Action expert | `gemma_300m` | turn that representation into joint numbers |
+
+The split exists because the two jobs have completely different requirements. Understanding "the red cube on the left" needs world knowledge and scale — that is what pretraining on internet-scale image-text data buys, and it is why the backbone is a real VLM rather than a vision encoder. Emitting a smooth 32-dimensional trajectory needs neither; it needs speed, because it happens repeatedly per decision.
+
+<Pi05Forward />
+
+### One vision tower, any number of cameras
+
+`embed_prefix` loops over the images and calls the *same* `embed_image` on each. There is no per-camera parameter anywhere in the model, so the architecture is genuinely N-camera flexible — you can hand it one camera or five without changing a weight.
+
+The cost knob is subtle and worth knowing, because it is easy to get backwards. It is `len(config.image_features)` — what the config **declares** — not how many images you actually put in the batch. A declared-but-absent camera is filled in with a `−1` image and a zero attention mask, and that padded view still goes through the full tower:
+
+```python
+# modeling_pi05.py — _preprocess_images
+for _num_empty_cameras in range(len(missing_img_keys)):
+    img = torch.ones_like(img) * -1   # padded with -1 for SigLIP
+    mask = torch.zeros_like(mask)     # mask is zero for empty cameras
+```
+
+Omitting a camera from the batch saves nothing. Removing it from the config saves everything. (If *every* declared key is missing, it raises rather than guessing.)
+
+Images are resized to **224×224** — `DEFAULT_IMAGE_SIZE` — through `resize_with_pad_torch`, which preserves aspect ratio and letterboxes rather than squashing, then rescales from [0, 1] to [−1, 1] for SigLIP.
+
+### The state is not embedded. It is written into the prompt.
+
+This is the most surprising thing about π0.5 if you arrive from ACT, and it is easy to miss because there is no state encoder to find.
+
+<StateAsText />
+
+The pre-processor normalises the joint vector to [−1, 1], bins each value into one of **256** integers, and splices those integers into the language prompt as text:
+
+```python
+# processor_pi05.py
+discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+```
+
+The model reads the arm's pose the same way it reads the instruction. `predict_action_chunk` passes no state tensor at all — the source comments it as *"no separate state needed for PI05"*.
+
+This is also why the normalisation scheme is load-bearing rather than bookkeeping. π0.5 sets both state and action normalisation to **`QUANTILES`**, which maps `q01`→−1 and `q99`→+1. The bin edges are fixed at ±1, so the scale determines the resolution: with min/max normalisation, a single outlier stretches the range and every ordinary pose collapses into a handful of bins. Quantiles keep the 256 bins spread across poses that actually occur. A dataset without `q01`/`q99` in its stats does not train at all — it raises on the first batch.
+
+### 32 dimensions in, your dimensions out
+
+State and action are padded to `max_state_dim` / `max_action_dim`, both **32**, and cut back on the way out:
+
+```python
+# modeling_pi05.py — predict_action_chunk
+original_action_dim = self.config.output_features[ACTION].shape[0]
+actions = actions[:, :, :original_action_dim]
+```
+
+The training loss is truncated the same way, so the padded dimensions never contribute a gradient.
+
+<Callout type="warn">
+**A small action space is not a blocker, and it is worth saying plainly because the opposite assumption is very natural.** Haller's single arm is 6-dimensional against a model that thinks in 32. That needs no architectural change, no wrapper, and no padding of your own — the model already does it, and undoes it. A bimanual 12-dim arm is equally a non-issue. Do not design around a problem that does not exist.
+</Callout>
+
+### How the actions are actually generated
+
+π0.5 does not regress actions directly. It generates them by **flow matching** — the same family as diffusion, run as an ODE.
+
+Start from pure Gaussian noise shaped `(chunk, 32)`. Then integrate a learned velocity field from `t = 1` down to `t = 0` in `num_inference_steps` forward-Euler steps (default **10**):
+
+```python
+# common/flow_matching.py — euler_integrate
+dt = -1.0 / num_steps
+x_t = noise
+for step in range(num_steps):
+    time = 1.0 + step * dt
+    v_t = denoise_fn(x_t, time)
+    x_t = x_t + dt * v_t
+```
+
+Each step asks "given this partly-formed trajectory and where we are in the schedule, which direction improves it?" and takes a small step that way. The trajectory starts as noise and is progressively pulled into a plausible motion.
+
+The efficiency detail is the one worth carrying away. Those ten steps are **not** ten forward passes of a 2B model. The prefix — images and language through the backbone — is computed **once** and kept as a KV cache. Each integration step re-runs only the 300M expert against that cache:
+
+```python
+# sample_actions: prefix computed once, cached
+_, past_key_values = self.paligemma_with_expert.forward(..., use_cache=True)
+return euler_integrate(lambda x, t: self.denoise_step(
+    prefix_pad_masks=..., past_key_values=past_key_values, x_t=x, timestep=t), ...)
+```
+
+`denoise_step` passes `inputs_embeds=[None, suffix_embs]` — the backbone half receives nothing, because its work is already done.
+
+### Chunks, again
+
+π0.5 predicts a **chunk** of future actions per observation, exactly as ACT does — `chunk_size` defaults to 50 rather than ACT's 100. Everything on the [temporal ensembling page](/docs/data/temporal-ensembling) about how you *spend* a chunk applies here too, and π0.5 additionally ships a real-time chunking mechanism for the case where inference latency matters. Both are downstream questions; neither is what the current run is testing.
+
+## 5. What it took to get a run started
+
+Three lessons came out of preparing this, and each is more general than its occasion.
+
+**The dataset was 5× larger than it needed to be, for a good reason that had stopped applying.** The recorded video used a keyframe interval of 2 — near-all-intra — so the operator UI can seek to any episode slice cheaply. Training reads frames in order and needs none of that. Re-encoding with the *same codec and same quality setting*, changing only `video.g` from 2 to 30, took it from **1.4 GB to 299 MB**.
+
+The check that made this safe to do was verifying frame counts per file with `ffprobe`, then loading both copies and confirming state and action tensors were **bit-identical**. Image PSNR came out at 34–41 dB at native resolution, and ~44 dB at the 224×224 the policy actually consumes. The metadata was updated to say `video.g: 30`, so the file describes its own contents.
+
+**A progress counter lied for twenty minutes.** The upload tool reported `0/57 files` while the network interface showed hundreds of KB/s leaving the machine — it was uploading and silently retrying the same file forever. The counter only ticks on whole-file completion, so it was technically honest and completely useless. What settled it was asking the *destination* what it actually held: one file, a placeholder. The lesson is to check remote state rather than local progress, and to distinguish "stalled" from "slow" by looking at bytes on the wire.
+
+**Four separate version-drift failures.** The tooling was written against an older library release, and every one of these would have killed the run outright: a dataset loader that moved into its own optional install; a required version tag on the uploaded dataset that raw file uploads do not create; a username lookup that parsed `key: value` from a tool that now prints `key=value`; and an experiment tracker that demanded an API key even when told to run offline. None was hard. All four were invisible until they fired.
+
+<DataPipeline />
+
+## 6. The run in flight
+
+π0.5 is currently fine-tuning on the 91-episode dataset, on a separate large-memory GPU.
+
+| | |
+|---|---|
+| Mode | **full fine-tune** — no adapters |
+| Steps × batch | 20,000 × 16 = **320,000** sample presentations |
+| Epochs | ≈ 4.3 over 74,382 frames |
+| Throughput | ~1.07 s/step |
+| Resident memory | ~37 GB |
+
+**Why full and not LoRA**, since LoRA is cheaper and the default: the library's default adapter targets hit only the action expert's attention projections and the small input/output heads. They leave the vision tower and the language model frozen. That configuration is measured as **catastrophic for adapting to a new embodiment** — 0.14 versus 0.76 on transfer — and it is easy to select by accident because it is what you get by asking for LoRA without reading which modules it touches. Adapting to a robot the model has never seen is exactly the case where the vision tower needs to move.
+
+Two honest notes on the numbers. The reference recipe for this model uses 20,000 × 32 = **640,000** presentations, so this run is at half of it — and with ~37 GB resident against far more available, **batch 32 is the obvious next lever and it is free**. And 4.3 epochs is thin; the tooling's own rule of thumb is that under ~200k presentations you are warming up rather than fine-tuning, which this clears but not by a wide margin.
+
+## 7. What this run is actually for
+
+It would be easy to read the above as "trying a bigger model to get a better number." That is not the point, and the design of the run reflects it.
+
+π0.5 is training on **the same episodes, for the same task**, and will be evaluated with **the same rollout protocol** as the ACT baseline. Holding all of that fixed is deliberate, because it turns one number into a diagnostic:
+
+- **π0.5 also lands near 45%** → the ceiling is in the **data**, not the model. Two different architectures, one small and one a pretrained generalist, hitting the same wall on the same observations is strong evidence that the observations are the wall. The wrist cameras are then exactly the right fix, and the priority is getting them in.
+- **π0.5 lands well above 45%** → ACT was **capacity**-limited, and the last stretch of tuning was aimed at the wrong thing. That redirects effort toward policy scale rather than sensing.
+
+Either answer is worth more than another ACT run, because either one *eliminates a hypothesis*. A result that merely improves the number without distinguishing those two cases would be worth much less.
+
+<Callout type="warn">
+The same twenty-trial limit from §3 applies to reading this result. It can answer "did something large happen." It cannot resolve a ten-point difference, and it should not be asked to.
+</Callout>
+
+## 8. What comes next
+
+**Wrist cameras, around 6 September.** They convert the dataset to three channels — `top`, `left_wrist`, `right_wrist` — which is *also* exactly π0.5's pretrained camera-slot count, so the recording stays in the distribution the model was trained on. That alignment was the reason for freezing the camera set at three rather than five.
+
+**Do not record more single-camera episodes in the meantime.** Adding a camera forks the dataset schema. The existing 113 episodes cannot train a three-camera policy, and neither can anything recorded this week — it would all have to be redone. Padding the dataset while waiting for hardware is work that deletes itself.
+
+**Simulation is the productive way to wait.** A scripted expert reads the scene's true state and drives the arm through pick-and-place unattended, at whatever rate physics can be stepped. Episodes are scored by a contact-based success predicate, not by the script's own opinion of itself — so the labels mean something. Measured at **90/90** at default randomisation, and it degrades honestly: raise the position jitter 3.5× and it drops to 13/20, with every failure sorting cleanly by reach distance rather than at random. A generator that fails for legible reasons is one you can trust the successes from.
+
+The simulated rig already renders and records the three-camera layout, so the top-only-versus-three-camera question can be answered there — hundreds of auto-scored episodes instead of twenty hand-scored ones — before the hardware arrives. Sim-to-real means the *number* will not transfer, but the *direction* will, and occlusion geometry is one of the things simulation models honestly.
+
+**Then the longer arc.** A large generalist trained in the cloud finds the ceiling: it is the best-eval producer and the teacher. A smaller policy runs onboard and is what actually ships untethered. They share one dataset and one evaluation harness, and **the gap between them is the diagnostic** — it separates "the policy is too small" from "the data is too thin", which are the two failure modes that get confused for months at a time, and which have opposite fixes.
+
+That is the same logic as §7, applied continuously instead of once.
+
+## Reference
+
+Verified against the installed library rather than papers:
+
+- `lerobot/policies/pi05/configuration_pi05.py` — `DEFAULT_IMAGE_SIZE = 224`, `max_state_dim`/`max_action_dim = 32`, `num_inference_steps = 10`, `chunk_size = 50`, `empty_cameras = 0`, the `QUANTILES` normalisation mapping, and the `gemma_2b` / `gemma_300m` variant split.
+- `lerobot/policies/pi05/modeling_pi05.py` — `embed_prefix` (one shared tower), `_preprocess_images` (the `−1` padding and the all-missing error), `sample_actions` (prefix cached as `past_key_values`), `denoise_step`, the action unpadding, and `_get_default_peft_targets`.
+- `lerobot/policies/pi05/processor_pi05.py` — `Pi05PrepareStateTokenizerProcessorStep`, the 256-bin discretisation, and the prompt template.
+- `lerobot/policies/common/flow_matching.py` — `euler_integrate`, the `dt = −1/num_steps` loop.
+- `lerobot/processor/normalize_processor.py` — the `q01`/`q99` requirement and the [−1, 1] mapping.

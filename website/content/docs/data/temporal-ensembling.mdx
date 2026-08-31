@@ -1,0 +1,147 @@
+---
+title: Temporal ensembling
+description: What ACT's temporal ensembling actually does to a chunked policy — the overlapping-chunk picture, the exponential weighting whose sign runs opposite to intuition, and an honest account of what it buys on Haller's 45% baseline.
+---
+
+Haller's ACT policy predicts a **chunk** of 100 actions from a single observation and then executes all of them before looking again. At 30 fps that is **3.33 seconds** of open-loop motion per glance.
+
+Temporal ensembling is the inference-time change that removes that. It costs no retraining — two keys in a checkpoint's `config.json` — which is exactly why it is worth understanding precisely rather than switching on and hoping. The mechanism is not what its name suggests, and the sign of its one tunable parameter runs opposite to almost everyone's first guess.
+
+<Callout type="info">
+Companion pages: [Dataset collection](/docs/data/dataset-collection) for the episodes this policy was trained on, and [RunPod inference and finetuning](/docs/data/runpod-inference) for the larger generalist policies that share the same eval harness.
+</Callout>
+
+## Why chunking exists at all
+
+A policy that maps one observation to one action, queried 30 times a second, fails in two specific ways.
+
+It **jitters**. Tiny perception noise makes consecutive actions disagree, and the arm buzzes around its trajectory instead of tracking it.
+
+It **dithers**. At a genuine decision point — grasp the cube from the left or the right? — consecutive observations can flip the answer, and the arm oscillates between two plans forever instead of committing to either.
+
+Action chunking fixes both by making the policy commit. One observation produces a whole sequence, and the sequence is internally consistent because a single forward pass produced it. Committing to a plan is what stops the dithering.
+
+## Three ways to spend a chunk
+
+Once you have 100 predicted actions, how you consume them is a separate decision from how you produced them.
+
+| | `n_action_steps` | Queried | Costs |
+|---|---|---|---|
+| **Spend it all** | 100 | once per 3.33 s | blind between observations; a discontinuous plan swap at every chunk boundary |
+| **Spend one, discard 99** | 1 | every step | closed-loop, but jitter and dithering are back — you threw away the commitment |
+| **Ensemble** | 1 | every step | ~100× the inference; nothing else |
+
+The first is Haller's baseline. The second is the naive fix and is strictly worse than either neighbour. The third is what this page is about, and it exists because of a structural fact about the second one that is easy to miss.
+
+## The picture that explains it
+
+Query every step and *keep* every chunk, and something useful accumulates. Each chunk starts one step later than the last but is still 100 long — so they overlap, and any given timestep ends up predicted many times over.
+
+<ChunkOverlap />
+
+By the time a timestep is actually sent to the arm, **100 different chunks have each made a prediction about it**, from 100 different observations, at 100 different distances into the future. The oldest of those guessed it 99 steps in advance from a scene three seconds stale; the newest guessed it one step in advance from the current frame.
+
+Temporal ensembling executes the weighted average of that column. That is the entire idea: you get chunking's commitment *and* a policy that is looking every step, instead of choosing between them.
+
+<Callout type="info">
+Strictly, 100 is the steady state. At the start of an episode the buffer is still filling, and lerobot tracks this per-timestep in `ensembled_actions_count` — the first prediction for a timestep is averaged with weight `w₀` alone, the second with `w₀` and `w₁`, and so on.
+</Callout>
+
+## The weighting, and the sign nearly everyone gets backwards
+
+The weights are `wᵢ = exp(−coeff · i)`, and the indexing is the crux:
+
+> **`i = 0` is the *oldest* prediction**, not the newest.
+
+So a **positive** coefficient — which is the ACT paper's default of `0.01`, and what Haller is running — weights the **stale** predictions *more* heavily. Drag it and watch:
+
+<EnsembleWeights />
+
+At `+0.01` the tilt is 2.69× from oldest to newest, and the freshest observation — the one taken at this very control step — contributes **0.58%** of the action the arm actually receives.
+
+That is deliberate, and lerobot's own docstring says why: weighting new actions aggressively "may diminish the benefits of action chunking." Chase the newest prediction hard enough and you have re-invented the dithering that chunking existed to kill. The positive coefficient is a brake on that, not an oversight.
+
+## What it actually buys — stated honestly
+
+It is tempting to describe ensembling as *"the policy corrects a stale plan with fresh observations."* That description is wrong, and the numbers above are why: the fresh observation contributes half a percent.
+
+What ensembling actually is, is a **low-pass filter over the policy's beliefs across time.** The real benefits are three, and none of them is "fresher":
+
+1. **Never fully blind.** Information from every observation in the last 3.33 s is present in every action — thinly, but present. The baseline has *literally zero* new information between chunk boundaries.
+2. **Variance reduction.** Averaging ~100 predictions of the same instant cancels independent noise, so the approach is steadier.
+3. **No seam.** The baseline swaps plans discontinuously every 100 steps, which is visible in the motion. Ensembling has no such boundary.
+
+The third figure makes the trade concrete, and it is less flattering than the pitch:
+
+<BlindVsEnsembled />
+
+<Callout type="warn">
+**Ensembling at the default coefficient is not, on average, working from fresher information.** The baseline's information age sweeps 0 → 3.33 s across a chunk, averaging **1.65 s**. The ensemble at `+0.01` sits at a constant **1.92 s** — *above* that average. What it removes is the excursion to 3.33 s and the discontinuity at the seam. It does not remove the staleness, and at this coefficient it slightly increases the mean.
+</Callout>
+
+Read that as a reason to expect a **modest** effect on Haller, not a dramatic one.
+
+## The gripper caveat
+
+Haller's action vector is six joints, and **the gripper is one of the six averaged dimensions.**
+
+Closing a gripper is a near-discontinuity: the right action goes from "open" to "closed" over very few steps. Averaging 100 predictions that disagree about *when* that transition happens smears a snap into a squeeze.
+
+The original ACT work grasps well with ensembling on, so this is not fatal. But if the trials show the gripper closing mushily or late, that is this mechanism and not a coincidence — worth recognising rather than re-debugging from scratch.
+
+## What Haller is testing
+
+The baseline is **9/20 = 45%** real-arm success on `so101_pick_cube`, single top camera, 77 demos. The failures are **mostly missed grasps**, with a few grasped-then-dropped — no wrong-place failures and no freezing. That is a precision signature, which is what put ensembling on the list: a steadier, seam-free approach plausibly closes on the cube more accurately.
+
+The test checkpoint is a byte-identical copy of the 90k baseline weights with exactly two keys changed:
+
+```json
+{
+  "n_action_steps": 1,
+  "temporal_ensemble_coeff": 0.01
+}
+```
+
+Those two are not independent choices. lerobot enforces the pairing in `configuration_act.py`:
+
+```
+NotImplementedError: `n_action_steps` must be 1 when using temporal ensembling.
+This is because the policy needs to be queried every step to compute the
+ensembled action.
+```
+
+### The latency question, measured
+
+Querying every step instead of every hundredth raises inference roughly 100×, and the rollout runner enforces a hard **27 Hz floor**. That is exactly the kind of change that quietly drops the control rate below the floor and invalidates the comparison, so it was measured before any trial ran, on the desktop RTX 4080 SUPER:
+
+| | p50 | p95 | p99 | sustainable |
+|---|---|---|---|---|
+| ensembling (every step) | 3.37 ms | 3.79 ms | 4.40 ms | **264 Hz** |
+| baseline (1 in 100) | 0.22 ms | 0.24 ms | 3.37 ms | — |
+
+Against the 33.33 ms budget at 30 fps that leaves **29.5 ms of headroom at p95**. Not close. (The baseline's p50 is the cached-chunk path; its p99 is the every-hundredth step where the forward pass actually runs.)
+
+<Callout type="warn">
+Twenty hand-scored trials cannot resolve a ten-point move, and a no-change re-test returns ≥12/20 about 13% of the time. Read the result as *"did something large happen"* — never as a point estimate.
+</Callout>
+
+## If `+0.01` does not move the number
+
+Do **not** conclude that ensembling does not help. That would be one point on a knob whose *sign* is the interesting part.
+
+A negative coefficient flips the tilt toward fresh information, and tests the staleness story far more directly than the positive default does:
+
+| `temporal_ensemble_coeff` | newest 10 | oldest 10 | mean info age |
+|---|---|---|---|
+| `+0.01` (ACT default, current) | 6.12% | 15.05% | 1.92 s |
+| `0.00` (uniform) | 10.00% | 10.00% | 1.65 s |
+| `−0.01` | 15.05% | 6.12% | 1.38 s |
+| `−0.05` | 39.61% | 0.44% | 0.63 s |
+
+Same trick each time: copy the checkpoint, change one number, no retraining. But finish the current 20 first — switching knobs mid-sample makes both halves unreadable.
+
+## Reference
+
+- Zhao et al., *Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware* — [Algorithm 2](https://huggingface.co/papers/2304.13705) is the ensembling scheme.
+- `lerobot/policies/act/modeling_act.py` — `ACTTemporalEnsembler`, including the online-average formulation that avoids caching a history.
+- `lerobot/policies/act/configuration_act.py` — the `n_action_steps` validation.

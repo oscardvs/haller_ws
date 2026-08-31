@@ -3,6 +3,17 @@ import { ImageZoom } from 'fumadocs-ui/components/image-zoom';
 import type { MDXComponents } from 'mdx/types';
 import type { ComponentProps } from 'react';
 import { Mermaid } from '@/components/mdx/mermaid';
+import {
+  DataPipeline,
+  Pi05Forward,
+  StateAsText,
+  TrialResolution,
+} from '@/components/mdx/pi05-run';
+import {
+  BlindVsEnsembled,
+  ChunkOverlap,
+  EnsembleWeights,
+} from '@/components/mdx/temporal-ensembling';
 
 export function getMDXComponents(components?: MDXComponents) {
   return {
@@ -12,6 +23,13 @@ export function getMDXComponents(components?: MDXComponents) {
       <ImageZoom {...(props as unknown as ComponentProps<typeof ImageZoom>)} />
     ),
     Mermaid,
+    ChunkOverlap,
+    EnsembleWeights,
+    BlindVsEnsembled,
+    Pi05Forward,
+    StateAsText,
+    TrialResolution,
+    DataPipeline,
     ...components,
   } satisfies MDXComponents;
 }

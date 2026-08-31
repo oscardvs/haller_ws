@@ -1,4 +1,10 @@
 {
   "title": "Data and policies",
-  "pages": ["dataset-collection", "public-datasets", "runpod-inference"]
+  "pages": [
+    "dataset-collection",
+    "public-datasets",
+    "pi05-run",
+    "temporal-ensembling",
+    "runpod-inference"
+  ]
 }
