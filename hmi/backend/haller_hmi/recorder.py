@@ -504,6 +504,353 @@ class RecorderState:
         return self.state == RECORDING
 
 
+def persist_info(info: dict, root: Path) -> None:
+    """Flush a dataset's in-memory `info` dict to its `meta/info.json`.
+
+    Module-level for `build_features`' reason: `sim/record.py` writes the same
+    namespaced blocks (`haller_joint_calibration`, `haller_scoring`) into the
+    same slot, and a second spelling of the write is a second chance to write
+    them somewhere a reader does not look.
+
+    Goes through lerobot's own `write_info` when it is importable so the
+    formatting stays byte-identical to the file lerobot itself rewrites on
+    every `save_episode`; the fallback exists only for the version that moves
+    the helper.
+    """
+    if _lerobot_write_info is not None:
+        _lerobot_write_info(info, root)
+    else:  # pragma: no cover - only if lerobot moves the helper
+        path = root / "meta" / "info.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(info, indent=4, ensure_ascii=False))
+
+
+def build_features(state_names: list[str], cam_specs: list[dict], *,
+                   scored: bool) -> dict:
+    """THE dataset schema, for every writer in this tree.
+
+    Module-level and parameterised rather than a `DatasetRecorder` method,
+    because there is now a SECOND writer: `sim/record.py` builds the same
+    datasets from a headless episode loop instead of from a teleop session.
+    Two writers with two schema definitions is the failure `_open_dataset`
+    already refuses at resume time ("the dataset at this root has a
+    different schema than this rig produces"), arriving instead as two
+    datasets that are each internally consistent and cannot be concatenated,
+    which nothing checks. So the schema is defined once and both writers
+    call it. What differs between them is the three ARGUMENTS: which joints
+    exist, which cameras are recorded, and whether anything can score the
+    episode.
+
+    `scored` is `task_monitor is not None` at the teleop recorder and
+    `True` on the sim bench, and it is the one input that changes the
+    COLUMN SET rather than a column's width. See the `REWARD_FEATURE`
+    branch below, and the module docstring for why a rig without a scorer
+    gets no reward column instead of a column of zeros.
+    """
+    names = list(state_names)
+    n = len(names)
+    features: dict = {
+        "observation.state": {"dtype": "float32", "shape": (n,), "names": names},
+        "action": {"dtype": "float32", "shape": (n,), "names": names},
+        # Signed fraction of each joint's torque limit — the contact/grasp
+        # signal. Same names and same left-then-right layout as state, so a
+        # consumer can zip the three columns joint-for-joint. Unit caveats
+        # are in the module docstring; they matter.
+        "observation.effort": {"dtype": "float32", "shape": (n,), "names": names},
+        # 3-wheel differential drive -> 2-DoF base command/velocity.
+        "observation.base": {"dtype": "float32", "shape": (2,), "names": ["v", "omega"]},
+        # Real capture time of each frame, in SECONDS SINCE THIS EPISODE
+        # STARTED. LeRobot's own `timestamp` column is synthetic
+        # (frame_index / fps), so a skipped tick leaves no gap there; this
+        # channel is what lets training code see real sampling holes after
+        # the fact.
+        #
+        # Relative, not a Unix epoch, and that is not a style choice: a
+        # float32 has 24 bits of mantissa, so one ULP at 1.79e9 (a 2026
+        # epoch) is 128 SECONDS. Stored absolutely, a three-minute take
+        # collapses to two distinct values and every consecutive diff is
+        # zero — the column silently becomes unable to do the only job it
+        # has. Measured from episode start it holds ~1e-5 s of resolution
+        # for any take shorter than three hours. The episode's absolute
+        # start time is in `haller_wall_clock` in info.json for anyone who
+        # needs to line a take up against an external log.
+        "observation.wall_clock": {"dtype": "float32", "shape": (1,), "names": ["t"]},
+        # BARE, and never under `observation.` or `action.` — see
+        # EPISODE_UID_FEATURE for why that one choice is what keeps this
+        # column inert to training instead of feeding the policy our own
+        # episode ids. int64 because microseconds since 1970 overflow
+        # float32's exact-integer range by nine orders of magnitude, and a
+        # uid that cannot be compared for equality is not an identity.
+        EPISODE_UID_FEATURE: {"dtype": "int64", "shape": (1,), "names": None},
+    }
+    if scored:
+        # LeRobot's own names and dtypes for the two task-outcome columns,
+        # present ONLY on a rig that can actually decide the outcome. A
+        # constant-zero reward column on the real rig would be
+        # indistinguishable from a dataset of failures — see the module
+        # docstring. `next.reward` is sparse: 1.0 on the frames where the
+        # success predicate holds, 0.0 everywhere else, which is what the
+        # public bimanual SO-101 sets carry and what a BC run can simply
+        # ignore.
+        features[REWARD_FEATURE] = {
+            "dtype": "float32", "shape": (1,), "names": None,
+        }
+        features[DONE_FEATURE] = {
+            "dtype": "bool", "shape": (1,), "names": None,
+        }
+    for c in cam_specs:
+        # `key`, not `id`: the dataset column is named for the VIEW
+        # (`top`, `left_wrist`), so it lines up with the datasets we
+        # co-train against, while the id stays the HMI's own handle.
+        features[f"observation.images.{c['key']}"] = {
+            "dtype": "video",
+            "shape": (c["height"], c["width"], 3),
+            "names": ["height", "width", "channels"],
+        }
+    return features
+
+
+def scoring_metadata(monitor) -> dict:
+    """Whether this dataset's episodes were machine-labelled, and how.
+
+    THE POINT OF WRITING IT WHEN THERE IS NO SCORER: `next.reward` absent
+    from a dataset means one of two very different things — nobody scored
+    these episodes, or somebody did and every episode failed — and a
+    consumer six months from now cannot tell them apart from the schema.
+    The real rig has no auto-scorer at all, so it writes
+    `auto_scored: false` and says in words that the episodes are
+    unlabelled. That is the difference between a dataset with no labels and
+    a dataset of failures.
+
+    When there IS a scorer the block carries the predicate and the exact
+    `SuccessSpec` thresholds it ran with, because those thresholds are the
+    label definition: a re-scoring later (or a comparison against someone
+    else's "success rate") is meaningless without them.
+    """
+    mon = monitor
+    if mon is None:
+        return {
+            "auto_scored": False,
+            "reward_feature": None,
+            "done_feature": None,
+            "predicate": None,
+            "note": (
+                "No automatic success detector was attached while these "
+                "episodes were recorded (this is the real rig — it has no "
+                "scorer), so they are UNLABELLED and carry no "
+                f"{REWARD_FEATURE}/{DONE_FEATURE} columns. Read the absence "
+                "as 'unknown outcome', NOT as 'every episode failed'."
+            ),
+        }
+    spec = getattr(mon, "spec", None)
+    # The monitor describes its own predicate. It has to: there is more
+    # than one task now (pick-and-place, bimanual insertion) and a block
+    # that hardcoded one of them would confidently mislabel the other —
+    # the single worst failure mode for a provenance record, because it is
+    # not detectable from the data.
+    prov = getattr(mon, "provenance", None)
+    described = prov() if callable(prov) else {}
+    note = described.get("predicate_note")
+    return {
+        "auto_scored": True,
+        "reward_feature": REWARD_FEATURE,
+        "done_feature": DONE_FEATURE,
+        "monitor": type(mon).__name__,
+        "task": described.get("task"),
+        "predicate": described.get("predicate"),
+        "predicate_note": (
+            f"{note} {DONE_FEATURE} is true on the final frame of each "
+            "episode only." if note else
+            # A monitor that does not describe itself is still recorded as
+            # scored — the reward column is real — but the block says the
+            # definition is unknown rather than inventing one.
+            f"This dataset was auto-scored by {type(mon).__name__}, which "
+            "did not report a predicate description, so the exact label "
+            f"definition is not recorded here. {DONE_FEATURE} is true on "
+            "the final frame of each episode only."
+        ),
+        "target": described.get("target", getattr(mon, "target", None)),
+        "spec": asdict(spec) if is_dataclass(spec) else None,
+        "reward_shape": "sparse",
+    }
+
+
+def one_video_file_per_episode(ds: LeRobotDataset) -> LeRobotDataset:
+    """Give every episode its own video file, so lerobot never concatenates.
+
+    WHY THIS EXISTS — lerobot 0.5.1 cannot append an episode to an existing
+    video file. `DatasetWriter._save_episode_video` packs episodes together
+    until the file reaches `video_files_size_in_mb`, and the packing step,
+    `video_utils.concatenate_video_files`, remuxes the second file's packets
+    WITHOUT re-basing their timestamps onto the end of the first:
+
+        av.error.ValueError: [Errno 22] Invalid argument
+        [mp4] Application provided invalid, non monotonically increasing
+              dts to muxer in stream 0: 3584 >= 3584
+
+    So the very first time a second episode lands in a file, `save_episode`
+    raises — after the frames are already on disk but BEFORE
+    `meta.save_episode` runs. `info.json` never advances, so the next take
+    is handed the same `episode_index` and appends to the same parquet, and
+    the half-reset episode buffer makes every later `add_frame` die on
+    `KeyError: 'size'`. One upstream muxer bug, and the whole session is a
+    single unreadable episode. That is exactly what happened on 2026-08-09.
+
+    `VIDEO_FILE_ROTATE_MB` makes the size test
+    (`latest + episode >= limit`) true for every episode after the first, so
+    each one takes the rotate-to-a-new-file branch — a plain `shutil.move`,
+    no concatenation, no muxer. Per-episode video files are a valid v3
+    layout: the chunk/file index of each episode is recorded in its own
+    metadata, so readers do not care. It costs one file per camera per
+    episode and buys back the entire pipeline.
+
+    The cap is a hair above 0 rather than 0 itself because lerobot 0.6.1
+    rejects a non-positive one at LOAD time, which is where training reads
+    it — see `VIDEO_FILE_ROTATE_MB` for why it is that number and not a
+    round one.
+
+    Revisit if lerobot fixes the remux (it needs a per-stream dts offset
+    carried across the file boundary); until then this must stay.
+    """
+    ds.meta.info["video_files_size_in_mb"] = VIDEO_FILE_ROTATE_MB
+    # Persist it: `resume` rebuilds the metadata from info.json, so a value
+    # kept only in memory would be lost the next time the backend starts and
+    # the second episode of the NEXT session would hit the muxer again.
+    persist_info(ds.meta.info, Path(ds.meta.root))
+    return ds
+
+
+def mark_terminal_frame(dataset: LeRobotDataset) -> str | None:
+    """Set `next.done` on the last frame currently in the episode buffer.
+
+    Returns None on success, or a human-readable reason it could not, for the
+    caller to surface: `DatasetRecorder` puts it in `status().last_error`,
+    `sim/record.py` counts it against the run. Returning rather than raising is
+    the same judgement `_mark_terminal_frame` has always made: an all-False
+    done column is recoverable from episode boundaries (lerobot's own
+    `rl/buffer.py` does exactly that), and losing the demonstration over it
+    would not be.
+
+    Reaches into `dataset.writer.episode_buffer` (a private LeRobot surface)
+    because there is no public "amend the last frame" call. The buffer is a
+    plain dict of per-feature lists until `save_episode` stacks them (lerobot
+    0.5.1 `DatasetWriter.add_frame`), so writing one element is safe and
+    type-identical to what `add_frame` put there.
+
+    Module-level for `build_features`' reason, and more sharply: this is the
+    one place in the tree that touches a lerobot private, so it is the one
+    place that has to be re-checked when lerobot moves. Two copies would mean
+    one of them silently keeps writing all-False done columns.
+    """
+    writer = getattr(dataset, "writer", None)
+    buffer = getattr(writer, "episode_buffer", None)
+    column = buffer.get(DONE_FEATURE) if isinstance(buffer, dict) else None
+    if not column:
+        logger.warning(
+            "recorder: could not mark the terminal frame — no %s column in "
+            "the episode buffer; the episode's done flags stay all-False",
+            DONE_FEATURE)
+        return f"could not set {DONE_FEATURE} on the final frame"
+    column[-1] = np.asarray([True], dtype=bool)
+    return None
+
+
+def calibration_block(joints: dict) -> dict:
+    """The `haller_joint_calibration` payload, given the per-joint entries.
+
+    Split from `_calibration_metadata` (which needs live arm handles and so
+    stays a method) because the NOTE is the part that must not fork: it is the
+    prose statement of the units contract (degrees here, normalised
+    [-100, 100] in every public SO-101 dataset) and the exact affine map back.
+    A sim dataset whose note disagreed with a teleop dataset's, in a block
+    whose whole purpose is to make the two convertible, would be worse than no
+    block at all.
+    """
+    return {
+        # What the recorded state/action columns are in, so the block's
+        # purpose survives without this module next to it.
+        "state_unit": "deg",
+        "note": (
+            "observation.state/action are joint DEGREES (lerobot "
+            "MotorNormMode.DEGREES). To convert a column to the normalised "
+            "[-100,100] / [0,100] form used by public SO-101 datasets: "
+            "raw = deg*(resolution-1)/360 + (range_min_ticks+range_max_ticks)/2, "
+            "then norm = (raw-range_min_ticks)/(range_max_ticks-range_min_ticks) "
+            "scaled per norm_mode, negated (or 100-x for range_0_100) when "
+            "drive_mode is 1."
+        ),
+        "joints": joints,
+    }
+
+
+def open_dataset(repo_id: str, root: Path, fps: int, features: dict, *,
+                 vcodec: str, image_writer_threads: int) -> LeRobotDataset:
+    """Open for appending, resuming an existing dataset or creating a new one.
+
+    Both paths use streaming video encoding so frames are compressed as
+    they arrive: memory stays flat over a long take, and `save_episode`
+    at stop time is near-instant instead of encoding the whole take.
+    """
+    if (root / "meta" / "info.json").exists():
+        try:
+            ds = LeRobotDataset.resume(
+                repo_id,
+                root=root,
+                vcodec=vcodec,
+                streaming_encoding=True,
+                image_writer_threads=image_writer_threads,
+            )
+        except Exception as e:
+            # The honest failure: an existing dataset we cannot append to.
+            # Creating over it would destroy episodes someone already drove
+            # for, so refuse loudly and make the operator move it aside.
+            raise RuntimeError(
+                f"dataset at {root} exists but cannot be resumed ({e}); "
+                "inspect it or move it aside — refusing to overwrite"
+            ) from e
+        # `add_frame` validates the frame's key set against the dataset's
+        # frozen features and rejects a mismatch in EITHER direction, so
+        # both are checked here. Otherwise the take runs to completion and
+        # the operator finds out at stop time, from an empty episode, that
+        # none of it was ever written.
+        missing = [k for k in features if k not in ds.meta.features]
+        stale = [k for k in ds.meta.features
+                 if k not in features
+                 and k not in _LEROBOT_DEFAULT_FEATURES]
+        if missing or stale:
+            raise RuntimeError(
+                f"dataset at {root} has a different schema than this rig "
+                f"produces (it is missing {missing or 'nothing'}, and "
+                f"expects {stale or 'nothing'} that this rig does not "
+                "record); every frame of this take would be rejected. "
+                "Record into a NEW repo_id — that is the safe move and "
+                "costs nothing but a name — or, if the two really must "
+                "become one dataset and the difference is only columns the "
+                "older one LACKS, migrate it offline:\n"
+                f"    python -m haller_hmi.dataset_migrate {repo_id} "
+                f"--root {root} --dry-run\n"
+                "(drop --dry-run to run it; it keeps a copy first, and "
+                "refuses anything it cannot fill honestly). Common causes: the "
+                "recorded camera set or a `dataset_key` changed, or the "
+                "dataset was recorded on a rig with a different task "
+                f"scorer ({REWARD_FEATURE}/{DONE_FEATURE} exist only on a "
+                "rig that can auto-score, i.e. the sim)."
+            )
+        logger.info("recorder: resuming existing dataset at %s", root)
+        return one_video_file_per_episode(ds)
+    return one_video_file_per_episode(LeRobotDataset.create(
+        repo_id=repo_id,
+        fps=fps,
+        features=features,
+        root=root,
+        robot_type="haller_bimanual",
+        use_videos=True,
+        image_writer_threads=image_writer_threads,
+        vcodec=vcodec,
+        streaming_encoding=True,
+    ))
+
+
 @dataclass
 class DatasetRecorder:
     """Records one bimanual episode into a `LeRobotDataset`.
@@ -1410,115 +1757,13 @@ class DatasetRecorder:
         return lerobot_home() / repo_id
 
     def _open_dataset(self, repo_id: str, fps: int, features: dict) -> LeRobotDataset:
-        """Open for appending, resuming an existing dataset or creating a new one.
-
-        Both paths use streaming video encoding so frames are compressed as
-        they arrive: memory stays flat over a long take, and `save_episode`
-        at stop time is near-instant instead of encoding the whole take.
-        """
-        root = self._dataset_root(repo_id)
-        if (root / "meta" / "info.json").exists():
-            try:
-                ds = LeRobotDataset.resume(
-                    repo_id,
-                    root=root,
-                    vcodec=self.vcodec,
-                    streaming_encoding=True,
-                    image_writer_threads=self.image_writer_threads,
-                )
-            except Exception as e:
-                # The honest failure: an existing dataset we cannot append to.
-                # Creating over it would destroy episodes someone already drove
-                # for, so refuse loudly and make the operator move it aside.
-                raise RuntimeError(
-                    f"dataset at {root} exists but cannot be resumed ({e}); "
-                    "inspect it or move it aside — refusing to overwrite"
-                ) from e
-            # `add_frame` validates the frame's key set against the dataset's
-            # frozen features and rejects a mismatch in EITHER direction, so
-            # both are checked here. Otherwise the take runs to completion and
-            # the operator finds out at stop time, from an empty episode, that
-            # none of it was ever written.
-            missing = [k for k in features if k not in ds.meta.features]
-            stale = [k for k in ds.meta.features
-                     if k not in features
-                     and k not in _LEROBOT_DEFAULT_FEATURES]
-            if missing or stale:
-                raise RuntimeError(
-                    f"dataset at {root} has a different schema than this rig "
-                    f"produces (it is missing {missing or 'nothing'}, and "
-                    f"expects {stale or 'nothing'} that this rig does not "
-                    "record); every frame of this take would be rejected. "
-                    "Record into a NEW repo_id — that is the safe move and "
-                    "costs nothing but a name — or, if the two really must "
-                    "become one dataset and the difference is only columns the "
-                    "older one LACKS, migrate it offline:\n"
-                    f"    python -m haller_hmi.dataset_migrate {repo_id} "
-                    f"--root {root} --dry-run\n"
-                    "(drop --dry-run to run it; it keeps a copy first, and "
-                    "refuses anything it cannot fill honestly). Common causes: the "
-                    "recorded camera set or a `dataset_key` changed, or the "
-                    "dataset was recorded on a rig with a different task "
-                    f"scorer ({REWARD_FEATURE}/{DONE_FEATURE} exist only on a "
-                    "rig that can auto-score, i.e. the sim)."
-                )
-            logger.info("recorder: resuming existing dataset at %s", root)
-            return self._one_video_file_per_episode(ds)
-        return self._one_video_file_per_episode(LeRobotDataset.create(
-            repo_id=repo_id,
-            fps=fps,
-            features=features,
-            root=root,
-            robot_type="haller_bimanual",
-            use_videos=True,
-            image_writer_threads=self.image_writer_threads,
+        return open_dataset(
+            repo_id, self._dataset_root(repo_id), fps, features,
             vcodec=self.vcodec,
-            streaming_encoding=True,
-        ))
+            image_writer_threads=self.image_writer_threads)
 
     def _one_video_file_per_episode(self, ds: LeRobotDataset) -> LeRobotDataset:
-        """Give every episode its own video file, so lerobot never concatenates.
-
-        WHY THIS EXISTS — lerobot 0.5.1 cannot append an episode to an existing
-        video file. `DatasetWriter._save_episode_video` packs episodes together
-        until the file reaches `video_files_size_in_mb`, and the packing step,
-        `video_utils.concatenate_video_files`, remuxes the second file's packets
-        WITHOUT re-basing their timestamps onto the end of the first:
-
-            av.error.ValueError: [Errno 22] Invalid argument
-            [mp4] Application provided invalid, non monotonically increasing
-                  dts to muxer in stream 0: 3584 >= 3584
-
-        So the very first time a second episode lands in a file, `save_episode`
-        raises — after the frames are already on disk but BEFORE
-        `meta.save_episode` runs. `info.json` never advances, so the next take
-        is handed the same `episode_index` and appends to the same parquet, and
-        the half-reset episode buffer makes every later `add_frame` die on
-        `KeyError: 'size'`. One upstream muxer bug, and the whole session is a
-        single unreadable episode. That is exactly what happened on 2026-08-09.
-
-        `VIDEO_FILE_ROTATE_MB` makes the size test
-        (`latest + episode >= limit`) true for every episode after the first, so
-        each one takes the rotate-to-a-new-file branch — a plain `shutil.move`,
-        no concatenation, no muxer. Per-episode video files are a valid v3
-        layout: the chunk/file index of each episode is recorded in its own
-        metadata, so readers do not care. It costs one file per camera per
-        episode and buys back the entire pipeline.
-
-        The cap is a hair above 0 rather than 0 itself because lerobot 0.6.1
-        rejects a non-positive one at LOAD time, which is where training reads
-        it — see `VIDEO_FILE_ROTATE_MB` for why it is that number and not a
-        round one.
-
-        Revisit if lerobot fixes the remux (it needs a per-stream dts offset
-        carried across the file boundary); until then this must stay.
-        """
-        ds.meta.info["video_files_size_in_mb"] = VIDEO_FILE_ROTATE_MB
-        # Persist it: `resume` rebuilds the metadata from info.json, so a value
-        # kept only in memory would be lost the next time the backend starts and
-        # the second episode of the NEXT session would hit the muxer again.
-        self._persist_info(ds.meta.info, root=Path(ds.meta.root))
-        return ds
+        return one_video_file_per_episode(ds)
 
     def _joint_order(self, arm_id: str) -> list[str]:
         """SO-101 joints present on this arm, in canonical order."""
@@ -1649,67 +1894,8 @@ class DatasetRecorder:
         return self._build_features(cams)
 
     def _build_features(self, cam_specs: list[dict]) -> dict:
-        names = self._state_names()
-        n = len(names)
-        features: dict = {
-            "observation.state": {"dtype": "float32", "shape": (n,), "names": names},
-            "action": {"dtype": "float32", "shape": (n,), "names": names},
-            # Signed fraction of each joint's torque limit — the contact/grasp
-            # signal. Same names and same left-then-right layout as state, so a
-            # consumer can zip the three columns joint-for-joint. Unit caveats
-            # are in the module docstring; they matter.
-            "observation.effort": {"dtype": "float32", "shape": (n,), "names": names},
-            # 3-wheel differential drive -> 2-DoF base command/velocity.
-            "observation.base": {"dtype": "float32", "shape": (2,), "names": ["v", "omega"]},
-            # Real capture time of each frame, in SECONDS SINCE THIS EPISODE
-            # STARTED. LeRobot's own `timestamp` column is synthetic
-            # (frame_index / fps), so a skipped tick leaves no gap there; this
-            # channel is what lets training code see real sampling holes after
-            # the fact.
-            #
-            # Relative, not a Unix epoch, and that is not a style choice: a
-            # float32 has 24 bits of mantissa, so one ULP at 1.79e9 (a 2026
-            # epoch) is 128 SECONDS. Stored absolutely, a three-minute take
-            # collapses to two distinct values and every consecutive diff is
-            # zero — the column silently becomes unable to do the only job it
-            # has. Measured from episode start it holds ~1e-5 s of resolution
-            # for any take shorter than three hours. The episode's absolute
-            # start time is in `haller_wall_clock` in info.json for anyone who
-            # needs to line a take up against an external log.
-            "observation.wall_clock": {"dtype": "float32", "shape": (1,), "names": ["t"]},
-            # BARE, and never under `observation.` or `action.` — see
-            # EPISODE_UID_FEATURE for why that one choice is what keeps this
-            # column inert to training instead of feeding the policy our own
-            # episode ids. int64 because microseconds since 1970 overflow
-            # float32's exact-integer range by nine orders of magnitude, and a
-            # uid that cannot be compared for equality is not an identity.
-            EPISODE_UID_FEATURE: {"dtype": "int64", "shape": (1,), "names": None},
-        }
-        if self.task_monitor is not None:
-            # LeRobot's own names and dtypes for the two task-outcome columns,
-            # present ONLY on a rig that can actually decide the outcome. A
-            # constant-zero reward column on the real rig would be
-            # indistinguishable from a dataset of failures — see the module
-            # docstring. `next.reward` is sparse: 1.0 on the frames where the
-            # success predicate holds, 0.0 everywhere else, which is what the
-            # public bimanual SO-101 sets carry and what a BC run can simply
-            # ignore.
-            features[REWARD_FEATURE] = {
-                "dtype": "float32", "shape": (1,), "names": None,
-            }
-            features[DONE_FEATURE] = {
-                "dtype": "bool", "shape": (1,), "names": None,
-            }
-        for c in cam_specs:
-            # `key`, not `id`: the dataset column is named for the VIEW
-            # (`top`, `left_wrist`), so it lines up with the datasets we
-            # co-train against, while the id stays the HMI's own handle.
-            features[f"observation.images.{c['key']}"] = {
-                "dtype": "video",
-                "shape": (c["height"], c["width"], 3),
-                "names": ["height", "width", "channels"],
-            }
-        return features
+        return build_features(self._state_names(), cam_specs,
+                              scored=self.task_monitor is not None)
 
     # ---- joint calibration metadata --------------------------------------
 
@@ -1991,21 +2177,7 @@ class DatasetRecorder:
         """
         assert self._dataset is not None
         info = self._dataset.meta.info
-        info[CALIBRATION_INFO_KEY] = {
-            # What the recorded state/action columns are in, so the block's
-            # purpose survives without this module next to it.
-            "state_unit": "deg",
-            "note": (
-                "observation.state/action are joint DEGREES (lerobot "
-                "MotorNormMode.DEGREES). To convert a column to the normalised "
-                "[-100,100] / [0,100] form used by public SO-101 datasets: "
-                "raw = deg*(resolution-1)/360 + (range_min_ticks+range_max_ticks)/2, "
-                "then norm = (raw-range_min_ticks)/(range_max_ticks-range_min_ticks) "
-                "scaled per norm_mode, negated (or 100-x for range_0_100) when "
-                "drive_mode is 1."
-            ),
-            "joints": self._calibration_metadata(),
-        }
+        info[CALIBRATION_INFO_KEY] = calibration_block(self._calibration_metadata())
         self._persist_info(info)
         logger.info("recorder: wrote %s for %d joints",
                     CALIBRATION_INFO_KEY, len(info[CALIBRATION_INFO_KEY]["joints"]))
@@ -2019,79 +2191,12 @@ class DatasetRecorder:
         if root is None:
             assert self._dataset is not None
             root = Path(self._dataset.meta.root)
-        if _lerobot_write_info is not None:
-            _lerobot_write_info(info, root)
-        else:  # pragma: no cover - only if lerobot moves the helper
-            import json
-            path = root / "meta" / "info.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(info, indent=4, ensure_ascii=False))
+        persist_info(info, root)
 
     # ---- task scoring metadata -------------------------------------------
 
     def _scoring_metadata(self) -> dict:
-        """Whether this dataset's episodes were machine-labelled, and how.
-
-        THE POINT OF WRITING IT WHEN THERE IS NO SCORER: `next.reward` absent
-        from a dataset means one of two very different things — nobody scored
-        these episodes, or somebody did and every episode failed — and a
-        consumer six months from now cannot tell them apart from the schema.
-        The real rig has no auto-scorer at all, so it writes
-        `auto_scored: false` and says in words that the episodes are
-        unlabelled. That is the difference between a dataset with no labels and
-        a dataset of failures.
-
-        When there IS a scorer the block carries the predicate and the exact
-        `SuccessSpec` thresholds it ran with, because those thresholds are the
-        label definition: a re-scoring later (or a comparison against someone
-        else's "success rate") is meaningless without them.
-        """
-        mon = self.task_monitor
-        if mon is None:
-            return {
-                "auto_scored": False,
-                "reward_feature": None,
-                "done_feature": None,
-                "predicate": None,
-                "note": (
-                    "No automatic success detector was attached while these "
-                    "episodes were recorded (this is the real rig — it has no "
-                    "scorer), so they are UNLABELLED and carry no "
-                    f"{REWARD_FEATURE}/{DONE_FEATURE} columns. Read the absence "
-                    "as 'unknown outcome', NOT as 'every episode failed'."
-                ),
-            }
-        spec = getattr(mon, "spec", None)
-        # The monitor describes its own predicate. It has to: there is more
-        # than one task now (pick-and-place, bimanual insertion) and a block
-        # that hardcoded one of them would confidently mislabel the other —
-        # the single worst failure mode for a provenance record, because it is
-        # not detectable from the data.
-        prov = getattr(mon, "provenance", None)
-        described = prov() if callable(prov) else {}
-        note = described.get("predicate_note")
-        return {
-            "auto_scored": True,
-            "reward_feature": REWARD_FEATURE,
-            "done_feature": DONE_FEATURE,
-            "monitor": type(mon).__name__,
-            "task": described.get("task"),
-            "predicate": described.get("predicate"),
-            "predicate_note": (
-                f"{note} {DONE_FEATURE} is true on the final frame of each "
-                "episode only." if note else
-                # A monitor that does not describe itself is still recorded as
-                # scored — the reward column is real — but the block says the
-                # definition is unknown rather than inventing one.
-                f"This dataset was auto-scored by {type(mon).__name__}, which "
-                "did not report a predicate description, so the exact label "
-                f"definition is not recorded here. {DONE_FEATURE} is true on "
-                "the final frame of each episode only."
-            ),
-            "target": described.get("target", getattr(mon, "target", None)),
-            "spec": asdict(spec) if is_dataclass(spec) else None,
-            "reward_shape": "sparse",
-        }
+        return scoring_metadata(self.task_monitor)
 
     def _write_scoring_metadata(self) -> None:
         """Persist the scoring block into `info.json`, same slot and same
@@ -2316,17 +2421,9 @@ class DatasetRecorder:
         """
         if self.task_monitor is None:
             return  # no outcome columns in this dataset's schema at all
-        writer = getattr(self._dataset, "writer", None)
-        buffer = getattr(writer, "episode_buffer", None)
-        column = buffer.get(DONE_FEATURE) if isinstance(buffer, dict) else None
-        if not column:
-            logger.warning(
-                "recorder: could not mark the terminal frame — no %s column in "
-                "the episode buffer; the episode's done flags stay all-False",
-                DONE_FEATURE)
-            self._state.last_error = f"could not set {DONE_FEATURE} on the final frame"
-            return
-        column[-1] = np.asarray([True], dtype=bool)
+        problem = mark_terminal_frame(self._dataset)
+        if problem is not None:
+            self._state.last_error = problem
 
     async def _run(self) -> None:
         # Every sample, so a subscription rather than `latest()`: this is the
