@@ -178,12 +178,21 @@ def _gripper_range(info: dict, raw_name: str) -> tuple[float, float]:
 
     Keyed by the raw column rather than the stripped base because
     `haller_joint_calibration` is written from the same names the recorder puts
-    in `features`. Anything unusable — no block, no such joint, None, NaN, or
-    an inverted or empty range — falls back, since a bad range does not fail
-    loudly here: it silently moves the closed/open thresholds and rewrites
-    every verdict on the dataset.
+    in `features`. Anything unusable (no block, a block that is not a mapping
+    at all, no such joint, None, NaN, or an inverted or empty range) falls
+    back, since a bad range does not fail loudly here: it silently moves the
+    closed/open thresholds and rewrites every verdict on the dataset.
+
+    The isinstance guards are what keep that promise for the two containers.
+    `from_info` runs on every dataset `catalog.list_datasets` walks, so a
+    single `meta/info.json` on disk whose block is a bare string would
+    otherwise raise AttributeError out of here and take the whole listing down
+    rather than degrading this one gripper to the default range.
     """
-    joints = ((info or {}).get("haller_joint_calibration") or {}).get("joints") or {}
+    block = (info or {}).get("haller_joint_calibration")
+    joints = block.get("joints") if isinstance(block, dict) else None
+    if not isinstance(joints, dict):
+        return DEFAULT_GRIPPER_RANGE
     entry = joints.get(raw_name) or {}
     try:
         lo = float(entry["min_deg"])

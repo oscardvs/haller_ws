@@ -181,6 +181,19 @@ def test_the_thresholds_are_forty_and_seventy_percent_of_the_calibrated_range():
     pytest.param(_gripper_calibration(10.0, 10.0), id="empty-range"),
     pytest.param(_gripper_calibration(float("nan"), 100.0), id="nan-min"),
     pytest.param(_gripper_calibration(0.0, float("inf")), id="inf-max"),
+    # Neither container is guaranteed to be a mapping: both spellings below
+    # were AttributeError out of `_gripper_range` until 2026-08-31, and since
+    # `RigSpec.from_info` runs on every dataset `catalog.list_datasets` walks,
+    # one such file on disk took the whole listing down instead of degrading
+    # this one gripper.
+    pytest.param("deg", id="block-is-a-string"),
+    pytest.param(["deg"], id="block-is-a-list"),
+    pytest.param({"state_unit": "deg", "joints": "gripper.pos"}, id="joints-is-a-string"),
+    pytest.param({"state_unit": "deg", "joints": ["gripper.pos"]}, id="joints-is-a-list"),
+    pytest.param({"state_unit": "deg", "joints": {"gripper.pos": "0..100"}},
+                 id="joint-entry-is-a-string"),
+    pytest.param({"state_unit": "deg", "joints": {"gripper.pos": [0.0, 100.0]}},
+                 id="joint-entry-is-a-list"),
 ])
 def test_an_unusable_calibration_falls_back_to_the_kit_range(calibration):
     """A bad range does not fail loudly — it silently re-thresholds every
