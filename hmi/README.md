@@ -447,7 +447,7 @@ Backend:
 source ~/venvs/haller-hmi/bin/activate-haller-hmi
 cd ~/haller_ws/hmi/backend
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 MUJOCO_GL=egl python -m pytest -p asyncio -q
-# 588 passed
+# 1952 passed, 44 skipped, 1 xfailed
 ```
 
 A bare `pytest` does not run here: the ROS 2 environment puts a `launch_testing`
@@ -455,12 +455,19 @@ plugin on the path that pluggy refuses to load against this pytest. So autoload
 is off and the one plugin the suite actually needs, `asyncio`, is named
 explicitly. `MUJOCO_GL=egl` is for the sim tests, which render headless.
 
+The skip count is machine-dependent, so treat it as a floor rather than a
+target. Those tests need assets that live outside the repo: the SO-101 URDF
+(`SO101_URDF`), the reference vr-teleop-kit checkout (`HALLER_KIT_SRC`),
+recorded datasets under `$HF_LEROBOT_HOME`, and a trained checkpoint. Each one
+skips with a message naming exactly what is missing, so a box carrying the full
+set runs strictly more than the number above.
+
 Frontend:
 
 ```bash
 cd ~/haller_ws/hmi/frontend
 pnpm test
-# 178 passed
+# 467 passed
 ```
 
 Frontend build:
