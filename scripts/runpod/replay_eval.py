@@ -109,7 +109,10 @@ import torch
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
-from lerobot.datasets.feature_utils import dataset_to_policy_features
+try:  # lerobot >= 0.6: moved out of datasets/ into utils/
+    from lerobot.utils.feature_utils import dataset_to_policy_features
+except ImportError:  # lerobot <= 0.5
+    from lerobot.datasets.feature_utils import dataset_to_policy_features
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
