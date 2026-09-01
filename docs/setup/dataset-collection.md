@@ -8,21 +8,21 @@ hardware, not by preference:
 
 | path | rig it is for | who drives the arm | HMI |
 |---|---|---|---|
-| **HMI-integrated recorder** — `POST /record/start` | **bimanual**: two SO-101 *followers* (real or MuJoCo sim), plus base and cameras | human-pose or [Quest VR](../../hmi/QUICKSTART-QUEST.md) teleop, in-process | **must be running** |
-| `scripts/record_dataset.sh` — wraps `lerobot-record` | **single arm**: one SO-101 leader driving one SO-101 follower | the physical leader arm | **must be stopped** |
+| **HMI-integrated recorder** (`POST /record/start`) | **bimanual**: two SO-101 *followers* (real or MuJoCo sim), plus base and cameras | human-pose or [Quest VR](../../hmi/QUICKSTART-QUEST.md) teleop, in-process | **must be running** |
+| `scripts/record_dataset.sh` (wraps `lerobot-record`) | **single arm**: one SO-101 leader driving one SO-101 follower | the physical leader arm | **must be stopped** |
 
 The bimanual path is the one Haller actually collects on. The reason is
 structural, not a preference: **both** of Haller's arms are followers. There is
 no leader pair to ALOHA-teleoperate them with, so `lerobot-record
 --teleop.type=so101_leader` cannot capture a two-arm demonstration on this
 hardware at all. The record loop therefore lives where the teleop already
-lives — inside the HMI backend, in
+lives: inside the HMI backend, in
 [`hmi/backend/haller_hmi/recorder.py`](../../hmi/backend/haller_hmi/recorder.py),
 whose module docstring is the schema's specification.
 
 It also means no new serial traffic. During teleop the half-duplex Feetech bus
 is already written at ~60 Hz and read at telemetry rate; the recorder opens no
-third bus reader and instead samples the streams that exist — telemetry frames
+third bus reader and instead samples the streams that exist: telemetry frames
 for `observation.state`/`observation.effort`/`observation.base`, the teleop
 session's committed goals for `action`, the camera grabber threads for images.
 
@@ -50,7 +50,7 @@ Three surfaces, one recorder:
 - **Cockpit** (`http://localhost:3000` → Dataset tab, or the Record button in
   the command bar). Draft the task string and HF username once; both persist in
   the browser so the headset can start takes from them.
-- **In the headset** — hold **A or X** for ~0.5 s to start, hold again to
+- **In the headset**: hold **A or X** for ~0.5 s to start, hold again to
   stop-and-save. Hold-gated so a thumb brush cannot toggle a take. The HUD shows
   `● REC <frames>`.
 - **curl**, which is what the other two do:
@@ -79,7 +79,7 @@ open dataset out and opens the new one.
 This is not tidiness: lerobot 0.5.1 cannot compute video statistics over a
 one-frame episode, so it omits that episode's `stats/observation.images.*` keys
 while every other episode has them, and the ragged result kills the metadata
-flush that writes `meta/episodes/` — taking the *whole dataset* with it, not
+flush that writes `meta/episodes/`, taking the *whole dataset* with it, not
 just the stray take. A mis-click that opens and closes a take in the same
 instant is therefore dropped on the floor, loudly.
 
@@ -90,10 +90,10 @@ instant is therefore dropped on the floor, loudly.
 | `recording` | a take is open |
 | `repo_id` / `task` | what it is being written into, under what instruction |
 | `episode_frames` | frames written so far this take |
-| `skipped_frames` | ticks seen but **not** turned into a frame — a required camera had no fresh image, or an arm's telemetry was missing. Nonzero means the take has gaps, and `observation.wall_clock` says where |
+| `skipped_frames` | ticks seen but **not** turned into a frame: a required camera had no fresh image, or an arm's telemetry was missing. Nonzero means the take has gaps, and `observation.wall_clock` says where |
 | `auto_scored` | whether a task monitor is attached at all (sim only) |
 | `success` | tri-state: `null` = nobody scored this, `false` = scored and did not succeed, `true` = succeeded |
-| `success_frames` | how many frames the success predicate held for — distinguishes a clean place from a cube that qualified for three frames and rolled off |
+| `success_frames` | how many frames the success predicate held for; distinguishes a clean place from a cube that qualified for three frames and rolled off |
 | `last_error` | last per-frame failure, if any |
 
 ### Where it lands, and at what rate
@@ -105,11 +105,11 @@ and `save_episode` at stop time is near-instant). The libsvtav1 default was
 rejected: a software AV1 encoder cannot keep up with realtime multi-camera
 capture on the machines this runs on.
 
-**Every episode gets its own video file per camera** — `video_files_size_in_mb`
+**Every episode gets its own video file per camera**: `video_files_size_in_mb`
 is pinned to `VIDEO_FILE_ROTATE_MB` (0.0001, a hundred bytes) in
 `meta/info.json` so lerobot rotates rather than packs. It was 0 until lerobot
 0.6.1, the venv that trains, began rejecting a non-positive value when it LOADS
-a dataset — a zero made every recorded dataset untrainable, so the pin is now
+a dataset; a zero made every recorded dataset untrainable, so the pin is now
 the smallest positive number instead of zero, which lands the rotate test in
 exactly the same place. Stock
 lerobot 0.5.1 packs several episodes into one file, and the packer
@@ -124,11 +124,11 @@ av.error.ValueError: [Errno 22] Invalid argument
 That raise lands *after* the frames are written but *before* the episode
 metadata is, which loses the take, freezes `total_episodes`, and leaves the
 next take reusing the same episode index. One file per episode is a valid v3
-layout — each episode records its own chunk/file index — and it removes the
+layout (each episode records its own chunk/file index), and it removes the
 broken path rather than hoping to miss it.
 
 **fps is `telemetry.hz`.** 30 in the sim config, matched to the Quest's ~30 Hz
-publish rate and LeRobot's SO-101 convention. The real rig stays at **20 Hz** —
+publish rate and LeRobot's SO-101 convention. The real rig stays at **20 Hz**;
 the half-duplex Feetech bus already interleaves 60 Hz writes with those reads.
 
 An **E-STOP or a dead-man release mid-take is safe.** If the teleop session was
@@ -161,18 +161,18 @@ bookkeeping columns (`timestamp`, `frame_index`, `episode_index`, `index`,
 `task_index`) which the recorder never writes itself.
 
 **On a real rig: identical, minus `next.reward`/`next.done`** (nothing on the
-real rig can decide whether the task was solved — see
+real rig can decide whether the task was solved; see
 [`haller_scoring`](#haller_scoring-in-infojson) below), **plus whatever cameras
 that config records.**
 
 Column layout for the three 12-vectors is the same in all of them: canonical
-SO-101 motor order, **left arm then right arm** —
+SO-101 motor order, **left arm then right arm**:
 
 ```
 shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
 ```
 
-— so `observation.state[i]`, `action[i]` and `observation.effort[i]` are the
+So `observation.state[i]`, `action[i]` and `observation.effort[i]` are the
 same joint, and the `names` metadata spells them out as
 `left_shoulder_pan … right_gripper`.
 
@@ -184,7 +184,7 @@ the only way to see real sampling holes after the fact.
 
 It is deliberately **not** a Unix timestamp. A float32 carries 24 bits of
 mantissa, so one representable step at a 2026 epoch (`1.79e9`) is **128
-seconds** — stored absolutely, a three-minute take collapses to two distinct
+seconds**; stored absolutely, a three-minute take collapses to two distinct
 values and every consecutive difference is zero, which destroys the only thing
 the column is for. Measured from episode start it keeps ~10 µs of resolution for
 any take under three hours. The absolute start time of the most recent take is
@@ -195,7 +195,7 @@ recoverable:
 abs_t = info["haller_wall_clock"]["episode_started_unix_s"] + wall_clock
 ```
 
-`observation.lidar` (fixed-length `/scan`) is the one remaining v0.1 slot — an
+`observation.lidar` (fixed-length `/scan`) is the one remaining v0.1 slot: an
 additive key, not a change to any of the above.
 
 ---
@@ -206,13 +206,13 @@ additive key, not a change to any of the above.
 
 An SO-101 is **6 DoF including the gripper**, so a bimanual pair is 12. It is
 easy to reach for 14 by analogy with ALOHA (7 per arm) or by counting the
-gripper separately from the arm — both are wrong here, and every public bimanual
+gripper separately from the arm; both are wrong here, and every public bimanual
 SO-101 dataset is 12-dim. If a config check or a policy head wants 14, the
 mismatch is in the assumption, not in the data.
 
 ### `action` is not the next `state`
 
-`action` is the **committed** teleop target — the number actually written to the
+`action` is the **committed** teleop target: the number actually written to the
 servo, after the low-pass filter, the velocity ramp and the collision guard have
 all had their say. It comes from the teleop session's `goal_deg`, which is what
 `send_goal` reports it *actually sent*, not what the retargeter asked for (the
@@ -220,7 +220,7 @@ per-call rate cap can legitimately command less than requested).
 
 `observation.state` is what the servo **achieved**.
 
-So the gap between them is real physical information — load and tracking error —
+So the gap between them is real physical information (load and tracking error),
 and not noise to be smoothed away. In particular it does not vanish at steady
 state when the arm is holding something.
 
@@ -232,8 +232,8 @@ saturated, i.e. stalled or gripping.
 
 | rig | source |
 |---|---|
-| real | `Present_Load` (sign-magnitude, sign in bit 10) `/ 1000` — the STS3215 reports load as signed per-mille of maximum torque, really the PWM duty it is applying |
-| sim | `actuator_force / actuator_forcerange[:, 1]` — N·m over the MJCF's declared saturation bound |
+| real | `Present_Load` (sign-magnitude, sign in bit 10) `/ 1000`; the STS3215 reports load as signed per-mille of maximum torque, really the PWM duty it is applying |
+| sim | `actuator_force / actuator_forcerange[:, 1]`; N·m over the MJCF's declared saturation bound |
 
 These are **not the same physical quantity and cannot be unit-matched.** A
 per-mille PWM duty and a newton-metre do not convert into one another without a
@@ -252,7 +252,7 @@ Two sharp edges:
 - **Sim effort is only meaningful with torque ON.** Disabling torque zeroes the
   actuator's `gainprm` but leaves its bias term intact, so a limp joint away from
   zero reads as saturated at −1.0. The sim handle reports 0.0 in that case
-  rather than the raw number — the same thing a real arm with torque off does.
+  rather than the raw number, the same thing a real arm with torque off does.
 
 ### Grasp detection
 
@@ -260,8 +260,8 @@ You can partly detect a grasp from columns you already have. When the jaw stalls
 on an object, `action[gripper] − state[gripper]` becomes a **standing tracking
 error**: the teleop keeps commanding closed, the servo cannot get there.
 
-Effort matters because that error **saturates** once stalled — the commanded
-value hits the joint limit and the difference stops growing — while effort keeps
+Effort matters because that error **saturates** once stalled (the commanded
+value hits the joint limit and the difference stops growing), while effort keeps
 carrying force and slip information after that point.
 
 The usable form is a hysteresis gate on both:
@@ -282,7 +282,7 @@ the unit reason above.
 `MotorNormMode.DEGREES`, `use_degrees=True` at connect). Every public LeRobot
 SO-101 dataset is in normalised **[-100, 100]** (with the gripper in [0, 100]).
 
-This **does not affect training on your own data** — LeRobot normalises from
+This **does not affect training on your own data**: LeRobot normalises from
 per-dataset statistics, so a policy trained only on Haller episodes never sees
 the raw scale. It **silently corrupts co-training** with public data, where two
 differently-scaled action spaces get averaged into one head.
@@ -306,7 +306,7 @@ norm  = (raw - range_min_ticks) / (range_max_ticks - range_min_ticks),
 ```
 
 > **The subtlety worth naming.** `deg_per_tick` in the block is
-> `360 / (resolution - 1)` — 360/4095 — because that is the factor lerobot's
+> `360 / (resolution - 1)`, i.e. 360/4095, because that is the factor lerobot's
 > DEGREES mode actually applies to recorded positions. The `min_deg`/`max_deg`
 > clamp limits are the HMI's own, computed with `DEG_PER_TICK = 360/4096`. Both
 > constants are in the block on purpose. The 0.02 % difference is irrelevant for
@@ -316,7 +316,7 @@ Note also that `norm_mode` is per joint: on SO-101 the gripper is `RANGE_0_100`
 and the other five are `RANGE_M100_100`, so a single dataset mixes both forms.
 
 The block describes the rig as of the **most recent take** appended to the
-dataset — LeRobot v3.0 has no per-episode slot for free-form metadata, so a
+dataset; LeRobot v3.0 has no per-episode slot for free-form metadata, so a
 mid-dataset recalibration is not representable. If you recalibrate, record into a
 new `repo_id`.
 
@@ -326,16 +326,16 @@ The bimanual sim **renders five views and records three**:
 
 | camera `id` | MJCF camera | resolution | `record` | `dataset_key` |
 |---|---|---|---|---|
-| `overshoulder_sim` | `overshoulder` | 960×720 | `false` | — |
+| `overshoulder_sim` | `overshoulder` | 960×720 | `false` | none |
 | `threequarter_sim` | `threequarter` | 960×720 | `true` | `top` |
-| `overhead_sim` | `overhead` | 640×480 | `false` | — |
+| `overhead_sim` | `overhead` | 640×480 | `false` | none |
 | `wrist_left_sim` | `left_wristcam` | 640×480 | `true` | `left_wrist` |
 | `wrist_right_sim` | `right_wristcam` | 640×480 | `true` | `right_wrist` |
 
 Three reasons, all of them training decisions rather than plumbing:
 
 - **π0.5's pretrained camera slots are `base_0_rgb` + `left_wrist_0_rgb` +
-  `right_wrist_0_rgb`** — one base plus two wrists. Three keeps us in
+  `right_wrist_0_rgb`**: one base plus two wrists. Three keeps us in
   distribution; five is territory with no published run behind it.
 - **`armnet/armnetbench_v01_lerobot_bimanual_so101` uses exactly
   `top` / `left_wrist` / `right_wrist`.** Matching those keys turns co-training
@@ -346,10 +346,10 @@ Three reasons, all of them training decisions rather than plumbing:
 
 Two config fields control this, both on `CameraConfig`:
 
-- `record: bool = true` — does this camera go into the dataset, or is it only
+- `record: bool = true`: does this camera go into the dataset, or is it only
   there for the human to drive from? Default true, so a config written before
   the field existed records exactly what it always did.
-- `dataset_key: str | null` — the feature name, i.e.
+- `dataset_key: str | null`: the feature name, i.e.
   `observation.images.<dataset_key>`, falling back to `id`. The split exists
   because the two names answer to different masters: `id` is the HMI's handle and
   has to be unique per rig (`wrist_left_sim`), while the dataset key has to match
@@ -360,7 +360,7 @@ Two config fields control this, both on `CameraConfig`:
 **Two recorded cameras resolving to the same key is a config-load error.** It is
 not something LeRobot would catch: both would build the same
 `observation.images.<key>` feature, the second spec would win, and every frame
-would carry whichever camera was written last — a dataset whose `top` column is
+would carry whichever camera was written last, a dataset whose `top` column is
 silently half one view and half another. Cameras with `record: false` are
 exempt, since a view that never reaches the dataset cannot collide inside it.
 
@@ -375,11 +375,11 @@ what thresholds**:
 | `auto_scored` | `true` | `false` |
 | `reward_feature` / `done_feature` | `next.reward` / `next.done` | `null` |
 | `monitor` / `predicate` | `TaskMonitor` / `haller_hmi.sim.task.cube_placed` | `null` |
-| `predicate_note` | the predicate in words | — |
-| `target_cube` | the watched cube, or `null` for "any" | — |
-| `spec` | the full `SuccessSpec` — `zone_inset_m`, `lin_vel_eps`, `ang_vel_eps`, `settle_s`, `require_release` | `null` |
-| `reward_shape` | `sparse` | — |
-| `note` | — | says in words that the episodes are unlabelled |
+| `predicate_note` | the predicate in words | n/a |
+| `target_cube` | the watched cube, or `null` for "any" | n/a |
+| `spec` | the full `SuccessSpec`: `zone_inset_m`, `lin_vel_eps`, `ang_vel_eps`, `settle_s`, `require_release` | `null` |
+| `reward_shape` | `sparse` | n/a |
+| `note` | n/a | says in words that the episodes are unlabelled |
 
 The thresholds are in there because **the thresholds are the label definition.**
 Re-scoring later, or comparing your success rate against someone else's, is
@@ -392,8 +392,8 @@ meaningless without them.
 > tri-state for the same reason: `null` is "nobody looked", `false` is "looked,
 > and it did not succeed."
 
-`next.reward` is sparse — 1.0 on frames where the predicate holds, 0.0
-elsewhere — and `next.done` is true on the final frame of each episode only. A
+`next.reward` is sparse (1.0 on frames where the predicate holds, 0.0
+elsewhere) and `next.done` is true on the final frame of each episode only. A
 behaviour-cloning run can ignore both.
 
 ### Resume refuses on a feature mismatch, in both directions
@@ -401,7 +401,7 @@ behaviour-cloning run can ignore both.
 Opening an existing dataset resumes it rather than clobbering it. Before the
 first frame, the recorder compares the schema this rig produces against the
 dataset's frozen features and refuses if **either** side has a key the other
-lacks — features missing from the dataset, *and* features the dataset expects
+lacks: features missing from the dataset, *and* features the dataset expects
 that this rig does not record.
 
 Both directions are checked because `add_frame` validates the key set both ways
@@ -411,7 +411,7 @@ rejected.
 
 Common causes: the recorded camera set or a `dataset_key` changed; or the dataset
 was recorded on a rig with a different scorer (`next.reward`/`next.done` exist
-only on a rig that can auto-score, i.e. the sim — so a sim dataset and a real
+only on a rig that can auto-score, i.e. the sim, so a sim dataset and a real
 dataset can never be one dataset).
 
 **The fix is to record into a new `repo_id`.** That is the safe move and costs
@@ -432,7 +432,7 @@ for.
 lerobot-dataset-viz --repo-id myuser/haller_pick_red_cube --episode-index 0
 ```
 
-Then read `meta/info.json` — it is a plain dict, and both Haller blocks survive
+Then read `meta/info.json`; it is a plain dict, and both Haller blocks survive
 create → `save_episode` → resume → save → finalize:
 
 ```bash
@@ -452,12 +452,12 @@ What to actually check:
   consecutive `observation.wall_clock` values to find where the gaps are.
 - **`action` and `observation.state` differ.** If they are identical, no teleop
   session was running and you recorded the fallback.
-- **Feature list matches the table above** — in particular that the three camera
+- **Feature list matches the table above**, in particular that the three camera
   keys are the ones you meant.
 - **`robot_type` is `haller_bimanual`** and `fps` is your `telemetry.hz`.
 - **The `task` string is what you intended.**
 - On sim, **`success` / `success_frames`** for the take, and `/sim/task/status`
-  after it — see [sim.md](./sim.md).
+  after it; see [sim.md](./sim.md).
 
 ## Push it to the Hub
 
@@ -486,8 +486,8 @@ one-arm task with a physical SO-101 **leader** driving a physical SO-101
 `observation.wall_clock`, no Haller metadata blocks.
 
 It needs **exclusive** control of `/dev/haller_arm_leader`,
-`/dev/haller_arm_follower` and every camera device — all of which the HMI holds
-while running — so **stop the HMI first**:
+`/dev/haller_arm_follower` and every camera device (all of which the HMI holds
+while running), so **stop the HMI first**:
 
 ```bash
 # Dev laptop: Ctrl-C the scripts/run_hmi.sh process
@@ -498,7 +498,7 @@ The script refuses to start if anything still has those nodes open, and prints
 which PID is holding them.
 
 ```bash
-# Required: task description (1 sentence — the language instruction, also
+# Required: task description (1 sentence: the language instruction, also
 # slugified into the dataset name). Optional: episode count (default 50).
 scripts/record_dataset.sh "Grab the red cube and place it in the box" 20
 ```
@@ -517,7 +517,7 @@ pushed to `<HF_USER>/so101_<slug>` at the end.
 | `FPS` | 30 | Capture + control rate. |
 | `EPISODE_TIME_SEC` | 30 | Max time per episode. |
 | `RESET_TIME_SEC` | 5 | Pause between episodes for scene reset. |
-| `CAMERAS_JSON` | base camera on `/dev/video0` | Full `lerobot --robot.cameras` dict. **This is the script's own camera config — it does not read `hmi/backend/config.yaml`.** |
+| `CAMERAS_JSON` | base camera on `/dev/video0` | Full `lerobot --robot.cameras` dict. **This is the script's own camera config; it does not read `hmi/backend/config.yaml`.** |
 
 During the run `lerobot-record` watches the keyboard: `→` ends the episode early
 and saves, `←` ends it and discards for a re-record, `ESC` stops the run.
@@ -528,23 +528,23 @@ and saves, `←` ends it and discards for a re-record, `ESC` stops the run.
 
 | Goal | Path |
 |---|---|
-| Train ACT from scratch (single task, ≥50 episodes) | `lerobot-train --policy.type=act --dataset.repo_id=...` — fits on a laptop GPU. |
+| Train ACT from scratch (single task, ≥50 episodes) | `lerobot-train --policy.type=act --dataset.repo_id=...`; fits on a laptop GPU. |
 | LoRA-finetune SmolVLA-base | `--policy.path=lerobot/smolvla_base --policy.peft_config.use_peft=true` on a 16 GB+ cloud GPU. |
-| Finetune π0.5 (recommended VLA path) | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/finetune_pi05.sh <your-dataset>`. Full fine-tune by default: lerobot 0.5.1's default π0.5 LoRA targets freeze the vision tower, which is the one configuration measured as catastrophic for a new embodiment. |
-| Replay-eval an existing policy on your data | See [`runpod-inference.md`](./runpod-inference.md) — `scripts/runpod/replay_eval.py` runs π0.5 / pi0 against your dataset and dumps per-joint error + plots. |
-| Finetune NVIDIA GR00T N1.7 | [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning) — official guide, ports cleanly to N1.7. |
-| Bootstrap before you have your own data | [Public datasets](./public-datasets.md) — which SO-101 sets are usable, which are licence- or action-space-disqualified, and in what order. |
-| Replay a take onto the sim arms to eyeball what you drove | `POST /teleop/sim/start` with `leader.source=replay` — see [`sim.md`](./sim.md). |
+| Finetune π0.5 (recommended VLA path) | See [`runpod-inference.md`](./runpod-inference.md): `scripts/runpod/finetune_pi05.sh <your-dataset>`. Full fine-tune by default: lerobot 0.5.1's default π0.5 LoRA targets freeze the vision tower, which is the one configuration measured as catastrophic for a new embodiment. |
+| Replay-eval an existing policy on your data | See [`runpod-inference.md`](./runpod-inference.md): `scripts/runpod/replay_eval.py` runs π0.5 / pi0 against your dataset and dumps per-joint error + plots. |
+| Finetune NVIDIA GR00T N1.7 | [Post-Training Isaac GR00T N1.5 for LeRobot SO-101 Arm](https://huggingface.co/blog/nvidia/gr00t-n1-5-so101-tuning): official guide, ports cleanly to N1.7. |
+| Bootstrap before you have your own data | [Public datasets](./public-datasets.md): which SO-101 sets are usable, which are licence- or action-space-disqualified, and in what order. |
+| Replay a take onto the sim arms to eyeball what you drove | `POST /teleop/sim/start` with `leader.source=replay`; see [`sim.md`](./sim.md). |
 
 ## Not yet shipped
 
-- **`observation.lidar`** — the one unfilled v0 schema slot. Additive; wires
+- **`observation.lidar`**: the one unfilled v0 schema slot. Additive; wires
   through the same telemetry frame once the broadcaster surfaces `/scan`.
-- **Closed-loop policy evaluation in the HMI** — a policy path, a deploy button,
+- **Closed-loop policy evaluation in the HMI**: a policy path, a deploy button,
   the existing E-STOP wired into the policy loop. The sim's auto-scorer is the
   half of this that exists: it can already label episodes, it just isn't driving
-  a policy yet. See [`sim.md`](./sim.md) for why closed-loop rollout success —
-  not training loss — is the number that matters.
+  a policy yet. See [`sim.md`](./sim.md) for why closed-loop rollout success,
+  not training loss, is the number that matters.
 - **Per-episode metadata.** LeRobot v3.0 has no free-form per-episode slot, so
   both Haller blocks describe the rig as of the *most recent* take appended.
   Recalibrating or re-scoring mid-dataset means a new `repo_id`.

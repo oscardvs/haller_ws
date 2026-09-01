@@ -5,7 +5,7 @@ This guide takes you from "I have a bimanual Haller dataset on Hugging Face" to
 all on a rented cloud GPU.
 
 You don't need this guide for ACT or any small policy that fits on a laptop
-GPU — train those locally. Use RunPod when the model needs ≥10 GB VRAM,
+GPU; train those locally. Use RunPod when the model needs ≥10 GB VRAM,
 which is every interesting generalist VLA (π0, π0.5, π0-FAST, SmolVLA-450M,
 Wall-X, X-VLA, NVIDIA GR00T).
 
@@ -15,7 +15,7 @@ bump the pin, re-check the flags in `scripts/runpod/finetune_pi05.sh`
 before trusting this page.
 
 > Companion guides:
-> - [`dataset-collection.md`](./dataset-collection.md) — how to record the
+> - [`dataset-collection.md`](./dataset-collection.md): how to record the
 >   bimanual dataset you'll evaluate against.
 > - The scripts referenced below all live in
 >   [`scripts/runpod/`](../../scripts/runpod/), and each one carries the
@@ -48,13 +48,13 @@ six, recorded in **degrees**.
 `max_action_dim` in lerobot's `configuration_pi05.py`) and unpads its output
 back to your dataset's real width inside `predict_action_chunk()`. A 12-dim
 bimanual dataset therefore needs **no architectural change, no config override,
-and no "bimanual" flag**. Don't go looking for one — it doesn't exist because
+and no "bimanual" flag**. Don't go looking for one; it doesn't exist because
 it isn't needed. (GR00T does the same thing with `max_state_dim=64` /
 `max_action_dim=32`.)
 
 Two visible consequences of the pad, so they don't surprise you:
 
-- A checkpoint loaded *bare* — no dataset attached — reports an action width of
+- A checkpoint loaded *bare* (no dataset attached) reports an action width of
   **32**, not 12. There is nothing to unpad to yet. `policy_smoke_test.py`
   accepts both widths for exactly this reason.
 - Nothing in the stack knows "left" from "right". The arms are just the first
@@ -63,7 +63,7 @@ Two visible consequences of the pad, so they don't surprise you:
 
 ## Cameras: three recorded, five renderable
 
-The bimanual recording config renders five views but records **three** —
+The bimanual recording config renders five views but records **three**:
 `top`, `left_wrist`, `right_wrist`, i.e. `observation.images.top`,
 `observation.images.left_wrist`, `observation.images.right_wrist`. That's a
 deliberate match to π0.5's three pretrained camera slots (`base_0_rgb` +
@@ -75,8 +75,8 @@ does not save you any compute.** `PI05Pytorch._preprocess_images()` walks
 `config.image_features`, and for every declared key that is *missing* from the
 batch it appends a `-1`-filled image with a zero mask. Those padded views go
 through the shared SigLIP tower in `embed_prefix()` alongside the real ones.
-The knob that costs VRAM and latency is therefore `len(config.image_features)`
-— what the config **declares** — not how many keys you actually put in the
+The knob that costs VRAM and latency is therefore `len(config.image_features)`,
+what the config **declares**, not how many keys you actually put in the
 batch.
 
 If *none* of the declared keys are present you get:
@@ -91,7 +91,7 @@ SigLIP tower and concatenates the results into the attention prefix. There is
 no per-camera parameter and no hard-coded 3, so the architecture is N-flexible;
 each extra view costs prefix length and the VRAM that implies, nothing else.
 
-Statistically, 5 is **out of distribution** — the pretraining mixture used 3
+Statistically, 5 is **out of distribution**: the pretraining mixture used 3
 views, and no published 5-camera π0.5 run was found. "It runs" is not "it
 works", and **whether 5 works at all here is UNVERIFIED**. That's what the
 smoke test's probe is for; see below.
@@ -101,10 +101,10 @@ smoke test's probe is for; see below.
 | Goal | GPU | Approx. $/h (community / secure) | Honest read |
 |------|-----|----------------------------------|-------------|
 | Inference + replay eval on π0.5 / π0 | RTX 4090 24 GB | ~$0.34 / $0.69 | Comfortable. openpi puts π0/π0.5 inference above 8 GB. |
-| LoRA finetune π0.5 | RTX 4090 24 GB | ~$0.34 / $0.69 | **Floor, not a spec.** openpi's LoRA figure is >22.5 GB — ~1.5 GB of headroom. Expect to pull the memory levers below. |
+| LoRA finetune π0.5 | RTX 4090 24 GB | ~$0.34 / $0.69 | **Floor, not a spec.** openpi's LoRA figure is >22.5 GB, leaving ~1.5 GB of headroom. Expect to pull the memory levers below. |
 | LoRA finetune with room to breathe | A100 40 GB | ~$1.20 / $1.90 | Where a multi-camera bimanual LoRA run stops being a fight. |
 | Full finetune π0.5 | 80 GB-class (H100 / A100 80 GB) | varies | openpi puts full finetune above **70 GB**. A 40 GB card does not do this. |
-| Production deploy (later, on Jetson) | Jetson Thor / Orin AGX | own hardware | — |
+| Production deploy (later, on Jetson) | Jetson Thor / Orin AGX | own hardware | n/a |
 
 Those VRAM numbers come from [openpi's README](https://github.com/Physical-Intelligence/openpi),
 the upstream π0/π0.5 implementation lerobot ports: **inference > 8 GB, LoRA
@@ -117,7 +117,7 @@ finetune > 22.5 GB, full finetune > 70 GB**. Two caveats that matter:
   published run covers that combination.
 
 **Template: `runpod/pytorch:2.x-py3.12-cuda12.x-devel-*`.** Note the Python
-version — lerobot 0.5.1 declares `Requires-Python: >=3.12`, so the older
+version: lerobot 0.5.1 declares `Requires-Python: >=3.12`, so the older
 py3.11 RunPod templates **cannot install it at all**. pip resolves to nothing
 and you lose an hour working out why. `setup.sh` checks the interpreter as its
 first step, before spending time on apt.
@@ -155,7 +155,7 @@ Two install details worth knowing, because both have bitten:
   package metadata: the `pi` extra resolves to `transformers-dep` + `scipy-dep`
   only. A LoRA run would then die deep inside `policies/pretrained.py` at
   `from peft import get_peft_model`, ten minutes into a model download. Use
-  **`lerobot[pi,peft]`** — which is what `setup.sh` defaults to
+  **`lerobot[pi,peft]`**, which is what `setup.sh` defaults to
   (`LEROBOT_EXTRAS=pi,peft`). Add `smolvla` or `groot` for those policies;
   `feetech` is only needed where there's a real serial bus, so not on a pod.
 - There is **no `huggingface_hub[cli]` extra any more**. lerobot 0.5.1 needs
@@ -172,8 +172,8 @@ hf auth login
 That covers pulling `lerobot/pi05_base` and pushing your finetuned policy back.
 
 It does **not** cover the tokenizer. π0.5's preprocessor builds its prompt with
-`google/paligemma-3b-pt-224` — hardcoded in lerobot's
-`policies/pi05/processor_pi05.py` — and **that repo is gated**: *"To access
+`google/paligemma-3b-pt-224` (hardcoded in lerobot's
+`policies/pi05/processor_pi05.py`), and **that repo is gated**: *"To access
 PaliGemma on Hugging Face, you're required to review and agree to Google's
 usage license."* Until you accept it, **logged in as the same account your
 token belongs to**, every π0.5 script here dies with a `GatedRepoError` on the
@@ -209,7 +209,7 @@ lerobot-edit-dataset \
 
 If you also plan to train with `--policy.use_relative_actions=true`, add
 `--operation.relative_action true --operation.chunk_size 50
---operation.relative_exclude_joints "['left_gripper','right_gripper']"` — note
+--operation.relative_exclude_joints "['left_gripper','right_gripper']"`. Note
 **both** gripper names, since a bimanual dataset has two.
 
 ## Smoke test the policy
@@ -236,12 +236,12 @@ python scripts/runpod/policy_smoke_test.py --policy-repo lerobot/pi0_base
 The first run downloads ~9 GB of weights (and the gated PaliGemma tokenizer)
 and warms the GPU; subsequent runs are fast. A pass means the model loads,
 the **real preprocessor pipeline** accepts a Haller-shaped 12-dim observation,
-and a **12-dim** action comes back — or **32** with `--bare-features`, which is
+and a **12-dim** action comes back, or **32** with `--bare-features`, which is
 π0.5's internal pad width showing through when no dataset has narrowed it. A
 fail here means the env or the checkpoint is wrong; don't move on.
 
 The 5-camera verdict is a claim about **shape and memory only**. It cannot tell
-you whether 5 views help or hurt the policy — that's a question for
+you whether 5 views help or hurt the policy; that's a question for
 `replay_eval.py` MAE at 3 vs 5 after a finetune.
 
 What the smoke test deliberately does **not** prove: that the outputs are
@@ -262,15 +262,15 @@ python scripts/runpod/replay_eval.py \
 
 Outputs land in `outputs/eval/<timestamp>_<policy>__<dataset>__ep<n>/`:
 
-- `actions.csv` — every frame, every joint, predicted + ground-truth + error
-- `summary.json` — per-joint MAE / RMSE / max error, a `global_mae`, **and a
+- `actions.csv`: every frame, every joint, predicted + ground-truth + error
+- `summary.json`: per-joint MAE / RMSE / max error, a `global_mae`, **and a
   `left_arm_mae` / `right_arm_mae` rollup**, plus mean inference latency, the
   GPU it ran on, the dtype, and which feature mode was used
-- `joints.png` — **one column per arm**, one row per joint, predicted overlaid
+- `joints.png`: **one column per arm**, one row per joint, predicted overlaid
   on ground truth over time
 
 The per-arm rollup is the number you actually compare between runs when one arm
-is doing the work and the other is parked — a global mean quietly halves the
+is doing the work and the other is parked; a global mean quietly halves the
 error of a task only the left arm performs. The two-column plot exists for the
 same reason: for a bimanual robot the interesting comparison is left vs right
 at the *same* joint, which a flat grid destroys.
@@ -284,16 +284,16 @@ renaming is *the thing that breaks a working setup*. What decides the expected
 keys is how the policy's `input_features` get populated, and there are exactly
 two modes:
 
-| | MODE A — features from your **dataset** | MODE B — features from the **checkpoint** |
+| | MODE A: features from your **dataset** | MODE B: features from the **checkpoint** |
 |---|---|---|
 | `replay_eval.py` | default | `--from-policy` |
 | `lerobot-train` analogue | `--policy.type=pi05 --policy.pretrained_path=lerobot/pi05_base` | `--policy.path=lerobot/pi05_base` |
 | Expected image keys | **yours, verbatim** (`observation.images.top`, …) | the checkpoint's (`base_0_rgb`, `left_wrist_0_rgb`, `right_wrist_0_rgb`) |
-| Rename map | **must not be passed** — you'd be renaming your keys to names nothing is looking for | **required** — otherwise `ValueError: All image features are missing from the batch` |
+| Rename map | **must not be passed**; you'd be renaming your keys to names nothing is looking for | **required**; otherwise `ValueError: All image features are missing from the batch` |
 
 In MODE A, `make_policy()` sees empty `input_features` and fills them from the
-dataset metadata. In MODE B it loads the saved config wholesale — camera names
-included — and does **not** overwrite non-empty `input_features`, so your
+dataset metadata. In MODE B it loads the saved config wholesale (camera names
+included) and does **not** overwrite non-empty `input_features`, so your
 dataset's keys won't match anything.
 
 MODE B, with the rename map going **dataset key → policy key**:
@@ -308,7 +308,7 @@ python scripts/runpod/replay_eval.py \
 ```
 
 `--rename` is repeatable and is fed to lerobot's own
-`RenameObservationsProcessorStep` — the same mechanism as `lerobot-train`'s
+`RenameObservationsProcessorStep`, the same mechanism as `lerobot-train`'s
 top-level `--rename_map`. Passing it *without* `--from-policy` earns you a
 warning, because it will hide the keys the policy is asking for.
 
@@ -319,7 +319,7 @@ That's what makes π0.5 unpad its 32-dim action back to your 12.
 ### Reading the output
 
 **Low MAE on every joint** doesn't mean the policy would succeed on the real
-arms — open-loop replay can't capture closed-loop dynamics, because the policy
+arms; open-loop replay can't capture closed-loop dynamics, because the policy
 never gets to see how the scene responds to its own actions. But **wild
 divergence** (predicted actions jumping orders of magnitude away from the
 human-teleoperated ones) is a strong "this policy doesn't understand the task
@@ -327,7 +327,7 @@ in this setting" signal, and saves you a closed-loop deployment.
 
 **π0.5 is generalist, not magic.** Out of the box it will probably get the
 *shape* of your task vaguely right (move in the rough direction) but not
-match the human teleop trace closely — that's expected, you haven't
+match the human teleop trace closely; that's expected, you haven't
 finetuned it yet. The replay eval mostly tells you whether the model is
 *reacting to the observation at all* vs emitting noise.
 
@@ -339,7 +339,7 @@ these produced *plausible* output while being wrong:
 - **Normalization was silently ignored.** The script used to pass
   `dataset_stats=` alongside `pretrained_path=` to `make_pre_post_processors()`.
   That function loads the saved pipelines verbatim when given a
-  `pretrained_path` and **silently drops** the `dataset_stats` kwarg — no error,
+  `pretrained_path` and **silently drops** the `dataset_stats` kwarg: no error,
   no warning. Every MAE was being computed against π0.5's *pretraining*
   normalization instead of your dataset's, i.e. your degrees measured against
   someone else's statistics. It now uses `preprocessor_overrides` /
@@ -348,7 +348,7 @@ these produced *plausible* output while being wrong:
   π0.5 deliberately keeps the vision tower, projector and layernorms in
   float32; a blanket `.to(dtype=torch.bfloat16)` from outside flattens that
   distinction. Set precision via `config.dtype` (what `--dtype` does). π0.5
-  accepts **only** `bfloat16` or `float32` — float16 is rejected by
+  accepts **only** `bfloat16` or `float32`; float16 is rejected by
   `PaliGemmaWithExpertModel`.
 - **Observations must stay float32 into the preprocessor.** π0.5's state
   discretization step calls `state.cpu().numpy()`, and torch refuses to hand
@@ -356,7 +356,7 @@ these produced *plausible* output while being wrong:
   *model* setting, never an input setting.
 
 There is also a fourth, in the same family: an older version called
-`policy.select_action(batch)` with a raw `"task"` string. That can never work —
+`policy.select_action(batch)` with a raw `"task"` string. That can never work:
 `predict_action_chunk()` reads `observation.language.tokens` and
 `.attention_mask`, which only exist after `TokenizerProcessorStep` has run, and
 for π0.5 the pipeline also folds the **discretized state into the text prompt**.
@@ -375,13 +375,13 @@ Defaults the wrapper passes to `lerobot-train`:
 
 | Flag | Default | Why |
 |------|---------|-----|
-| `--policy.type=pi05` + `--policy.pretrained_path=lerobot/pi05_base` | — | MODE A: input features come from your dataset, so **no `--rename_map`** |
+| `--policy.type=pi05` + `--policy.pretrained_path=lerobot/pi05_base` | n/a | MODE A: input features come from your dataset, so **no `--rename_map`** |
 | `--peft.method_type=LORA` + `--peft.r` | 16 | attaches a **fresh** adapter (see below) |
 | `--batch_size` | 2 | `BATCH_SIZE` env var |
 | `--policy.optimizer_lr` | 5e-5 | `LR` env var; typical for LoRA |
-| `--policy.dtype=bfloat16` | — | π0.5 applies its own selective cast |
-| `--policy.gradient_checkpointing=true` | — | trades compute for activation memory |
-| `--policy.compile_model=true` | — | — |
+| `--policy.dtype=bfloat16` | n/a | π0.5 applies its own selective cast |
+| `--policy.gradient_checkpointing=true` | n/a | trades compute for activation memory |
+| `--policy.compile_model=true` | n/a | n/a |
 | `--policy.train_expert_only` / `--policy.freeze_vision_encoder` | false | the memory levers, below |
 | `--steps` | 5000 (positional arg 2) | also sets `--policy.scheduler_decay_steps` |
 
@@ -396,20 +396,20 @@ BATCH_SIZE=1 \
 scripts/runpod/finetune_pi05.sh myteam/haller_bimanual_pickplace 8000
 ```
 
-Wall-clock time and cost for a full run have **not been measured here** — they
+Wall-clock time and cost for a full run have **not been measured here**; they
 depend on episode count, camera count, and which memory levers you pulled.
 Watch the first few hundred steps and extrapolate rather than trusting a
 number.
 
 After the finetune, re-run `replay_eval.py` against your new policy and
-compare — the joint traces should track much closer to ground truth on the
+compare; the joint traces should track much closer to ground truth on the
 training episodes, and `left_arm_mae` / `right_arm_mae` should both fall.
 That's the basic sanity check that finetuning did *something*.
 
 ### Memory levers, in order of least to most damaging
 
 1. **`BATCH_SIZE=1`.** Note there is **no gradient-accumulation flag** in
-   `lerobot-train` 0.5.1 — an earlier version of this guide promised one and
+   `lerobot-train` 0.5.1; an earlier version of this guide promised one and
    was wrong. You cannot recover an effective batch of 16 this way.
 2. **`FREEZE_VISION_ENCODER=true`** → `--policy.freeze_vision_encoder`.
 3. **`TRAIN_EXPERT_ONLY=true`** → `--policy.train_expert_only`. Freezes the
@@ -422,7 +422,7 @@ Worth knowing before you plan around it: **LoRA is not part of LeRobot's
 official π0.5 workflow.** [LeRobot's π0/π0.5 guide](https://huggingface.co/docs/lerobot/en/pi0)
 trains at `--batch_size=32` and never mentions LoRA or PEFT at all. The LoRA
 path used here is a lerobot *library* feature that the guide does not walk
-through — which is exactly why the flag surface is easy to get wrong.
+through, which is exactly why the flag surface is easy to get wrong.
 
 ### The PEFT flag surface
 
@@ -435,7 +435,7 @@ two separate things, and they are **not interchangeable**:
 | `--policy.pretrained_path=<path>` + `--policy.use_peft` | **Resumes an existing adapter.** `policies/factory.py` calls `PeftConfig.from_pretrained(cfg.pretrained_path)`, i.e. reads `adapter_config.json` out of that path. `lerobot/pi05_base` has none, so a first LoRA run down this path fails. |
 | `--policy.pretrained_path=<path>` + `--peft.<field>` | **Attaches a fresh adapter.** The factory loads the base policy normally, then `lerobot_train.py` calls `policy.wrap_with_peft(...)`. This is the path the script takes. |
 
-The script deliberately does **not** pass `--policy.use_peft` for a fresh run —
+The script deliberately does **not** pass `--policy.use_peft` for a fresh run;
 lerobot sets it inside `wrap_with_peft()` so the checkpoint saves correctly.
 π0.5 supplies its own default LoRA `target_modules` (gemma-expert q/v
 projections plus the state/action projections), so `--peft.method_type` +
@@ -486,13 +486,13 @@ repo is flagging it rather than resolving it:
   OpenPI repository".
 - But the **weights you actually download** declare something else. The
   `lerobot/pi05_base` model card frontmatter says `license: gemma`, because
-  π0.5 is built on a PaliGemma backbone — and PaliGemma itself sits behind
+  π0.5 is built on a PaliGemma backbone, and PaliGemma itself sits behind
   Google's gated licence.
 
 Gemma Terms of Use **permit commercial use**, but attach a Prohibited Use
 Policy and obligations that follow the model downstream: you must pass the
 terms on with any redistribution and keep the use restrictions attached to
-derivatives — **including a LoRA adapter trained on top**.
+derivatives, **including a LoRA adapter trained on top**.
 
 **This is UNRESOLVED, not settled.** If Haller output is ever going to be
 commercial, "π0.5 is Apache-2.0" is the wrong line to rely on; someone needs to
@@ -507,7 +507,7 @@ read the Gemma terms against the intended use. Sources:
 ## Worth an A/B: GR00T N1.7
 
 If π0.5's licence position or its 3-camera pretraining bias becomes a problem,
-NVIDIA's GR00T is the natural comparison — and it is **much cheaper to try than
+NVIDIA's GR00T is the natural comparison, and it is **much cheaper to try than
 the old version of this guide claimed**. Two corrections:
 
 - **No separate runtime.** `--policy.type=groot` is already registered in the
@@ -520,7 +520,7 @@ the old version of this guide claimed**. Two corrections:
   people remember applied to **N1.5**, not N1.7.
 
 > **The trap.** lerobot 0.5.1's `GrootConfig` defaults to
-> `base_model_path="nvidia/GR00T-N1.5-3B"` — the **non-commercial** weights. A
+> `base_model_path="nvidia/GR00T-N1.5-3B"`, the **non-commercial** weights. A
 > plain `--policy.type=groot` run silently gives you N1.5. Getting the
 > commercially-licensed model requires explicitly passing
 > **`--policy.base_model_path=nvidia/GR00T-N1.7-3B`**.
@@ -533,7 +533,7 @@ Like π0.5, GR00T zero-pads short vectors (`max_state_dim=64`,
 `max_action_dim=32`), so 12-dim bimanual is a non-issue there too. It has its
 own LoRA knobs (`--policy.lora_rank`, `--policy.lora_alpha`) rather than the
 shared `--peft.*` block. Install with `lerobot[groot]`, which does pull `peft`
-in — unlike `lerobot[pi]`.
+in, unlike `lerobot[pi]`.
 
 This is a pointer, not an implementation: **nothing in this section has been
 run on a GPU.**

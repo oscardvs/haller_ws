@@ -5,7 +5,7 @@ A ROS2 workspace for the Haller mobile robot platform - a 3-wheeled differential
 ## Hardware Specifications
 
 - **Compute**: NVIDIA Jetson Orin Nano (developer kit)
-- **Drive**: differential drive — 2 driven front wheels (MF5010 BLDC over CAN) + rear caster (3 wheels total)
+- **Drive**: differential drive: 2 driven front wheels (MF5010 BLDC over CAN) + rear caster (3 wheels total)
 - **Sensors**:
   - Slamtech 2D LiDAR (RPLIDAR A1M8)
   - Camera modules (IMX219)
@@ -14,9 +14,9 @@ A ROS2 workspace for the Haller mobile robot platform - a 3-wheeled differential
 
 Hardware documentation:
 
-- [`docs/hardware_inventory.md`](../docs/hardware_inventory.md) — parts list,
+- [`docs/hardware_inventory.md`](../docs/hardware_inventory.md): parts list,
   what is confirmed vs unknown, and the shopping list
-- [`docs/power_system.md`](../docs/power_system.md) — power architecture:
+- [`docs/power_system.md`](../docs/power_system.md): power architecture,
   battery specifications, connector pinout, load budget, DC-DC requirements,
   fusing, and state-of-charge thresholds
 

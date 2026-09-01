@@ -57,14 +57,14 @@ across time. Measured on the healthy arm (torque cap 500):
 A real gearbox fault reads 2-5× these, not +25 %. `elbow_flex` sits highest
 simply because it carries the largest gravity moment in the rest pose. A damaged
 tooth shows as a **localized spike at a specific output angle**, repeatable
-across passes and directions — not as a uniformly raised floor.
+across passes and directions, not as a uniformly raised floor.
 
 **Do not take `abs()` of the load.** It destroys the sign that separates the two
 terms, and it was the reason a first pass mistook a normal joint for a stiff one.
 
 ---
 
-## 3. The lift test — the one that actually answers it
+## 3. The lift test: the one that actually answers it
 
 Everything above runs at low load and cannot distinguish a healthy servo from
 one that fails under real weight. This test can, and it is cheap.
@@ -87,18 +87,18 @@ Result for `elbow_flex`, walking out to 88°:
 | +700 | 61.5° | 5 | 48 |
 | +1000 | 87.9° | 7 | 64 |
 
-Smooth, monotonic, no spikes — a textbook gravity curve. Then the lift back:
+Smooth, monotonic, no spikes: a textbook gravity curve. Then the lift back:
 
 | torque cap | result |
 |---|---|
 | 200/1000 | no lift; load saturated exactly at the cap |
 | **300/1000** | **full 987-tick lift, horizontal → vertical** |
 
-**`elbow_flex` does its hardest real job at ~25-30 % of rated torque — better
+**`elbow_flex` does its hardest real job at ~25-30 % of rated torque, better
 than 3× headroom.** Use 300 as the reference figure. If a future elbow needs
 materially more to make this same lift, that is a genuine fault.
 
-Note that at cap 200 the joint did not *fail* — its load pinned exactly at the
+Note that at cap 200 the joint did not *fail*; its load pinned exactly at the
 imposed cap. Saturation at the cap is the signature of a torque limit, not of
 broken hardware. Always check whether a "no move" is sitting at your own ceiling.
 
@@ -133,7 +133,7 @@ error. A ±4 tick tolerance made a perfectly healthy `shoulder_pan` look stalled
 - **Goal-lunge.** `Goal_Position` reads 0 on a freshly booted arm. Seed goal =
   present position *before* `Torque_Enable=1`, or every joint slams toward tick
   0. (Also noted in the 2026-08-24 bring-up.)
-- **EEPROM read-back.** Reading a register back while `Lock=0` returns garbage —
+- **EEPROM read-back.** Reading a register back while `Lock=0` returns garbage:
   `I_Coefficient` read as 250 immediately after a correct write of 8. Read it
   only *after* re-locking. A first attempt aborted on this phantom failure.
   Sequence: `Lock=0` → write → `Lock=1` → *then* verify, with ~0.4 s between
@@ -144,7 +144,7 @@ error. A ±4 tick tolerance made a perfectly healthy `shoulder_pan` look stalled
 - **One anomalous sweep means nothing.** A single pass measured `wrist_roll`
   friction at 973 (~full torque). Three repeats gave 35.0-35.3. The bad pass
   also reported nonzero gravity on a *roll* axis, which is physically
-  impossible — a good tell that a measurement is corrupt rather than alarming.
+  impossible, a good tell that a measurement is corrupt rather than alarming.
   Repeat before believing.
 - **`pkill -f <script>` kills your own shell** if the pattern appears in the
   invoking command line. Cost two emergency-stop attempts.
@@ -155,8 +155,8 @@ error. A ±4 tick tolerance made a perfectly healthy `shoulder_pan` look stalled
 
 **Do not run a full-range sweep in a confined workspace**, even at a capped
 torque. Doing so wedged this arm against its own base and the table, and later
-against itself. A capped torque makes a collision non-damaging — no alarm ever
-latched — but it does not make it harmless: the arm ends up tangled, and every
+against itself. A capped torque makes a collision non-damaging (no alarm ever
+latched), but it does not make it harmless: the arm ends up tangled, and every
 measurement taken while it is jammed is void.
 
 **How to recognise it in the data:** a joint blocked at the *same tick in both
@@ -165,7 +165,7 @@ reported obstruction at 2716 up and down, and `elbow_flex` at 2708 up and down.
 That is what "the third motor won't come up" actually was. Freed, the elbow
 lifted its full load at a third of its torque.
 
-Collision points observed this session, **as raw observations, not limits** —
+Collision points observed this session, **as raw observations, not limits**;
 they were recorded with the other joints limp, so they are pose-dependent and
 must not be treated as authoritative travel bounds:
 
@@ -186,7 +186,7 @@ For reference, `elbow_flex` travel is **810 = arm straight, 3037 = folded**.
 - **Real payload.** Everything ran under the arm's own weight only. A fault that
   appears only under an external load is still untested.
 - **`I_Coefficient` > 0 on hardware.** The experiment was attempted twice and
-  abandoned — first on the read-back trap in §5, then because the arm had fallen
+  abandoned: first on the read-back trap in §5, then because the arm had fallen
   and was colliding with itself, making every sample an obstruction reading. The
   `load/9` relationship in §4 is measured and solid; the *fix* is unproven.
 - **Cross-arm comparison.** The second arm was unreachable from this desktop.

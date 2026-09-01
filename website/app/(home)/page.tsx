@@ -41,18 +41,18 @@ function Hero() {
         <span className="text-[11px]">DOCS · LAST PUSH 2026-05-23</span>
       </div>
 
-      {/* title — serif display, italic accent, mono pip */}
+      {/* title: serif display, italic accent, mono pip */}
       <h1
         className="h-rise mt-10 text-balance text-[clamp(2.6rem,7.4vw,6.4rem)] leading-[0.96] text-fd-foreground h-display"
         style={{ animationDelay: '80ms' }}
       >
-        A hackable{' '}
+        An open-source{' '}
         <span className="italic text-fd-primary" style={{ fontVariationSettings: "'opsz' 144, 'SOFT' 100" }}>
           bimanual
         </span>{' '}
         mobile manipulator,
         <br className="hidden sm:block" />
-        engineered in the open.
+        built on ROS 2 and LeRobot.
       </h1>
 
       {/* deck / lede */}
@@ -60,11 +60,11 @@ function Hero() {
         className="h-rise mt-8 max-w-2xl text-pretty text-[1.05rem] leading-[1.55] text-fd-muted-foreground sm:text-[1.12rem]"
         style={{ animationDelay: '160ms' }}
       >
-        Haller is a three-wheel differential-drive base (two driven front wheels + a rear caster) carrying two SO-101 arms.
-        ROS&nbsp;2 for the base, LeRobot for the arms, a unified FastAPI&nbsp;+&nbsp;Next.js HMI
-        that ties it all together —{' '}
-        <span className="italic text-fd-foreground">build it, calibrate it in the browser,
-        teleoperate it across the room.</span>
+        Haller is a three-wheel differential-drive base (two driven front wheels and a rear caster) carrying two SO-101 arms.
+        ROS&nbsp;2 runs the base, LeRobot runs the arms, and one FastAPI&nbsp;+&nbsp;Next.js HMI
+        controls both from the browser.{' '}
+        <span className="italic text-fd-foreground">Today the arms are the working rig: calibration,
+        WebXR teleop from a Meta Quest, and dataset recording all run through the HMI.</span>
       </p>
 
       {/* CTAs */}
@@ -112,14 +112,14 @@ const SPECS = [
     n: '02',
     tag: 'ARMS',
     title: 'Two symmetric SO-101 arms',
-    body: 'Open hardware from TheRobotStudio — 6× Feetech STS3215 servos each, on half-duplex USB-TTL buses. Either arm can lead or follow. Calibration sidecars are saved and backed up on every write.',
+    body: 'Open hardware from TheRobotStudio: 6× Feetech STS3215 servos each, on half-duplex USB-TTL buses. Either arm can lead or follow. Calibration sidecars are saved and backed up on every write.',
     stat: ['6 DoF × 2', 'in-browser calib'],
   },
   {
     n: '03',
     tag: 'HMI',
-    title: 'One browser, every loop closed',
-    body: 'A unified Next.js + FastAPI dashboard: joint sliders, pose presets, MJPEG feeds, leader↔follower teleop at 60 Hz, webcam pose-teleop with a SPACE dead-man, dataset recording — all behind a single E-STOP.',
+    title: 'One browser HMI for arms and base',
+    body: 'A Next.js + FastAPI dashboard: joint sliders, pose presets, MJPEG feeds, leader↔follower teleop at 60 Hz, WebXR teleop from a Meta Quest, and an in-process dataset recorder, all behind a single E-STOP.',
     stat: ['60 Hz teleop', '20 Hz telemetry'],
   },
 ];
@@ -130,7 +130,7 @@ function SpecSheet() {
       <header className="mb-10 flex items-baseline justify-between">
         <span className="h-label">[ Spec Sheet · 03 ]</span>
         <span className="h-mono text-[10px] text-fd-muted-foreground">
-          §01—03 / overview
+          §01–03 / overview
         </span>
       </header>
 
@@ -194,7 +194,7 @@ const ROUTES: { label: string; href: string; hint: string }[] = [
   { label: 'RunPod inference', href: '/docs/data/runpod-inference', hint: 'cloud GPU' },
   { label: 'Jetson deployment', href: '/docs/deployment/jetson', hint: 'on-robot install' },
   { label: 'Wi-Fi AP fallback', href: '/docs/deployment/wifi-ap', hint: 'HallerRobot SSID' },
-  { label: 'Troubleshooting', href: '/docs/troubleshooting', hint: 'when it lies to you' },
+  { label: 'Troubleshooting', href: '/docs/troubleshooting', hint: 'symptoms and fixes' },
 ];
 
 function RoutesIndex() {

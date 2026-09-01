@@ -2,22 +2,22 @@
 
 This guide brings up the SO-101 arms on Haller. It assumes the [LeRobot environment](./lerobot-environment.md) is already installed.
 
-Source: official LeRobot SO-101 docs — [huggingface.co/docs/lerobot/so101](https://huggingface.co/docs/lerobot/so101).
+Source: official LeRobot SO-101 docs, [huggingface.co/docs/lerobot/so101](https://huggingface.co/docs/lerobot/so101).
 
-Haller has **two** SO-101 arms, and they are mechanically **identical** — six
+Haller has **two** SO-101 arms, and they are mechanically **identical**: six
 C001-spec (1/345) STS3215 motors each, rather than the stock leader gearbox mix
 of 3× C046 / 2× C044 / 1× C001. Symmetric on purpose: either arm can be leader
 or follower, and swapping the end-effector flips the role.
 
-- **Right** — calibrated as `haller_follower`, USB symlink `/dev/haller_arm_follower`.
-- **Left** — calibrated as `haller_leader`, USB symlink `/dev/haller_arm_leader`.
+- **Right**: calibrated as `haller_follower`, USB symlink `/dev/haller_arm_follower`.
+- **Left**: calibrated as `haller_leader`, USB symlink `/dev/haller_arm_leader`.
   That name records the role it was first built for (2026-05-22); the HMI now
   also drives it as a follower, copying its teleoperator calibration into
   `robots/so_follower/` on startup.
 
 **Both arms currently run as followers**, because teleoperation is the
 human-pose webcam path in the HMI. Leader-follower teleop still works and needs
-no new hardware — key off the udev symlinks rather than assuming which arm is
+no new hardware; key off the udev symlinks rather than assuming which arm is
 physically which.
 
 Both bring-ups follow the same pattern (find port → configure motor IDs → daisy-chain → calibrate → smoke test). The instructions below describe the **follower** flow in detail; the leader-specific deltas are at the end.
@@ -29,16 +29,16 @@ Both bring-ups follow the same pattern (find port → configure motor IDs → da
 Before you start:
 
 - [ ] SO-101 arm mechanically assembled per the [TheRobotStudio assembly instructions](https://github.com/TheRobotStudio/SO-ARM100).
-- [ ] 6× Feetech STS3215 servos. **Haller's are the 7.4 V variant** — all twelve
+- [ ] 6× Feetech STS3215 servos. **Haller's are the 7.4 V variant**, all twelve
       of them. Check the label anyway if you are building your own:
-  - **7.4 V variant** (operating range 6.0–7.4 V) — use a **7.4 V supply** (e.g. bench DC set to 7.0–7.4 V at ≥2 A).
-  - **12 V variant** (operating range 4–14 V) — use the official SO-101 kit's **12 V / 5 A** brick.
-  - Wrong supply on the 7.4 V variant = "Input voltage error" + alarm LED at best, dead servos at worst. On the robot, the 7.4 V rail carries four independent layers of over-voltage protection for exactly this reason — see [`wiring.md`](../wiring.md).
+  - **7.4 V variant** (operating range 6.0–7.4 V): use a **7.4 V supply** (e.g. bench DC set to 7.0–7.4 V at ≥2 A).
+  - **12 V variant** (operating range 4–14 V): use the official SO-101 kit's **12 V / 5 A** brick.
+  - Wrong supply on the 7.4 V variant = "Input voltage error" + alarm LED at best, dead servos at worst. On the robot, the 7.4 V rail carries four independent layers of over-voltage protection for exactly this reason; see [`wiring.md`](../wiring.md).
 - [ ] Feetech bus servo adapter board (Waveshare or equivalent).
   - The two jumpers select the **control path**, not the power source:
     - `A` channel = UART control (Pi Zero, ESP32, Arduino, STM32).
     - `B` channel = USB control (PCs, Pi 4B, Jetson Orin Nano). This is what you want for a desktop or Jetson host.
-  - **USB does not power the servo bus.** The servos are powered exclusively from the barrel jack — USB only powers the on-board USB-to-TTL logic.
+  - **USB does not power the servo bus.** The servos are powered exclusively from the barrel jack; USB only powers the on-board USB-to-TTL logic.
 - [ ] Power supply matching your servo variant, with a center-positive barrel plug that physically fits the board's DC5521 jack.
 - [ ] USB cable from the adapter board to the workstation.
 - [ ] At least one 3-pin TTL cable for connecting one motor at a time during configuration.
@@ -65,7 +65,7 @@ The tool lists all serial devices, asks you to **unplug** the adapter and press 
 - Follower: `/dev/haller_arm_follower`
 - Leader: `/dev/haller_arm_leader`
 
-Use those names in every subsequent command — they survive reboots, USB port reorderings, and dual-arm plug-in order changes.
+Use those names in every subsequent command; they survive reboots, USB port reorderings, and dual-arm plug-in order changes.
 
 ### Persistent permissions
 
@@ -99,7 +99,7 @@ udevadm info -a -n /dev/ttyACM0 | grep '{serial}' | head -1
 
 Brand-new Feetech motors all ship with ID `1`. The bus servo protocol requires unique IDs (1–6 for the SO-101) and a shared baud rate. These values are written to motor EEPROM, so this step is **one-time per motor**.
 
-> **Critical:** only **one motor** may be connected to the bus during this step. The script writes ID `n` to whatever motor it can see — if multiple are on the bus, you'll overwrite IDs you've already set.
+> **Critical:** only **one motor** may be connected to the bus during this step. The script writes ID `n` to whatever motor it can see; if multiple are on the bus, you'll overwrite IDs you've already set.
 
 Run the LeRobot setup tool for the follower:
 
@@ -116,12 +116,12 @@ The script walks motors in REVERSE order: `gripper` (ID 6) → `wrist_roll` (5) 
 2. Press Enter. The tool prints e.g. `'gripper' motor id set to 6`.
 3. Swap to the next motor and repeat.
 
-Tape-label each motor `1`–`6` (or by name) as you go — they're visually indistinguishable once the EEPROM is written.
+Tape-label each motor `1`–`6` (or by name) as you go; they're visually indistinguishable once the EEPROM is written.
 
 If a motor doesn't respond:
 
-- **`Motor 'gripper' (model 'sts3215') was not found`** — the servo's V+ pin has no power. The board's logic is alive (USB-powered) but the servo bus isn't. Confirm the barrel-jack supply is connected and on, and that your supply voltage matches the servo variant (e.g. 7.4 V supply for 7.4 V STS3215). USB alone never powers the servos.
-- **`[RxPacketError] Input voltage error!`** — the servo sees voltage outside its safe range and is alarming. You're feeding the wrong supply for this servo's voltage variant. Power off, swap supply (e.g. drop from 12 V to 7.4 V for the 7.4 V variant), retry.
+- **`Motor 'gripper' (model 'sts3215') was not found`**: the servo's V+ pin has no power. The board's logic is alive (USB-powered) but the servo bus isn't. Confirm the barrel-jack supply is connected and on, and that your supply voltage matches the servo variant (e.g. 7.4 V supply for 7.4 V STS3215). USB alone never powers the servos.
+- **`[RxPacketError] Input voltage error!`**: the servo sees voltage outside its safe range and is alarming. You're feeding the wrong supply for this servo's voltage variant. Power off, swap supply (e.g. drop from 12 V to 7.4 V for the 7.4 V variant), retry.
 - Check the USB cable between board and computer.
 - Check the 3-pin cable is fully seated on both ends.
 - On a Waveshare board, confirm both jumpers are on the `B` channel (control path = USB).
@@ -164,13 +164,13 @@ cd ~/haller_ws
 python scripts/test_so101_arm.py --port /dev/haller_arm_follower --id haller_follower
 ```
 
-Move each joint — values in the table should update at ~5 Hz. Exit with Ctrl-C. Torque is disabled during the test so the arm is freely back-drivable.
+Move each joint; values in the table should update at ~5 Hz. Exit with Ctrl-C. Torque is disabled during the test so the arm is freely back-drivable.
 
 ---
 
 ## 5. Bring up the leader
 
-The leader hardware on Haller is **identical to the follower** (six STS3215 1/345-ratio motors) — a deliberate symmetric-hardware choice, not the mixed-gear-ratio leader spec from the upstream SO-101 docs. Teleop with this leader is slightly stiffer to back-drive than a "true" leader, but the arm is hardware-interchangeable with the follower and converts cleanly when needed.
+The leader hardware on Haller is **identical to the follower** (six STS3215 1/345-ratio motors), a deliberate symmetric-hardware choice, not the mixed-gear-ratio leader spec from the upstream SO-101 docs. Teleop with this leader is slightly stiffer to back-drive than a "true" leader, but the arm is hardware-interchangeable with the follower and converts cleanly when needed.
 
 Same workflow as above, with the type and id swapped:
 
@@ -194,7 +194,7 @@ Leader calibration lands at:
 ~/.cache/huggingface/lerobot/calibration/teleoperators/so101_leader/haller_leader.json
 ```
 
-Note the path differs from the follower's (`robots/so_follower/`) — lerobot stores teleoperators and robots in separate sub-trees.
+Note the path differs from the follower's (`robots/so_follower/`); lerobot stores teleoperators and robots in separate sub-trees.
 
 ### Verify end-to-end teleop
 
@@ -210,11 +210,11 @@ lerobot-teleoperate \
     --teleop.id=haller_leader
 ```
 
-Move the leader by hand — the follower should mirror its motion at ~60 Hz. Quit with Ctrl-C; the follower's torque drops on disconnect (`disable_torque_on_disconnect=True`), leaving the arm back-drivable.
+Move the leader by hand; the follower should mirror its motion at ~60 Hz. Quit with Ctrl-C; the follower's torque drops on disconnect (`disable_torque_on_disconnect=True`), leaving the arm back-drivable.
 
 ### Calibrating two arms that will teleop together
 
-`lerobot-calibrate` sets each arm's "0°" reference at whatever physical pose you happen to hold the arm in when it prompts "move to the middle of the range." If you calibrate two arms in **different neutral poses**, their midpoints won't match in physical space and teleop (leader → follower) will show a per-joint offset — typically a few degrees, most visible on `shoulder_lift` because that joint changes arm height.
+`lerobot-calibrate` sets each arm's "0°" reference at whatever physical pose you happen to hold the arm in when it prompts "move to the middle of the range." If you calibrate two arms in **different neutral poses**, their midpoints won't match in physical space and teleop (leader → follower) will show a per-joint offset, typically a few degrees, most visible on `shoulder_lift` because that joint changes arm height.
 
 When calibrating the second arm, hold it in the **same physical neutral pose** you used for the first arm (e.g. arm extended straight forward, shoulder centered, elbow centered, wrist horizontal). The midpoints will then line up and teleop tracks 1:1.
 
@@ -253,7 +253,7 @@ The HMI is already two-arm-keyed; the conversion is a config change, not a code 
 
 ## Next: drive it from the web HMI
 
-The Haller HMI provides a browser-based control surface for the follower (and eventually both arms). See [`../../hmi/README.md`](../../hmi/README.md) for the full launch and operation walkthrough — backend + frontend bring-up, joint sliders, presets, base teleop, E-STOP.
+The Haller HMI provides a browser-based control surface for the follower (and eventually both arms). See [`../../hmi/README.md`](../../hmi/README.md) for the full launch and operation walkthrough: backend + frontend bring-up, joint sliders, presets, base teleop, E-STOP.
 
 ---
 

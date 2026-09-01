@@ -5,7 +5,7 @@ training pipeline. This page is the shortlist of public LeRobot datasets that ar
 actually usable on this embodiment, the ones that look usable and are not, and
 the order to pick them up in.
 
-Everything in the first table has been verified — licence, embodiment, size,
+Everything in the first table has been verified: licence, embodiment, size,
 camera keys and dataset format all checked against the repo itself, not against
 a blog post about it.
 
@@ -24,7 +24,7 @@ a blog post about it.
 hf download armnet/armnetbench_v01_lerobot_bimanual_so101 --repo-type=dataset
 ```
 
-Haller records `top` / `left_wrist` / `right_wrist` — see
+Haller records `top` / `left_wrist` / `right_wrist`; see
 [dataset collection](./dataset-collection.md#the-camera-set-is-3-of-5-deliberately)
 for why those exact names. So `armnetbench` needs no camera remapping at all;
 `Elvinky` matches on both wrists and has `right_front` where Haller has `top`;
@@ -192,7 +192,7 @@ corpora) or absorbed by the policy.
 
 ## The order to pick them up in
 
-### 1. `lerobot/svla_so101_pickplace` — today, as a pipeline smoke test
+### 1. `lerobot/svla_so101_pickplace`: today, as a pipeline smoke test
 
 86 MB. Download it, train something small on it, and find out that your
 environment, your dataloader and your visualiser all work, before a 43 GB
@@ -205,16 +205,16 @@ Two things make it the right first pick rather than a compromise:
   wrong costs a minute. Discovering a format assumption on a 43 GB set is worse
   in every way.
 - **The 6-dim mismatch does not matter here.** It is uni-manual, so it cannot
-  validate anything about a 12-dim head — but a smoke test does not need the
+  validate anything about a 12-dim head, but a smoke test does not need the
   final shape. It needs to prove the pipeline moves data.
 
-### 2. `armnet/armnetbench_v01_lerobot_bimanual_so101` — this week
+### 2. `armnet/armnetbench_v01_lerobot_bimanual_so101`: this week
 
 The important one. **Its 12 joint names are Haller's left-then-right layout, up
 to a `.pos` suffix** (verified 2026-08-31 against its `meta/info.json`, not
 assumed), and its camera keys are exactly the three Haller records. So it
 validates **12-dim bimanual training before Haller has a single episode of its
-own** — the model, the head shape, the camera stack, the whole run.
+own**: the model, the head shape, the camera stack, the whole run.
 
 Apache-2.0, and 1,219 real bimanual SO-101 episodes, of which **200 are human
 demonstrations and 756 are recorded failures**. Read the armnet section above
@@ -228,7 +228,7 @@ already agree. **On units it is neither a rename nor a re-record**, but a
 per-joint offset estimation: see the units section below, which is materially
 better news than this page previously carried.
 
-### 3. `Elvinky/bi-so101-insert-screw-562ep` — as a co-training partner, later
+### 3. `Elvinky/bi-so101-insert-screw-562ep`: as a co-training partner, later
 
 Once you have **50–200 of your own episodes**, mix Haller data with this at
 roughly **1:3 to 1:5 (yours : theirs)**. Enough of theirs to carry general
@@ -247,15 +247,15 @@ renaming (`wrist_left`/`wrist_right`/`center` → `left_wrist`/`right_wrist`/`to
 
 ## Ruled out, and why
 
-### 🚨 AgiBot World — licence
+### AgiBot World: licence
 
 **CC-BY-NC-SA-4.0.** Non-commercial **and** share-alike. Either clause alone
 would be a problem; together they disqualify it outright for anything that might
-become a product. If a spinoff stays possible, do not train on it — a share-alike
+become a product. If a spinoff stays possible, do not train on it; a share-alike
 obligation on a model's training data is not something you can quietly unwind
 later.
 
-### DROID / BridgeData V2 / Open-X — wrong action space
+### DROID / BridgeData V2 / Open-X: wrong action space
 
 They use **end-effector pose** action spaces. This is not a units problem or a
 dimensionality problem you can rescale around: a 6-DoF Cartesian pose and a
@@ -267,7 +267,7 @@ exactly two ways: through a VLA with a shared action head that already speaks
 both, or as **vision-encoder pretraining**, where the action space is irrelevant
 because you are only using the images.
 
-### RoboTwin `lerobot/robotwin_unified` — unverifiable licence, wrong embodiment
+### RoboTwin `lerobot/robotwin_unified`: unverifiable licence, wrong embodiment
 
 27,500 episodes, and genuinely tempting at that size. Two problems:
 
@@ -275,13 +275,13 @@ because you are only using the images.
   claim Apache-2.0; the repo states nothing. An unstated licence is not a
   permissive one.
 - **It is ALOHA, 14-dim, sim-only.** Wrong embodiment and wrong action
-  dimensionality — see [12 dims, not
+  dimensionality; see [12 dims, not
   14](./dataset-collection.md#12-dims-not-14).
 
-### AIST bimanual — right data, wrong container
+### AIST bimanual: right data, wrong container
 
 **CC-BY-4.0** (clean) and **real** (not sim), 10,705 episodes across **112**
-tasks — not the 119 sometimes quoted. On the merits it belongs on the shortlist.
+tasks, not the 119 sometimes quoted. On the merits it belongs on the shortlist.
 
 It ships as **HDF5 on Dropbox**, not as a LeRobot dataset. That is a converter's
 worth of work before a single training step, so it is parked rather than

@@ -1,15 +1,36 @@
 # Haller
 
-Haller is an open-source mobile-manipulation robot: a three-wheeled differential-drive base (two driven front wheels + a rear caster) that carries **two SO-101 arms** for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase — ROS 2 stack for the base, LeRobot integration for the arms, scripts for deployment, and documentation for reproducing the build.
+Haller is an open-source mobile manipulation robot. A three-wheeled differential-drive base (two driven front wheels and a rear caster) carries two SO-101 arms for bimanual manipulation. This repository (`haller_ws`) is the umbrella codebase: the ROS 2 stack for the base, the LeRobot integration for the arms, deployment scripts, and the documentation for reproducing the build.
 
-> **Status (August 2026):** the working rig is the arms. One or both SO-101 arms run through the unified HMI (FastAPI + Next.js + shadcn): per-arm controls (joint sliders, home, free-drive, pose presets) and an in-browser calibration wizard (homing + range-of-motion sweep + save, with automatic backup). **Teleop is WebXR from a Meta Quest** — one input path since the 2026-08-22 unification, which deleted the MediaPipe webcam pipeline and the body-angle modes; see [`hmi/README.md`](./hmi/README.md). Live MJPEG camera streams and an **HMI-integrated dataset recorder** are wired — the recorder runs inside the HMI (start/stop from the cockpit or from inside the headset), because Haller's two arms are both *followers* and stock `lerobot-record` structurally cannot capture a two-arm demo on this hardware. See [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md). Three MuJoCo sim presets (solo, bimanual, leader+follower) drop into the same HMI surface, with seeded per-episode scene reset, domain randomization and an automatic task-success predicate, so a rehearsal needs no hardware; see [`docs/setup/sim.md`](./docs/setup/sim.md). The mobile base's ROS 2 stack is in the tree but is mid-migration to Jazzy / JetPack 7 and is not part of that rig today. Public datasets to bootstrap from: [`docs/setup/public-datasets.md`](./docs/setup/public-datasets.md).
+## Status (August 2026)
+
+The arms are the working rig. What works today:
+
+- One or both SO-101 arms run through the browser HMI (FastAPI backend, Next.js + shadcn frontend). Each arm gets joint sliders, home, free-drive, and pose presets.
+- An in-browser calibration wizard: capture a neutral pose, sweep the range of motion, and save. The previous calibration file is backed up automatically.
+- WebXR teleop from a Meta Quest. It has been the only teleop input path since the 2026-08-22 unification, which removed the MediaPipe webcam pipeline and the body-angle modes.
+- Live MJPEG camera streams.
+- A dataset recorder that runs inside the HMI. Takes start and stop from the cockpit or from inside the headset. Both of Haller's arms are followers, so stock `lerobot-record` cannot capture a two-arm demo on this hardware; the in-process recorder replaces it.
+- Three MuJoCo sim presets (solo, bimanual, leader+follower) in the same HMI, with seeded per-episode scene reset, domain randomization, and an automatic task-success predicate. A rehearsal needs no hardware.
+
+In progress:
+
+- The mobile base's ROS 2 stack is in the tree but is mid-migration to Jazzy / JetPack 7. It is not part of the working rig today.
+
+Where to read more:
+
+- [`hmi/README.md`](./hmi/README.md): HMI bring-up, teleop, cameras, the recorder, and the REST endpoints.
+- [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md): recording bimanual datasets.
+- [`docs/setup/sim.md`](./docs/setup/sim.md): the MuJoCo presets.
+- [`docs/setup/public-datasets.md`](./docs/setup/public-datasets.md): public SO-101 datasets to start from.
+- The documentation site: [oscardvs.github.io/haller_ws](https://oscardvs.github.io/haller_ws/).
 
 ## Hardware overview
 
 | Subsystem        | Components                                                              |
 | ---------------- | ----------------------------------------------------------------------- |
 | Compute          | NVIDIA Jetson Orin Nano                                                 |
-| Mobile base      | Differential drive — 2 driven front wheels + rear caster, LK-TECH MF5010 BLDC motors over CAN |
+| Mobile base      | Differential drive: 2 driven front wheels + rear caster, LK-TECH MF5010 BLDC motors over CAN |
 | Perception       | Slamtec RPLIDAR A1M8 (2D LiDAR), camera modules                          |
 | Arms             | 2× SO-ARM101 ("SO-101") follower arms with Feetech STS3215 servos        |
 | Servo bus        | Feetech bus servo adapter board (USB ↔ TTL half-duplex daisy-chain)      |
@@ -65,7 +86,7 @@ See [`src/README.md`](./src/README.md) for the full nav-stack bringup. Quick pat
 git clone --recurse-submodules https://github.com/oscardvs/haller_ws.git
 cd haller_ws
 
-# install ROS 2 deps (ROS 2 Jazzy on Ubuntu 24.04; the older src/README references Humble — that's stale)
+# install ROS 2 deps (ROS 2 Jazzy on Ubuntu 24.04; the older src/README still says Humble, which is stale)
 rosdep install --from-paths src --ignore-src -r -y
 
 colcon build --symlink-install
@@ -75,13 +96,13 @@ ros2 launch haller_gazebo haller_sim.launch.py   # simulation
 
 ### 2. Arms (LeRobot + SO-101)
 
-Two guides, run them in order:
+Five guides, in order:
 
-1. **[`docs/setup/lerobot-environment.md`](./docs/setup/lerobot-environment.md)** — install Miniforge, create the `lerobot` conda env, install LeRobot with the Feetech extra, and patch the env so it isn't poisoned by ROS's `PYTHONPATH` or the user-site directory.
-2. **[`docs/setup/so101-arm.md`](./docs/setup/so101-arm.md)** — find the bus servo adapter's serial port, configure each motor's ID and baud rate one-by-one, wire the arm, calibrate, and run a smoke test.
-3. **[`hmi/README.md`](./hmi/README.md)** — bring up the unified HMI (FastAPI backend + Next.js + shadcn frontend) that replaces the legacy `web_teleop.py`.
-4. **[`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md)** — wire your cameras, record a 12-dim bimanual teleop dataset with the HMI recorder, push to the Hugging Face Hub. Prerequisite for training or finetuning a policy on your own task. See also [`docs/setup/public-datasets.md`](./docs/setup/public-datasets.md) for public SO-101 datasets you can train on before you have your own.
-5. **[`docs/setup/runpod-inference.md`](./docs/setup/runpod-inference.md)** — rent a cloud GPU on RunPod, run π0.5 / GR00T inference against your dataset, and LoRA-finetune on top. The whole "see what a generalist VLA does on my data" flow.
+1. [`docs/setup/lerobot-environment.md`](./docs/setup/lerobot-environment.md): install Miniforge, create the `lerobot` conda env, install LeRobot with the Feetech extra, and patch the env so ROS's `PYTHONPATH` and the user-site directory do not shadow it.
+2. [`docs/setup/so101-arm.md`](./docs/setup/so101-arm.md): find the bus servo adapter's serial port, set each motor's ID and baud rate one at a time, wire the arm, calibrate it, and run a smoke test.
+3. [`hmi/README.md`](./hmi/README.md): bring up the HMI (FastAPI backend, Next.js + shadcn frontend). It replaces the legacy `web_teleop.py`.
+4. [`docs/setup/dataset-collection.md`](./docs/setup/dataset-collection.md): wire your cameras, record a 12-dim bimanual teleop dataset with the HMI recorder, and push it to the Hugging Face Hub. This is the prerequisite for training or finetuning a policy on your own task. [`docs/setup/public-datasets.md`](./docs/setup/public-datasets.md) lists public SO-101 datasets you can train on before you have your own.
+5. [`docs/setup/runpod-inference.md`](./docs/setup/runpod-inference.md): rent a cloud GPU on RunPod, run π0.5 / GR00T inference against your dataset, and LoRA-finetune on top.
 
 ## License
 
