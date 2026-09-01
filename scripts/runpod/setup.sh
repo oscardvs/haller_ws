@@ -20,7 +20,10 @@
 #                     "peft" -> transformers-dep + peft>=0.18  — REQUIRED for finetune_pi05.sh.
 #                     `lerobot[pi]` alone does NOT pull peft in, so a LoRA run would
 #                     ImportError deep inside lerobot (policies/pretrained.py, `from peft import
-#                     get_peft_model`). Verified against lerobot 0.5.1 package metadata.
+#                     get_peft_model`). Verified against lerobot 0.6.1 package metadata.
+#                     NOT needed: the `dataset` extra. 0.6.1 does expose one, but
+#                     `import lerobot.datasets` and LeRobotDataset both resolve from
+#                     `lerobot[pi,peft]` alone. Verified on the training box.
 #                     Add "smolvla" for SmolVLA, "groot" for GR00T N1.x, "feetech" for SO-101
 #                     hardware (not needed on a cloud pod — no serial bus there).
 set -euo pipefail
@@ -58,12 +61,16 @@ git lfs install --skip-repo
 # 2. Python deps. pip --upgrade first because runpod images sometimes pin old pip.
 echo "[2/4] python deps…"
 python -m pip install --upgrade pip wheel
-# NOTE: no `[cli]` extra any more. lerobot 0.5.1 requires huggingface-hub>=1.0,
-# and in hub 1.x the `hf` command is a plain console_script — `huggingface_hub[cli]`
-# is an unknown extra that pip merely warns about, which is easy to miss.
+# NOTE: no `[cli]` extra any more. lerobot requires huggingface-hub>=1.0, and in
+# hub 1.x the `hf` command is a plain console_script, so `huggingface_hub[cli]` is
+# an unknown extra that pip merely warns about, which is easy to miss.
+#
+# PIN: 0.6.1 is the version the pi0.5 runs were actually trained on. The previous
+# `>=0.5,<0.6` pin is what produced a family of drift bugs against a script written
+# for 0.5.1. Do not widen this without re-verifying finetune_pi05.sh end to end.
 python -m pip install \
     "huggingface_hub>=1.0,<2.0" \
-    "lerobot[${LEROBOT_EXTRAS}]>=0.5,<0.6" \
+    "lerobot[${LEROBOT_EXTRAS}]>=0.6.1,<0.7" \
     "matplotlib>=3.9" \
     "pandas>=2.2"
 
@@ -131,7 +138,29 @@ Fix it once, then push, so the pod and your laptop agree:
       --operation.type recompute_stats \
       --push_to_hub true
 
---- 3. Next steps ---
+--- 3. Dataset must carry a git TAG matching codebase_version ---
+
+A Hub-hosted LeRobotDataset is refused unless the repo has a git tag equal to
+its `codebase_version` (`v3.0` for datasets recorded here). Without it, loading
+raises:
+
+  "RuntimeError: Your dataset must be tagged with a codebase version"
+
+lerobot's own `push_to_hub` creates the tag. A plain `hf upload` does NOT, so a
+dataset pushed by hand looks complete on the Hub and still fails to load. Check
+and create it with:
+
+  python - <<'PYTAG'
+  from huggingface_hub import HfApi
+  api, repo = HfApi(), "$HF_USER/haller_bimanual_<your_task>"
+  tags = [r.name for r in api.list_repo_refs(repo, repo_type="dataset").tags]
+  print("tags:", tags)
+  if "v3.0" not in tags:
+      api.create_tag(repo, tag="v3.0", repo_type="dataset", exist_ok=True)
+      print("created v3.0")
+  PYTAG
+
+--- 4. Next steps ---
 
   python scripts/runpod/policy_smoke_test.py          # ~3 min: download + warm pi05_base
   python scripts/runpod/policy_smoke_test.py --num-images 5   # does 5 cameras work?

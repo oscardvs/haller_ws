@@ -88,6 +88,11 @@
 #     POLICY_REPO    default ${HF_USER}/pi05_<slug>  (PRIVATE)
 #     PUSH_PUBLIC=1  make the pushed repo public — read the licensing note first
 #     RESUME_ADAPTER resume an existing adapter (uses --policy.use_peft)
+#     WANDB_ENABLE   default false. true needs a real API key, offline mode does not help.
+#     EVAL_SPLIT     default 0.0 (no held-out eval). Set WITH EVAL_STEPS or it raises.
+#     EVAL_STEPS     default 0. Set WITH EVAL_SPLIT.
+#     SAVE_FREQ      default 5000. Lower it on short runs, or you will miss the optimum.
+#     OUTPUT_DIR     default outputs/train/pi05_<slug>_<mode>
 #
 # PREREQS
 #     - `lerobot[pi,peft]` (setup.sh does this; plain `lerobot[pi]` has NO peft)
@@ -111,6 +116,19 @@ STEPS="${2:-20000}"
 LR="${LR:-2.5e-5}"
 LORA_RANK="${LORA_RANK:-32}"
 RESUME_ADAPTER="${RESUME_ADAPTER:-}"
+# wandb demands an API key even under WANDB_MODE=offline, because lerobot passes
+# the mode explicitly and overrides the env. Defaulting this to true is what
+# blocked a launch. MetricsTracker still prints losses to the console, which is
+# where every loss curve in this project actually came from.
+WANDB_ENABLE="${WANDB_ENABLE:-false}"
+# HELD-OUT EVAL. Both 2026-08-31 runs set neither of these and produced nothing
+# but training losses. In lerobot 0.6.1 `eval_steps > 0` RAISES unless
+# `eval_split > 0.0`, so the two are coupled and are validated together below.
+EVAL_SPLIT="${EVAL_SPLIT:-0.0}"
+EVAL_STEPS="${EVAL_STEPS:-0}"
+# 5000 was hardcoded, and on a 6k-step schedule it never wrote a checkpoint near
+# the held-out optimum, which lands inside the first epoch.
+SAVE_FREQ="${SAVE_FREQ:-5000}"
 
 case "$MODE" in
     full)         BATCH_SIZE="${BATCH_SIZE:-16}" ;;
@@ -132,7 +150,14 @@ fi
 
 # Resolve HF user from token if not pinned.
 if [ -z "${HF_USER:-}" ]; then
-    if HF_USER=$(NO_COLOR=1 hf auth whoami 2>/dev/null | awk -F': *' 'NR==1 {print $2}') && [ -n "$HF_USER" ]; then
+    # hub 1.x prints a two-line block, and the username is NOT on line 1:
+    #     ✓ Logged in
+    #       user: Oskrt
+    # The old `NR==1 {print $2}` read "Logged in" and resolved empty. Match the
+    # `user:` line by name, and tolerate `=` as the separator too.
+    if HF_USER=$(NO_COLOR=1 hf auth whoami 2>/dev/null \
+            | sed -nE 's/^[[:space:]]*user[:=][[:space:]]*([^[:space:]]+).*/\1/p' \
+            | head -1) && [ -n "$HF_USER" ]; then
         :
     else
         echo "Cannot resolve HF_USER. Run: hf auth login   (or pass HF_USER=...)" >&2
@@ -145,14 +170,16 @@ fi
 if [ "$MODE" != "full" ] || [ -n "$RESUME_ADAPTER" ]; then
     if ! python -c "import peft" 2>/dev/null; then
         echo "peft is not installed — 'lerobot[pi]' does not pull it in." >&2
-        echo "Fix: pip install 'lerobot[pi,peft]>=0.5,<0.6'   (or re-run setup.sh)" >&2
+        echo "Fix: pip install 'lerobot[pi,peft]>=0.6.1,<0.7'   (or re-run setup.sh)" >&2
         exit 1
     fi
 fi
 
 dataset_slug=$(printf "%s" "$DATASET_REPO" | sed -E 's|^[^/]+/||; s/[^a-zA-Z0-9]+/_/g')
 POLICY_REPO="${POLICY_REPO:-${HF_USER}/pi05_${dataset_slug}}"
-OUTPUT_DIR="outputs/train/pi05_${dataset_slug}_${MODE}"
+# Indirection matters: without it a second concurrent run writes its checkpoints
+# into the first run's directory. POLICY_REPO was already overridable; this was not.
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/train/pi05_${dataset_slug}_${MODE}}"
 
 # openpi's real LoRA freeze filter, spelled out because lerobot's default is
 # not it. `full_training_modules` is lerobot's name for PEFT's
@@ -223,6 +250,20 @@ if [ "$MODE" = "hybrid" ]; then
        in the 0.14 configuration.
 EOF
 fi
+# Enforce lerobot's coupling here rather than letting it raise minutes in.
+eval_args=()
+if [ "$EVAL_STEPS" != "0" ] || [ "$EVAL_SPLIT" != "0.0" ]; then
+    if [ "$EVAL_STEPS" = "0" ] || [ "$EVAL_SPLIT" = "0.0" ]; then
+        echo "EVAL_SPLIT and EVAL_STEPS must be set together (lerobot raises otherwise)." >&2
+        echo "Got EVAL_SPLIT=$EVAL_SPLIT EVAL_STEPS=$EVAL_STEPS. Example: EVAL_SPLIT=0.15 EVAL_STEPS=250" >&2
+        exit 64
+    fi
+    eval_args=(--dataset.eval_split="$EVAL_SPLIT" --eval_steps="$EVAL_STEPS")
+else
+    echo "WARNING: no held-out eval. Every number this run reports will be a"
+    echo "         TRAINING loss. Set EVAL_SPLIT and EVAL_STEPS to change that."
+fi
+
 ans=""
 read -r -p "Proceed? [y/N] " ans || true
 [ "$ans" = "y" ] || [ "$ans" = "Y" ] || { echo "Aborted."; exit 0; }
@@ -243,8 +284,9 @@ exec lerobot-train \
     --batch_size="$BATCH_SIZE" \
     --steps="$STEPS" \
     --policy.scheduler_decay_steps="$STEPS" \
-    --save_freq=5000 \
+    --save_freq="$SAVE_FREQ" \
+    "${eval_args[@]}" \
     --num_workers=8 \
     --output_dir="$OUTPUT_DIR" \
     --job_name="pi05_${dataset_slug}_${MODE}" \
-    --wandb.enable=true
+    --wandb.enable="$WANDB_ENABLE"
