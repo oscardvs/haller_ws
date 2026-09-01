@@ -191,7 +191,7 @@ function Defs({ gid }: { gid: string }) {
 
 /**
  * π0.5's forward pass, drawn to make three specific things obvious:
- *   1. every camera goes through ONE shared vision tower — no per-camera weights;
+ *   1. every camera goes through ONE shared vision tower, with no per-camera weights;
  *   2. the prefix (images + language) is computed ONCE and cached as KV, so the
  *      ten integration steps only re-run the small expert;
  *   3. actions live at 32 dims internally and are cut back to the dataset's
@@ -208,16 +208,16 @@ export function Pi05Forward() {
 
   return (
     <Figure
-      label="Fig. 2 — one forward pass, and the part that runs ten times"
+      label="Fig. 2: one forward pass, and the part that runs ten times"
       caption={
         <>
-          Every camera passes through the <strong>same</strong> vision tower —{' '}
+          Every camera passes through the <strong>same</strong> vision tower:{' '}
           <code>embed_prefix</code> loops over the images calling one{' '}
           <code>embed_image</code>, so there is no per-camera parameter anywhere.
           Images and language concatenate into a single attention prefix, which
           the 2B backbone processes <strong>once</strong> and hands on as a KV
           cache. The ten integration steps that actually produce the actions
-          re-run only the 300M expert against that cache — which is why ten
+          re-run only the 300M expert against that cache, which is why ten
           steps costs far less than ten forward passes.
         </>
       }
@@ -291,7 +291,7 @@ export function Pi05Forward() {
           fontSize={7.5}
           fill="var(--color-fd-muted-foreground)"
         >
-          state is TEXT — see Fig. 3
+          state is TEXT, see Fig. 3
         </text>
 
         {/* prefix */}
@@ -568,7 +568,7 @@ export function StateAsText() {
 
   return (
     <Figure
-      label="Fig. 3 — the robot's joint angles become words"
+      label="Fig. 3: the robot's joint angles become words"
       caption={
         <>
           π0.5 has no separate state encoder. The pre-processor normalises the
@@ -719,7 +719,7 @@ export function StateAsText() {
 
 /* ── 3. why twenty trials cannot settle it ───────────────────────────────── */
 
-/** Wilson score interval — the one you want for small n and proportions near the edges. */
+/** Wilson score interval: the one you want for small n and proportions near the edges. */
 function wilson(successes: number, n: number, z = 1.96) {
   const p = successes / n;
   const d = 1 + (z * z) / n;
@@ -801,13 +801,13 @@ export function TrialResolution() {
 
   return (
     <Figure
-      label="Fig. 1 — why twenty trials cannot settle a ten-point question"
+      label="Fig. 1: why twenty trials cannot settle a ten-point question"
       caption={
         <>
           Two policies, one truly at 45% and one truly at 70%, each scored{' '}
           <span className="h-mono">{n}</span> times. Drag the trial count: at 20
           the intervals <strong>overlap</strong>, so a good result and a lucky
-          one are indistinguishable. Rollout trials — not GPU time — are the
+          one are indistinguishable. Rollout trials, not GPU time, are the
           scarce resource on this project, which is why a change gets screened
           offline before it is allowed to spend any.
         </>
@@ -830,7 +830,7 @@ export function TrialResolution() {
               color: overlap ? 'var(--haller-action)' : 'var(--color-fd-muted-foreground)',
             }}
           >
-            {overlap ? 'intervals overlap — cannot tell them apart' : 'intervals separate'}
+            {overlap ? 'intervals overlap: cannot tell them apart' : 'intervals separate'}
           </span>
         </div>
         <input
@@ -925,13 +925,13 @@ export function DataPipeline() {
 
   return (
     <Figure
-      label="Fig. 4 — where the episodes come from, and where the next ones will"
+      label="Fig. 4: where the episodes come from, and where the next ones will"
       caption={
         <>
           Solid boxes exist today. Dashed ones do not yet: the wrist channels
           arrive with the hardware, and the simulator can produce episodes in
           the three-camera shape before then. The fork in the middle is the
-          reason not to record more single-camera demonstrations now — adding a
+          reason not to record more single-camera demonstrations now, because adding a
           camera changes the dataset schema, and episodes recorded on the old
           one cannot train a policy on the new one.
         </>

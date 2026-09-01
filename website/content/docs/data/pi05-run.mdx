@@ -1,27 +1,31 @@
 ---
-title: Where Haller is, and why π0.5
-description: The honest state of the project — a 45% ACT baseline whose failures are all missed grasps, two exhausted training levers, and why the next move is a generalist policy on the same data. Includes a walk through π0.5's actual mechanism, verified against the installed source.
+title: π0.5 as a diagnostic, not an upgrade
+description: A 45% ACT baseline whose failures are all missed grasps, two exhausted training levers, and a π0.5 run designed to eliminate a hypothesis rather than chase a number. Includes a walk through π0.5's actual mechanism, verified against the installed source, and the training-set defect that decides how the first two runs can be read.
 ---
 
-Haller can pick up a cube and put it in a box **45% of the time**. This page explains how that number was reached, why the obvious ways to improve it have already been tried and measured, what π0.5 actually does inside, and what the run currently training is meant to settle.
+Haller can pick up a cube and put it in a box **45% of the time**. This page explains how that number was reached, why the obvious ways to improve it have already been tried and measured, what π0.5 actually does inside, and how a π0.5 run was set up to settle *which* of two very different problems the 45% represents.
 
-It is written to be read by someone who has not been following along, and it keeps the dead ends in. The dead ends are most of the value: two of them cost real time, and one of them was killed by a two-minute measurement instead of a two-hour experiment.
+The framing matters more than the outcome. Training a bigger policy to get a bigger number is not an experiment. Training it so that either result eliminates a hypothesis is. Most of this page is about the difference, including the part where the first attempt at it was set up wrong and how that was caught.
 
-## 1. Where the project actually is
+It is written to be read by someone who has not been following along, and it keeps the dead ends in. The dead ends are most of the value: two of them cost real time, one was killed by a two-minute measurement instead of a two-hour experiment, and one was a configuration defect that would have quietly produced a publishable-looking answer to the wrong question.
 
-One SO-101 arm. One camera, looking down at the table. No wrist cameras — the rig did not have any when the data was recorded.
+## 1. The baseline, and the shape of its failures
+
+One SO-101 arm. One camera, looking down at the table. No wrist cameras, because the rig did not have any when the data was recorded.
 
 | | |
 |---|---|
-| Episodes recorded | 113 |
-| Kept after review | **91** (22 rejected) |
-| Median episode | 19.5 s |
-| Frames | 74,382 at 30 fps |
+| Episodes recorded | 113 (**74,382** frames at 30 fps) |
+| Kept after review | **91** (**56,505** frames) |
+| Rejected as failed takes | **22** (**17,877** frames) |
+| Median kept episode | 18.3 s |
 | Task | pick up the cube, place it in the box |
 | Policy | ACT, chunk size 100 |
 | **Real-world success** | **9/20 = 45%** (95% Wilson CI **26–66%**) |
 
-The headline number matters less than the shape of the failures. Of the eleven failed attempts, **almost all were missed grasps**, with a few grasped-then-dropped. There were **no** wrong-place failures and **no** freezing.
+Note the three-way frame split rather than just the episode counts. It looks like bookkeeping here. In §7 it turns out to be the most important number on the page.
+
+The headline success rate matters less than the shape of the failures. Of the eleven failed attempts, **almost all were missed grasps**, with a few grasped-then-dropped. There were **no** wrong-place failures and **no** freezing.
 
 That absence is the interesting part. A policy that has not seen enough situations fails by going to the wrong place, or by stalling when the scene does not match anything it knows. Haller does neither. It goes to the right place, at the right time, and closes on air by a few millimetres.
 
@@ -31,9 +35,9 @@ That is a **precision** signature, and precision failures point somewhere very s
 
 The instinct after a 45% result is to train longer or record more. Both were tried. Both are measured. Neither is the lever.
 
-**Training longer bought almost nothing.** Eighteen times the training steps — 5k to 90k — moved held-out loss from 0.4213 to 0.4026. That is a **4.4% improvement for 18× the compute**, and the curve was still creeping down at the end. Real, but a terrible exchange rate.
+**Training longer bought almost nothing.** Eighteen times the training steps, 5k to 90k, moved held-out loss from 0.4213 to 0.4026. That is a **4.4% improvement for 18× the compute**, and the curve was still creeping down at the end. Real, but a terrible exchange rate.
 
-**Augmentation confirmed the ceiling is not overfitting.** The train/validation gap was over 5× at 19 epochs, which looks exactly like a model memorising its training set. So augmentation was switched on as a regulariser, and it *worked as a regulariser*: training L1 rose from 0.0598 to 0.0723, and the gap narrowed from 6.73× to 5.65×. The ceiling did not move — best validation loss was 0.4083 against 0.4026 without.
+**Augmentation confirmed the ceiling is not overfitting.** The train/validation gap was over 5× at 19 epochs, which looks exactly like a model memorising its training set. So augmentation was switched on as a regulariser, and it *worked as a regulariser*: training L1 rose from 0.0598 to 0.0723, and the gap narrowed from 6.73× to 5.65×. The ceiling did not move. Best validation loss was 0.4083 against 0.4026 without.
 
 That result is worth sitting with, because it settles more than it appears to:
 
@@ -41,25 +45,25 @@ That result is worth sitting with, because it settles more than it appears to:
 The anti-overfitting treatment took effect, and the ceiling did not move. **So the ceiling was never overfitting.** And since more data acts largely as a regulariser too, more data of the same kind is unlikely to move it either.
 </Callout>
 
-The reason is visible in the failure mode. At the instant that decides a grasp, the gripper is directly above the cube — and from a top-down camera, the gripper is *occluding the very thing it is trying to grasp*. The few-millimetre relationship that determines success is not in the image.
+The reason is visible in the failure mode. At the instant that decides a grasp, the gripper is directly above the cube, and from a top-down camera the gripper is *occluding the very thing it is trying to grasp*. The few-millimetre relationship that determines success is not in the image.
 
 More episodes give you more samples of an observation that is ambiguous exactly when it matters. That is an **observability** problem, not a sample-count problem. No amount of additional data from the same viewpoint conjures information the viewpoint does not contain.
 
-The fix is a camera that can see the gripper and the cube together. That is the wrist camera, and it is the reason the project is not currently grinding on this dataset.
+The fix is a camera that can see the gripper and the cube together. That is the wrist camera, and it is the reason the project is not grinding on this dataset.
 
 ## 3. The measurement bottleneck
 
 There is a harder constraint underneath all of this, and it shapes every decision.
 
-**Rollout trials are the scarce resource, not GPU time.** Every success rate on this page was scored by a human watching an arm and writing down yes or no. Twenty of those take an evening. Twenty thousand training steps take a few hours and no attention at all.
+**Rollout trials are the scarce resource, not GPU time.** Every real-robot success rate on this page was scored by a human watching an arm and writing down yes or no. Twenty of those take an evening. Twenty thousand training steps take a few hours and no attention at all.
 
 And twenty trials cannot answer the questions people want to ask of them:
 
 <TrialResolution />
 
-At 20 trials, a policy that is genuinely at 45% and one genuinely at 70% produce confidence intervals that overlap. A no-change re-test of the same checkpoint returns ≥12/20 about **13%** of the time — so a "promising" result is more often luck than progress.
+At 20 trials, a policy that is genuinely at 45% and one genuinely at 70% produce confidence intervals that overlap. A no-change re-test of the same checkpoint returns ≥12/20 about **13%** of the time, so a "promising" result is more often luck than progress.
 
-The consequence is a working rule: **screen changes offline before spending trials on them.** That rule just paid for itself.
+The consequence is a working rule: **screen changes offline before spending trials on them.** That rule has now paid for itself twice, once by killing an experiment (below) and once by catching a broken setup (§7).
 
 ### The ensembling experiment, killed for the price of one rollout
 
@@ -67,10 +71,10 @@ Temporal ensembling was the leading candidate to fix missed grasps: it is infere
 
 Offline replay of recorded episodes through the modified checkpoint showed it **cuts the gripper's peak closing speed by 32%** at the default coefficient of `+0.01`, and by 18% at `−0.05`. Against a policy whose dominant failure is *already* missed grasps, that is precisely the wrong direction.
 
-It also turned out that at the default coefficient, ensembling is on average *staler* than the baseline it replaces — the weighting runs opposite to everyone's intuition. That argument, with the arithmetic, is on its own page:
+It also turned out that at the default coefficient, ensembling is on average *staler* than the baseline it replaces. The weighting runs opposite to everyone's intuition. That argument, with the arithmetic, is on its own page:
 
 <Callout type="info">
-[**Temporal ensembling**](/docs/data/temporal-ensembling) — the overlapping-chunk picture, the exponential weighting whose sign surprises people, and why the mechanism is a low-pass filter rather than a freshness fix.
+[**Temporal ensembling**](/docs/data/temporal-ensembling): the overlapping-chunk picture, the exponential weighting whose sign surprises people, and why the mechanism is a low-pass filter rather than a freshness fix.
 </Callout>
 
 Forty planned rollouts, cancelled on a measurement that took two minutes. That is the bottleneck rule working.
@@ -88,18 +92,18 @@ Everything in this section was verified against the installed `lerobot/policies/
 | PaliGemma backbone | `gemma_2b` | look at the scene, read the instruction, build a rich representation of both |
 | Action expert | `gemma_300m` | turn that representation into joint numbers |
 
-The split exists because the two jobs have completely different requirements. Understanding "the red cube on the left" needs world knowledge and scale — that is what pretraining on internet-scale image-text data buys, and it is why the backbone is a real VLM rather than a vision encoder. Emitting a smooth 32-dimensional trajectory needs neither; it needs speed, because it happens repeatedly per decision.
+The split exists because the two jobs have completely different requirements. Understanding "the red cube on the left" needs world knowledge and scale, which is what pretraining on internet-scale image-text data buys, and it is why the backbone is a real VLM rather than a vision encoder. Emitting a smooth 32-dimensional trajectory needs neither; it needs speed, because it happens repeatedly per decision.
 
 <Pi05Forward />
 
 ### One vision tower, any number of cameras
 
-`embed_prefix` loops over the images and calls the *same* `embed_image` on each. There is no per-camera parameter anywhere in the model, so the architecture is genuinely N-camera flexible — you can hand it one camera or five without changing a weight.
+`embed_prefix` loops over the images and calls the *same* `embed_image` on each. There is no per-camera parameter anywhere in the model, so the architecture is genuinely N-camera flexible. You can hand it one camera or five without changing a weight.
 
-The cost knob is subtle and worth knowing, because it is easy to get backwards. It is `len(config.image_features)` — what the config **declares** — not how many images you actually put in the batch. A declared-but-absent camera is filled in with a `−1` image and a zero attention mask, and that padded view still goes through the full tower:
+The cost knob is subtle and worth knowing, because it is easy to get backwards. It is `len(config.image_features)`, what the config **declares**, not how many images you actually put in the batch. A declared-but-absent camera is filled in with a `−1` image and a zero attention mask, and that padded view still goes through the full tower:
 
 ```python
-# modeling_pi05.py — _preprocess_images
+# modeling_pi05.py, _preprocess_images
 for _num_empty_cameras in range(len(missing_img_keys)):
     img = torch.ones_like(img) * -1   # padded with -1 for SigLIP
     mask = torch.zeros_like(mask)     # mask is zero for empty cameras
@@ -107,7 +111,7 @@ for _num_empty_cameras in range(len(missing_img_keys)):
 
 Omitting a camera from the batch saves nothing. Removing it from the config saves everything. (If *every* declared key is missing, it raises rather than guessing.)
 
-Images are resized to **224×224** — `DEFAULT_IMAGE_SIZE` — through `resize_with_pad_torch`, which preserves aspect ratio and letterboxes rather than squashing, then rescales from [0, 1] to [−1, 1] for SigLIP.
+Images are resized to **224×224**, the value of `DEFAULT_IMAGE_SIZE`, through `resize_with_pad_torch`, which preserves aspect ratio and letterboxes rather than squashing, then rescales from [0, 1] to [−1, 1] for SigLIP.
 
 ### The state is not embedded. It is written into the prompt.
 
@@ -123,16 +127,16 @@ discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]
 full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
 ```
 
-The model reads the arm's pose the same way it reads the instruction. `predict_action_chunk` passes no state tensor at all — the source comments it as *"no separate state needed for PI05"*.
+The model reads the arm's pose the same way it reads the instruction. `predict_action_chunk` passes no state tensor at all, and the source comments it as *"no separate state needed for PI05"*.
 
-This is also why the normalisation scheme is load-bearing rather than bookkeeping. π0.5 sets both state and action normalisation to **`QUANTILES`**, which maps `q01`→−1 and `q99`→+1. The bin edges are fixed at ±1, so the scale determines the resolution: with min/max normalisation, a single outlier stretches the range and every ordinary pose collapses into a handful of bins. Quantiles keep the 256 bins spread across poses that actually occur. A dataset without `q01`/`q99` in its stats does not train at all — it raises on the first batch.
+This is also why the normalisation scheme is load-bearing rather than bookkeeping. π0.5 sets both state and action normalisation to **`QUANTILES`**, which maps `q01` to −1 and `q99` to +1. The bin edges are fixed at ±1, so the scale determines the resolution: with min/max normalisation, a single outlier stretches the range and every ordinary pose collapses into a handful of bins. Quantiles keep the 256 bins spread across poses that actually occur. A dataset without `q01`/`q99` in its stats does not train at all; it raises on the first batch.
 
 ### 32 dimensions in, your dimensions out
 
 State and action are padded to `max_state_dim` / `max_action_dim`, both **32**, and cut back on the way out:
 
 ```python
-# modeling_pi05.py — predict_action_chunk
+# modeling_pi05.py, predict_action_chunk
 original_action_dim = self.config.output_features[ACTION].shape[0]
 actions = actions[:, :, :original_action_dim]
 ```
@@ -140,17 +144,17 @@ actions = actions[:, :, :original_action_dim]
 The training loss is truncated the same way, so the padded dimensions never contribute a gradient.
 
 <Callout type="warn">
-**A small action space is not a blocker, and it is worth saying plainly because the opposite assumption is very natural.** Haller's single arm is 6-dimensional against a model that thinks in 32. That needs no architectural change, no wrapper, and no padding of your own — the model already does it, and undoes it. A bimanual 12-dim arm is equally a non-issue. Do not design around a problem that does not exist.
+**A small action space is not a blocker, and it is worth saying plainly because the opposite assumption is very natural.** Haller's single arm is 6-dimensional against a model that thinks in 32. That needs no architectural change, no wrapper, and no padding of your own. The model already does it, and undoes it. A bimanual 12-dim arm is equally a non-issue. Do not design around a problem that does not exist.
 </Callout>
 
 ### How the actions are actually generated
 
-π0.5 does not regress actions directly. It generates them by **flow matching** — the same family as diffusion, run as an ODE.
+π0.5 does not regress actions directly. It generates them by **flow matching**, the same family as diffusion, run as an ODE.
 
 Start from pure Gaussian noise shaped `(chunk, 32)`. Then integrate a learned velocity field from `t = 1` down to `t = 0` in `num_inference_steps` forward-Euler steps (default **10**):
 
 ```python
-# common/flow_matching.py — euler_integrate
+# common/flow_matching.py, euler_integrate
 dt = -1.0 / num_steps
 x_t = noise
 for step in range(num_steps):
@@ -161,7 +165,7 @@ for step in range(num_steps):
 
 Each step asks "given this partly-formed trajectory and where we are in the schedule, which direction improves it?" and takes a small step that way. The trajectory starts as noise and is progressively pulled into a plausible motion.
 
-The efficiency detail is the one worth carrying away. Those ten steps are **not** ten forward passes of a 2B model. The prefix — images and language through the backbone — is computed **once** and kept as a KV cache. Each integration step re-runs only the 300M expert against that cache:
+The efficiency detail is the one worth carrying away. Those ten steps are **not** ten forward passes of a 2B model. The prefix, meaning images and language through the backbone, is computed **once** and kept as a KV cache. Each integration step re-runs only the 300M expert against that cache:
 
 ```python
 # sample_actions: prefix computed once, cached
@@ -170,77 +174,276 @@ return euler_integrate(lambda x, t: self.denoise_step(
     prefix_pad_masks=..., past_key_values=past_key_values, x_t=x, timestep=t), ...)
 ```
 
-`denoise_step` passes `inputs_embeds=[None, suffix_embs]` — the backbone half receives nothing, because its work is already done.
+`denoise_step` passes `inputs_embeds=[None, suffix_embs]`. The backbone half receives nothing, because its work is already done.
 
 ### Chunks, again
 
-π0.5 predicts a **chunk** of future actions per observation, exactly as ACT does — `chunk_size` defaults to 50 rather than ACT's 100. Everything on the [temporal ensembling page](/docs/data/temporal-ensembling) about how you *spend* a chunk applies here too, and π0.5 additionally ships a real-time chunking mechanism for the case where inference latency matters. Both are downstream questions; neither is what the current run is testing.
+π0.5 predicts a **chunk** of future actions per observation, exactly as ACT does, with `chunk_size` defaulting to 50 rather than ACT's 100. Everything on the [temporal ensembling page](/docs/data/temporal-ensembling) about how you *spend* a chunk applies here too, and π0.5 additionally ships a real-time chunking mechanism for the case where inference latency matters. Both are downstream questions; neither is what these runs are testing.
 
 ## 5. What it took to get a run started
 
 Three lessons came out of preparing this, and each is more general than its occasion.
 
-**The dataset was 5× larger than it needed to be, for a good reason that had stopped applying.** The recorded video used a keyframe interval of 2 — near-all-intra — so the operator UI can seek to any episode slice cheaply. Training reads frames in order and needs none of that. Re-encoding with the *same codec and same quality setting*, changing only `video.g` from 2 to 30, took it from **1.4 GB to 299 MB**.
+**The dataset was 5× larger than it needed to be, for a good reason that had stopped applying.** The recorded video used a keyframe interval of 2, which is near-all-intra, so the operator UI can seek to any episode slice cheaply. Training reads frames in order and needs none of that. Re-encoding with the *same codec and same quality setting*, changing only `video.g` from 2 to 30, took it from **1.4 GB to 299 MB**.
 
-The check that made this safe to do was verifying frame counts per file with `ffprobe`, then loading both copies and confirming state and action tensors were **bit-identical**. Image PSNR came out at 34–41 dB at native resolution, and ~44 dB at the 224×224 the policy actually consumes. The metadata was updated to say `video.g: 30`, so the file describes its own contents.
+The check that made this safe to do was verifying frame counts per file with `ffprobe`, then loading both copies and confirming state and action tensors were **bit-identical**. Image PSNR came out at 34–41 dB at native resolution, and about 44 dB at the 224×224 the policy actually consumes. The metadata was updated to say `video.g: 30`, so the file describes its own contents.
 
-**A progress counter lied for twenty minutes.** The upload tool reported `0/57 files` while the network interface showed hundreds of KB/s leaving the machine — it was uploading and silently retrying the same file forever. The counter only ticks on whole-file completion, so it was technically honest and completely useless. What settled it was asking the *destination* what it actually held: one file, a placeholder. The lesson is to check remote state rather than local progress, and to distinguish "stalled" from "slow" by looking at bytes on the wire.
+**A progress counter lied for twenty minutes.** The upload tool reported `0/57 files` while the network interface showed hundreds of KB/s leaving the machine. It was uploading and silently retrying the same file forever. The counter only ticks on whole-file completion, so it was technically honest and completely useless. What settled it was asking the *destination* what it actually held: one file, a placeholder. The lesson is to check remote state rather than local progress, and to distinguish "stalled" from "slow" by looking at bytes on the wire.
 
-**Four separate version-drift failures.** The tooling was written against an older library release, and every one of these would have killed the run outright: a dataset loader that moved into its own optional install; a required version tag on the uploaded dataset that raw file uploads do not create; a username lookup that parsed `key: value` from a tool that now prints `key=value`; and an experiment tracker that demanded an API key even when told to run offline. None was hard. All four were invisible until they fired.
+**Five separate version-drift failures.** The tooling was written against an older library release, and every one of these would have killed a run or a measurement outright:
+
+1. a dataset loader that moved into its own optional install;
+2. a required version tag on the uploaded dataset that raw file uploads do not create;
+3. a username lookup that parsed `key: value` from a tool that now prints `key=value`;
+4. an experiment tracker that demanded an API key even when told to run offline;
+5. and, surfacing later against the same library bump, `replay_eval.py` importing `dataset_to_policy_features` from `lerobot.datasets.feature_utils` when lerobot 0.6.1 had moved it to `lerobot.utils.feature_utils`.
+
+None was hard. All five were invisible until they fired. The fifth is fixed at source with a `try`/`except ImportError` that works on either version, which is the right shape of fix when you are running the same scripts against two library releases:
+
+```python
+try:  # lerobot >= 0.6: moved out of datasets/ into utils/
+    from lerobot.utils.feature_utils import dataset_to_policy_features
+except ImportError:  # lerobot <= 0.5
+    from lerobot.datasets.feature_utils import dataset_to_policy_features
+```
+
+The general lesson is that version drift does not arrive all at once. Four of these fired at launch, and a fifth waited until the first time anyone tried to *evaluate* rather than train. Expect a tail.
 
 <DataPipeline />
 
-## 6. The run in flight
+## 6. The two runs, and what they produced
 
-π0.5 is currently fine-tuning on the 91-episode dataset, on a separate large-memory GPU.
+Two full fine-tunes were launched overnight on 2026-08-31, on a box with 2× RTX PRO 6000 Blackwell 96 GB, one run per card. Both completed with **zero errors, zero OOM, and zero NaN**.
 
-| | |
-|---|---|
-| Mode | **full fine-tune** — no adapters |
-| Steps × batch | 20,000 × 16 = **320,000** sample presentations |
-| Epochs | ≈ 4.3 over 74,382 frames |
-| Throughput | ~1.07 s/step |
-| Resident memory | ~37 GB |
+| | Run 1 | Run 2 |
+|---|---|---|
+| Batch size | 16 | 32 |
+| Steps | 20,000 | 20,000 |
+| Sample presentations | 320,000 | 640,000 |
+| Epochs (as reported) | 4.30 | 7.83 |
+| Throughput | 1.08 s/step | 2.01 s/step |
+| Wall clock | **5 h 59 m** | ~11 h |
+| Resident memory | 37 GB | 42.9 GB |
+| Final training loss | 0.018 | 0.013 |
 
-**Why full and not LoRA**, since LoRA is cheaper and the default: the library's default adapter targets hit only the action expert's attention projections and the small input/output heads. They leave the vision tower and the language model frozen. That configuration is measured as **catastrophic for adapting to a new embodiment** — 0.14 versus 0.76 on transfer — and it is easy to select by accident because it is what you get by asking for LoRA without reading which modules it touches. Adapting to a robot the model has never seen is exactly the case where the vision tower needs to move.
+Run 1 was pushed to the Hub as `Oskrt/pi05_so101_pick_cube`: a 9.35 GB safetensors file plus the pre- and post-processor normalizer statistics. Shipping the processors alongside the weights is not optional housekeeping. §4 explained that π0.5 discretises the state into the prompt using `q01`/`q99` quantiles; a checkpoint without those statistics cannot reconstruct the input the model was trained on.
 
-Two honest notes on the numbers. The reference recipe for this model uses 20,000 × 32 = **640,000** presentations, so this run is at half of it — and with ~37 GB resident against far more available, **batch 32 is the obvious next lever and it is free**. And 4.3 epochs is thin; the tooling's own rule of thumb is that under ~200k presentations you are warming up rather than fine-tuning, which this clears but not by a wide margin.
+Both loss curves fell smoothly and monotonically, and run 1's gradient norm came down from 3.581 to 0.575, which is what a stable full fine-tune looks like:
 
-## 7. What this run is actually for
+| Step | Run 1 (b16) | Run 2 (b32) |
+|---|---|---|
+| 200 | 0.242 | 0.237 |
+| 400 | 0.163 | 0.152 |
+| 2,000 | 0.080 | 0.064 |
+| 4,000 | 0.057 | 0.043 |
+| 6,000 | 0.047 | 0.034 |
+| 8,000 | 0.036 | 0.027 |
+| 10,000 | 0.032 | 0.022 |
+| 12,000 | 0.026 | 0.018 |
+| 14,000 | 0.023 | 0.016 |
+| 16,000 | 0.021 | 0.014 |
+| 18,000 | 0.020 | 0.013 |
+| 20,000 | 0.018 | not logged |
 
-It would be easy to read the above as "trying a bigger model to get a better number." That is not the point, and the design of the run reflects it.
+**Why full fine-tune and not LoRA**, since LoRA is cheaper and the default: the library's default adapter targets hit only the action expert's attention projections and the small input/output heads. They leave the vision tower and the language model frozen. That configuration is measured as **catastrophic for adapting to a new embodiment**, 0.14 versus 0.76 on transfer, and it is easy to select by accident because it is what you get by asking for LoRA without reading which modules it touches. Adapting to a robot the model has never seen is exactly the case where the vision tower needs to move.
 
-π0.5 is training on **the same episodes, for the same task**, and will be evaluated with **the same rollout protocol** as the ACT baseline. Holding all of that fixed is deliberate, because it turns one number into a diagnostic:
+### The comparison you are tempted to make, and why it is empty
 
-- **π0.5 also lands near 45%** → the ceiling is in the **data**, not the model. Two different architectures, one small and one a pretrained generalist, hitting the same wall on the same observations is strong evidence that the observations are the wall. The wrist cameras are then exactly the right fix, and the priority is getting them in.
-- **π0.5 lands well above 45%** → ACT was **capacity**-limited, and the last stretch of tuning was aimed at the wrong thing. That redirects effort toward policy scale rather than sensing.
+Run 2 ended at a lower training loss than run 1. It is very natural to read that as "batch 32 generalises better", and it is worth being precise about why that reading is unsupported.
+
+Run 2 made **twice as many passes over the same frames**. A model's training loss falls as it revisits data, because revisiting data is how memorisation happens as well as how learning happens. Training loss is the model's error on examples it has already been optimised against. Two runs that saw the same data a different number of times will differ in training loss *mechanically*, whether or not either one got better at the task.
+
+<Callout type="warn">
+**Training loss is not comparable across runs that saw different amounts of data.** The only thing that distinguishes memorising from generalising is error on data the model was never optimised against. Neither of these runs produced any, for reasons that turn out to be the point of the next section.
+</Callout>
+
+## 7. The defect that decides how to read them
+
+Both runs completed cleanly and are, as experiments, badly broken. Two separate defects, both in the setup rather than the execution, and both worth understanding because they are easy to reproduce.
+
+### Defect 1: no held-out evaluation, by construction
+
+Both runs set `dataset.eval_split = 0.0` and left `eval_steps` at its default of `0`. The consequence is blunt: **neither run produced a single held-out number.** Every figure in §6 is a training loss.
+
+The trap is a coupling in the library that is only obvious once you have hit it. In lerobot 0.6.1, setting `eval_steps > 0` **raises** unless `eval_split > 0.0`. The two settings are not independent knobs; they must be set together. Ask for evaluation without carving out a split and the run refuses to start, which is the failure you want. Leave both at their defaults and the run starts happily and evaluates nothing, which is the failure you get.
+
+This is a general shape worth recognising. A default that produces a *loud* failure teaches you something. A default that produces a *quiet* absence, in this case a training log with no eval column, teaches you nothing until you go looking for the column that is not there.
+
+### Defect 2: a quarter of the training data was demonstrations of failing
+
+The runs trained on **all 113 episodes**. The ACT baseline they are supposed to be compared against trained on a hand-curated **91** of those, split 77 train / 14 eval at random with seed 42.
+
+The 22 episodes ACT excluded are failed takes, and the evidence that the exclusion was deliberate rather than arbitrary is unusually clean. Look at the frame counts:
+
+| | Kept 91 | Excluded 22 |
+|---|---|---|
+| Frame-count range | 340 to 1,549 | 13 to 1,797 |
+| Episodes at exactly 1,797 frames | **0** | **4** (8, 56, 57, 61) |
+| Episodes under 200 frames | **0** | **5** (9, 53, 54, 55, 90) |
+
+1,797 frames at 30 fps is 59.9 s, which is the recording timeout cap. An episode that sits exactly on the cap is one where the operator never completed the task and the recorder cut it off. An episode under 200 frames is an aborted take; episode 55 is **13 frames, 0.43 seconds**, which is barely a twitch.
+
+The separation is perfect at both ends. Zero kept episodes hit the cap, zero kept episodes are that short. That is not what a random split looks like. The full excluded list is `[2, 3, 4, 5, 6, 8, 9, 12, 15, 19, 33, 53, 54, 55, 56, 57, 61, 72, 85, 86, 87, 90]`, and those 22 episodes are **17,877 frames, 24.0% of what π0.5 trained on**.
+
+Now the consequence, which is the part that actually matters:
+
+<Callout type="warn">
+**π0.5 is trained by imitation and has no reward signal.** Nothing in the objective distinguishes a demonstration of success from a demonstration of failure. Both are trajectories to reproduce. A quarter of this run's training signal was the model learning to imitate a human failing to pick up a cube, including four demonstrations of flailing for a full minute and one of stopping after 13 frames.
+</Callout>
+
+If you come from supervised learning this is the moment to slow down. There is no label saying "this one was bad". Behaviour cloning fits the conditional distribution of actions given observations in the data you hand it, and if a quarter of that data is failure, then failure is a quarter of what it models as correct behaviour. The dataset itself carries no scoring flags, so nothing in the files marks these episodes. The only record that they are failures is the ACT run's own saved episode list.
+
+### The epoch count was already saying so
+
+Here is the detail that should have caught this before the runs launched, and did not.
+
+Run 1's own log reports **4.30 epochs**. Check that against the two candidate datasets:
+
+- 320,000 presentations over the kept 91 episodes (56,505 frames) is **5.66 epochs**.
+- 320,000 presentations over all 113 episodes (74,382 frames) is **4.30 epochs**.
+
+The reported number matches the second one exactly. The run had been announcing which dataset it was training on, in a field that was being read as a throughput statistic rather than as evidence.
+
+The transferable habit: when a run reports a derived quantity like epochs, and you also know the numerator, **divide it out and check the denominator is the one you meant.** Derived fields are free assertions about your configuration, and they are the cheapest audit available.
+
+### Why the checkpoints are still worth keeping
+
+It would be reasonable to assume a run trained on 24% garbage is worthless. It is not, and the reason is a genuinely useful piece of experimental reasoning.
+
+**The confound is one-directional.** Training on demonstrations of failure can plausibly hurt π0.5's success rate. There is no mechanism by which it helps. So the existing checkpoint is a *handicapped* version of the policy under test, and a handicapped result is still informative in one of the two directions:
+
+- **If the dirty checkpoint clearly beats ACT's 45%**, the conclusion "ACT was capacity-limited" holds ***a fortiori***. π0.5 won while carrying a quarter of its training data as noise; a clean run can only do better. The confound cannot explain away a win.
+- **If the dirty checkpoint lands near 45%**, the result is genuinely ambiguous and answers nothing. "The data and the viewpoint are the ceiling" and "we fed it a quarter garbage" predict the same number, and one rollout series cannot separate them.
+
+That asymmetry is the general lesson. A confounded experiment is not automatically void. Work out which direction the confound pushes, and you often find it still rules something out. What it costs you is the *other* outcome: the ambiguous branch is the one you have to pay to re-run.
+
+## 8. The offline screen: a liveness check, not a score
+
+Before spending an evening of rollouts on the batch-16 checkpoint, it went through the offline screen from §3. `scripts/runpod/replay_eval.py` replays recorded episodes through the policy and compares the predicted joint actions against what the human teleoperator actually did, reporting mean absolute error in degrees.
+
+Twelve episodes:
+
+| Episode | Frames | MAE (deg) |
+|---|---|---|
+| 0 | 855 | 1.870 |
+| 10 | 546 | 1.950 |
+| 25 | 491 | 2.012 |
+| 40 | 1,206 | 3.033 |
+| 55 | **13** | **0.234** |
+| 70 | 775 | 2.933 |
+| 85 | 1,252 | 3.279 |
+| 88 | 689 | 1.888 |
+| 94 | 1,549 | 2.056 |
+| 100 | 517 | 2.111 |
+| 106 | 519 | 2.861 |
+| 112 | 513 | 2.816 |
+| **Mean** | | **2.254** |
+
+Per joint: `shoulder_pan` 1.735, `shoulder_lift` 2.330, `elbow_flex` **3.047** (worst), `wrist_flex` 2.667, `wrist_roll` 2.496, `gripper` **1.246** (best).
+
+Inference ran at **5.3 ms per frame**, a 188 Hz ceiling against the rollout runner's 27 Hz control floor. Latency is not a constraint for this policy on this hardware, and that is worth knowing before it becomes a suspect in some later debugging session.
+
+Two things about this table are more instructive than the numbers in it.
+
+**It measures fit, not generalisation.** Every one of those twelve episodes was a training episode for this checkpoint, because the run held nothing out. 2.254 degrees says the policy loads, reacts to observations, and emits trajectories in the right neighbourhood of the human's. That is a liveness check: it rules out "the thing is broken" cheaply and it earns the right to spend rollouts. It is not a score, and quoting it as one would be quoting a model's performance on its own training set.
+
+**Episode 55 is the cautionary tale.** It scored 0.234, roughly an order of magnitude "better" than everything else. It is also the 13-frame stub from §7, where the arm barely moves. A near-stationary trajectory is trivially easy to predict, so a degenerate input flatters the metric.
+
+<Callout type="info">
+Read the frame count next to the error, always. A mean over episodes weights a 13-frame stub the same as a 1,549-frame episode, and the stub is the one most likely to be anomalous. This is the same property that made the excluded takes identifiable in the first place: degenerate episodes look different from real ones in ways that show up in simple statistics, if you look.
+</Callout>
+
+## 9. The experiment that settles it
+
+Both defects from §7 are fixed by a two-arm experiment launched on 2026-09-01, one arm per GPU. The arms differ in **exactly one thing**: whether the 22 failure takes are in the training set.
+
+| | Arm A, "dirty" | Arm B, "clean" |
+|---|---|---|
+| Train episodes | **99** = ACT's 77 plus the 22 failures | **77** = ACT's exact train set |
+| `eval_split` | 0.12 | 0.15 |
+| Held-out episodes | the same 14 | the same 14 |
+
+Both hold out **ACT's own eval set**: `[10, 11, 21, 23, 24, 27, 39, 42, 46, 71, 91, 97, 103, 110]`. Everything else is identical between the arms: batch 16, 20,000 steps, seed 1000, `eval_steps 1000`, `max_eval_samples 1600`, learning rate 2.5e-5, full fine-tune, bfloat16, gradient checkpointing.
+
+Two properties fall out of that design, and they are different properties:
+
+- **Arm A versus Arm B** isolates the contamination. Same held-out set, same everything else, one variable. The difference between their held-out curves *is* the cost of the 22 failure takes, measured rather than argued about.
+- **Arm B versus the ACT baseline** gives exact training-data parity. Arm B sees precisely the frames ACT saw and is scored on precisely the episodes ACT was scored on, so the architecture comparison from §10 finally has nothing else moving in it.
+
+### How the split is pinned, and why that needed verifying
+
+Choosing *which* episodes are held out is not something lerobot exposes as a list. The mechanism is worth spelling out because it is not obvious and it is easy to get silently wrong.
+
+`make_train_eval_datasets` holds out the **last** `ceil(n_episodes * eval_split)` episodes **per task**, taken from the episode list *in the order you pass it*. So the split is positional, not random, and it is controlled by list order rather than by any seed.
+
+That gives you a lever, provided one thing is true: that `LeRobotDataset` actually preserves the order you hand it rather than sorting or re-indexing. It does, and that was checked empirically rather than assumed, because the whole design rests on it. Put the 14 chosen episodes at the **end** of the list and they are exactly the ones held out.
+
+The two `eval_split` fractions then follow from arithmetic rather than taste. They are chosen so that `ceil()` lands on exactly 14:
+
+- Arm A: `ceil(113 × 0.12)` = `ceil(13.56)` = **14**, leaving 99 to train on.
+- Arm B: `ceil(91 × 0.15)` = `ceil(13.65)` = **14**, leaving 77 to train on.
+
+And then it was confirmed against the log rather than trusted, which after §7 is the habit this whole page is arguing for. Arm B reports:
+
+```
+Train/eval split: 77 train, 14 eval (eval_split=0.15, 1 tasks)
+```
+
+### Results
+
+<Callout type="warn">
+**Pending as of 2026-09-01.** Arm B is running. Arm A is queued behind the batch-32 run's card. Nothing here should be read as an outcome yet.
+
+To be filled in when the runs land: the held-out loss curve for each arm, the gap between them (which is the measured cost of the 22 failure takes), and Arm B's held-out loss against the ACT baseline's 0.4026 on the same 14 episodes. Rollout success rates follow separately, under the twenty-trial caveat from §3.
+</Callout>
+
+## 10. What the diagnostic is for
+
+It would be easy to read all of the above as "trying a bigger model to get a better number." That is not the point, and the design of the runs is what makes the difference.
+
+π0.5 trains on **the same episodes, for the same task**, and is evaluated on **the same held-out episodes and the same rollout protocol** as the ACT baseline. Holding all of that fixed is deliberate, because it turns one number into a diagnostic:
+
+- **π0.5 also lands near 45%** means the ceiling is in the **data**, not the model. Two different architectures, one small and one a pretrained generalist, hitting the same wall on the same observations is strong evidence that the observations are the wall. The wrist cameras are then exactly the right fix, and the priority is getting them in.
+- **π0.5 lands well above 45%** means ACT was **capacity**-limited, and the last stretch of tuning was aimed at the wrong thing. That redirects effort toward policy scale rather than sensing.
 
 Either answer is worth more than another ACT run, because either one *eliminates a hypothesis*. A result that merely improves the number without distinguishing those two cases would be worth much less.
 
+This is also the clearest way to see why §7's contamination mattered so much. A confounded run could still deliver the second answer, but it could not deliver the first, because near-45% would have two live explanations instead of one. The defect did not threaten the *number*; it threatened the branch of the diagnostic that was the more likely and the more actionable of the two.
+
 <Callout type="warn">
-The same twenty-trial limit from §3 applies to reading this result. It can answer "did something large happen." It cannot resolve a ten-point difference, and it should not be asked to.
+The same twenty-trial limit from §3 applies to reading the real-robot result. It can answer "did something large happen." It cannot resolve a ten-point difference, and it should not be asked to. The held-out losses from §9 are the higher-resolution instrument; the rollouts are the one that measures the thing you actually care about. Use both, for different questions.
 </Callout>
 
-## 8. What comes next
+## 11. What comes next
 
-**Wrist cameras, around 6 September.** They convert the dataset to three channels — `top`, `left_wrist`, `right_wrist` — which is *also* exactly π0.5's pretrained camera-slot count, so the recording stays in the distribution the model was trained on. That alignment was the reason for freezing the camera set at three rather than five.
+**Wrist cameras, around 6 September.** They convert the dataset to three channels, `top` / `left_wrist` / `right_wrist`, which is *also* exactly π0.5's pretrained camera-slot count, so the recording stays in the distribution the model was trained on. That alignment was the reason for freezing the camera set at three rather than five.
 
-**Do not record more single-camera episodes in the meantime.** Adding a camera forks the dataset schema. The existing 113 episodes cannot train a three-camera policy, and neither can anything recorded this week — it would all have to be redone. Padding the dataset while waiting for hardware is work that deletes itself.
+**Do not record more single-camera episodes in the meantime.** Adding a camera forks the dataset schema. The existing 113 episodes cannot train a three-camera policy, and neither can anything recorded this week; it would all have to be redone. Padding the dataset while waiting for hardware is work that deletes itself.
 
-**Simulation is the productive way to wait.** A scripted expert reads the scene's true state and drives the arm through pick-and-place unattended, at whatever rate physics can be stepped. Episodes are scored by a contact-based success predicate, not by the script's own opinion of itself — so the labels mean something. Measured at **90/90** at default randomisation, and it degrades honestly: raise the position jitter 3.5× and it drops to 13/20, with every failure sorting cleanly by reach distance rather than at random. A generator that fails for legible reasons is one you can trust the successes from.
+**Score episodes at recording time.** §7 is the argument for this. The 22 failures were recoverable only because a *different* run happened to save its episode list, and identifying them after the fact took frame-count forensics. An episode that is marked pass or fail when it is recorded costs nothing at the time and removes an entire class of silent contamination later. The sim collection path already does this with a contact-based success predicate; the teleop path does not yet.
 
-The simulated rig already renders and records the three-camera layout, so the top-only-versus-three-camera question can be answered there — hundreds of auto-scored episodes instead of twenty hand-scored ones — before the hardware arrives. Sim-to-real means the *number* will not transfer, but the *direction* will, and occlusion geometry is one of the things simulation models honestly.
+**Simulation is the productive way to wait.** A scripted expert reads the scene's true state and drives the arm through pick-and-place unattended, at whatever rate physics can be stepped. Episodes are scored by a contact-based success predicate, not by the script's own opinion of itself, so the labels mean something. Measured at **90/90** at default randomisation, and it degrades honestly: raise the position jitter 3.5× and it drops to 13/20, with every failure sorting cleanly by reach distance rather than at random. A generator that fails for legible reasons is one you can trust the successes from.
 
-**Then the longer arc.** A large generalist trained in the cloud finds the ceiling: it is the best-eval producer and the teacher. A smaller policy runs onboard and is what actually ships untethered. They share one dataset and one evaluation harness, and **the gap between them is the diagnostic** — it separates "the policy is too small" from "the data is too thin", which are the two failure modes that get confused for months at a time, and which have opposite fixes.
+The simulated rig already renders and records the three-camera layout, so the top-only-versus-three-camera question can be answered there, with hundreds of auto-scored episodes instead of twenty hand-scored ones, before the hardware arrives. Sim-to-real means the *number* will not transfer, but the *direction* will, and occlusion geometry is one of the things simulation models honestly.
 
-That is the same logic as §7, applied continuously instead of once.
+**Then the longer arc.** A large generalist trained in the cloud finds the ceiling: it is the best-eval producer and the teacher. A smaller policy runs onboard and is what actually ships untethered. They share one dataset and one evaluation harness, and **the gap between them is the diagnostic**. It separates "the policy is too small" from "the data is too thin", which are the two failure modes that get confused for months at a time, and which have opposite fixes.
+
+That is the same logic as §10, applied continuously instead of once.
 
 ## Reference
 
 Verified against the installed library rather than papers:
 
-- `lerobot/policies/pi05/configuration_pi05.py` — `DEFAULT_IMAGE_SIZE = 224`, `max_state_dim`/`max_action_dim = 32`, `num_inference_steps = 10`, `chunk_size = 50`, `empty_cameras = 0`, the `QUANTILES` normalisation mapping, and the `gemma_2b` / `gemma_300m` variant split.
-- `lerobot/policies/pi05/modeling_pi05.py` — `embed_prefix` (one shared tower), `_preprocess_images` (the `−1` padding and the all-missing error), `sample_actions` (prefix cached as `past_key_values`), `denoise_step`, the action unpadding, and `_get_default_peft_targets`.
-- `lerobot/policies/pi05/processor_pi05.py` — `Pi05PrepareStateTokenizerProcessorStep`, the 256-bin discretisation, and the prompt template.
-- `lerobot/policies/common/flow_matching.py` — `euler_integrate`, the `dt = −1/num_steps` loop.
-- `lerobot/processor/normalize_processor.py` — the `q01`/`q99` requirement and the [−1, 1] mapping.
+- `lerobot/policies/pi05/configuration_pi05.py`: `DEFAULT_IMAGE_SIZE = 224`, `max_state_dim`/`max_action_dim = 32`, `num_inference_steps = 10`, `chunk_size = 50`, `empty_cameras = 0`, the `QUANTILES` normalisation mapping, and the `gemma_2b` / `gemma_300m` variant split.
+- `lerobot/policies/pi05/modeling_pi05.py`: `embed_prefix` (one shared tower), `_preprocess_images` (the `−1` padding and the all-missing error), `sample_actions` (prefix cached as `past_key_values`), `denoise_step`, the action unpadding, and `_get_default_peft_targets`.
+- `lerobot/policies/pi05/processor_pi05.py`: `Pi05PrepareStateTokenizerProcessorStep`, the 256-bin discretisation, and the prompt template.
+- `lerobot/policies/common/flow_matching.py`: `euler_integrate`, the `dt = −1/num_steps` loop.
+- `lerobot/processor/normalize_processor.py`: the `q01`/`q99` requirement and the [−1, 1] mapping.
+- `lerobot/datasets/factory.py`: `make_train_eval_datasets`, whose docstring states the rule directly (*"The last ceil(n_episodes * eval_split) episodes per task are held out for evaluation"*), the per-task `eps[len(eps) - n_eval :]` slicing, and the `Train/eval split: ...` log line quoted in §9.
+- `lerobot/configs/train.py`: the `eval_steps` default of `0` and the validation that raises `eval_steps > 0 requires dataset.eval_split > 0.0 to hold out eval data.`
+
+Verified against this repo's own artefacts:
+
+- `outputs/runs/train-20260830-104258-act_hilti_box_91_pinned/spec.json`: the ACT baseline's `train_episodes` (77) and `eval_episodes` (14) lists, `eval_mode: random`, `eval_seed: 42`.
+- `meta/episodes/` of the `so101_pick_cube` dataset: the per-episode frame counts behind every count in §1 and §7, including the 1,797-frame cap group and the sub-200-frame aborts.
+- `scripts/runpod/replay_eval.py`: the replay-eval harness in §8, and the `feature_utils` import shim in §5.
