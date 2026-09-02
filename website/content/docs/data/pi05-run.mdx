@@ -538,6 +538,25 @@ Held-out MAE in degrees, eight paired episodes, one seed.
 
 **The best checkpoint is step 10,000, at 3.44 epochs, and this time both neighbours are worse.** Paired against 10,000 on the six episodes common to every cell, 8,000 is +0.68 degrees worse (t = 4.7, 6 of 6) and 12,000 is +0.42 worse (t = 5.5, 6 of 6). Past 10,000 the curve is a plateau at 8.7 to 8.9, within 0.3 degrees of the best, and with one seed the wiggles on that plateau mean nothing. Against the 6,000-step schedule's best, 9.24 degrees at its final save, this is about 0.65 degrees better.
 
+### Result 4: a second seed, and the optimum becomes a plateau
+
+That paragraph lasted one day. On 2026-09-02 the measurement run was repeated with a different seed and nothing else changed, and all ten of its checkpoints were scored on the same eight episodes:
+
+| step | 2,000 | 4,000 | 6,000 | 8,000 | 10,000 | 12,000 | 14,000 | 16,000 | 18,000 | 20,000 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| seed 1 | 10.93 | 9.78 | 8.98 | 9.15 | **8.59** | 9.05 | 8.90 | 8.72 | 8.87 | 8.78 |
+| seed 2 | 10.76 | 9.70 | 9.57 | 8.82 | 8.93 | 8.88 | 8.75 | 8.83 | 9.03 | **8.64** |
+
+Held-out MAE in degrees, eight paired episodes. The per-checkpoint difference between the seeds has a mean of +0.01 and a standard deviation of **0.28 degrees**. That number is the noise floor of this instrument on these eight episodes, and it was not known when Result 3 was written.
+
+Read against it, the sentence "both neighbours are worse" does not hold. Seed 2 is *better* at 8,000 than at 10,000, and its best checkpoint is the last one. What both seeds agree on is the shape: clearly falling to step 8,000, then flat within 0.3 degrees to the end. The optimum is not a point at 3.44 epochs. It is a plateau that begins around 2.75 epochs, and where on that plateau a single seed's minimum lands is a draw.
+
+Two things survive, and one does not:
+
+- **The deploy pick survives.** Index 5 sits on the plateau, and no checkpoint on the plateau can be told from it. There is nothing to redo.
+- **The failure-take effect survives.** At 0.65 to 1.3 degrees it is two to five times the seed noise, and the spread between its three estimates is about what two seeds would produce.
+- **The paired t-tests within one seed were overconfident.** Pairing removes the episode-to-episode variation, which is what makes eight episodes usable at all. It does nothing about the seed, which is a random draw the test never sees. A paired t of 4.7 between two checkpoints of one run said the difference was real; the second seed says it was that run's own weather. The rule that follows: a single-seed difference under about half a degree on eight episodes is noise, whatever its t-value.
+
 Two statements made earlier in this section do not survive that table. They are left standing where they were, with this note, rather than edited:
 
 - **"20,000 steps is roughly four times too long" was an `eval_loss` reading.** The loss did bottom inside the first epoch. The actions kept improving for another two and a half. It is the same disagreement as Result 2 at a larger scale: the metric that watches the run and the metric that describes what the arm will do disagree by a factor of five about when to stop.
@@ -627,7 +646,7 @@ The twenty-trial limit from §3 still governs the last row. It can answer "did s
 
 **Score episodes at recording time, and this now has a price tag.** §7 argued for it from first principles. §9 measured it: the 22 unmarked failures cost about **one degree of joint error**, around 10% of the held-out baseline, and the metric that runs during training could not see it. An episode marked pass or fail when it is recorded costs nothing at the time and removes an entire class of contamination that is both silent and, as it turns out, not free. The sim collection path already does this with a contact-based success predicate; the teleop path does not yet.
 
-**Long enough to bracket, saved often enough to choose.** The `eval_loss` minimum sits inside the first epoch on every schedule tried; the replay-eval optimum sits at 3.4 epochs. Result 3 is the first run that went far enough to see both neighbours of its best checkpoint be worse, and on this dataset that took 20,000 steps at batch 16. The save cadence is the other half of the decision: `finetune_pi05.sh` now takes `SAVE_FREQ` as a knob rather than hard-coding 5,000, and when two runs on differently sized data have to be compared, choose the two cadences so that the saves land on the same epochs. Otherwise the comparison inherits the step-versus-epoch confound from Result 1, and this time there is no held-out set on the second run to catch it.
+**Long enough to bracket, saved often enough to choose.** The `eval_loss` minimum sits inside the first epoch on every schedule tried; the replay-eval optimum sits at 3.4 epochs. Result 3 is the first run that went far enough to see the curve go flat, and Result 4 showed with a second seed that the flat part is a plateau rather than a point; on this dataset reaching it took about 8,000 steps at batch 16, and seeing that it stays flat took 20,000. The save cadence is the other half of the decision: `finetune_pi05.sh` now takes `SAVE_FREQ` as a knob rather than hard-coding 5,000, and when two runs on differently sized data have to be compared, choose the two cadences so that the saves land on the same epochs. Otherwise the comparison inherits the step-versus-epoch confound from Result 1, and this time there is no held-out set on the second run to catch it.
 
 **Simulation is the productive way to wait.** A scripted expert reads the scene's true state and drives the arm through pick-and-place unattended, at whatever rate physics can be stepped. Episodes are scored by a contact-based success predicate, not by the script's own opinion of itself, so the labels mean something. Measured at **90/90** at default randomisation, and it degrades honestly: raise the position jitter 3.5× and it drops to 13/20, with every failure sorting cleanly by reach distance rather than at random. A generator that fails for legible reasons is one you can trust the successes from.
 
@@ -661,4 +680,4 @@ Result files, on the training box rather than in this repo, since they are outpu
 
 - `~/ab_experiment_6k_result.json`: both arms' 24-point held-out loss curves and the matched-epoch statistics.
 - `~/aborted_20k_eval_curves.json`: the killed 20,000-step attempt, the only copy of that schedule's curves.
-- `~/replay_eval/`: the per-episode replay summaries behind every MAE in §9. `heldout_*` and `control_*` are the fourteen held-out and six trained-on episodes; `xstep_*` are the extra checkpoints that fill in the square and continue the sweep; `s20k_clean77_<step>/` are the ten cells of Result 3.
+- `~/replay_eval/`: the per-episode replay summaries behind every MAE in §9. `heldout_*` and `control_*` are the fourteen held-out and six trained-on episodes; `xstep_*` are the extra checkpoints that fill in the square and continue the sweep; `s20k_clean77_<step>/` are the ten cells of Result 3, and `s20k_clean77_seed2_<step>/` the ten of Result 4.
