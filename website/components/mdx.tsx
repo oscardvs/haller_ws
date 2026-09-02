@@ -4,9 +4,11 @@ import type { MDXComponents } from 'mdx/types';
 import type { ComponentProps } from 'react';
 import { Mermaid } from '@/components/mdx/mermaid';
 import {
+  ConfoundSquare,
   DataPipeline,
   Pi05Forward,
   StateAsText,
+  StepsBetweenMetrics,
   TrialResolution,
 } from '@/components/mdx/pi05-run';
 import {
@@ -30,6 +32,8 @@ export function getMDXComponents(components?: MDXComponents) {
     StateAsText,
     TrialResolution,
     DataPipeline,
+    ConfoundSquare,
+    StepsBetweenMetrics,
     ...components,
   } satisfies MDXComponents;
 }

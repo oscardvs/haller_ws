@@ -1053,3 +1053,357 @@ export function DataPipeline() {
     </Figure>
   );
 }
+
+/* ── 5. the 2x2 that separated the arm from the checkpoint ───────────────── */
+
+/**
+ * The confound, drawn as the square it is. Comparing each arm at its own
+ * eval-loss-best checkpoint walks the DIAGONAL of a 2x2, which changes two
+ * things at once. Filling in the other two cells recovers the two effects
+ * separately, and the two routes around the square must sum to the diagonal,
+ * which is a free check that the cells hold the same episodes.
+ */
+export function ConfoundSquare() {
+  const gid = useId().replace(/:/g, '_');
+  const W = 740;
+  const H = 332;
+
+  const colA = 118;
+  const colB = 458;
+  const cw = 190;
+  const rowT = 84;
+  const rowB = 224;
+  const ch = 56;
+  const cxA = colA + cw / 2;
+  const cxB = colB + cw / 2;
+  const cyT = rowT + ch / 2;
+  const cyB = rowB + ch / 2;
+
+  const edge = (
+    x: number,
+    y: number,
+    est: string,
+    t: string,
+    dir: string,
+    anchor: 'middle' | 'start' | 'end',
+  ) => (
+    <g>
+      <text
+        x={x}
+        y={y}
+        textAnchor={anchor}
+        className="h-mono"
+        fontSize={9}
+        fontWeight={600}
+        fill="var(--color-fd-foreground)"
+      >
+        {est}
+      </text>
+      <text
+        x={x}
+        y={y + 12}
+        textAnchor={anchor}
+        className="h-mono"
+        fontSize={8}
+        fill="var(--color-fd-muted-foreground)"
+      >
+        {t}
+      </text>
+      <text
+        x={x}
+        y={y + 23}
+        textAnchor={anchor}
+        className="h-mono"
+        fontSize={8}
+        fill="var(--color-fd-muted-foreground)"
+      >
+        {dir}
+      </text>
+    </g>
+  );
+
+  return (
+    <Figure
+      label="Fig. 5: one comparison, two variables, and the square that pulls them apart"
+      caption={
+        <>
+          Held-out replay MAE, in degrees, over the eight episodes present in
+          all four cells and paired per episode, which is why the cell means
+          differ a little from the fourteen-episode means in the text. The two{' '}
+          <strong>horizontal</strong> edges are the effect under test, the arm.
+          The two <strong>vertical</strong> edges are a checkpoint-step effect
+          nobody was trying to measure. Comparing each arm at its own
+          eval-loss-best checkpoint takes the dashed diagonal, which is the sum
+          of one of each and so overstates the arm effect. The square also
+          audits itself: both routes from{' '}
+          <span className="h-mono">dirty@1500</span> to{' '}
+          <span className="h-mono">clean@2000</span> must add to the same
+          number, and they agree to a thousandth of a degree.
+        </>
+      }
+    >
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        role="img"
+        aria-label="A two by two of arm (dirty, clean) against checkpoint step (1500, 2000), with the confounded diagonal drawn across it"
+      >
+        <Defs gid={gid} />
+
+        {/* column headers */}
+        <text
+          x={cxA}
+          y={30}
+          textAnchor="middle"
+          className="h-mono"
+          fontSize={9}
+          fontWeight={600}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          Arm A: dirty, 99 episodes
+        </text>
+        <text
+          x={cxB}
+          y={30}
+          textAnchor="middle"
+          className="h-mono"
+          fontSize={9}
+          fontWeight={600}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          Arm B: clean, 77 episodes
+        </text>
+
+        {/* row labels */}
+        <text
+          x={colA - 12}
+          y={cyT + 3}
+          textAnchor="end"
+          className="h-mono"
+          fontSize={9}
+          fontWeight={600}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          step 1,500
+        </text>
+        <text
+          x={colA - 12}
+          y={cyB + 3}
+          textAnchor="end"
+          className="h-mono"
+          fontSize={9}
+          fontWeight={600}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          step 2,000
+        </text>
+
+        {/* the diagonal actually compared: cell edge to cell edge, so it
+            crosses neither box's text nor either straight edge of the square */}
+        <line
+          x1={colA + cw - 20}
+          y1={rowT + ch}
+          x2={colB + 20}
+          y2={rowB}
+          stroke="var(--haller-action)"
+          strokeWidth={1.4}
+          strokeDasharray="5 4"
+          markerEnd={`url(#ar-action-${gid})`}
+        />
+
+        {/* the four cells */}
+        <Box
+          x={colA}
+          y={rowT}
+          w={cw}
+          h={ch}
+          title="dirty @ 1,500"
+          sub="12.142 deg, its eval-loss best"
+        />
+        <Box
+          x={colB}
+          y={rowT}
+          w={cw}
+          h={ch}
+          title="clean @ 1,500"
+          sub="11.471 deg, added by the square"
+        />
+        <Box
+          x={colA}
+          y={rowB}
+          w={cw}
+          h={ch}
+          title="dirty @ 2,000"
+          sub="11.767 deg, added by the square"
+        />
+        <Box
+          x={colB}
+          y={rowB}
+          w={cw}
+          h={ch}
+          title="clean @ 2,000"
+          sub="10.435 deg, nearest to its best"
+        />
+
+        {/* arm effect, one per row: labelled away from the middle band, which
+            belongs to the step effects and the diagonal */}
+        <Arrow x1={colA + cw} y1={cyT} x2={colB - 4} y2={cyT} marker={`ar-data-${gid}`} />
+        {edge(383, cyT - 30, '+0.670 deg', 't = 1.65', 'clean better, 7/8', 'middle')}
+        <Arrow x1={colA + cw} y1={cyB} x2={colB - 4} y2={cyB} marker={`ar-data-${gid}`} />
+        {edge(383, cyB + 14, '+1.332 deg', 't = 3.13', 'clean better, 7/8', 'middle')}
+
+        {/* step effect, one per column */}
+        <Arrow x1={cxA} y1={rowT + ch} x2={cxA} y2={rowB - 4} marker={`ar-data-${gid}`} />
+        {edge(cxA - 10, 172, '+0.375 deg', 't = 0.74', '2,000 better, 6/8', 'end')}
+        <Arrow x1={cxB} y1={rowT + ch} x2={cxB} y2={rowB - 4} marker={`ar-data-${gid}`} />
+        {edge(cxB + 10, 172, '+1.036 deg', 't = 2.45', '2,000 better, 7/8', 'start')}
+
+        {/* the diagonal is labelled as a legend rather than in the middle of
+            the square, where a two-line caption and a descending line collide */}
+        <line
+          x1={12}
+          y1={299}
+          x2={44}
+          y2={299}
+          stroke="var(--haller-action)"
+          strokeWidth={1.4}
+          strokeDasharray="5 4"
+        />
+        <text
+          x={52}
+          y={302}
+          className="h-mono"
+          fontSize={9}
+          fontWeight={600}
+          fill="var(--haller-action)"
+        >
+          the comparison actually made: +1.707 deg, the arm effect and the step effect summed
+        </text>
+        <text
+          x={52}
+          y={318}
+          className="h-mono"
+          fontSize={8}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          0.375 + 1.332 = 1.707 across the top-then-right route; 0.670 + 1.036 = 1.706 across the
+          left-then-bottom one
+        </text>
+      </svg>
+    </Figure>
+  );
+}
+
+/* ── 6. the ten steps between the two metrics ────────────────────────────── */
+
+/**
+ * Why an effect that replay-eval MAE resolves at t = 3.13 can be invisible to
+ * eval_loss on the same checkpoint and the same held-out episodes. The two
+ * metrics tap different points of the same model: one scores a single denoise
+ * against a noised copy of the answer, the other scores the trajectory that
+ * comes out of the full integrator.
+ */
+export function StepsBetweenMetrics() {
+  const gid = useId().replace(/:/g, '_');
+  const W = 720;
+  const H = 246;
+
+  return (
+    <Figure
+      label="Fig. 6: the ten steps that one metric never runs"
+      caption={
+        <>
+          Same checkpoint, same held-out episodes, two different quantities.{' '}
+          <span className="h-mono">eval_loss</span> is the training objective
+          with gradients off: it corrupts the known answer to a random degree
+          and asks which way to push. Replay-eval MAE starts from pure noise,
+          runs the whole integrator, and measures the joint angles that come
+          out. A change can move either one while leaving the other flat, which
+          is exactly what happened, so only the lower lane belongs in a decision
+          about hardware.
+        </>
+      }
+    >
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full"
+        role="img"
+        aria-label="Two lanes: the eval loss path scoring a single denoising step, and the replay eval path running ten integration steps to an emitted action"
+      >
+        <Defs gid={gid} />
+
+        {/* eval_loss lane */}
+        <text x={12} y={26} className="h-label" fontSize={8.5} fill="var(--color-fd-muted-foreground)">
+          eval_loss: a denoising score
+        </text>
+        <Box x={12} y={38} w={132} h={40} title="true chunk" sub="the answer" tone="muted" />
+        <Arrow x1={146} y1={58} x2={172} y2={58} tone="muted" marker={`ar-muted-${gid}`} />
+        <Box x={174} y={38} w={148} h={40} title="corrupt at random t" sub="t ~ Beta(1.5, 1.0)" />
+        <Arrow x1={324} y1={58} x2={350} y2={58} marker={`ar-data-${gid}`} />
+        <Box x={352} y={38} w={140} h={40} title="one denoise call" sub="predict a velocity" />
+        <Arrow x1={494} y1={58} x2={520} y2={58} marker={`ar-data-${gid}`} />
+        <Box x={522} y={38} w={186} h={40} title="MSE vs true velocity" sub="never emits an action" />
+
+        {/* the shared middle */}
+        <line
+          x1={12}
+          y1={106}
+          x2={708}
+          y2={106}
+          stroke="var(--color-fd-border)"
+          strokeWidth={1}
+          strokeDasharray="3 4"
+        />
+        <text
+          x={360}
+          y={122}
+          textAnchor="middle"
+          className="h-mono"
+          fontSize={8.5}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          one checkpoint, one held-out set, measured twice
+        </text>
+
+        {/* MAE lane */}
+        <text x={12} y={152} className="h-label" fontSize={8.5} fill="var(--haller-action)">
+          replay-eval MAE: a control error
+        </text>
+        <Box x={12} y={164} w={132} h={40} title="pure noise" sub="no answer given" tone="muted" />
+        <Arrow x1={146} y1={184} x2={172} y2={184} tone="muted" marker={`ar-muted-${gid}`} />
+        <Box
+          x={174}
+          y={164}
+          w={148}
+          h={40}
+          title="10 Euler steps"
+          sub="t = 1 down to 0"
+          tone="action"
+        />
+        <Arrow x1={324} y1={184} x2={350} y2={184} tone="action" marker={`ar-action-${gid}`} />
+        <Box x={352} y={164} w={140} h={40} title="emitted action" sub="6 joints, degrees" tone="action" />
+        <Arrow x1={494} y1={184} x2={520} y2={184} tone="action" marker={`ar-action-${gid}`} />
+        <Box
+          x={522}
+          y={164}
+          w={186}
+          h={40}
+          title="MAE vs the human"
+          sub="what the arm would be told"
+          tone="action"
+        />
+
+        <text
+          x={12}
+          y={230}
+          className="h-mono"
+          fontSize={8}
+          fill="var(--color-fd-muted-foreground)"
+        >
+          the errors of ten successive velocity predictions compose along the lower lane; the upper
+          lane scores one of them, in isolation
+        </text>
+      </svg>
+    </Figure>
+  );
+}

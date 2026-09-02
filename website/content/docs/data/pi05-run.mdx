@@ -1,6 +1,6 @@
 ---
 title: π0.5 as a diagnostic, not an upgrade
-description: A 45% ACT baseline whose failures are all missed grasps, two exhausted training levers, and a π0.5 run designed to eliminate a hypothesis rather than chase a number. Includes a walk through π0.5's actual mechanism, verified against the installed source, and the training-set defect that decides how the first two runs can be read.
+description: A 45% ACT baseline whose failures are all missed grasps, two exhausted training levers, and a π0.5 run designed to eliminate a hypothesis rather than chase a number. Includes a walk through π0.5's actual mechanism, verified against the installed source, the training-set defect that decides how the first two runs can be read, and the day a null result from one metric was overturned by another on the same checkpoints.
 ---
 
 Haller can pick up a cube and put it in a box **45% of the time**. This page explains how that number was reached, why the obvious ways to improve it have already been tried and measured, what π0.5 actually does inside, and how a π0.5 run was set up to settle *which* of two very different problems the 45% represents.
@@ -8,6 +8,8 @@ Haller can pick up a cube and put it in a box **45% of the time**. This page exp
 The framing matters more than the outcome. Training a bigger policy to get a bigger number is not an experiment. Training it so that either result eliminates a hypothesis is. Most of this page is about the difference, including the part where the first attempt at it was set up wrong and how that was caught.
 
 It is written to be read by someone who has not been following along, and it keeps the dead ends in. The dead ends are most of the value: two of them cost real time, one was killed by a two-minute measurement instead of a two-hour experiment, and one was a configuration defect that would have quietly produced a publishable-looking answer to the wrong question.
+
+It also keeps a **retracted conclusion**, in §9, rather than editing it away. The experiment that closes this page returned a clean null on its headline metric, that null was recorded as settling the question, and a second metric on the same checkpoints reversed it within the hour. Three separate ways of being wrong show up in that one afternoon: a null from a proxy read as a null about the world, a confounded comparison that inflated the effect it did find by about 40%, and a dramatic-looking fivefold gap that shrank to a quarter once a control group existed. Each has a general form, and each is easier to recognise the second time.
 
 ## 1. The baseline, and the shape of its failures
 
@@ -36,6 +38,8 @@ That is a **precision** signature, and precision failures point somewhere very s
 The instinct after a 45% result is to train longer or record more. Both were tried. Both are measured. Neither is the lever.
 
 **Training longer bought almost nothing.** Eighteen times the training steps, 5k to 90k, moved held-out loss from 0.4213 to 0.4026. That is a **4.4% improvement for 18× the compute**, and the curve was still creeping down at the end. Real, but a terrible exchange rate.
+
+(Held-out loss is doing a lot of work in that sentence, and §9 is about exactly how much weight it will bear. The short version, for anyone reading these numbers as quality scores: not this much. Here it is being used for what it is good at, showing that a curve has stopped moving, and the conclusion is backed by a rollout series rather than resting on the loss alone.)
 
 **Augmentation confirmed the ceiling is not overfitting.** The train/validation gap was over 5× at 19 epochs, which looks exactly like a model memorising its training set. So augmentation was switched on as a regulariser, and it *worked as a regulariser*: training L1 rose from 0.0598 to 0.0723, and the gap narrowed from 6.73× to 5.65×. The ceiling did not move. Best validation loss was 0.4083 against 0.4026 without.
 
@@ -220,7 +224,7 @@ Two full fine-tunes were launched overnight on 2026-08-31, on a box with 2× RTX
 | Batch size | 16 | 32 |
 | Steps | 20,000 | 20,000 |
 | Sample presentations | 320,000 | 640,000 |
-| Epochs (as reported) | 4.30 | 7.83 |
+| Epochs | 4.30 | 8.60 |
 | Throughput | 1.08 s/step | 2.01 s/step |
 | Wall clock | **5 h 59 m** | ~11 h |
 | Resident memory | 37 GB | 42.9 GB |
@@ -255,6 +259,8 @@ Run 2 made **twice as many passes over the same frames**. A model's training los
 
 <Callout type="warn">
 **Training loss is not comparable across runs that saw different amounts of data.** The only thing that distinguishes memorising from generalising is error on data the model was never optimised against. Neither of these runs produced any, for reasons that turn out to be the point of the next section.
+
+§9 adds the sharper version of that rule, learned the hard way: held-out data is necessary but not sufficient. *Which* error you compute on it decides whether you can see anything at all.
 </Callout>
 
 ## 7. The defect that decides how to read them
@@ -317,6 +323,8 @@ It would be reasonable to assume a run trained on 24% garbage is worthless. It i
 
 That asymmetry is the general lesson. A confounded experiment is not automatically void. Work out which direction the confound pushes, and you often find it still rules something out. What it costs you is the *other* outcome: the ambiguous branch is the one you have to pay to re-run.
 
+Everything in this section is an argument about a size nobody had measured. §9 measures it: the 22 failure takes are worth about **one degree** of held-out joint error, roughly a tenth of the error the policy makes anyway. Large enough that curating is clearly worth doing, and small enough that it would never have explained away a large win. The direction of the confound was predicted correctly here; its magnitude was not knowable from the armchair, and one of the two attempts to measure it said zero.
+
 ## 8. The offline screen: a liveness check, not a score
 
 Before spending an evening of rollouts on the batch-16 checkpoint, it went through the offline screen from §3. `scripts/runpod/replay_eval.py` replays recorded episodes through the policy and compares the predicted joint actions against what the human teleoperator actually did, reporting mean absolute error in degrees.
@@ -353,22 +361,30 @@ Two things about this table are more instructive than the numbers in it.
 Read the frame count next to the error, always. A mean over episodes weights a 13-frame stub the same as a 1,549-frame episode, and the stub is the one most likely to be anomalous. This is the same property that made the excluded takes identifiable in the first place: degenerate episodes look different from real ones in ways that show up in simple statistics, if you look.
 </Callout>
 
-## 9. The experiment that settles it
+**One warning about 2.254 before leaving it here, because the next section walks straight into the trap.** A number that lands early and looks reasonable tends to become the anchor everything later is compared against, and this one did. When §9's checkpoints scored 11.318 degrees on genuinely held-out episodes, "five times worse than 2.254" was the obvious reading, and it was almost entirely wrong. 2.254 came from a checkpoint trained for 20,000 steps, scoring episodes it had memorised. The §9 checkpoints stopped at 1,500 to 2,000 steps. Comparing across that gap measures how hard two models were fitted, not how well either generalises. **Two numbers from different checkpoints on different data are not a comparison**, however natural it feels to subtract them, and the fix is cheap: score each checkpoint on its own training data too, and read the gap rather than the level. §9 does that, and the fivefold collapse turns into about a quarter.
 
-Both defects from §7 are fixed by a two-arm experiment launched on 2026-09-01, one arm per GPU. The arms differ in **exactly one thing**: whether the 22 failure takes are in the training set.
+## 9. The experiment, and the null that did not hold
+
+Both defects from §7 are fixed by a two-arm experiment run on 2026-09-01, one arm per GPU. The arms differ in **exactly one thing**: whether the 22 failure takes are in the training set.
 
 | | Arm A, "dirty" | Arm B, "clean" |
 |---|---|---|
 | Train episodes | **99** = ACT's 77 plus the 22 failures | **77** = ACT's exact train set |
+| Train frames | **64,442** | **46,565** |
+| One epoch, at batch 16 | 4,028 steps | 2,910 steps |
 | `eval_split` | 0.12 | 0.15 |
 | Held-out episodes | the same 14 | the same 14 |
 
-Both hold out **ACT's own eval set**: `[10, 11, 21, 23, 24, 27, 39, 42, 46, 71, 91, 97, 103, 110]`. Everything else is identical between the arms: batch 16, 20,000 steps, seed 1000, `eval_steps 1000`, `max_eval_samples 1600`, learning rate 2.5e-5, full fine-tune, bfloat16, gradient checkpointing.
+The frame counts are worth one line of arithmetic before moving on, because they are the only cross-check available that the arms are what they claim to be. 64,442 − 46,565 = **17,877**, which is exactly the failure-take frame count from §7. And Arm B's 46,565 is exactly the ACT baseline's training-frame count. The two arms differ by the 22 episodes and by nothing else.
+
+Both hold out **ACT's own eval set**: `[10, 11, 21, 23, 24, 27, 39, 42, 46, 71, 91, 97, 103, 110]`. Everything else is identical between the arms: batch 16, seed 1000, learning rate 2.5e-5, full fine-tune, bfloat16, gradient checkpointing, `max_eval_samples 1600`. The step budget and the logging cadence changed once before any result existed, for a reason that turned out to be one of the findings.
 
 Two properties fall out of that design, and they are different properties:
 
-- **Arm A versus Arm B** isolates the contamination. Same held-out set, same everything else, one variable. The difference between their held-out curves *is* the cost of the 22 failure takes, measured rather than argued about.
+- **Arm A versus Arm B** isolates the contamination. Same held-out set, same everything else, one variable. The difference between the arms *is* the cost of the 22 failure takes, measured rather than argued about.
 - **Arm B versus the ACT baseline** gives exact training-data parity. Arm B sees precisely the frames ACT saw and is scored on precisely the episodes ACT was scored on, so the architecture comparison from §10 finally has nothing else moving in it.
+
+Also note the number that is *not* in that table: **there is no third arm**. Every comparison below is one seed against one seed. Hold on to that while reading the confidence intervals.
 
 ### How the split is pinned, and why that needed verifying
 
@@ -389,13 +405,190 @@ And then it was confirmed against the log rather than trusted, which after §7 i
 Train/eval split: 77 train, 14 eval (eval_split=0.15, 1 tasks)
 ```
 
-### Results
+### Two restarts before there was a curve
+
+The first launch copied the batch-16 run's budget: **20,000 steps, `save_freq 5000`, `eval_steps 1000`**. It was killed after about 90 minutes, with the arms at steps 5,000 and 6,000, as soon as there were enough eval points to see the shape. The shape was not the expected one.
+
+**Both arms reached their held-out minimum before finishing one epoch, and rose afterwards.** Arm A bottomed at step 3,000, which is 0.74 epochs; Arm B at step 2,000, which is 0.69 epochs. By step 4,000 both were clearly worse than they had been at 2,000, and Arm B's last point before the kill was its worst.
+
+Two consequences, and the second is the one that forced a restart:
+
+1. **20,000 steps is roughly four times too long for this dataset.** That also reframes §6: the b16 run at 4.30 epochs and the b32 run at nearly twice that were trained far past the point where held-out loss stopped improving, and only their final states exist.
+2. **`save_freq 5000` would never have written a checkpoint near the optimum.** The first save lands at step 5,000, well past a minimum at 2,000 to 3,000. The run would have finished, reported a curve with a clear best step, and handed over no weights from anywhere near it.
+
+That second point is the more general trap, because the two settings look unrelated. `eval_steps` is a measurement cadence and `save_freq` is a disk decision: full fine-tune checkpoints carry model *and* optimizer state, roughly 20 to 43 GiB each, and lerobot prunes none of them, so saving often is expensive. But together they decide something neither of them is named after, namely **which checkpoints you are able to choose between at the end**. A measurement you cannot act on is not a measurement.
+
+So the experiment was relaunched at **6,000 steps, `save_freq 500`, `eval_steps 250`**. The step budget is not just truncated: `finetune_pi05.sh` passes `--policy.scheduler_decay_steps="$STEPS"`, so the cosine decay is re-shaped to the new length and the learning rate at a given step is different from what it would have been. The aborted curves are therefore evidence about a *different* schedule, and they are the only copy of that evidence, since the logs were overwritten on relaunch. They are kept at `~/aborted_20k_eval_curves.json` on the training box.
+
+Then a **host reboot killed both relaunched runs at step ~450**, before any checkpoint had been written. Nothing was lost but the elapsed time, and the runs were simply started again. The lesson is still worth one line, because it is the kind of thing people believe they have already handled:
 
 <Callout type="warn">
-**Pending as of 2026-09-01.** Arm B is running. Arm A is queued behind the batch-32 run's card. Nothing here should be read as an outcome yet.
-
-To be filled in when the runs land: the held-out loss curve for each arm, the gap between them (which is the measured cost of the 22 failure takes), and Arm B's held-out loss against the ACT baseline's 0.4026 on the same 14 episodes. Rollout success rates follow separately, under the twenty-trial caveat from §3.
+`setsid` and `nohup` protect a job against a **dropped ssh connection**. They do nothing about the **host going down**. Those are different failure modes and only one of them is solved by detaching. On this particular box there is a second edge: its `glm-server` systemd unit is `enabled`, so a reboot silently re-arms the thing that takes both GPUs on the next request. A machine that has rebooted is not the machine you left running, even when it looks identical.
 </Callout>
+
+### Result 1: the held-out loss says nothing happened
+
+The relaunched runs completed. Twenty-four eval points each, every 250 steps, saved at `~/ab_experiment_6k_result.json`.
+
+| | Arm A, dirty | Arm B, clean |
+|---|---|---|
+| Best held-out `eval_loss` | **0.1049** | **0.1072** |
+| at step | 1,500 | 1,750 |
+| which is | **0.37 epochs** | **0.60 epochs** |
+
+Note where those minima sit. Both arms reach their best inside their **first pass over the data**, on a schedule a quarter as long as the aborted one, which is the same message the aborted curves gave from a different direction. Whatever these runs are learning, they have learned most of it before they have seen every frame once.
+
+Comparing the arms is where the care goes, and it is the first place this experiment could have been read wrong.
+
+<Callout type="warn">
+**Compare the arms at matched epochs, never at matched steps.** Arm A has 38% more frames, so one of its epochs is 4,028 steps against Arm B's 2,910. At any *shared step* Arm A is less far through its data than Arm B, and a model earlier in its schedule has a lower held-out loss for reasons that have nothing to do with the treatment. Read at matched steps, this experiment produced a spurious "dirty leads" twice and a spurious "clean overfits earlier" once, all in a single afternoon, all from the same artefact.
+</Callout>
+
+At matched epochs there are 18 comparable points, and they give:
+
+**mean(dirty − clean) = −0.0010, 95% CI [−0.0031, +0.0011], t = −0.95.**
+
+The interval straddles zero. Against a baseline loss of about 0.105 it bounds any effect at under 3%, and what sign there is nominally favours the *dirty* arm.
+
+At that point the conclusion recorded was: the 22 failure takes cost nothing measurable, the b16 and b32 checkpoints are not compromised by their training data, and the curation question is retired.
+
+<Callout type="warn">
+**That conclusion was wrong, and it was withdrawn within the hour.** It is left here rather than quietly edited out, because the mistake in it is not a slip. Every number above is correct. The error is in the last step: a null from one instrument was read as a null about the world. What the experiment had actually established was that *this metric* could not see a difference, which is a claim about the metric until you know its resolution.
+</Callout>
+
+There is also one thing the earlier plan for this section promised that cannot be delivered, and the reason is instructive. The plan was to compare Arm B's held-out loss against the ACT baseline's **0.4026** on the same 14 episodes. Those two numbers do not share a unit. ACT's `eval_loss` is its full training objective, an L1 action error plus ten times a KL term. π0.5's is a mean-squared error on a flow-matching velocity target at a randomly chosen noise level (the mechanism is two subsections below). 0.1072 is not "better than" 0.4026; the comparison is not close to meaningful. **Comparing two architectures requires a metric defined outside both of them**, which is exactly what the replay eval and the rollouts are, and it is why the rest of this section stops quoting losses.
+
+### Result 2: the replay eval reverses it
+
+The 14 held-out episodes were never trained on by either arm. So replaying them through each arm's checkpoint and scoring the emitted joint angles against the human's is a genuine **generalisation** measurement, unlike §8's screen, which replayed the b16 run's own training data because that run held nothing out.
+
+Six trained-on episodes were replayed as well, through the same checkpoints, as a control. That second column is what makes the first one mean anything.
+
+| checkpoint | trained-on (n = 6) | held-out (n = 14) | gap |
+|---|---|---|---|
+| dirty @ 1,500 | 9.203 | **11.318** | +2.115 (**23%**) |
+| clean @ 2,000 | 7.410 | **9.888** | +2.477 (**33%**) |
+
+Mean absolute error in degrees, over all six joints.
+
+Now the part that is easy to get wrong, and was got wrong first. Set 11.318 next to §8's **2.254** and it reads as a fivefold collapse in generalisation: the policy is five times worse on data it has not seen. That reading is almost entirely an artefact, and the control column is what exposes it.
+
+**2.254 came from a 20,000-step checkpoint scoring its own training data. These checkpoints score 7.4 to 9.2 degrees on *their* own training data.** Most of the distance between 2.254 and 11.318 is a difference in how hard the checkpoints were fitted, not a difference in how well they generalise. Compare each checkpoint against its own training-data score, which is the only comparison that holds the fitting constant, and the generalisation gap is **23 to 33%**, not 500%.
+
+<Callout type="info">
+**A number is not a result until you know what it should be compared against.** 11.318 alone supports any story you like. 11.318 next to 9.203 from the same checkpoint supports exactly one. The trained-on column cost six extra replays on hardware that was already sitting there, and it is the difference between a dramatic false conclusion and a modest true one.
+</Callout>
+
+What that does say about the b16 checkpoint is narrower than it looks. It fits its training data three to four times more closely, which is what ten times the steps buys, and past the held-out optimum that is memorisation rather than learning. Whether it *generalises* better is **unmeasurable**, because it trained on all 113 episodes and therefore has no held-out set anywhere. That is the concrete price of §7's defect: not a wrong number, but a question that can no longer be asked of that run at all.
+
+### The 2×2 that separated the arm from the checkpoint
+
+The natural comparison is each arm at its own best checkpoint. That is `dirty@1500` against `clean@2000`, and the table above shows it as 11.318 against 9.888, a **1.43 degree** advantage to the clean arm at t = 4.25.
+
+Look at what differs between those two checkpoints. The arm differs, which is the treatment. **And the step differs**, which is not. (Arm B's eval-loss minimum at 1,750 falls between saves, since eval ran every 250 steps and checkpoints every 500, so the checkpoint taken was the neighbouring 2,000.) One comparison, two changed variables, and no way to attribute the difference to either.
+
+The fix is to fill in the other two cells: run `dirty@2000` and `clean@1500` as well, and score all four on the same episodes, paired per episode.
+
+<ConfoundSquare />
+
+| effect | estimate (deg) | t | direction |
+|---|---|---|---|
+| **arm**, at step 2,000 | **+1.332 ± 0.425** | 3.13 | clean better, 7/8 |
+| **arm**, at step 1,500 | +0.670 ± 0.407 | 1.65 | clean better, 7/8 |
+| **step**, dirty arm | +0.375 ± 0.508 | 0.74 | step 2,000 better, 6/8 |
+| **step**, clean arm | +1.036 ± 0.422 | 2.45 | step 2,000 better, 7/8 |
+| confounded original, `dirty@1500` vs `clean@2000` | +1.431 ± 0.337 | 4.25 | arm and step, summed |
+
+Eight held-out episodes appear in all four cells, so every effect above is a paired within-episode difference. That pairing is what makes eight episodes usable at all: it removes the large episode-to-episode variation in difficulty, which would otherwise swamp a one-degree effect.
+
+The square also checks itself, and this is worth doing every time. Going from `dirty@1500` to `clean@2000` the long way round gives 0.375 + 1.332 = **1.707** along one route and 0.670 + 1.036 = **1.706** along the other. Paired means are linear, so those two routes must agree exactly, and they do to a thousandth of a degree. Any real disagreement would mean the cells are not the same episodes.
+
+(The last row's +1.431 is not that diagonal. It matches the fourteen-episode means above, 11.318 − 9.888 = 1.430, because it is the original comparison as it was actually made, over the full held-out set rather than the square's eight.)
+
+Three things come out of the square:
+
+1. **The 22 failure takes are worth about one degree of joint error.** The arm effect is +1.332 at step 2,000 and +0.670 at step 1,500, averaging **+1.0 degree** against a held-out baseline of about 10 degrees, so roughly 10%. The clean arm wins **14 of the 16** paired episode comparisons. Curating the dataset is worth doing, and §7's worry was justified after all.
+2. **The confounded comparison overstates it by about 40%.** The number it produced, 1.43 degrees over the full fourteen, is the arm effect plus a checkpoint-step effect that has nothing to do with the treatment. On the square's own eight episodes the same diagonal is 1.707, and it splits into 1.332 of arm and 0.375 of step. Either way, a large fraction of the headline figure belongs to a variable nobody was testing. Choosing each arm's own best checkpoint feels like fairness. It is actually a second, uncontrolled variable, introduced by the selection rule itself.
+3. **The held-out loss selects checkpoints too early.** Both arms bottomed on `eval_loss` at step 1,500 to 1,750, and step 2,000 is better on MAE in **both** arms. The metric used to pick the checkpoint disagrees with the metric that describes what the arm will do. The follow-up below shows the disagreement is larger than the square alone reveals.
+
+### The sweep that kept going
+
+The square used the two checkpoints the eval-loss curve pointed at. Extending it one save further, on the same eight episodes, says the curve was not pointing far enough:
+
+| step | Arm B, clean | Arm A, dirty |
+|---|---|---|
+| 1,500 | 11.471 | 12.142 |
+| 2,000 | 10.435 | 11.767 |
+| 2,500 | **9.754** | **10.400** |
+
+Held-out MAE in degrees, eight paired episodes. Both arms are still improving at 2,500: **+0.681 for clean, better on all 8 of 8 episodes, and +1.367 for dirty**. That is a bigger step effect than anything inside the square, and it lands 750 to 1,000 steps past where `eval_loss` bottomed out. A 3,000-step pass was still running when this was written, so **the best checkpoint has not actually been located yet**. What is settled is the direction: the eval-loss minimum is not it, and it is not close.
+
+The arm effect survives the third column at **+0.646** (t = 2.03, clean better in 6 of 8), which puts the three measured estimates at 0.646, 0.670 and 1.332 degrees. The treatment effect is real and consistently signed in every comparison, and its size moves around by a factor of two depending on which checkpoint you measure it at. That is worth saying out loud: **an effect measured at one checkpoint is an effect at that checkpoint.** The square separates the arm from the step. It does not make the arm effect independent of the step.
+
+### Result 3: the sweep that finally bracketed it
+
+The 6,000-step schedule left the best checkpoint at its last save, in both arms. A curve still falling at its final point says only that it had not finished, so nothing above locates the optimum; it only says where the optimum is not. The clean arm was therefore re-run on 2026-09-01 at **20,000 steps with a save every 2,000**: the same 77 train / 14 held-out split, batch 16, seed 1000 and learning rate, and all ten checkpoints were scored by replay-eval on the same eight paired episodes as the square.
+
+| step | 2,000 | 4,000 | 6,000 | 8,000 | **10,000** | 12,000 | 14,000 | 16,000 | 18,000 | 20,000 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| epoch | 0.69 | 1.37 | 2.06 | 2.75 | **3.44** | 4.12 | 4.81 | 5.50 | 6.18 | 6.87 |
+| MAE, deg | 10.93 | 9.79 | 8.98 | 9.15 | **8.59** | 9.05 | 8.90 | 8.73 | 8.78 | 8.78 |
+
+Held-out MAE in degrees, eight paired episodes, one seed.
+
+**The best checkpoint is step 10,000, at 3.44 epochs, and this time both neighbours are worse.** Paired against 10,000 on the six episodes common to every cell, 8,000 is +0.68 degrees worse (t = 4.7, 6 of 6) and 12,000 is +0.42 worse (t = 5.5, 6 of 6). Past 10,000 the curve is a plateau at 8.7 to 8.9, within 0.3 degrees of the best, and with one seed the wiggles on that plateau mean nothing. Against the 6,000-step schedule's best, 9.24 degrees at its final save, this is about 0.65 degrees better.
+
+Two statements made earlier in this section do not survive that table. They are left standing where they were, with this note, rather than edited:
+
+- **"20,000 steps is roughly four times too long" was an `eval_loss` reading.** The loss did bottom inside the first epoch. The actions kept improving for another two and a half. It is the same disagreement as Result 2 at a larger scale: the metric that watches the run and the metric that describes what the arm will do disagree by a factor of five about when to stop.
+- **6,000 steps was too short, not 20,000 too long.** Every checkpoint the 6,000-step arms produced sits on the falling part of this curve.
+
+### Picking a checkpoint the arm will actually get
+
+The measured curve belongs to a 77-episode training set, but the checkpoint that goes on the arm should train on all 91 curated episodes. Holding 14 out is the price of being able to measure, and once the measurement is made there is no reason to keep paying it. So a second run, on all 91, was trained alongside. It cannot be scored, because it has no held-out episodes; its checkpoint has to be chosen by transfer from the first, and the transfer has exactly the trap this page fell into in Result 1.
+
+The second run's dataset is 18% larger, so **the same step is a different epoch**. Matching by step would put a checkpoint on the arm that is 18% earlier in its schedule than the one measured. The two runs were therefore laid out with save frequencies that cancel the difference: the measured run saves every 2,000 steps on 2,910 steps per epoch, the refit run every 2,427 on 3,532. Both land at 0.687 epochs per save and both end at 6.87. **Checkpoint k of one run sits at the same epoch as checkpoint k of the other**, and choosing the deploy checkpoint is an index lookup with nothing to correct.
+
+The measured run's best is index 5. The arm gets **the refit run's index 5, step 12,135**, at the same 3.44 epochs, trained on all 91. It has no offline score of its own and cannot have one. What it rests on is the alignment, and one seed's worth of the measured run. It is on the Hub as `Oskrt/pi05_so101_pick_cube_clean91_s24k_012135`.
+
+### Why the two metrics disagreed
+
+This is the transferable part of the whole page, so it is worth being exact. Both numbers come from the **same checkpoints** on the **same held-out episodes**. They still measure different things.
+
+**`eval_loss` is the training objective with gradients off.** lerobot's eval loop calls `policy.forward(eval_batch)`, the same function training calls. π0.5's forward draws fresh Gaussian noise and a fresh timestep for every sample, mixes the noise into the ground-truth action chunk, and scores the model's predicted velocity against the true one:
+
+```python
+# modeling_pi05.py, the flow-matching forward
+time_expanded = time[:, None, None]
+x_t = time_expanded * noise + (1 - time_expanded) * actions   # a partly-noised chunk
+u_t = noise - actions                                          # the true velocity
+...
+return F.mse_loss(u_t, v_t, reduction="none")
+```
+
+with `time` drawn from a Beta(1.5, 1.0) distribution scaled onto (0.001, 1.0). So `eval_loss` answers: *given a partly corrupted version of the right answer, at a randomly chosen corruption level, does the model know which direction to push?* It never runs the integrator. **It never produces an action.**
+
+**Replay-eval MAE is the action itself.** It calls `policy.select_action`, which runs the entire sampler: the prefix through the backbone once, then ten Euler steps from pure noise down to `t = 0`, then the unpad back to the arm's six joints. It answers: *what would this arm have been commanded to do, and how many degrees is that from what the human did?*
+
+<StepsBetweenMetrics />
+
+Ten integration steps sit between the two quantities, and the model's errors compose along that path. A policy can get better at the one-step denoising score while emitting the same trajectories, and it can emit better trajectories while the denoising score sits flat. Nothing guarantees the two move together, and here they did not: an effect that MAE resolved at t = 3.13 was invisible to a metric whose confidence interval bounded it under 3%.
+
+<Callout type="warn">
+**For anything destined for hardware, trust the metric that measures the action the policy actually emits.** For a flow-matching or diffusion policy, the training and eval loss is a *denoising score*, not a control error. Use it to watch a run's health. Do not use it to decide whether A beats B, do not use it alone to pick a checkpoint, and never conclude "no effect" from it. A null from a proxy is a null about the proxy.
+</Callout>
+
+### What this settles, and what it does not
+
+Stated plainly rather than buried, because the caveats are load-bearing:
+
+- **Eight episodes per cell of the 2×2, and one seed per arm.** A one-degree effect measured this way is a good reason to curate, which is nearly free. It is not a precise coefficient.
+- **The eval-loss confidence interval was a lower bound on the uncertainty.** Points within one run are autocorrelated: consecutive evals share most of their training history, so they are not 18 independent samples. The true interval is wider than [−0.0031, +0.0011], which means the null was even weaker than it read.
+- **MAE is not rollout success.** It measures agreement with one human's trajectory, open loop, with the policy never seeing the scene respond to its own actions. Nothing on this project has yet established that *any* offline number predicts the real success rate; §2's ACT curve is the closest thing there is, and it shows a validation loss creeping down for 18× the compute with no evidence that anything on the bench changed. A degree of joint error is not a probability of a grasp, and the failure this page is chasing is measured in millimetres of gripper closure.
+- **Every effect size in the square was measured on the falling part of the curve.** Result 3 puts the optimum at step 10,000 on the 20,000-step schedule; the 1,500 to 2,500 checkpoints in the square are far short of it. That is a reason to trust the *sign* of the arm effect more than its magnitude.
+- **The 45% question is untouched.** Nothing here says whether π0.5 beats ACT on the arm. Only rollouts answer that, at twenty trials an evening, with the resolution from §3.
+
+Both checkpoints are on the Hub as `Oskrt/pi05_so101_pick_cube_clean77` and `Oskrt/pi05_so101_pick_cube_dirty99`, so the rollout comparison has its two candidates ready.
 
 ## 10. What the diagnostic is for
 
@@ -408,19 +601,33 @@ It would be easy to read all of the above as "trying a bigger model to get a bet
 
 Either answer is worth more than another ACT run, because either one *eliminates a hypothesis*. A result that merely improves the number without distinguishing those two cases would be worth much less.
 
-This is also the clearest way to see why §7's contamination mattered so much. A confounded run could still deliver the second answer, but it could not deliver the first, because near-45% would have two live explanations instead of one. The defect did not threaten the *number*; it threatened the branch of the diagnostic that was the more likely and the more actionable of the two.
+**That question is still open, and §9 did not answer it.** What §9 did is make it answerable. The near-45% branch was the one §7's contamination would have ruined, because near-45% would have had two live explanations instead of one. Arm B now exists: clean training data, exact parity with ACT's training frames, scored on ACT's own held-out episodes. Whichever branch the rollouts land on, there is a checkpoint that can carry the argument.
+
+What §9 also did is settle **which instrument reads which question**. That was stated wrongly here before the results came in, so it is worth laying out as a hierarchy:
+
+| instrument | cost | what it can see | what it cannot |
+|---|---|---|---|
+| held-out `eval_loss` | free, every 250 steps | that a run is healthy, and roughly when it stops improving | any difference between two policies that matters on hardware; it missed a one-degree effect entirely, and it picks checkpoints too early |
+| replay-eval MAE, held-out episodes | GPU time, no hardware and no human | the actions the policy would actually emit, in degrees, against a human's | whether those actions succeed; the scene never responds |
+| rollouts on the arm | an evening for 20 | success, the only thing anyone cares about | anything finer than a large difference, per §3 |
+
+The working rule that falls out: **watch the run with the first, screen with the second, decide with the third.** The failure mode this page walked into was using the first for the second's job.
 
 <Callout type="warn">
-The same twenty-trial limit from §3 applies to reading the real-robot result. It can answer "did something large happen." It cannot resolve a ten-point difference, and it should not be asked to. The held-out losses from §9 are the higher-resolution instrument; the rollouts are the one that measures the thing you actually care about. Use both, for different questions.
+The twenty-trial limit from §3 still governs the last row. It can answer "did something large happen". It cannot resolve a ten-point difference, and it should not be asked to. That is precisely why the offline screen has to be a metric worth trusting: it is the only high-resolution instrument available, and §9 is the story of it being the wrong one for an afternoon.
 </Callout>
 
 ## 11. What comes next
+
+**Rollouts on the deploy checkpoint.** `Oskrt/pi05_so101_pick_cube_clean91_s24k_012135` is the one Result 3 chose: the measured optimum's epoch, trained on all 91 curated episodes. It is the outstanding obligation from §10. Twenty trials, same bench, same protocol, scored the same way. One thing about the runner is worth knowing before reading those trials. It was built for ACT, whose inference takes about 10 ms; π0.5's takes about 130 ms at every chunk boundary on the desktop card, four missed 30 Hz ticks with the servos holding their last target, fifty times a rollout. The runner also used to read camera frames in the order they arrived, so each of those stalls left four frames queued and the policy's view fell a further 130 ms behind at every boundary for the rest of the run. It now reads the newest frame, and the stall itself is inside the rate gate's tolerance, but a policy that plans 1.7 s ahead from a view that is occasionally 130 ms old is a different animal from one that re-plans every tick.
 
 **Wrist cameras, around 6 September.** They convert the dataset to three channels, `top` / `left_wrist` / `right_wrist`, which is *also* exactly π0.5's pretrained camera-slot count, so the recording stays in the distribution the model was trained on. That alignment was the reason for freezing the camera set at three rather than five.
 
 **Do not record more single-camera episodes in the meantime.** Adding a camera forks the dataset schema. The existing 113 episodes cannot train a three-camera policy, and neither can anything recorded this week; it would all have to be redone. Padding the dataset while waiting for hardware is work that deletes itself.
 
-**Score episodes at recording time.** §7 is the argument for this. The 22 failures were recoverable only because a *different* run happened to save its episode list, and identifying them after the fact took frame-count forensics. An episode that is marked pass or fail when it is recorded costs nothing at the time and removes an entire class of silent contamination later. The sim collection path already does this with a contact-based success predicate; the teleop path does not yet.
+**Score episodes at recording time, and this now has a price tag.** §7 argued for it from first principles. §9 measured it: the 22 unmarked failures cost about **one degree of joint error**, around 10% of the held-out baseline, and the metric that runs during training could not see it. An episode marked pass or fail when it is recorded costs nothing at the time and removes an entire class of contamination that is both silent and, as it turns out, not free. The sim collection path already does this with a contact-based success predicate; the teleop path does not yet.
+
+**Long enough to bracket, saved often enough to choose.** The `eval_loss` minimum sits inside the first epoch on every schedule tried; the replay-eval optimum sits at 3.4 epochs. Result 3 is the first run that went far enough to see both neighbours of its best checkpoint be worse, and on this dataset that took 20,000 steps at batch 16. The save cadence is the other half of the decision: `finetune_pi05.sh` now takes `SAVE_FREQ` as a knob rather than hard-coding 5,000, and when two runs on differently sized data have to be compared, choose the two cadences so that the saves land on the same epochs. Otherwise the comparison inherits the step-versus-epoch confound from Result 1, and this time there is no held-out set on the second run to catch it.
 
 **Simulation is the productive way to wait.** A scripted expert reads the scene's true state and drives the arm through pick-and-place unattended, at whatever rate physics can be stepped. Episodes are scored by a contact-based success predicate, not by the script's own opinion of itself, so the labels mean something. Measured at **90/90** at default randomisation, and it degrades honestly: raise the position jitter 3.5× and it drops to 13/20, with every failure sorting cleanly by reach distance rather than at random. A generator that fails for legible reasons is one you can trust the successes from.
 
@@ -428,22 +635,30 @@ The simulated rig already renders and records the three-camera layout, so the to
 
 **Then the longer arc.** A large generalist trained in the cloud finds the ceiling: it is the best-eval producer and the teacher. A smaller policy runs onboard and is what actually ships untethered. They share one dataset and one evaluation harness, and **the gap between them is the diagnostic**. It separates "the policy is too small" from "the data is too thin", which are the two failure modes that get confused for months at a time, and which have opposite fixes.
 
-That is the same logic as §10, applied continuously instead of once.
+That is the same logic as §10, applied continuously instead of once. With one amendment from §9: whatever metric that gap is measured in has to be one that can see the thing you are trying to detect. That is not automatic, and it is not something the number itself will ever tell you.
 
 ## Reference
 
 Verified against the installed library rather than papers:
 
-- `lerobot/policies/pi05/configuration_pi05.py`: `DEFAULT_IMAGE_SIZE = 224`, `max_state_dim`/`max_action_dim = 32`, `num_inference_steps = 10`, `chunk_size = 50`, `empty_cameras = 0`, the `QUANTILES` normalisation mapping, and the `gemma_2b` / `gemma_300m` variant split.
-- `lerobot/policies/pi05/modeling_pi05.py`: `embed_prefix` (one shared tower), `_preprocess_images` (the `−1` padding and the all-missing error), `sample_actions` (prefix cached as `past_key_values`), `denoise_step`, the action unpadding, and `_get_default_peft_targets`.
+- `lerobot/policies/pi05/configuration_pi05.py`: `DEFAULT_IMAGE_SIZE = 224`, `max_state_dim`/`max_action_dim = 32`, `num_inference_steps = 10`, `chunk_size = 50`, `empty_cameras = 0`, the `QUANTILES` normalisation mapping, the `gemma_2b` / `gemma_300m` variant split, and the flow-matching time sampling (`time_sampling_beta_alpha = 1.5`, `time_sampling_beta_beta = 1.0`, `scale = 0.999`, `offset = 0.001`).
+- `lerobot/policies/pi05/modeling_pi05.py`: `embed_prefix` (one shared tower), `_preprocess_images` (the `−1` padding and the all-missing error), `sample_actions` (prefix cached as `past_key_values`), `denoise_step`, the action unpadding, `_get_default_peft_targets`, and the flow-matching `forward` whose `F.mse_loss(u_t, v_t)` is the quantity `eval_loss` reports.
 - `lerobot/policies/pi05/processor_pi05.py`: `Pi05PrepareStateTokenizerProcessorStep`, the 256-bin discretisation, and the prompt template.
-- `lerobot/policies/common/flow_matching.py`: `euler_integrate`, the `dt = −1/num_steps` loop.
+- `lerobot/policies/common/flow_matching.py`: `euler_integrate`, the `dt = −1/num_steps` loop, and `sample_time_beta`.
 - `lerobot/processor/normalize_processor.py`: the `q01`/`q99` requirement and the [−1, 1] mapping.
 - `lerobot/datasets/factory.py`: `make_train_eval_datasets`, whose docstring states the rule directly (*"The last ceil(n_episodes * eval_split) episodes per task are held out for evaluation"*), the per-task `eps[len(eps) - n_eval :]` slicing, and the `Train/eval split: ...` log line quoted in §9.
 - `lerobot/configs/train.py`: the `eval_steps` default of `0` and the validation that raises `eval_steps > 0 requires dataset.eval_split > 0.0 to hold out eval data.`
+- `lerobot/scripts/lerobot_train.py`: the eval loop, which calls `policy.forward(eval_batch)` under `torch.no_grad()` and averages the result. That single line is why `eval_loss` is the training objective rather than a control error, and therefore why §9 needed a second metric.
 
 Verified against this repo's own artefacts:
 
 - `outputs/runs/train-20260830-104258-act_hilti_box_91_pinned/spec.json`: the ACT baseline's `train_episodes` (77) and `eval_episodes` (14) lists, `eval_mode: random`, `eval_seed: 42`.
 - `meta/episodes/` of the `so101_pick_cube` dataset: the per-episode frame counts behind every count in §1 and §7, including the 1,797-frame cap group and the sub-200-frame aborts.
-- `scripts/runpod/replay_eval.py`: the replay-eval harness in §8, and the `feature_utils` import shim in §5.
+- `scripts/runpod/replay_eval.py`: the replay-eval harness in §8 and §9, its `select_action` call, and the `feature_utils` import shim in §5.
+- `scripts/runpod/finetune_pi05.sh`: `--policy.scheduler_decay_steps="$STEPS"`, which is why changing the step budget re-shapes the learning-rate schedule, and the checkpoint-size note behind the `save_freq` trade-off in §9.
+
+Result files, on the training box rather than in this repo, since they are outputs rather than sources:
+
+- `~/ab_experiment_6k_result.json`: both arms' 24-point held-out loss curves and the matched-epoch statistics.
+- `~/aborted_20k_eval_curves.json`: the killed 20,000-step attempt, the only copy of that schedule's curves.
+- `~/replay_eval/`: the per-episode replay summaries behind every MAE in §9. `heldout_*` and `control_*` are the fourteen held-out and six trained-on episodes; `xstep_*` are the extra checkpoints that fill in the square and continue the sweep; `s20k_clean77_<step>/` are the ten cells of Result 3.
