@@ -561,6 +561,43 @@ class IngestClient:
                 return None
             self._buf += chunk
 
+    def recv_nowait(self) -> dict | None:
+        """One message that has ALREADY arrived, or None. Never waits.
+
+        Everything the kernel is holding is pulled into the buffer first: a
+        camera frame is bigger than one read, so consulting the buffer alone
+        would call a frame split between the two "nothing yet".
+        """
+        if self._sock is None:
+            return None
+        try:
+            self._sock.settimeout(0.0)
+            while True:
+                chunk = self._sock.recv(65536)
+                if not chunk:
+                    break
+                self._buf += chunk
+        except OSError:
+            # BlockingIOError: nothing more is queued. A closed peer is the
+            # same answer here; whatever it sent before going is still parsed.
+            pass
+        finally:
+            # `send` is `sendall`, which must never see a non-blocking socket.
+            if self._sock is not None:
+                self._sock.settimeout(None)
+        while True:
+            line, sep, rest = self._buf.partition(b"\n")
+            if not sep:
+                return None
+            self._buf = rest
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                return json.loads(text)
+            except ValueError:
+                continue
+
     def handshake(self, hello: dict, timeout: float = HANDSHAKE_TIMEOUT_S) -> dict:
         """Declare the source, and refuse on the SERVER's answer.
 
@@ -930,25 +967,48 @@ def _rollout(run_dir: Path, spec: dict) -> None:
 
 
 def _next_observation(client: IngestClient, plan: dict) -> dict:
-    """The next observation from the server, or a refusal naming the stall.
+    """The NEWEST observation from the server, or a refusal naming the stall.
 
     A rollout with no observation has nothing to infer from, and inventing one
     (the last frame, zeros) would drive the arm off a state that never existed.
+
+    Newest, not next. The server pushes a frame every control period whether
+    or not the last one was read, and this loop reads one frame per tick, so an
+    inference step longer than a period leaves frames queued that the arm has
+    already moved past. Read in order, they would put the policy's view one
+    stall further behind at every slow step for the rest of the run, with
+    nothing to ever catch it up. ACT never showed this: a 10 ms step queues
+    nothing. A VLA's chunk boundary is ~130 ms on the desktop card, four frames,
+    every 50 ticks. So once one frame is in hand, whatever else has ALREADY
+    arrived is drained and the last one wins; nothing is waited for.
     """
     deadline = time.monotonic() + max(1.0, 5.0 / plan["control_hz_declared"])
-    while time.monotonic() < deadline:
+    obs = None
+    while obs is None and time.monotonic() < deadline:
         msg = client.recv(max(0.0, deadline - time.monotonic()))
         if msg is None:
             break
-        obs = decode_observation(msg)
-        if obs is not None:
+        obs = _observation_or_refusal(msg)
+    if obs is None:
+        raise SystemExit(
+            f"no {OBSERVATION_TYPE!r} from {client.url} — the policy has nothing to "
+            "infer from. Track A owns the observation stream."
+        )
+    while True:
+        msg = client.recv_nowait()
+        if msg is None:
             return obs
-        if msg.get("type") == REFUSED_TYPE:
-            raise SystemExit(str(msg.get("detail") or "the server stopped the rollout"))
-    raise SystemExit(
-        f"no {OBSERVATION_TYPE!r} from {client.url} — the policy has nothing to "
-        "infer from. Track A owns the observation stream."
-    )
+        newer = _observation_or_refusal(msg)
+        if newer is not None:
+            obs = newer
+
+
+def _observation_or_refusal(msg: dict) -> dict | None:
+    """One inbound message decoded, or the run ended on the server's own
+    sentence. A refusal queued behind stale frames is still a refusal."""
+    if msg.get("type") == REFUSED_TYPE:
+        raise SystemExit(str(msg.get("detail") or "the server stopped the rollout"))
+    return decode_observation(msg)
 
 
 def main() -> int:

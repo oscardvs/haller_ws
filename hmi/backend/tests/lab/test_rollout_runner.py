@@ -1005,3 +1005,55 @@ def test_sending_to_a_closed_ingest_names_what_holds_the_arms(peer):
             client.send({"type": rr.ACTION_TYPE})
 
     assert "closed mid-run" in str(excinfo.value)
+
+
+# ---- newest frame wins ----------------------------------------------------
+
+def test_a_backlog_of_observations_yields_the_newest_not_the_oldest(peer):
+    """The server pushes a frame per period whether or not the last was read.
+    After a slow inference step the queue holds frames the arm has moved past;
+    the policy must see the latest, or its view falls one stall further behind
+    at every chunk boundary and never catches up."""
+    client, server = peer
+    for seq in (1, 2, 3):
+        send_line(server, {"type": rr.OBSERVATION_TYPE, "state": [float(seq)], "seq": seq})
+    time.sleep(0.05)  # let all three land on the client's side
+
+    obs = rr._next_observation(client, {"control_hz_declared": 30.0})
+
+    assert obs["seq"] == 3
+    # And the stale ones are consumed, not left for the next tick to read.
+    assert client.recv_nowait() is None
+
+
+def test_a_refusal_queued_behind_stale_frames_still_ends_the_run(peer):
+    client, server = peer
+    send_line(server, {"type": rr.OBSERVATION_TYPE, "state": [1.0], "seq": 1})
+    send_line(server, {"type": rr.REFUSED_TYPE, "detail": "the operator hit E-STOP"})
+    time.sleep(0.05)
+
+    with pytest.raises(SystemExit) as excinfo:
+        rr._next_observation(client, {"control_hz_declared": 30.0})
+
+    assert "E-STOP" in str(excinfo.value)
+
+
+def test_recv_nowait_never_waits_and_reassembles_a_frame_larger_than_one_read(peer):
+    """A camera frame is bigger than one 64 KiB read. The drain must pull the
+    whole of what has arrived, or a split frame reads as 'nothing yet' and the
+    tick infers from the frame before it."""
+    client, server = peer
+    t0 = time.monotonic()
+    assert client.recv_nowait() is None
+    assert time.monotonic() - t0 < 0.1
+
+    send_line(server, {"type": rr.OBSERVATION_TYPE, "state": [1.0],
+                       "images": {"top": "x" * 200_000}})
+    time.sleep(0.05)
+
+    got = client.recv_nowait()
+    assert got is not None
+    assert len(got["images"]["top"]) == 200_000
+    # The socket is left blocking again: `send` is `sendall` and must not
+    # meet a non-blocking socket on the next tick.
+    assert client._sock.gettimeout() is None
